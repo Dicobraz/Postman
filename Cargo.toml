@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "app", "app-gpui"]
+members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "app", "app-gpui"]
 
 [workspace.package]
 edition = "2024"
@@ -14,6 +14,7 @@ postman-cache = { path = "crates/cache" }
 postman-compose = { path = "crates/compose" }
 postman-search = { path = "crates/search" }
 postman-demo = { path = "crates/demo" }
+postman-calendar = { path = "crates/calendar" }
 postman-worker = { path = "crates/worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

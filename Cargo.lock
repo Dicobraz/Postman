@@ -6087,6 +6087,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-calendar"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "postman-compose"
 version = "0.1.0"
 dependencies = [

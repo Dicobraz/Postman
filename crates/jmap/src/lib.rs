@@ -2,11 +2,13 @@
 //! обёртки для почты. Своя реализация вместо `jmap-client`, чтобы без
 //! ограничений добавлять Calendars/Contacts/Principals.
 
+mod calendars;
 mod mail;
 mod push;
 mod session;
 mod submission;
 
+pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};
