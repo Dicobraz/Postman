@@ -122,6 +122,8 @@ pub struct EmailBody {
 pub struct EmailPage {
     pub total: u64,
     pub position: u64,
+    /// Порядок результатов запроса (Email/get порядок не гарантирует).
+    pub ids: Vec<String>,
     pub emails: Vec<EmailSummary>,
     pub query_state: String,
     /// Состояние `Email` — точка отсчёта для `Email/changes`.
@@ -152,6 +154,8 @@ struct QueryResponse {
     #[serde(default)]
     total: Option<u64>,
     position: u64,
+    #[serde(default)]
+    ids: Vec<String>,
 }
 
 pub(crate) const USING: &[&str] = &[CORE, MAIL];
@@ -175,20 +179,41 @@ impl Client {
 
     /// Страница писем ящика, новые сверху: Email/query + Email/get одним запросом.
     pub async fn email_page(&self, mailbox_id: &str, position: u64, limit: u64) -> Result<EmailPage> {
+        self.query_page(json!({ "inMailbox": mailbox_id }), Some(position), None, limit).await
+    }
+
+    /// Следующая страница после письма `anchor` (устойчиво к новым письмам сверху).
+    pub async fn email_page_after(&self, mailbox_id: &str, anchor: &str, limit: u64) -> Result<EmailPage> {
+        self.query_page(json!({ "inMailbox": mailbox_id }), None, Some(anchor), limit).await
+    }
+
+    /// Серверный поиск по тексту (тема, адреса, тело), опционально в одной папке.
+    pub async fn search(&self, text: &str, mailbox_id: Option<&str>, limit: u64) -> Result<EmailPage> {
+        let filter = match mailbox_id {
+            Some(mb) => json!({ "operator": "AND", "conditions": [{ "text": text }, { "inMailbox": mb }] }),
+            None => json!({ "text": text }),
+        };
+        self.query_page(filter, Some(0), None, limit).await
+    }
+
+    async fn query_page(&self, filter: Value, position: Option<u64>, anchor: Option<&str>, limit: u64) -> Result<EmailPage> {
         let acc = self.mail_account()?;
+        let mut query = json!({
+            "accountId": acc,
+            "filter": filter,
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "limit": limit,
+            "calculateTotal": true,
+        });
+        if let Some(p) = position {
+            query["position"] = json!(p);
+        }
+        if let Some(a) = anchor {
+            query["anchor"] = json!(a);
+            query["anchorOffset"] = json!(1);
+        }
         let calls = [
-            inv(
-                "Email/query",
-                json!({
-                    "accountId": acc,
-                    "filter": { "inMailbox": mailbox_id },
-                    "sort": [{ "property": "receivedAt", "isAscending": false }],
-                    "position": position,
-                    "limit": limit,
-                    "calculateTotal": true,
-                }),
-                "q",
-            ),
+            inv("Email/query", query, "q"),
             inv(
                 "Email/get",
                 json!({
@@ -202,7 +227,14 @@ impl Client {
         let mut r = self.call(USING, &calls).await?;
         let q: QueryResponse = take(&mut r, "q")?;
         let g: GetResponse<EmailSummary> = take(&mut r, "g")?;
-        Ok(EmailPage { total: q.total.unwrap_or(0), position: q.position, emails: g.list, query_state: q.query_state, state: g.state })
+        Ok(EmailPage {
+            total: q.total.unwrap_or(0),
+            position: q.position,
+            ids: q.ids,
+            emails: g.list,
+            query_state: q.query_state,
+            state: g.state,
+        })
     }
 
     pub async fn email_get(&self, ids: &[String]) -> Result<(Vec<EmailSummary>, String)> {

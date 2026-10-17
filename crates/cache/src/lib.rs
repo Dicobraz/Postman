@@ -163,6 +163,26 @@ CREATE TABLE IF NOT EXISTS sync_state (
 ) WITHOUT ROWID;
 ";
 
+const EMAIL_COLUMNS: &str = "e.id, e.thread_id, e.received_at, e.subject, e.from_name, e.from_addr, e.preview,
+    e.seen, e.flagged, e.has_attachment, e.size";
+
+fn email_row(r: &rusqlite::Row<'_>) -> Result<EmailRow> {
+    Ok(EmailRow {
+        id: r.get(0)?,
+        thread_id: r.get(1)?,
+        mailbox_ids: Vec::new(),
+        received_at: r.get(2)?,
+        subject: r.get(3)?,
+        from_name: r.get(4)?,
+        from_addr: r.get(5)?,
+        preview: r.get(6)?,
+        seen: r.get(7)?,
+        flagged: r.get(8)?,
+        has_attachment: r.get(9)?,
+        size: r.get::<_, i64>(10)? as u64,
+    })
+}
+
 pub struct Cache {
     db: Connection,
 }
@@ -183,6 +203,10 @@ impl Cache {
             db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         db.execute_batch(SCHEMA)?;
+        // SQLite lower() понимает только ASCII — для кириллицы своя функция.
+        db.create_scalar_function("ulower", 1, rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+            Ok(ctx.get::<String>(0)?.to_lowercase())
+        })?;
         // Небольшой кэш страниц: память важнее, чем лишнее чтение с SSD.
         db.pragma_update(None, "cache_size", -8 * 1024)?;
         Ok(Self { db })
@@ -267,31 +291,56 @@ impl Cache {
 
     /// Окно списка: новые сверху. Для виртуального скролла.
     pub fn page(&self, mailbox_id: &str, offset: usize, limit: usize) -> Result<Vec<EmailRow>> {
-        let mut st = self.db.prepare_cached(
-            "SELECT e.id, e.thread_id, e.received_at, e.subject, e.from_name, e.from_addr, e.preview,
-                    e.seen, e.flagged, e.has_attachment, e.size
+        let mut st = self.db.prepare_cached(&format!(
+            "SELECT {EMAIL_COLUMNS}
              FROM email_mailbox m JOIN email e ON e.id = m.email_id
              WHERE m.mailbox_id = ?1
              ORDER BY m.received_at DESC, m.email_id DESC
-             LIMIT ?2 OFFSET ?3",
-        )?;
-        st.query_map(params![mailbox_id, limit as i64, offset as i64], |r| {
-            Ok(EmailRow {
-                id: r.get(0)?,
-                thread_id: r.get(1)?,
-                mailbox_ids: Vec::new(),
-                received_at: r.get(2)?,
-                subject: r.get(3)?,
-                from_name: r.get(4)?,
-                from_addr: r.get(5)?,
-                preview: r.get(6)?,
-                seen: r.get(7)?,
-                flagged: r.get(8)?,
-                has_attachment: r.get(9)?,
-                size: r.get::<_, i64>(10)? as u64,
-            })
-        })?
-        .collect()
+             LIMIT ?2 OFFSET ?3"
+        ))?;
+        st.query_map(params![mailbox_id, limit as i64, offset as i64], email_row)?.collect()
+    }
+
+    /// Строки по id в заданном порядке (результаты поиска); отсутствующие пропускаются.
+    pub fn rows_by_ids(&self, ids: &[String]) -> Result<Vec<EmailRow>> {
+        let mut st = self.db.prepare_cached(&format!("SELECT {EMAIL_COLUMNS} FROM email e WHERE e.id = ?1"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(r) = st.query_row([id], email_row).optional()? {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Самое старое письмо ящика в кэше — якорь для догрузки следующей страницы.
+    pub fn oldest(&self, mailbox_id: &str) -> Result<Option<String>> {
+        self.db
+            .prepare_cached(
+                "SELECT email_id FROM email_mailbox WHERE mailbox_id = ?1 ORDER BY received_at ASC, email_id ASC LIMIT 1",
+            )?
+            .query_row([mailbox_id], |r| r.get(0))
+            .optional()
+    }
+
+    /// Локальный поиск (без сервера): все слова запроса должны встретиться в теме,
+    /// отправителе или превью; регистр не важен, в том числе для кириллицы.
+    pub fn search(&self, query: &str, mailbox_id: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from(
+            "SELECT e.id FROM email e WHERE (?1 IS NULL OR EXISTS (SELECT 1 FROM email_mailbox m WHERE m.email_id = e.id AND m.mailbox_id = ?1))",
+        );
+        for i in 0..words.len() {
+            sql.push_str(&format!(" AND instr(ulower(e.subject || ' ' || e.from_name || ' ' || e.from_addr || ' ' || e.preview), ?{}) > 0", i + 3));
+        }
+        sql.push_str(" ORDER BY e.received_at DESC LIMIT ?2");
+        let mut st = self.db.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(mailbox_id.map(str::to_string)), Box::new(limit as i64)];
+        params.extend(words.into_iter().map(|w| Box::new(w) as Box<dyn rusqlite::ToSql>));
+        st.query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))?.collect()
     }
 
     pub fn set_flags(&self, id: &str, seen: bool, flagged: bool) -> Result<()> {
@@ -446,11 +495,26 @@ mod tests {
         let ids: Vec<_> = c.page("in", 0, 10).unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(ids, ["b", "c", "a"]);
         assert_eq!(c.page("in", 1, 1).unwrap()[0].id, "c");
+        assert_eq!(c.oldest("in").unwrap().as_deref(), Some("a"));
+        let ids: Vec<_> = c.rows_by_ids(&["c".into(), "zz".into(), "a".into()]).unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["c", "a"]);
         // Перемещение: письмо пропадает из старого ящика.
         c.upsert_emails(&[email("c", 2, &["x"])]).unwrap();
         assert_eq!(c.count("in").unwrap(), 2);
         c.delete_emails(&["c".into()]).unwrap();
         assert_eq!(c.count("x").unwrap(), 0);
+    }
+
+    #[test]
+    fn local_search_is_case_insensitive_for_cyrillic() {
+        let mut c = Cache::open_in_memory().unwrap();
+        let mut e = email("a", 1, &["in"]);
+        e.subject = "Отчёт за КВАРТАЛ".into();
+        e.from_name = "Иванова Мария".into();
+        c.upsert_emails(&[e, email("b", 2, &["x"])]).unwrap();
+        assert_eq!(c.search("квартал иванова", None, 10).unwrap(), ["a"]);
+        assert_eq!(c.search("квартал", Some("x"), 10).unwrap(), Vec::<String>::new());
+        assert_eq!(c.search("sb", None, 10).unwrap(), ["b"]);
     }
 
     #[test]

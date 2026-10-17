@@ -15,6 +15,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 /// Сколько писем на ящик тянуть при первом входе (остальное — по мере прокрутки, позже).
 const INITIAL_PAGE: u64 = 500;
 const POLL: Duration = Duration::from_secs(30);
+/// Догрузка при прокрутке.
+const PAGE: u64 = 500;
+const SEARCH_LIMIT: u64 = 1000;
 
 #[derive(Clone)]
 pub struct Account {
@@ -43,6 +46,10 @@ pub enum Command {
     /// `replace` — id прежней версии черновика на сервере.
     Send { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
     SaveDraft { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
+    /// Догрузить следующую страницу ящика (после самого старого письма в кэше).
+    LoadMore { mailbox: String },
+    /// Серверный поиск; `mailbox: None` — во всех папках.
+    Search { query: String, mailbox: Option<String>, ticket: u64 },
     /// Скачать вложение/картинку.
     Blob { blob_id: String, name: String, mime: String },
 }
@@ -53,6 +60,8 @@ pub enum Event {
     EmailsChanged,
     BodyReady(String),
     BlobReady { blob_id: String, data: Arc<Vec<u8>> },
+    LoadedMore { mailbox: String },
+    SearchResults { ticket: u64, ids: Vec<String>, total: u64 },
     BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
@@ -218,6 +227,27 @@ async fn handle(
                 Ok(()) => Event::Sent { ticket },
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
             });
+        }
+        Command::LoadMore { mailbox } => {
+            let page = match cache.oldest(&mailbox).map_err(db_err)? {
+                Some(anchor) => client.email_page_after(&mailbox, &anchor, PAGE).await,
+                None => client.email_page(&mailbox, 0, PAGE).await,
+            };
+            // Якорь мог исчезнуть на сервере (удалён) — тогда по позиции.
+            let page = match page {
+                Err(postman_jmap::Error::Method { kind, .. }) if kind == "anchorNotFound" => {
+                    client.email_page(&mailbox, cache.count(&mailbox).map_err(db_err)? as u64, PAGE).await?
+                }
+                p => p?,
+            };
+            cache.upsert_emails(&page.emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+            notify(Event::LoadedMore { mailbox });
+            notify(Event::EmailsChanged);
+        }
+        Command::Search { query, mailbox, ticket } => {
+            let page = client.search(&query, mailbox.as_deref(), SEARCH_LIMIT).await?;
+            cache.upsert_emails(&page.emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+            notify(Event::SearchResults { ticket, ids: page.ids, total: page.total });
         }
         Command::Blob { blob_id, name, mime } => {
             let acc = client.mail_account()?.to_string();

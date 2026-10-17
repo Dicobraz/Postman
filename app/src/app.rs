@@ -32,6 +32,16 @@ enum Section {
     Contacts,
 }
 
+/// Результаты поиска вместо содержимого папки.
+struct SearchView {
+    ticket: u64,
+    query: String,
+    ids: Vec<String>,
+    /// Ждём ответа сервера (пока показаны локальные совпадения).
+    pending: bool,
+    total: Option<u64>,
+}
+
 struct ListWindow {
     offset: usize,
     rows: Vec<EmailRow>,
@@ -67,6 +77,10 @@ pub struct App {
     reading: Option<Reading>,
     search: String,
     focus_search: bool,
+    search_all: bool,
+    search_view: Option<SearchView>,
+    /// Ящик, для которого уже запрошена следующая страница.
+    loading_more: Option<String>,
     status: String,
     commands: Option<UnboundedSender<sync::Command>>,
     events: mpsc::Receiver<sync::Event>,
@@ -127,6 +141,9 @@ impl App {
             reading: None,
             search: String::new(),
             focus_search: false,
+            search_all: false,
+            search_view: None,
+            loading_more: None,
             status,
             commands,
             events: ev_rx,
@@ -156,6 +173,7 @@ impl App {
     }
 
     fn open_mailbox(&mut self, id: String) {
+        self.search_view = None;
         self.mailbox = Some(id);
         self.selected = None;
         self.reading = None;
@@ -163,8 +181,11 @@ impl App {
     }
 
     fn reload_list(&mut self) {
-        let Some(mb) = &self.mailbox else { return };
-        self.count = self.cache.count(mb).unwrap_or(0);
+        self.count = match (&self.search_view, &self.mailbox) {
+            (Some(sv), _) => sv.ids.len(),
+            (None, Some(mb)) => self.cache.count(mb).unwrap_or(0),
+            (None, None) => return,
+        };
         self.window.rows.clear();
         self.ensure_window(self.visible.clone());
     }
@@ -176,10 +197,59 @@ impl App {
         if covered && !w.rows.is_empty() {
             return;
         }
-        let Some(mb) = &self.mailbox else { return };
         let offset = range.start.saturating_sub(WINDOW_MARGIN);
         let limit = range.len() + 2 * WINDOW_MARGIN;
-        self.window = ListWindow { offset, rows: self.cache.page(mb, offset, limit).unwrap_or_default() };
+        let rows = match (&self.search_view, &self.mailbox) {
+            (Some(sv), _) => {
+                let end = (offset + limit).min(sv.ids.len());
+                self.cache.rows_by_ids(&sv.ids[offset.min(end)..end]).unwrap_or_default()
+            }
+            (None, Some(mb)) => self.cache.page(mb, offset, limit).unwrap_or_default(),
+            (None, None) => return,
+        };
+        self.window = ListWindow { offset, rows };
+    }
+
+    /// Поиск: сразу локальные совпадения из кэша, затем — ответ сервера.
+    fn start_search(&mut self) {
+        let query = self.search.trim().to_string();
+        if query.is_empty() {
+            self.stop_search();
+            return;
+        }
+        let scope = if self.search_all { None } else { self.mailbox.clone() };
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        let ids = self.cache.search(&query, scope.as_deref(), 1000).unwrap_or_default();
+        let pending = match &self.commands {
+            Some(tx) => tx.send(sync::Command::Search { query: query.clone(), mailbox: scope, ticket }).is_ok(),
+            None => false,
+        };
+        self.search_view = Some(SearchView { ticket, query, ids, pending, total: None });
+        self.selected = None;
+        self.reading = None;
+        self.reload_list();
+    }
+
+    fn stop_search(&mut self) {
+        if self.search_view.take().is_some() {
+            self.selected = None;
+            self.reading = None;
+            self.reload_list();
+        }
+    }
+
+    /// Ближе к концу списка — догрузить следующую страницу ящика с сервера.
+    fn maybe_load_more(&mut self) {
+        let (Some(mb), None, Some(tx)) = (&self.mailbox, &self.search_view, &self.commands) else { return };
+        if self.loading_more.is_some() || self.visible.end + 100 < self.count {
+            return;
+        }
+        let total = self.mailboxes.iter().find(|m| &m.id == mb).map_or(0, |m| m.total as usize);
+        if total > self.count {
+            let _ = tx.send(sync::Command::LoadMore { mailbox: mb.clone() });
+            self.loading_more = Some(mb.clone());
+        }
     }
 
     fn row(&self, i: usize) -> Option<&EmailRow> {
@@ -282,6 +352,19 @@ impl App {
                 sync::Event::Status(s) => self.status = s,
                 sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
                 sync::Event::BlobReady { blob_id, data } => self.blob_ready(&blob_id, data),
+                sync::Event::LoadedMore { mailbox } => {
+                    if self.loading_more.as_ref() == Some(&mailbox) {
+                        self.loading_more = None;
+                    }
+                }
+                sync::Event::SearchResults { ticket, ids, total } => {
+                    if let Some(sv) = self.search_view.as_mut().filter(|sv| sv.ticket == ticket) {
+                        sv.ids = ids;
+                        sv.pending = false;
+                        sv.total = Some(total);
+                        self.reload_list();
+                    }
+                }
                 sync::Event::BlobFailed { blob_id, error } => {
                     self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
                     self.status = format!("Не удалось скачать вложение: {error}");
@@ -590,6 +673,7 @@ impl App {
     }
 
     fn command_bar(&mut self, ui: &mut egui::Ui) {
+        let mut search = None;
         ui.horizontal(|ui| {
             for (label, action, hint) in [
                 ("✉ Создать", "new", "Ctrl+N"),
@@ -604,17 +688,35 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.toggle_value(&mut self.search_all, "Все папки").on_hover_text("Искать во всех папках, а не только в текущей");
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Поиск (Ctrl+E)")
+                        .hint_text("Поиск (Ctrl+E), Enter — искать, Esc — сбросить")
                         .desired_width(260.0),
                 );
                 if self.focus_search {
                     r.request_focus();
                     self.focus_search = false;
                 }
+                if r.lost_focus() {
+                    ui.input(|i| {
+                        if i.key_pressed(Key::Enter) {
+                            search = Some(true);
+                        } else if i.key_pressed(Key::Escape) {
+                            search = Some(false);
+                        }
+                    });
+                }
             });
         });
+        match search {
+            Some(true) => self.start_search(),
+            Some(false) => {
+                self.search.clear();
+                self.stop_search();
+            }
+            None => {}
+        }
     }
 
     fn folders(&mut self, ui: &mut egui::Ui) {
@@ -632,6 +734,11 @@ impl App {
             });
         });
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(sv) = &self.search_view {
+                let status = if sv.pending { " …".to_string() } else { sv.total.map(|t| format!(" ({t})")).unwrap_or_default() };
+                let _ = ui.selectable_label(true, format!("🔍 «{}»{status}", sv.query));
+                ui.separator();
+            }
             let mut open = None;
             let roots: Vec<MailboxRow> = self.mailboxes.iter().filter(|m| m.parent_id.is_none()).cloned().collect();
             for m in &roots {
@@ -654,7 +761,8 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.add_space(depth as f32 * 12.0);
-            if ui.selectable_label(self.mailbox.as_deref() == Some(&m.id), rt).clicked() {
+            let selected = self.search_view.is_none() && self.mailbox.as_deref() == Some(&m.id);
+            if ui.selectable_label(selected, rt).clicked() {
                 *open = Some(m.id.clone());
             }
         });
@@ -692,6 +800,7 @@ impl App {
             self.select(i);
             self.scroll_to_selected = false;
         }
+        self.maybe_load_more();
     }
 
     fn list_row(&self, ui: &mut egui::Ui, row: &EmailRow, selected: bool) -> egui::Response {
@@ -889,7 +998,14 @@ impl eframe::App for App {
         egui::Panel::top("commands").show(ui, |ui| self.command_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.weak(format!("Элементов: {}", self.count));
+                let total = match &self.search_view {
+                    Some(_) => None,
+                    None => self.mailboxes.iter().find(|m| Some(&m.id) == self.mailbox.as_ref()).map(|m| m.total as usize),
+                };
+                match total {
+                    Some(t) if t > self.count => ui.weak(format!("Элементов: {} из {t}", self.count)),
+                    _ => ui.weak(format!("Элементов: {}", self.count)),
+                };
                 ui.separator();
                 ui.weak(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
