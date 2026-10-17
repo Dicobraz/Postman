@@ -6110,6 +6110,7 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "postman-cache",
+ "postman-calendar",
 ]
 
 [[package]]
@@ -6120,6 +6121,7 @@ dependencies = [
  "jiff",
  "memory-stats",
  "postman-cache",
+ "postman-calendar",
  "postman-demo",
  "postman-ir",
  "postman-worker",

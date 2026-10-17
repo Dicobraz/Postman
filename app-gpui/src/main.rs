@@ -3,6 +3,7 @@
 //!
 //!   postman-gpui [--demo N] [--bench]
 
+mod calendar;
 mod ir_view;
 
 use std::ops::Range;
@@ -16,7 +17,13 @@ use postman_cache::{Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
 use postman_worker::{Client as Worker, Level, Request};
 
-actions!(postman, [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, FocusSearch, ClearSearch]);
+actions!(postman, [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, FocusSearch, ClearSearch, ShowMail, ShowCalendar, NewMeeting]);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Mail,
+    Calendar,
+}
 
 const ROW_HEIGHT: f32 = 44.0;
 const WINDOW_MARGIN: usize = 100;
@@ -44,6 +51,8 @@ struct Mailer {
     sandbox: &'static str,
     search: Entity<InputState>,
     bench: Option<Bench>,
+    section: Section,
+    cal: calendar::CalendarView,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,6 +83,8 @@ impl Mailer {
             sandbox: "",
             search,
             bench,
+            section: Section::Mail,
+            cal: calendar::CalendarView::demo(),
             _subscriptions: vec![sub],
         };
         m.mailboxes = m.cache.mailboxes().unwrap_or_default();
@@ -251,7 +262,16 @@ impl Mailer {
             );
         }
         col.child(list).child(
-            div().flex().flex_wrap().gap_2().p_2().border_t_1().border_color(rgb(0xdddddd)).child("✉ Почта").child("📅 Календарь").child("👥 Контакты"),
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .p_2()
+                .border_t_1()
+                .border_color(rgb(0xdddddd))
+                .child(nav("nav-mail", "✉ Почта", self.section == Section::Mail, Section::Mail, cx))
+                .child(nav("nav-cal", "📅 Календарь", self.section == Section::Calendar, Section::Calendar, cx))
+                .child("👥 Контакты"),
         )
     }
 
@@ -326,6 +346,20 @@ impl Mailer {
     }
 }
 
+fn nav(id: &'static str, label: &'static str, active: bool, section: Section, cx: &mut Context<Mailer>) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(active, |d| d.bg(rgb(0xcce4ff)))
+        .child(label)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.section = section;
+            cx.notify();
+        }))
+}
+
 fn field(label: &'static str, value: String) -> impl IntoElement {
     div().flex().gap_2().child(div().w(px(48.)).text_color(rgb(0x888888)).child(label)).child(value)
 }
@@ -396,6 +430,19 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &MarkRead, _, cx| this.set_flags(Some(true), false, cx)))
             .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.set_flags(Some(false), false, cx)))
             .on_action(cx.listener(|this, _: &ToggleFlag, _, cx| this.set_flags(None, true, cx)))
+            .on_action(cx.listener(|this, _: &ShowMail, _, cx| {
+                this.section = Section::Mail;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ShowCalendar, _, cx| {
+                this.section = Section::Calendar;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NewMeeting, _, cx| {
+                this.section = Section::Calendar;
+                this.cal.assistant = !this.cal.assistant;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
@@ -431,8 +478,8 @@ impl Render for Mailer {
                     .flex_1()
                     .min_h_0()
                     .child(self.folders(cx))
-                    .child(self.list(cx))
-                    .child(self.reading_pane(cx)),
+                    .when(self.section == Section::Mail, |d| d.child(self.list(cx)).child(self.reading_pane(cx)))
+                    .when(self.section == Section::Calendar, |d| d.child(calendar::render(self, cx))),
             )
             .child(
                 div()
@@ -567,6 +614,9 @@ fn main() {
             KeyBinding::new("ctrl-u", MarkUnread, Some("Mailer")),
             KeyBinding::new("insert", ToggleFlag, Some("Mailer")),
             KeyBinding::new("ctrl-e", FocusSearch, None),
+            KeyBinding::new("ctrl-1", ShowMail, None),
+            KeyBinding::new("ctrl-2", ShowCalendar, None),
+            KeyBinding::new("ctrl-shift-q", NewMeeting, None),
             KeyBinding::new("escape", ClearSearch, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);

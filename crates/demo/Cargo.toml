@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 postman-cache.workspace = true
 jiff = "0.2"
+postman-calendar.workspace = true

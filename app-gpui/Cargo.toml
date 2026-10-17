@@ -10,6 +10,7 @@ postman-ir.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
 postman-demo.workspace = true
+postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"
 memory-stats = "1"

