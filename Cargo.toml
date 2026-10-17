@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/ir", "crates/jmap", "crates/cache", "app"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+postman-ir = { path = "crates/ir" }
+postman-jmap = { path = "crates/jmap" }
+postman-cache = { path = "crates/cache" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

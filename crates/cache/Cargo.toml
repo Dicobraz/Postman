@@ -1,0 +1,9 @@
+[package]
+name = "postman-cache"
+description = "Локальный SQLite-кэш: список писем, тела, состояния синхронизации"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }

@@ -1,0 +1,16 @@
+[package]
+name = "postman-jmap"
+description = "Тонкий JMAP-клиент (RFC 8620/8621) под Stalwart"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

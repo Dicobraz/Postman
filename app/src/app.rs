@@ -1,0 +1,629 @@
+//! Оболочка в духе classic Outlook: панель команд, дерево папок с навигацией
+//! внизу, список писем и область чтения.
+
+use std::ops::Range;
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use eframe::egui::{
+    self, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Rect, Sense, TextStyle, Vec2, pos2,
+};
+use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
+use postman_ir::Document;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::{demo, ir_view, sync};
+
+const ROW_HEIGHT: f32 = 40.0;
+/// Сколько строк сверх видимых держать в окне списка.
+const WINDOW_MARGIN: usize = 100;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Mail,
+    Calendar,
+    Contacts,
+}
+
+struct ListWindow {
+    offset: usize,
+    rows: Vec<EmailRow>,
+}
+
+struct Reading {
+    row: EmailRow,
+    body: Option<BodyRow>,
+    doc: Option<Document>,
+}
+
+pub struct App {
+    cache: Cache,
+    demo: bool,
+    section: Section,
+    mailboxes: Vec<MailboxRow>,
+    mailbox: Option<String>,
+    count: usize,
+    window: ListWindow,
+    visible: Range<usize>,
+    selected: Option<usize>,
+    scroll_to_selected: bool,
+    reading: Option<Reading>,
+    search: String,
+    focus_search: bool,
+    status: String,
+    commands: Option<UnboundedSender<sync::Command>>,
+    events: mpsc::Receiver<sync::Event>,
+    rendered_tx: mpsc::Sender<(String, Document)>,
+    rendered_rx: mpsc::Receiver<(String, Document)>,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext, db: PathBuf, account: Option<sync::Account>, demo: bool) -> Self {
+        let cache = Cache::open(&db).expect("кэш");
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let ctx = cc.egui_ctx.clone();
+        let commands = account.map(|a| sync::spawn(a, db, ev_tx, move || ctx.request_repaint()));
+        let status = match (&commands, demo) {
+            (_, true) => "Демо-режим".to_string(),
+            (Some(_), _) => "Запуск синхронизации…".to_string(),
+            (None, _) => "Нет учётной записи: задайте POSTMAN_URL/POSTMAN_USER/POSTMAN_PASSWORD или --demo".to_string(),
+        };
+        configure_style(&cc.egui_ctx);
+        let (rendered_tx, rendered_rx) = mpsc::channel();
+        let mut app = Self {
+            cache,
+            demo,
+            section: Section::Mail,
+            mailboxes: Vec::new(),
+            mailbox: None,
+            count: 0,
+            window: ListWindow { offset: 0, rows: Vec::new() },
+            visible: 0..0,
+            selected: None,
+            scroll_to_selected: false,
+            reading: None,
+            search: String::new(),
+            focus_search: false,
+            status,
+            commands,
+            events: ev_rx,
+            rendered_tx,
+            rendered_rx,
+        };
+        app.reload_mailboxes();
+        app
+    }
+
+    fn reload_mailboxes(&mut self) {
+        self.mailboxes = self.cache.mailboxes().unwrap_or_default();
+        if self.mailbox.is_none() {
+            let inbox = self.mailboxes.iter().find(|m| m.role.as_deref() == Some("inbox")).or(self.mailboxes.first());
+            if let Some(id) = inbox.map(|m| m.id.clone()) {
+                self.open_mailbox(id);
+            }
+        }
+    }
+
+    fn open_mailbox(&mut self, id: String) {
+        self.mailbox = Some(id);
+        self.selected = None;
+        self.reading = None;
+        self.reload_list();
+    }
+
+    fn reload_list(&mut self) {
+        let Some(mb) = &self.mailbox else { return };
+        self.count = self.cache.count(mb).unwrap_or(0);
+        self.window.rows.clear();
+        self.ensure_window(self.visible.clone());
+    }
+
+    /// Подгрузить из кэша окно строк вокруг видимого диапазона.
+    fn ensure_window(&mut self, range: Range<usize>) {
+        let w = &self.window;
+        let covered = range.start >= w.offset && range.end <= w.offset + w.rows.len();
+        if covered && !w.rows.is_empty() {
+            return;
+        }
+        let Some(mb) = &self.mailbox else { return };
+        let offset = range.start.saturating_sub(WINDOW_MARGIN);
+        let limit = range.len() + 2 * WINDOW_MARGIN;
+        self.window = ListWindow { offset, rows: self.cache.page(mb, offset, limit).unwrap_or_default() };
+    }
+
+    fn row(&self, i: usize) -> Option<&EmailRow> {
+        i.checked_sub(self.window.offset).and_then(|j| self.window.rows.get(j))
+    }
+
+    fn select(&mut self, i: usize) {
+        if self.count == 0 {
+            return;
+        }
+        let i = i.min(self.count - 1);
+        self.selected = Some(i);
+        self.scroll_to_selected = true;
+        self.ensure_window(i..i + 1);
+        let Some(row) = self.row(i).cloned() else { return };
+        if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
+            return;
+        }
+        // Как в Outlook: письмо помечается прочитанным при открытии.
+        if !row.seen {
+            self.set_flags(&row, true, row.flagged);
+        }
+        let body = self.load_body(&row.id);
+        self.reading = Some(Reading { row, body, doc: None });
+        self.render_body();
+    }
+
+    fn load_body(&self, id: &str) -> Option<BodyRow> {
+        if self.demo {
+            return Some(demo::body(id));
+        }
+        let b = self.cache.body(id).ok().flatten();
+        if b.is_none()
+            && let Some(tx) = &self.commands
+        {
+            let _ = tx.send(sync::Command::Body(id.to_string()));
+        }
+        b
+    }
+
+    /// HTML -> IR вне UI-потока.
+    // TODO(песочница): вынести в отдельный процесс-воркер (AppContainer/seccomp), см. HANDOFF §3a.
+    fn render_body(&mut self) {
+        let Some(r) = &self.reading else { return };
+        let Some(body) = r.body.clone() else { return };
+        let id = r.row.id.clone();
+        let tx = self.rendered_tx.clone();
+        std::thread::spawn(move || {
+            let doc = match (&body.html, &body.text) {
+                (Some(h), _) => postman_ir::from_html(h),
+                (None, Some(t)) => postman_ir::from_plain(t),
+                _ => Document::default(),
+            };
+            let _ = tx.send((id, doc));
+        });
+    }
+
+    fn set_flags(&mut self, row: &EmailRow, seen: bool, flagged: bool) {
+        let _ = self.cache.set_flags(&row.id, seen, flagged);
+        if let Some(tx) = &self.commands {
+            if seen != row.seen {
+                let _ = tx.send(sync::Command::Keyword { id: row.id.clone(), keyword: "$seen", on: seen });
+            }
+            if flagged != row.flagged {
+                let _ = tx.send(sync::Command::Keyword { id: row.id.clone(), keyword: "$flagged", on: flagged });
+            }
+        }
+        for r in self.window.rows.iter_mut().filter(|r| r.id == row.id) {
+            r.seen = seen;
+            r.flagged = flagged;
+        }
+        if let Some(rd) = self.reading.as_mut().filter(|rd| rd.row.id == row.id) {
+            rd.row.seen = seen;
+            rd.row.flagged = flagged;
+        }
+    }
+
+    fn selected_row(&self) -> Option<EmailRow> {
+        self.selected.and_then(|i| self.row(i)).cloned()
+    }
+
+    fn delete_selected(&mut self) {
+        let (Some(row), Some(from)) = (self.selected_row(), self.mailbox.clone()) else { return };
+        let Some(trash) = self.mailboxes.iter().find(|m| m.role.as_deref() == Some("trash")).map(|m| m.id.clone())
+        else {
+            return;
+        };
+        if from == trash {
+            self.status = "Окончательное удаление — в следующей итерации".into();
+            return;
+        }
+        let mut moved = row.clone();
+        moved.mailbox_ids = vec![trash.clone()];
+        let _ = self.cache.upsert_emails(&[moved]);
+        if let Some(tx) = &self.commands {
+            let _ = tx.send(sync::Command::Move { id: row.id, from, to: trash });
+        }
+        let keep = self.selected;
+        self.reading = None;
+        self.reload_list();
+        if let Some(i) = keep {
+            self.select(i);
+        }
+    }
+
+    fn poll_background(&mut self) {
+        while let Ok(ev) = self.events.try_recv() {
+            match ev {
+                sync::Event::Status(s) => self.status = s,
+                sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
+                sync::Event::MailboxesChanged => self.reload_mailboxes(),
+                sync::Event::EmailsChanged => {
+                    self.reload_list();
+                    if let Some(r) = &self.reading {
+                        let id = r.row.id.clone();
+                        self.ensure_window(self.visible.clone());
+                        self.selected = self.window.rows.iter().position(|r| r.id == id).map(|p| p + self.window.offset);
+                    }
+                }
+                sync::Event::BodyReady(id) => {
+                    if self.reading.as_ref().is_some_and(|r| r.row.id == id) {
+                        let body = self.cache.body(&id).ok().flatten();
+                        if let Some(r) = self.reading.as_mut() {
+                            r.body = body;
+                        }
+                        self.render_body();
+                    }
+                }
+            }
+        }
+        while let Ok((id, doc)) = self.rendered_rx.try_recv() {
+            if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) {
+                r.doc = Some(doc);
+            }
+        }
+    }
+
+    fn hotkeys(&mut self, ctx: &egui::Context) {
+        let typing = ctx.egui_wants_keyboard_input();
+        let cmd = |m: Modifiers, k: Key| KeyboardShortcut::new(m, k);
+        let ctrl = Modifiers::COMMAND;
+        let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        let mut action = None;
+        ctx.input_mut(|i| {
+            let mut hit = |s: KeyboardShortcut, a: &'static str| {
+                if action.is_none() && i.consume_shortcut(&s) {
+                    action = Some(a);
+                }
+            };
+            hit(cmd(ctrl, Key::Num1), "mail");
+            hit(cmd(ctrl, Key::Num2), "calendar");
+            hit(cmd(ctrl, Key::Num3), "contacts");
+            hit(cmd(ctrl, Key::E), "search");
+            hit(cmd(ctrl_shift, Key::R), "reply_all");
+            hit(cmd(ctrl, Key::R), "reply");
+            hit(cmd(ctrl, Key::F), "forward");
+            hit(cmd(ctrl, Key::N), "new");
+            hit(cmd(ctrl, Key::Q), "read");
+            hit(cmd(ctrl, Key::U), "unread");
+            if !typing {
+                hit(cmd(Modifiers::NONE, Key::Delete), "delete");
+                hit(cmd(Modifiers::NONE, Key::Insert), "flag");
+                hit(cmd(Modifiers::NONE, Key::J), "next");
+                hit(cmd(Modifiers::NONE, Key::ArrowDown), "next");
+                hit(cmd(Modifiers::NONE, Key::K), "prev");
+                hit(cmd(Modifiers::NONE, Key::ArrowUp), "prev");
+                hit(cmd(Modifiers::NONE, Key::Home), "first");
+                hit(cmd(Modifiers::NONE, Key::End), "last");
+                hit(cmd(Modifiers::NONE, Key::PageDown), "page_down");
+                hit(cmd(Modifiers::NONE, Key::PageUp), "page_up");
+            }
+        });
+        if let Some(a) = action {
+            self.run(a);
+        }
+    }
+
+    fn run(&mut self, action: &str) {
+        let page = self.visible.len().max(1);
+        let cur = self.selected;
+        match action {
+            "mail" => self.section = Section::Mail,
+            "calendar" => self.section = Section::Calendar,
+            "contacts" => self.section = Section::Contacts,
+            "search" => self.focus_search = true,
+            "next" => self.select(cur.map_or(0, |i| i + 1)),
+            "prev" => self.select(cur.map_or(0, |i| i.saturating_sub(1))),
+            "first" => self.select(0),
+            "last" => self.select(self.count.saturating_sub(1)),
+            "page_down" => self.select(cur.map_or(0, |i| i + page)),
+            "page_up" => self.select(cur.map_or(0, |i| i.saturating_sub(page))),
+            "read" | "unread" => {
+                if let Some(r) = self.selected_row() {
+                    self.set_flags(&r, action == "read", r.flagged);
+                }
+            }
+            "flag" => {
+                if let Some(r) = self.selected_row() {
+                    self.set_flags(&r, r.seen, !r.flagged);
+                }
+            }
+            "delete" => self.delete_selected(),
+            "new" | "reply" | "reply_all" | "forward" => {
+                self.status = "Композер — следующая веха (недели 2–6)".into();
+            }
+            _ => {}
+        }
+    }
+
+    fn command_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (label, action, hint) in [
+                ("✉ Создать", "new", "Ctrl+N"),
+                ("↩ Ответить", "reply", "Ctrl+R"),
+                ("↩↩ Ответить всем", "reply_all", "Ctrl+Shift+R"),
+                ("↪ Переслать", "forward", "Ctrl+F"),
+                ("🗑 Удалить", "delete", "Del"),
+                ("⚑ Флаг", "flag", "Insert"),
+            ] {
+                if ui.button(label).on_hover_text(hint).clicked() {
+                    self.run(action);
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Поиск (Ctrl+E)")
+                        .desired_width(260.0),
+                );
+                if self.focus_search {
+                    r.request_focus();
+                    self.focus_search = false;
+                }
+            });
+        });
+    }
+
+    fn folders(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("nav").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (label, s, hint) in [
+                    ("✉ Почта", Section::Mail, "Ctrl+1"),
+                    ("📅 Календарь", Section::Calendar, "Ctrl+2"),
+                    ("👥 Контакты", Section::Contacts, "Ctrl+3"),
+                ] {
+                    if ui.selectable_label(self.section == s, label).on_hover_text(hint).clicked() {
+                        self.section = s;
+                    }
+                }
+            });
+        });
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut open = None;
+            let roots: Vec<MailboxRow> = self.mailboxes.iter().filter(|m| m.parent_id.is_none()).cloned().collect();
+            for m in &roots {
+                self.folder(ui, m, 0, &mut open);
+            }
+            if let Some(id) = open {
+                self.open_mailbox(id);
+            }
+        });
+    }
+
+    fn folder(&self, ui: &mut egui::Ui, m: &MailboxRow, depth: usize, open: &mut Option<String>) {
+        if depth > 16 {
+            return;
+        }
+        let text = if m.unread > 0 { format!("{}  {}", m.name, m.unread) } else { m.name.clone() };
+        let mut rt = egui::RichText::new(text);
+        if m.unread > 0 {
+            rt = rt.strong();
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 12.0);
+            if ui.selectable_label(self.mailbox.as_deref() == Some(&m.id), rt).clicked() {
+                *open = Some(m.id.clone());
+            }
+        });
+        for child in self.mailboxes.iter().filter(|c| c.parent_id.as_deref() == Some(&m.id)) {
+            self.folder(ui, child, depth + 1, open);
+        }
+    }
+
+    fn message_list(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut area = egui::ScrollArea::vertical().auto_shrink(false);
+        if self.scroll_to_selected
+            && let Some(i) = self.selected
+        {
+            self.scroll_to_selected = false;
+            let (top, bottom) = (self.visible.start, self.visible.end.saturating_sub(1));
+            if i < top || i >= bottom {
+                let rows_visible = self.visible.len().max(1);
+                let first = if i < top { i } else { (i + 2).saturating_sub(rows_visible) };
+                area = area.vertical_scroll_offset(first as f32 * ROW_HEIGHT);
+            }
+        }
+        let mut clicked = None;
+        area.show_rows(ui, ROW_HEIGHT, self.count, |ui, range| {
+            self.visible = range.clone();
+            self.ensure_window(range.clone());
+            for i in range {
+                let Some(row) = self.row(i) else { continue };
+                if self.list_row(ui, row, self.selected == Some(i)).clicked() {
+                    clicked = Some(i);
+                }
+            }
+        });
+        if let Some(i) = clicked {
+            self.select(i);
+            self.scroll_to_selected = false;
+        }
+    }
+
+    fn list_row(&self, ui: &mut egui::Ui, row: &EmailRow, selected: bool) -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
+        let v = ui.visuals();
+        let painter = ui.painter_at(rect);
+        if selected {
+            painter.rect_filled(rect, 0.0, v.selection.bg_fill);
+        } else if resp.hovered() {
+            painter.rect_filled(rect, 0.0, v.faint_bg_color);
+        }
+        if !row.seen {
+            painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(3.0, ROW_HEIGHT)), 0.0, v.hyperlink_color);
+        }
+        let strong = v.strong_text_color();
+        let weak = v.weak_text_color();
+        let font = FontId::proportional(13.0);
+        let small = FontId::proportional(12.0);
+        let left = rect.left() + 10.0;
+        let right = rect.right() - 8.0;
+        let date = painter.text(pos2(right, rect.top() + 4.0), Align2::RIGHT_TOP, format_date(row.received_at), small.clone(), weak);
+        let mut icons = String::new();
+        if row.has_attachment {
+            icons.push('📎');
+        }
+        if row.flagged {
+            icons.push('⚑');
+        }
+        let icons_w = if icons.is_empty() {
+            0.0
+        } else {
+            painter.text(pos2(date.left() - 6.0, rect.top() + 4.0), Align2::RIGHT_TOP, icons, small.clone(), Color32::from_rgb(200, 60, 60)).width() + 6.0
+        };
+        let sender_clip = Rect::from_min_max(rect.min, pos2(date.left() - 8.0 - icons_w, rect.bottom()));
+        let from = if row.from_name.is_empty() { &row.from_addr } else { &row.from_name };
+        let sender_color = if row.seen { v.text_color() } else { strong };
+        painter.with_clip_rect(sender_clip).text(pos2(left, rect.top() + 4.0), Align2::LEFT_TOP, from, font.clone(), sender_color);
+        let line2 = if row.preview.is_empty() { row.subject.clone() } else { format!("{}  —  {}", row.subject, row.preview) };
+        painter.with_clip_rect(rect.shrink2(Vec2::new(8.0, 0.0))).text(
+            pos2(left, rect.top() + 22.0),
+            Align2::LEFT_TOP,
+            line2,
+            small,
+            if row.seen { weak } else { v.hyperlink_color },
+        );
+        painter.hline(rect.x_range(), rect.bottom() - 0.5, (1.0, v.widgets.noninteractive.bg_stroke.color));
+        resp
+    }
+
+    fn reading_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(r) = &self.reading else {
+            ui.centered_and_justified(|ui| ui.weak("Выберите письмо"));
+            return;
+        };
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(&r.row.subject).size(18.0).strong());
+        ui.add_space(4.0);
+        let from = if r.row.from_name.is_empty() {
+            r.row.from_addr.clone()
+        } else {
+            format!("{} <{}>", r.row.from_name, r.row.from_addr)
+        };
+        egui::Grid::new("headers").num_columns(2).spacing([8.0, 2.0]).show(ui, |ui| {
+            ui.weak("От:");
+            ui.label(from);
+            ui.end_row();
+            if let Some(b) = &r.body {
+                ui.weak("Кому:");
+                ui.label(&b.to);
+                ui.end_row();
+                if !b.cc.is_empty() {
+                    ui.weak("Копия:");
+                    ui.label(&b.cc);
+                    ui.end_row();
+                }
+            }
+            ui.weak("Дата:");
+            ui.label(format_full_date(r.row.received_at));
+            ui.end_row();
+        });
+        let mut action = None;
+        ui.horizontal(|ui| {
+            for (label, a) in [("↩ Ответить", "reply"), ("↩↩ Всем", "reply_all"), ("↪ Переслать", "forward")] {
+                if ui.small_button(label).clicked() {
+                    action = Some(a);
+                }
+            }
+        });
+        ui.separator();
+        let mut link = None;
+        match &r.doc {
+            None => {
+                ui.spinner();
+            }
+            Some(doc) => {
+                if doc.remote_images_blocked > 0 {
+                    egui::Frame::new().fill(ui.visuals().warn_fg_color.gamma_multiply(0.15)).inner_margin(4.0).show(ui, |ui| {
+                        ui.label(format!(
+                            "Внешние картинки не загружаются ({}). Это защищает от отслеживания.",
+                            doc.remote_images_blocked
+                        ));
+                    });
+                    ui.add_space(4.0);
+                }
+                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    link = ir_view::show(ui, doc);
+                });
+            }
+        }
+        if let Some(a) = action {
+            self.run(a);
+        }
+        if let Some(url) = link {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll_background();
+        self.hotkeys(&ctx);
+
+        egui::Panel::top("commands").show(ui, |ui| self.command_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.weak(format!("Элементов: {}", self.count));
+                ui.separator();
+                ui.weak(&self.status);
+            });
+        });
+        egui::Panel::left("folders").default_size(200.0).show(ui, |ui| self.folders(ui));
+        match self.section {
+            Section::Mail => {
+                egui::Panel::left("list")
+                    .default_size(380.0)
+                    .size_range(260.0..=700.0)
+                    .show(ui, |ui| self.message_list(ui));
+                egui::CentralPanel::default().show(ui, |ui| self.reading_pane(ui));
+            }
+            Section::Calendar => {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.centered_and_justified(|ui| ui.weak("Календарь и «Помощник планирования» — недели 7–12"));
+                });
+            }
+            Section::Contacts => {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.centered_and_justified(|ui| ui.weak("Контакты и справочник LDAP — недели 7–12"));
+                });
+            }
+        }
+    }
+}
+
+fn configure_style(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Light);
+    ctx.global_style_mut(|s| {
+        // Плотная вёрстка, как в Outlook.
+        s.spacing.item_spacing = Vec2::new(6.0, 3.0);
+        s.spacing.button_padding = Vec2::new(6.0, 2.0);
+        s.text_styles.insert(TextStyle::Body, FontId::proportional(13.0));
+        s.text_styles.insert(TextStyle::Button, FontId::proportional(13.0));
+    });
+}
+
+fn local(ts: i64) -> Option<jiff::Zoned> {
+    Some(jiff::Timestamp::from_second(ts).ok()?.to_zoned(jiff::tz::TimeZone::system()))
+}
+
+fn format_date(ts: i64) -> String {
+    let (Some(t), Some(now)) = (local(ts), local(jiff::Timestamp::now().as_second())) else {
+        return String::new();
+    };
+    if t.date() == now.date() {
+        t.strftime("%H:%M").to_string()
+    } else if t.year() == now.year() {
+        t.strftime("%d.%m %H:%M").to_string()
+    } else {
+        t.strftime("%d.%m.%Y").to_string()
+    }
+}
+
+fn format_full_date(ts: i64) -> String {
+    local(ts).map(|t| t.strftime("%d.%m.%Y %H:%M").to_string()).unwrap_or_default()
+}
