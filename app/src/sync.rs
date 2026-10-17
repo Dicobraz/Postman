@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_compose::{Address, Draft};
+use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -72,9 +73,13 @@ pub enum Event {
     Error(String),
 }
 
+/// Поисковый индекс (если открылся); пишут в него и синхронизация, и UI.
+pub type Index = Option<Arc<SearchIndex>>;
+
 pub fn spawn(
     account: Account,
     db: PathBuf,
+    index: Index,
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
 ) -> UnboundedSender<Command> {
@@ -88,7 +93,7 @@ pub fn spawn(
                 repaint();
             };
             rt.block_on(async {
-                if let Err(e) = run(account, db, rx, &notify).await {
+                if let Err(e) = run(account, db, index, rx, &notify).await {
                     notify(Event::Error(e));
                 }
             });
@@ -100,6 +105,7 @@ pub fn spawn(
 async fn run(
     account: Account,
     db: PathBuf,
+    index: Index,
     mut rx: UnboundedReceiver<Command>,
     notify: &impl Fn(Event),
 ) -> Result<(), String> {
@@ -112,19 +118,19 @@ async fn run(
     if let Some(i) = identities.first() {
         notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
     }
-    let mut email_state = initial_load(&client, &mut cache, notify).await.map_err(|e| e.to_string())?;
+    let mut email_state = initial_load(&client, &mut cache, &index, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
     loop {
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
-                if let Err(e) = handle(&client, &mut cache, &identities, cmd, notify).await {
+                if let Err(e) = handle(&client, &mut cache, &index, &identities, cmd, notify).await {
                     notify(Event::Error(e.to_string()));
                 }
             }
             _ = poll.tick() => {
-                match refresh(&client, &mut cache, &email_state).await {
+                match refresh(&client, &mut cache, &index, &email_state).await {
                     Ok(Some(s)) => {
                         email_state = s;
                         notify(Event::MailboxesChanged);
@@ -138,7 +144,7 @@ async fn run(
     }
 }
 
-async fn initial_load(client: &Client, cache: &mut Cache, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
+async fn initial_load(client: &Client, cache: &mut Cache, index: &Index, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
     let (mailboxes, _) = client.mailboxes().await?;
     cache.replace_mailboxes(&mailboxes.iter().map(mailbox_row).collect::<Vec<_>>()).map_err(db_err)?;
     notify(Event::MailboxesChanged);
@@ -149,7 +155,7 @@ async fn initial_load(client: &Client, cache: &mut Cache, notify: &impl Fn(Event
     let mut state = String::new();
     for mb in order {
         let page = client.email_page(&mb.id, 0, INITIAL_PAGE).await?;
-        cache.upsert_emails(&page.emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+        save(cache, index, page.emails.iter().map(email_row).collect())?;
         state = page.state;
         notify(Event::EmailsChanged);
     }
@@ -159,7 +165,7 @@ async fn initial_load(client: &Client, cache: &mut Cache, notify: &impl Fn(Event
 }
 
 /// Дельта через `Email/changes`; `Some(новое состояние)`, если что-то изменилось.
-async fn refresh(client: &Client, cache: &mut Cache, since: &str) -> postman_jmap::Result<Option<String>> {
+async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str) -> postman_jmap::Result<Option<String>> {
     let mut state = since.to_string();
     loop {
         let ch = client.changes("Email", &state, 500).await?;
@@ -169,9 +175,13 @@ async fn refresh(client: &Client, cache: &mut Cache, since: &str) -> postman_jma
         let ids: Vec<String> = ch.created.into_iter().chain(ch.updated).collect();
         if !ids.is_empty() {
             let (emails, _) = client.email_get(&ids).await?;
-            cache.upsert_emails(&emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+            save(cache, index, emails.iter().map(email_row).collect())?;
         }
         cache.delete_emails(&ch.destroyed).map_err(db_err)?;
+        if let Some(i) = index {
+            i.delete(&ch.destroyed);
+            let _ = i.commit();
+        }
         state = ch.new_state;
         if !ch.has_more_changes {
             break;
@@ -186,6 +196,7 @@ async fn refresh(client: &Client, cache: &mut Cache, since: &str) -> postman_jma
 async fn handle(
     client: &Client,
     cache: &mut Cache,
+    index: &Index,
     identities: &[Identity],
     cmd: Command,
     notify: &impl Fn(Event),
@@ -240,13 +251,13 @@ async fn handle(
                 }
                 p => p?,
             };
-            cache.upsert_emails(&page.emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+            save(cache, index, page.emails.iter().map(email_row).collect())?;
             notify(Event::LoadedMore { mailbox });
             notify(Event::EmailsChanged);
         }
         Command::Search { query, mailbox, ticket } => {
             let page = client.search(&query, mailbox.as_deref(), SEARCH_LIMIT).await?;
-            cache.upsert_emails(&page.emails.iter().map(email_row).collect::<Vec<_>>()).map_err(db_err)?;
+            save(cache, index, page.emails.iter().map(email_row).collect())?;
             notify(Event::SearchResults { ticket, ids: page.ids, total: page.total });
         }
         Command::Blob { blob_id, name, mime } => {
@@ -332,6 +343,15 @@ async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Opti
     let draft = &draft;
     let drafts = mailbox_by_role(cache, "drafts")?;
     client.save_draft(raw_message(draft)?, &drafts, replace).await
+}
+
+/// Записать письма в кэш и в поисковый индекс (тема, люди, превью).
+fn save(cache: &mut Cache, index: &Index, rows: Vec<EmailRow>) -> postman_jmap::Result<()> {
+    cache.upsert_emails(&rows).map_err(db_err)?;
+    if let Some(i) = index {
+        crate::indexer::rows(i, &rows);
+    }
+    Ok(())
 }
 
 fn db_err(e: postman_cache::Error) -> postman_jmap::Error {

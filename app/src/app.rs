@@ -79,6 +79,7 @@ pub struct App {
     focus_search: bool,
     search_all: bool,
     search_view: Option<SearchView>,
+    index: sync::Index,
     /// Ящик, для которого уже запрошена следующая страница.
     loading_more: Option<String>,
     status: String,
@@ -108,9 +109,14 @@ impl App {
     ) -> Self {
         let cache = Cache::open(&db).expect("кэш");
         let open_dir = db.parent().map(|d| d.join("open")).unwrap_or_default();
+        let index_dir = db.with_extension("search");
+        let index = postman_search::SearchIndex::open(&index_dir).ok().map(Arc::new);
+        if let Some(i) = index.clone().filter(|i| i.is_empty()) {
+            build_index(i, db.clone());
+        }
         let (ev_tx, ev_rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
-        let commands = account.map(|a| sync::spawn(a, db, ev_tx, move || ctx.request_repaint()));
+        let commands = account.map(|a| sync::spawn(a, db, index.clone(), ev_tx, move || ctx.request_repaint()));
         let status = match (&commands, demo) {
             (_, true) => "Демо-режим".to_string(),
             (Some(_), _) => "Запуск синхронизации…".to_string(),
@@ -143,6 +149,7 @@ impl App {
             focus_search: false,
             search_all: false,
             search_view: None,
+            index,
             loading_more: None,
             status,
             commands,
@@ -220,7 +227,16 @@ impl App {
         let scope = if self.search_all { None } else { self.mailbox.clone() };
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        let ids = self.cache.search(&query, scope.as_deref(), 1000).unwrap_or_default();
+        let ids = match &self.index {
+            Some(i) => {
+                let ids = i.search(&query, 1000).unwrap_or_default();
+                match &scope {
+                    Some(mb) => self.cache.filter_mailbox(&ids, mb).unwrap_or_default(),
+                    None => ids,
+                }
+            }
+            None => self.cache.search(&query, scope.as_deref(), 1000).unwrap_or_default(),
+        };
         let pending = match &self.commands {
             Some(tx) => tx.send(sync::Command::Search { query: query.clone(), mailbox: scope, ticket }).is_ok(),
             None => false,
@@ -359,7 +375,9 @@ impl App {
                 }
                 sync::Event::SearchResults { ticket, ids, total } => {
                     if let Some(sv) = self.search_view.as_mut().filter(|sv| sv.ticket == ticket) {
-                        sv.ids = ids;
+                        // Сначала локальные (нечёткие) совпадения, затем то, что нашёл только сервер.
+                        let have: HashSet<String> = sv.ids.iter().cloned().collect();
+                        sv.ids.extend(ids.into_iter().filter(|id| !have.contains(id)));
                         sv.pending = false;
                         sv.total = Some(total);
                         self.reload_list();
@@ -418,6 +436,9 @@ impl App {
                         postman_worker::Level::None => "Песочница: нет",
                     };
                     if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) {
+                        if let (Some(i), Some(body)) = (&self.index, &r.body) {
+                            crate::indexer::full(i, &r.row, body, &postman_ir::to_markdown(&doc));
+                        }
                         r.doc = Some(doc);
                     }
                 }
@@ -1039,6 +1060,22 @@ impl eframe::App for App {
             b.ui_time(frame_start.elapsed());
         }
     }
+}
+
+/// Первичное построение индекса по уже накопленному кэшу — в фоне.
+fn build_index(index: Arc<postman_search::SearchIndex>, db: PathBuf) {
+    std::thread::spawn(move || {
+        let Ok(cache) = Cache::open(&db) else { return };
+        let mut offset = 0;
+        loop {
+            let rows = cache.all_rows(offset, 5000).unwrap_or_default();
+            if rows.is_empty() {
+                break;
+            }
+            offset += rows.len();
+            crate::indexer::rows(&index, &rows);
+        }
+    });
 }
 
 fn addr_list(list: &[postman_cache::Addr]) -> String {

@@ -12,6 +12,7 @@
 | `crates/jmap` | Тонкий JMAP-клиент: autodiscover `.well-known/jmap`, произвольные вызовы, Mail (ящики, письма, `*/changes`, флаги, перемещение). Свой, чтобы добавить Calendars/Principals. |
 | `crates/cache` | SQLite-кэш (WAL): список окнами для виртуального скролла, тела лениво, состояния синхронизации. |
 | `crates/compose` | Ответ/ответ всем/пересылка из IR (как в Outlook: RE:/FW:, ответ сверху), разбор полей адресов, сборка RFC 5322 multipart/alternative. Bcc — только в конверт. |
+| `crates/search` | Полнотекстовый индекс (tantivy): словоформы (Snowball ru+en), опечатки (Левенштейн 1–2), префикс по мере набора, неверная раскладка, ё=е, свежие выше. 50 тыс. писем: 1–4 мс на запрос. |
 | `crates/worker` | Процесс `postman-worker`: HTML/текст → IR в песочнице. Linux: seccomp-bpf + Landlock + rlimits (+ namespaces, если разрешены). Windows: AppContainer, Job Object, mitigation policies (win32k off, только Microsoft-DLL, без динамического кода и дочерних процессов). |
 | `app` | egui/eframe (wgpu): папки, список, область чтения, хоткеи, фоновая синхронизация. |
 

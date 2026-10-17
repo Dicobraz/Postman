@@ -11,6 +11,7 @@ postman-jmap.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
 postman-compose.workspace = true
+postman-search.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "accesskit", "default_fonts", "system_fonts", "links", "clipboard", "x11", "wayland"] }
 jiff = "0.2"
 memory-stats = "1"

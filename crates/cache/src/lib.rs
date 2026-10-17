@@ -313,6 +313,26 @@ impl Cache {
         Ok(out)
     }
 
+    /// Оставить из `ids` только письма ящика, сохранив порядок.
+    pub fn filter_mailbox(&self, ids: &[String], mailbox_id: &str) -> Result<Vec<String>> {
+        let mut st = self.db.prepare_cached("SELECT 1 FROM email_mailbox WHERE email_id = ?1 AND mailbox_id = ?2")?;
+        let mut out = Vec::new();
+        for id in ids {
+            if st.exists(params![id, mailbox_id])? {
+                out.push(id.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Все письма (для первичного построения поискового индекса), порциями.
+    pub fn all_rows(&self, offset: usize, limit: usize) -> Result<Vec<EmailRow>> {
+        self.db
+            .prepare_cached(&format!("SELECT {EMAIL_COLUMNS} FROM email e ORDER BY e.id LIMIT ?1 OFFSET ?2"))?
+            .query_map(params![limit as i64, offset as i64], email_row)?
+            .collect()
+    }
+
     /// Самое старое письмо ящика в кэше — якорь для догрузки следующей страницы.
     pub fn oldest(&self, mailbox_id: &str) -> Result<Option<String>> {
         self.db

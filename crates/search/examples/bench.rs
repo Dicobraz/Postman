@@ -1,0 +1,52 @@
+//! Замер: индексация N писем и время запросов. `cargo run --release -p postman-search --example bench -- 50000`
+use std::time::Instant;
+
+use postman_search::{Doc, SearchIndex};
+
+const WORDS: &[&str] = &[
+    "отчёт", "квартал", "совещание", "проект", "договор", "оплата", "счёт", "поставка", "сервер", "доступ", "пропуск",
+    "парковка", "регламент", "бюджет", "закупка", "лицензия", "deploy", "pipeline", "release", "incident", "migration",
+    "сотрудник", "отпуск", "командировка", "презентация", "заказчик", "требования", "аудит", "безопасность", "сертификат",
+];
+
+fn main() {
+    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(50_000);
+    let dir = std::env::temp_dir().join("postman-search-bench");
+    let _ = std::fs::remove_dir_all(&dir);
+    let idx = SearchIndex::open(&dir).unwrap();
+    let mut rng = 0x2545F4914F6CDD1Du64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng as usize
+    };
+    let t = Instant::now();
+    let mut texts = Vec::with_capacity(n);
+    for i in 0..n {
+        let subj: Vec<&str> = (0..4).map(|_| WORDS[next() % WORDS.len()]).collect();
+        let body: Vec<&str> = (0..40).map(|_| WORDS[next() % WORDS.len()]).collect();
+        texts.push((i.to_string(), subj.join(" "), format!("Сотрудник {} user{}@corp.example", i % 300, i % 300), body.join(" ")));
+    }
+    for chunk in texts.chunks(5000) {
+        let docs: Vec<Doc> = chunk
+            .iter()
+            .map(|(id, s, p, b)| Doc { id, subject: s, people: p, body: b, attachments: "", received_at: 0 })
+            .collect();
+        idx.upsert(&docs).unwrap();
+    }
+    idx.commit().unwrap();
+    let index_time = t.elapsed();
+    let size: u64 = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+    println!("docs={} index={:?} size={:.1}MB", idx.len(), index_time, size as f64 / 1e6);
+    for q in ["отчеты", "кваратл", "jnxtn", "командир", "отчет квартал безопасность", "deploying", "сотрудник 17", "лиценз"] {
+        let t = Instant::now();
+        let mut hits = 0;
+        for _ in 0..20 {
+            hits = idx.search(q, 50).unwrap().len();
+        }
+        println!("{q:28} hits={hits:3} {:?}/запрос", t.elapsed() / 20);
+    }
+    let rss = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    println!("{}", rss.lines().find(|l| l.starts_with("VmRSS")).unwrap_or(""));
+}

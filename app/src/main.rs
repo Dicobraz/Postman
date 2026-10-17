@@ -14,6 +14,7 @@ mod composer;
 mod demo;
 mod files;
 mod gpu;
+mod indexer;
 mod ir_view;
 mod render;
 mod sync;
