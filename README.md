@@ -2,7 +2,7 @@
 
 Корпоративный клиент почта + календарь + контакты под **Stalwart** по **JMAP**.
 Чистый Rust, GPU-рендер (wgpu → DX12/Vulkan), раскладка и хоткеи classic Outlook.
-Исходное ТЗ и решения — [docs/HANDOFF.md](docs/HANDOFF.md).
+Исходное ТЗ и решения — [docs/HANDOFF.md](docs/HANDOFF.md). Учётные записи, файлы и связь с Подиумом — [docs/IDENTITY.md](docs/IDENTITY.md).
 
 ## Структура
 
