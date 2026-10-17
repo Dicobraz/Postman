@@ -11,11 +11,14 @@
 | `crates/ir` | HTML (белый список) / text/plain → IR → Markdown-цитата / исходящий HTML. Без I/O, готов к запуску в песочнице. |
 | `crates/jmap` | Тонкий JMAP-клиент: autodiscover `.well-known/jmap`, произвольные вызовы, Mail (ящики, письма, `*/changes`, флаги, перемещение). Свой, чтобы добавить Calendars/Principals. |
 | `crates/cache` | SQLite-кэш (WAL): список окнами для виртуального скролла, тела лениво, состояния синхронизации. |
+| `crates/compose` | Ответ/ответ всем/пересылка из IR (как в Outlook: RE:/FW:, ответ сверху), разбор полей адресов, сборка RFC 5322 multipart/alternative. Bcc — только в конверт. |
+| `crates/worker` | Процесс `postman-worker`: HTML/текст → IR в песочнице. Linux: seccomp-bpf + Landlock + rlimits (+ namespaces, если разрешены). Windows: AppContainer, Job Object, mitigation policies (win32k off, только Microsoft-DLL, без динамического кода и дочерних процессов). |
 | `app` | egui/eframe (wgpu): папки, список, область чтения, хоткеи, фоновая синхронизация. |
 
 ## Запуск
 
 ```sh
+cargo build --release --workspace                         # postman + postman-worker (должны лежать рядом)
 cargo run --release -p postman -- --demo 50000          # синтетический ящик, без сервера
 POSTMAN_URL=https://mail.example.com POSTMAN_USER=u POSTMAN_PASSWORD=p cargo run --release -p postman
 # или POSTMAN_TOKEN=… (Bearer) вместо USER/PASSWORD
@@ -39,7 +42,7 @@ API: `--gpu dx12|vulkan|gl` или `POSTMAN_GPU`. По умолчанию DX12 �
 ## Хоткеи
 
 Ctrl+1/2/3 — почта/календарь/контакты · Ctrl+E — поиск · Ctrl+N/R/Shift+R/F — создать/ответить/всем/переслать ·
-Ctrl+Q/U — прочитано/не прочитано · Insert — флаг · Del — в «Удалённые» · ↑↓ / j k, Home/End, PgUp/PgDn — навигация.
+Ctrl+Q/U — прочитано/не прочитано · в окне письма: Ctrl+Enter или Alt+S — отправить, Ctrl+S — черновик, Ctrl+Shift+B — «Скрытая», Ctrl+Shift+P — просмотр, Esc — закрыть · · Insert — флаг · Del — в «Удалённые» · ↑↓ / j k, Home/End, PgUp/PgDn — навигация.
 
 ## Статус (неделя 1, спайк)
 
@@ -48,8 +51,18 @@ Ctrl+Q/U — прочитано/не прочитано · Insert — флаг �
 JMAP-сессия, ящики, страницы писем, тела, флаги, перемещение, опрос `Email/changes`; SQLite-кэш;
 UI-оболочка с виртуальным списком на 50 тыс. писем.
 
+Неделя 2: композер (отдельное окно, Markdown, превью через воркер, ответ/всем/переслать), отправка через
+JMAP (blob upload → Email/import → EmailSubmission с переносом в «Отправленные»), черновики; воркер-песочница
+(тесты: чтение ФС, сеть, запуск процессов — отказ; зависание — убийство по таймауту и перезапуск).
+Защита от «бомб» вложенности: html5ever квадратичен на глубоких `<div>` — при оценочной глубине > 2000 письмо показывается текстом.
+
+Не проверено (нет стенда/Windows): отправка и черновики против Stalwart; Windows-песочница
+(только проверка типов под `x86_64-pc-windows-msvc`).
+
 Дальше:
-- Воркер-песочница для HTML→IR (сейчас — отдельный поток): AppContainer/Job Object/Win32k-off; seccomp/Landlock на Linux.
+- Проверить на Stalwart: отправку, черновики, удаление Bcc сервером; Windows-песочницу на Windows.
+- Вложения в композере (выбор файла, вставка картинок `cid:`), автосохранение черновика, вопрос при закрытии.
+- Картинки `cid:` — декодирование в воркере (PNG/JPEG/GIF/WebP), передача RGBA в UI.
 - Push (EventSource/WebSocket) вместо опроса; догрузка писем за пределами первых 500 на ящик; серверный поиск.
 - Композер (Markdown → multipart/alternative), вложения.
 - Рендер: настоящий полужирный шрифт (сейчас `strong` = контрастный цвет), выравнивание абзацев, группировка списка по датам, треды.

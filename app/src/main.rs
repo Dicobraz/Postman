@@ -10,9 +10,11 @@
 
 mod app;
 mod bench;
+mod composer;
 mod demo;
 mod gpu;
 mod ir_view;
+mod render;
 mod sync;
 
 use std::path::PathBuf;

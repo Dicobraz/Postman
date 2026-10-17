@@ -1,0 +1,202 @@
+//! Изолированный воркер разбора писем (HANDOFF §3a).
+//!
+//! UI держит один процесс `postman-worker` и общается с ним кадрами
+//! `u32 LE длина + JSON` по stdin/stdout. Воркер запирает себя до чтения
+//! первого запроса: без сети, без файловой системы, без дочерних процессов,
+//! на Windows — без win32k. Зависание или падение воркера стоит одного письма:
+//! клиент убивает процесс и поднимает новый.
+
+mod sandbox;
+
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use postman_ir::Document;
+use serde::{Deserialize, Serialize};
+
+pub use sandbox::Level;
+
+/// Больше этого не принимаем ни в одну сторону.
+const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Request {
+    Html(String),
+    Text(String),
+    /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    Probe(Probe),
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Probe {
+    ReadFile(String),
+    Connect(String),
+    Spawn(String),
+    Hang,
+}
+
+#[cfg(debug_assertions)]
+fn probe(p: Probe) -> Response {
+    let r = match p {
+        Probe::ReadFile(path) => std::fs::read(path).map(|_| ()),
+        Probe::Connect(addr) => std::net::TcpStream::connect(addr).map(drop),
+        Probe::Spawn(cmd) => std::process::Command::new(cmd).status().map(drop),
+        Probe::Hang => loop {
+            std::hint::spin_loop();
+        },
+    };
+    match r {
+        Ok(()) => Response::Err("ДОСТУП РАЗРЕШЁН".into()),
+        Err(e) => Response::Err(format!("запрещено: {e}")),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum Response {
+    Ok(Document),
+    Err(String),
+}
+
+fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+    w.write_all(&(payload.len() as u32).to_le_bytes())?;
+    w.write_all(payload)?;
+    w.flush()
+}
+
+fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_FRAME {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "кадр слишком большой"));
+    }
+    let mut buf = vec![0; len];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Точка входа процесса-воркера.
+pub fn serve() -> ! {
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
+    if let Err(e) = sandbox::lockdown() {
+        // Без песочницы не работаем: лучше показать письмо текстом, чем разбирать HTML без защиты.
+        let _ = write_frame(&mut stdout, &serde_json::to_vec(&Response::Err(format!("песочница: {e}"))).unwrap_or_default());
+        std::process::exit(3);
+    }
+    loop {
+        let Ok(frame) = read_frame(&mut stdin) else { std::process::exit(0) };
+        let resp = match serde_json::from_slice::<Request>(&frame) {
+            Ok(Request::Html(h)) => Response::Ok(postman_ir::from_html(&h)),
+            Ok(Request::Text(t)) => Response::Ok(postman_ir::from_plain(&t)),
+            #[cfg(debug_assertions)]
+            Ok(Request::Probe(p)) => probe(p),
+            Err(e) => Response::Err(e.to_string()),
+        };
+        let out = serde_json::to_vec(&resp).unwrap_or_default();
+        if write_frame(&mut stdout, &out).is_err() {
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Запущенный процесс-воркер, как его видит клиент.
+pub(crate) struct Process {
+    pub stdin: Box<dyn Write + Send>,
+    pub stdout: Box<dyn Read + Send>,
+    pub kill: Box<dyn FnMut() + Send>,
+    pub level: Level,
+}
+
+struct Running {
+    stdin: Box<dyn Write + Send>,
+    responses: mpsc::Receiver<io::Result<Vec<u8>>>,
+    kill: Box<dyn FnMut() + Send>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        (self.kill)();
+    }
+}
+
+/// Клиент воркера. Не потокобезопасен: держите в одном потоке.
+pub struct Client {
+    exe: PathBuf,
+    timeout: Duration,
+    running: Option<Running>,
+    level: Level,
+}
+
+impl Client {
+    pub fn new(exe: PathBuf, timeout: Duration) -> Self {
+        Self { exe, timeout, running: None, level: Level::None }
+    }
+
+    /// Рядом с основным исполняемым файлом.
+    pub fn default_exe() -> PathBuf {
+        let name = if cfg!(windows) { "postman-worker.exe" } else { "postman-worker" };
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(name)))
+            .unwrap_or_else(|| PathBuf::from(name))
+    }
+
+    /// Насколько изолирован текущий процесс (после первого запроса).
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    pub fn render(&mut self, req: &Request) -> Result<Document, String> {
+        let payload = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+        let result = self.exchange(&payload);
+        if result.is_err() {
+            // Таймаут, падение или ошибка песочницы: процесс больше не используем.
+            self.running = None;
+        }
+        match serde_json::from_slice::<Response>(&result?).map_err(|e| e.to_string())? {
+            Response::Ok(doc) => Ok(doc),
+            Response::Err(e) => Err(e),
+        }
+    }
+
+    fn exchange(&mut self, payload: &[u8]) -> Result<Vec<u8>, String> {
+        if self.running.is_none() {
+            self.running = Some(self.start()?);
+        }
+        let r = self.running.as_mut().expect("запущен");
+        write_frame(&mut r.stdin, payload).map_err(|e| format!("воркер недоступен: {e}"))?;
+        match r.responses.recv_timeout(self.timeout) {
+            Ok(Ok(frame)) => Ok(frame),
+            Ok(Err(e)) => Err(format!("воркер завершился: {e}")),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("воркер не ответил за {:?}", self.timeout)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("воркер завершился".into()),
+        }
+    }
+
+    fn start(&mut self) -> Result<Running, String> {
+        let p = sandbox::spawn(&self.exe).map_err(|e| format!("запуск {}: {e}", self.exe.display()))?;
+        self.level = p.level;
+        let (tx, rx) = mpsc::channel();
+        let mut stdout = p.stdout;
+        std::thread::Builder::new()
+            .name("worker-reader".into())
+            .spawn(move || {
+                loop {
+                    let r = read_frame(&mut stdout);
+                    let stop = r.is_err();
+                    if tx.send(r).is_err() || stop {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Running { stdin: p.stdin, responses: rx, kill: p.kill })
+    }
+}

@@ -35,13 +35,49 @@ pub struct EmailRow {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Addr {
+    pub name: String,
+    pub email: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BodyRow {
-    pub to: String,
-    pub cc: String,
+    pub to: Vec<Addr>,
+    pub cc: Vec<Addr>,
+    pub reply_to: Vec<Addr>,
+    pub message_id: Option<String>,
+    pub references: Vec<String>,
     pub html: Option<String>,
     pub text: Option<String>,
 }
+
+/// Адреса хранятся строками `имя\tадрес` через перевод строки: ни то, ни другое
+/// не может содержать эти символы после разбора заголовков сервером.
+fn addrs_to_db(list: &[Addr]) -> String {
+    list.iter()
+        .map(|a| format!("{}\t{}", a.name.replace(['\t', '\n'], " "), a.email.replace(['\t', '\n'], "")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn addrs_from_db(s: &str) -> Vec<Addr> {
+    s.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(n, e)| Addr { name: n.to_string(), email: e.to_string() })
+        .collect()
+}
+
+/// Кэш одноразовый: при смене версии схемы он пересоздаётся и заполняется заново.
+const SCHEMA_VERSION: i64 = 2;
+
+const DROP: &str = "
+DROP TABLE IF EXISTS body;
+DROP TABLE IF EXISTS email_mailbox;
+DROP TABLE IF EXISTS email;
+DROP TABLE IF EXISTS mailbox;
+DROP TABLE IF EXISTS sync_state;
+";
 
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
@@ -80,6 +116,9 @@ CREATE TABLE IF NOT EXISTS body (
     email_id TEXT PRIMARY KEY REFERENCES email(id) ON DELETE CASCADE,
     recipients_to TEXT NOT NULL,
     recipients_cc TEXT NOT NULL,
+    reply_to TEXT NOT NULL,
+    message_id TEXT,
+    refs TEXT NOT NULL,
     html TEXT,
     text TEXT
 ) WITHOUT ROWID;
@@ -103,6 +142,11 @@ impl Cache {
     }
 
     fn init(db: Connection) -> Result<Self> {
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != SCHEMA_VERSION {
+            db.execute_batch(DROP)?;
+            db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         db.execute_batch(SCHEMA)?;
         // Небольшой кэш страниц: память важнее, чем лишнее чтение с SSD.
         db.pragma_update(None, "cache_size", -8 * 1024)?;
@@ -224,17 +268,39 @@ impl Cache {
 
     pub fn body(&self, id: &str) -> Result<Option<BodyRow>> {
         self.db
-            .prepare_cached("SELECT recipients_to, recipients_cc, html, text FROM body WHERE email_id = ?1")?
-            .query_row([id], |r| Ok(BodyRow { to: r.get(0)?, cc: r.get(1)?, html: r.get(2)?, text: r.get(3)? }))
+            .prepare_cached(
+                "SELECT recipients_to, recipients_cc, reply_to, message_id, refs, html, text FROM body WHERE email_id = ?1",
+            )?
+            .query_row([id], |r| {
+                Ok(BodyRow {
+                    to: addrs_from_db(&r.get::<_, String>(0)?),
+                    cc: addrs_from_db(&r.get::<_, String>(1)?),
+                    reply_to: addrs_from_db(&r.get::<_, String>(2)?),
+                    message_id: r.get(3)?,
+                    references: r.get::<_, String>(4)?.split_whitespace().map(str::to_string).collect(),
+                    html: r.get(5)?,
+                    text: r.get(6)?,
+                })
+            })
             .optional()
     }
 
     pub fn put_body(&self, id: &str, b: &BodyRow) -> Result<()> {
         self.db
             .prepare_cached(
-                "INSERT OR REPLACE INTO body (email_id, recipients_to, recipients_cc, html, text) VALUES (?1,?2,?3,?4,?5)",
+                "INSERT OR REPLACE INTO body (email_id, recipients_to, recipients_cc, reply_to, message_id, refs, html, text)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             )?
-            .execute(params![id, b.to, b.cc, b.html, b.text])
+            .execute(params![
+                id,
+                addrs_to_db(&b.to),
+                addrs_to_db(&b.cc),
+                addrs_to_db(&b.reply_to),
+                b.message_id,
+                b.references.join(" "),
+                b.html,
+                b.text
+            ])
             .map(drop)
     }
 
@@ -293,7 +359,13 @@ mod tests {
         let mut c = Cache::open_in_memory().unwrap();
         c.upsert_emails(&[email("a", 1, &["in"])]).unwrap();
         assert!(c.body("a").unwrap().is_none());
-        let b = BodyRow { text: Some("hi".into()), ..Default::default() };
+        let b = BodyRow {
+            text: Some("hi".into()),
+            to: vec![Addr { name: "Иванов, Иван".into(), email: "i@x.ru".into() }, Addr { name: String::new(), email: "p@x.ru".into() }],
+            message_id: Some("m@x".into()),
+            references: vec!["a@x".into(), "b@x".into()],
+            ..Default::default()
+        };
         c.put_body("a", &b).unwrap();
         assert_eq!(c.body("a").unwrap(), Some(b));
         c.set_state("Email", "s1").unwrap();

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/jmap", "crates/cache", "app"]
+members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "app"]
 
 [workspace.package]
 edition = "2024"
@@ -11,6 +11,8 @@ license = "Apache-2.0"
 postman-ir = { path = "crates/ir" }
 postman-jmap = { path = "crates/jmap" }
 postman-cache = { path = "crates/cache" }
+postman-compose = { path = "crates/compose" }
+postman-worker = { path = "crates/worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

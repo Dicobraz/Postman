@@ -23,7 +23,13 @@ const BLOCKISH: &[&str] = &[
 /// Не больше этой глубины вложенности — защита стека от «бомб» из тегов.
 const MAX_DEPTH: usize = 256;
 
+/// Выше этой оценочной глубины html5ever работает за O(n²) — показываем текстом.
+const MAX_ESTIMATED_DEPTH: usize = 2000;
+
 pub fn from_html(html: &str) -> Document {
+    if estimate_depth(html) > MAX_ESTIMATED_DEPTH {
+        return crate::from_plain(&strip_tags(html));
+    }
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
     let mut b = Builder::default();
     let mut sink = Sink::default();
@@ -395,6 +401,50 @@ impl Builder {
     }
 }
 
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
+];
+
+/// Грубая оценка максимальной глубины вложенности по тегам, без разбора.
+/// Незакрытые `<p>`/`<li>` её завышают — это безопасная сторона.
+fn estimate_depth(html: &str) -> usize {
+    let b = html.as_bytes();
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    while let Some(off) = b[i..].iter().position(|&c| c == b'<') {
+        i += off + 1;
+        match b.get(i) {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(c) if c.is_ascii_alphabetic() => {
+                let end = b[i..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |e| i + e);
+                let name = html[i..end].to_ascii_lowercase();
+                let close = b[end..].iter().position(|&c| c == b'>').map(|e| end + e);
+                let self_closing = close.is_some_and(|e| e > 0 && b[e - 1] == b'/');
+                if !VOID.contains(&name.as_str()) && !self_closing {
+                    depth += 1;
+                    max = max.max(depth);
+                }
+            }
+            _ => {}
+        }
+    }
+    max
+}
+
+/// Запасной путь для «бомб»: только текст, теги и сущности (кроме базовых) выброшены.
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
+}
+
 fn attr(node: &Handle, name: &str) -> Option<String> {
     match &node.data {
         NodeData::Element { attrs, .. } => attrs
@@ -540,5 +590,15 @@ mod tests {
     fn deep_nesting_does_not_overflow() {
         let html = "<span>".repeat(50_000) + "x";
         let _ = from_html(&html);
+    }
+
+    #[test]
+    fn nesting_bomb_falls_back_to_text() {
+        let html = "<div>".repeat(100_000) + "<b>текст</b>";
+        let t = std::time::Instant::now();
+        let d = from_html(&html);
+        assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+        assert_eq!(d.blocks, vec![para(vec![text("текст")])]);
+        assert_eq!(estimate_depth("<p>a<br><img src=x/><p>b</p></p>"), 2);
     }
 }

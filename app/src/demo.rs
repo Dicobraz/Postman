@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
+use postman_cache::{Addr, BodyRow, Cache, EmailRow, MailboxRow};
 
 const SENDERS: &[(&str, &str)] = &[
     ("Иванова Мария", "m.ivanova@corp.example"),
@@ -92,10 +92,10 @@ pub fn body(id: &str) -> BodyRow {
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
     let html = if n.is_multiple_of(2) { OUTLOOK } else { HOSTILE };
     BodyRow {
-        to: "Команда проекта <team@corp.example>".into(),
-        cc: String::new(),
+        to: vec![Addr { name: "Команда проекта".into(), email: "team@corp.example".into() }],
+        message_id: Some(format!("{id}@corp.example")),
         html: Some(html.into()),
-        text: None,
+        ..Default::default()
     }
 }
 

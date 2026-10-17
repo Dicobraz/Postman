@@ -4,9 +4,11 @@
 
 mod mail;
 mod session;
+mod submission;
 
 pub use mail::*;
 pub use session::{Account, Session};
+pub use submission::{Envelope, Identity};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -82,6 +84,14 @@ impl Client {
             return Err(Error::MissingCapability(MAIL));
         }
         Ok(Self { http, auth, session })
+    }
+
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub(crate) fn authorized(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        authorize(rb, &self.auth)
     }
 
     pub fn session(&self) -> &Session {

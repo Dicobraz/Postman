@@ -1,0 +1,13 @@
+[package]
+name = "postman-compose"
+description = "Сборка исходящих писем: ответ/пересылка из IR, Markdown -> multipart"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-ir.workspace = true
+mail-builder = "1"
+
+[dev-dependencies]
+mail-parser = "0.11"

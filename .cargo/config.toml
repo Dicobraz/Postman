@@ -1,0 +1,4 @@
+# Статический CRT: воркеру с политикой «только Microsoft-DLL» и установке
+# без VC++ Redistributable не нужен vcruntime140.dll.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -12,6 +12,10 @@ use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
 use tokio::sync::mpsc::UnboundedSender;
 
+use postman_compose::{Address, Draft, Mode, Original};
+
+use crate::composer::{Action, Composer};
+use crate::render::Renderer;
 use crate::{bench, demo, ir_view, sync};
 
 const ROW_HEIGHT: f32 = 40.0;
@@ -53,8 +57,12 @@ pub struct App {
     status: String,
     commands: Option<UnboundedSender<sync::Command>>,
     events: mpsc::Receiver<sync::Event>,
-    rendered_tx: mpsc::Sender<(String, Document)>,
-    rendered_rx: mpsc::Receiver<(String, Document)>,
+    renderer: Renderer,
+    sandbox: &'static str,
+    composers: Vec<Composer>,
+    next_ticket: u64,
+    me: Address,
+    signature: String,
     /// Адаптер и API, на которых идёт рендер, — для статус-строки.
     gpu: String,
     bench: Option<bench::Bench>,
@@ -86,7 +94,8 @@ impl App {
                 format!("{} · {:?} · {:?}", i.name, i.backend, i.device_type)
             })
             .unwrap_or_default();
-        let (rendered_tx, rendered_rx) = mpsc::channel();
+        let ctx = cc.egui_ctx.clone();
+        let renderer = Renderer::spawn(move || ctx.request_repaint());
         let mut app = Self {
             cache,
             demo,
@@ -104,8 +113,12 @@ impl App {
             status,
             commands,
             events: ev_rx,
-            rendered_tx,
-            rendered_rx,
+            renderer,
+            sandbox: "",
+            composers: Vec::new(),
+            next_ticket: 1,
+            me: if demo { Address::new("Я", "me@corp.example") } else { Address::default() },
+            signature: String::new(),
             gpu,
             bench,
         };
@@ -188,21 +201,11 @@ impl App {
         b
     }
 
-    /// HTML -> IR вне UI-потока.
-    // TODO(песочница): вынести в отдельный процесс-воркер (AppContainer/seccomp), см. HANDOFF §3a.
+    /// HTML -> IR в изолированном процессе.
     fn render_body(&mut self) {
         let Some(r) = &self.reading else { return };
         let Some(body) = r.body.clone() else { return };
-        let id = r.row.id.clone();
-        let tx = self.rendered_tx.clone();
-        std::thread::spawn(move || {
-            let doc = match (&body.html, &body.text) {
-                (Some(h), _) => postman_ir::from_html(h),
-                (None, Some(t)) => postman_ir::from_plain(t),
-                _ => Document::default(),
-            };
-            let _ = tx.send((id, doc));
-        });
+        self.renderer.request(r.row.id.clone(), body);
     }
 
     fn set_flags(&mut self, row: &EmailRow, seen: bool, flagged: bool) {
@@ -258,6 +261,26 @@ impl App {
             match ev {
                 sync::Event::Status(s) => self.status = s,
                 sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
+                sync::Event::Me { address, signature } => {
+                    self.me = address;
+                    self.signature = signature;
+                }
+                sync::Event::Sent { ticket } => {
+                    if let Some(c) = self.composer(ticket) {
+                        c.sent();
+                    }
+                    self.status = "Письмо отправлено".into();
+                }
+                sync::Event::DraftSaved { ticket, id } => {
+                    if let Some(c) = self.composer(ticket) {
+                        c.saved(id);
+                    }
+                }
+                sync::Event::ComposeFailed { ticket, error } => {
+                    if let Some(c) = self.composer(ticket) {
+                        c.failed(error);
+                    }
+                }
                 sync::Event::MailboxesChanged => self.reload_mailboxes(),
                 sync::Event::EmailsChanged => {
                     self.reload_list();
@@ -278,9 +301,14 @@ impl App {
                 }
             }
         }
-        while let Ok((id, doc)) = self.rendered_rx.try_recv() {
-            if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) {
-                r.doc = Some(doc);
+        while let Ok(done) = self.renderer.rx.try_recv() {
+            self.sandbox = match done.level {
+                postman_worker::Level::Full => "Песочница: полная",
+                postman_worker::Level::Partial => "Песочница: частичная",
+                postman_worker::Level::None => "Песочница: нет",
+            };
+            if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == done.id) {
+                r.doc = Some(done.doc);
             }
         }
     }
@@ -350,11 +378,75 @@ impl App {
                 }
             }
             "delete" => self.delete_selected(),
-            "new" | "reply" | "reply_all" | "forward" => {
-                self.status = "Композер — следующая веха (недели 2–6)".into();
+            "new" => {
+                let markdown = if self.signature.is_empty() { String::new() } else { format!("\n\n{}", self.signature) };
+                self.open_composer(Draft { from: self.me.clone(), markdown, ..Default::default() });
+            }
+            "reply" | "reply_all" | "forward" => {
+                let mode = match action {
+                    "reply" => Mode::Reply,
+                    "reply_all" => Mode::ReplyAll,
+                    _ => Mode::Forward,
+                };
+                match self.respond(mode) {
+                    Some(d) => self.open_composer(d),
+                    None => self.status = "Письмо ещё загружается".into(),
+                }
             }
             _ => {}
         }
+    }
+
+    fn respond(&self, mode: Mode) -> Option<Draft> {
+        let r = self.reading.as_ref()?;
+        let (body, doc) = (r.body.as_ref()?, r.doc.as_ref()?);
+        let addrs = |v: &[postman_cache::Addr]| v.iter().map(|a| Address::new(&a.name, &a.email)).collect::<Vec<_>>();
+        let orig = Original {
+            message_id: body.message_id.clone(),
+            references: body.references.clone(),
+            from: vec![Address::new(&r.row.from_name, &r.row.from_addr)],
+            reply_to: addrs(&body.reply_to),
+            to: addrs(&body.to),
+            cc: addrs(&body.cc),
+            subject: r.row.subject.clone(),
+            date: format_full_date(r.row.received_at),
+        };
+        Some(postman_compose::respond(&orig, doc, mode, &self.me, &self.signature))
+    }
+
+    fn open_composer(&mut self, draft: Draft) {
+        self.composers.push(Composer::new(self.next_ticket, draft));
+        self.next_ticket += 1;
+    }
+
+    fn composer(&mut self, ticket: u64) -> Option<&mut Composer> {
+        self.composers.iter_mut().find(|c| c.ticket == ticket)
+    }
+
+    fn show_composers(&mut self, ctx: &egui::Context) {
+        let mut actions = Vec::new();
+        for c in &mut self.composers {
+            if let Some(a) = c.show(ctx) {
+                actions.push((c.ticket, a));
+            }
+        }
+        for (ticket, a) in actions {
+            let cmd = match a {
+                Action::Send(draft, replace) => sync::Command::Send { draft, replace, ticket },
+                Action::Save(draft, replace) => sync::Command::SaveDraft { draft, replace, ticket },
+            };
+            match &self.commands {
+                Some(tx) => {
+                    let _ = tx.send(cmd);
+                }
+                None => {
+                    if let Some(c) = self.composer(ticket) {
+                        c.failed("нет подключения к серверу (демо-режим)".into());
+                    }
+                }
+            }
+        }
+        self.composers.retain(|c| c.open);
     }
 
     fn command_bar(&mut self, ui: &mut egui::Ui) {
@@ -528,11 +620,11 @@ impl App {
             ui.end_row();
             if let Some(b) = &r.body {
                 ui.weak("Кому:");
-                ui.label(&b.to);
+                ui.label(addr_list(&b.to));
                 ui.end_row();
                 if !b.cc.is_empty() {
                     ui.weak("Копия:");
-                    ui.label(&b.cc);
+                    ui.label(addr_list(&b.cc));
                     ui.end_row();
                 }
             }
@@ -603,6 +695,7 @@ impl eframe::App for App {
         self.drive_bench(&ctx);
         self.poll_background();
         self.hotkeys(&ctx);
+        self.show_composers(&ctx);
 
         egui::Panel::top("commands").show(ui, |ui| self.command_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
@@ -610,7 +703,11 @@ impl eframe::App for App {
                 ui.weak(format!("Элементов: {}", self.count));
                 ui.separator();
                 ui.weak(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(&self.gpu));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(&self.gpu);
+                    ui.separator();
+                    ui.weak(self.sandbox);
+                });
             });
         });
         egui::Panel::left("folders").default_size(200.0).show(ui, |ui| self.folders(ui));
@@ -637,6 +734,13 @@ impl eframe::App for App {
             b.ui_time(frame_start.elapsed());
         }
     }
+}
+
+fn addr_list(list: &[postman_cache::Addr]) -> String {
+    list.iter()
+        .map(|a| if a.name.is_empty() { a.email.clone() } else { format!("{} <{}>", a.name, a.email) })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn configure_style(ctx: &egui::Context) {

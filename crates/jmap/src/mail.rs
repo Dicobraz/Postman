@@ -22,7 +22,7 @@ pub struct Mailbox {
     pub unread_emails: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct EmailAddress {
     pub name: Option<String>,
     pub email: Option<String>,
@@ -81,6 +81,10 @@ pub struct BodyPart {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawBody {
+    message_id: Option<Vec<String>>,
+    references: Option<Vec<String>>,
+    reply_to: Option<Vec<EmailAddress>>,
+    sent_at: Option<String>,
     to: Option<Vec<EmailAddress>>,
     cc: Option<Vec<EmailAddress>>,
     #[serde(default)]
@@ -101,6 +105,12 @@ struct BodyValue {
 /// Тело письма, декодированное сервером (MIME на клиенте не разбираем).
 #[derive(Debug, Clone)]
 pub struct EmailBody {
+    /// Message-ID оригинала (без угловых скобок) — для In-Reply-To.
+    pub message_id: Option<String>,
+    pub references: Vec<String>,
+    pub reply_to: Vec<EmailAddress>,
+    /// Дата из заголовка Date (UTCDate/Date JMAP), если есть.
+    pub sent_at: Option<String>,
     pub to: Vec<EmailAddress>,
     pub cc: Vec<EmailAddress>,
     pub html: Option<String>,
@@ -130,9 +140,9 @@ pub struct Changes {
 }
 
 #[derive(Deserialize)]
-struct GetResponse<T> {
-    state: String,
-    list: Vec<T>,
+pub(crate) struct GetResponse<T> {
+    pub(crate) state: String,
+    pub(crate) list: Vec<T>,
 }
 
 #[derive(Deserialize)]
@@ -144,9 +154,9 @@ struct QueryResponse {
     position: u64,
 }
 
-const USING: &[&str] = &[CORE, MAIL];
+pub(crate) const USING: &[&str] = &[CORE, MAIL];
 
-fn inv(name: &str, args: Value, id: &str) -> Invocation {
+pub(crate) fn inv(name: &str, args: Value, id: &str) -> Invocation {
     Invocation(name.into(), args, id.into())
 }
 
@@ -216,7 +226,7 @@ impl Client {
         let args = json!({
             "accountId": acc,
             "ids": [id],
-            "properties": ["to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
+            "properties": ["messageId", "references", "replyTo", "sentAt", "to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
             "fetchTextBodyValues": true,
             "fetchHTMLBodyValues": true,
             "maxBodyValueBytes": 4 * 1024 * 1024,
@@ -234,6 +244,10 @@ impl Client {
             (!out.is_empty()).then_some(out)
         };
         Ok(EmailBody {
+            message_id: raw.message_id.as_ref().and_then(|v| v.first().cloned()),
+            references: raw.references.clone().unwrap_or_default(),
+            reply_to: raw.reply_to.clone().unwrap_or_default(),
+            sent_at: raw.sent_at.clone(),
             html: join(&raw.html_body, "text/html"),
             text: join(&raw.text_body, "text/plain"),
             to: raw.to.clone().unwrap_or_default(),
@@ -268,9 +282,14 @@ impl Client {
 
 fn check_set(r: &mut [Invocation], id: &str, field: &str) -> Result<()> {
     let v: Value = take(r, "s")?;
-    if let Some(err) = v.get(field).and_then(|m| m.get(id)) {
+    set_error(&v, field, id, "Email/set")
+}
+
+/// Ошибка из `notCreated`/`notUpdated`/`notDestroyed` по ключу.
+pub(crate) fn set_error(v: &Value, field: &str, key: &str, method: &str) -> Result<()> {
+    if let Some(err) = v.get(field).and_then(|m| m.get(key)) {
         return Err(crate::Error::Method {
-            method: "Email/set".into(),
+            method: method.into(),
             kind: err["type"].as_str().unwrap_or("?").into(),
             description: err["description"].as_str().unwrap_or("").into(),
         });

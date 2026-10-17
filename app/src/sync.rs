@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
-use postman_jmap::{Auth, Client, EmailAddress, EmailSummary, Mailbox, utc_to_unix};
+use postman_cache::{Addr, BodyRow, Cache, EmailRow, MailboxRow};
+use postman_compose::{Address, Draft};
+use postman_jmap::{Auth, Client, EmailAddress, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Сколько писем на ящик тянуть при первом входе (остальное — по мере прокрутки, позже).
@@ -37,6 +38,9 @@ pub enum Command {
     Body(String),
     Keyword { id: String, keyword: &'static str, on: bool },
     Move { id: String, from: String, to: String },
+    /// `replace` — id прежней версии черновика на сервере.
+    Send { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
+    SaveDraft { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
 }
 
 pub enum Event {
@@ -44,6 +48,12 @@ pub enum Event {
     MailboxesChanged,
     EmailsChanged,
     BodyReady(String),
+    /// Учётная запись отправителя и подпись (из Identity).
+    Me { address: Address, signature: String },
+    Sent { ticket: u64 },
+    DraftSaved { ticket: u64, id: String },
+    /// Ошибка конкретной отправки/сохранения — показывается в окне письма.
+    ComposeFailed { ticket: u64, error: String },
     Error(String),
 }
 
@@ -83,6 +93,10 @@ async fn run(
     let client = Client::connect(&account.url, account.auth).await.map_err(|e| e.to_string())?;
     notify(Event::Status(format!("Вход выполнен: {}", client.session().username)));
 
+    let identities = client.identities().await.unwrap_or_default();
+    if let Some(i) = identities.first() {
+        notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
+    }
     let mut email_state = initial_load(&client, &mut cache, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
@@ -90,7 +104,7 @@ async fn run(
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
-                if let Err(e) = handle(&client, &cache, cmd, notify).await {
+                if let Err(e) = handle(&client, &cache, &identities, cmd, notify).await {
                     notify(Event::Error(e.to_string()));
                 }
             }
@@ -154,32 +168,101 @@ async fn refresh(client: &Client, cache: &mut Cache, since: &str) -> postman_jma
     Ok(Some(state))
 }
 
-async fn handle(client: &Client, cache: &Cache, cmd: Command, notify: &impl Fn(Event)) -> postman_jmap::Result<()> {
+async fn handle(
+    client: &Client,
+    cache: &Cache,
+    identities: &[Identity],
+    cmd: Command,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<()> {
     match cmd {
         Command::Body(id) => {
             let b = client.email_body(&id).await?;
-            let row = BodyRow { to: addresses(&b.to), cc: addresses(&b.cc), html: b.html, text: b.text };
+            let row = BodyRow {
+                to: addresses(&b.to),
+                cc: addresses(&b.cc),
+                reply_to: addresses(&b.reply_to),
+                message_id: b.message_id,
+                references: b.references,
+                html: b.html,
+                text: b.text,
+            };
             cache.put_body(&id, &row).map_err(db_err)?;
             notify(Event::BodyReady(id));
         }
         Command::Keyword { id, keyword, on } => client.set_keyword(&id, keyword, on).await?,
         Command::Move { id, from, to } => client.move_email(&id, &from, &to).await?,
+        Command::Send { draft, replace, ticket } => {
+            let r = send(client, cache, identities, &draft, replace.as_deref()).await;
+            notify(match r {
+                Ok(()) => Event::Sent { ticket },
+                Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
+            });
+        }
+        Command::SaveDraft { draft, replace, ticket } => {
+            let r = save_draft(client, cache, &draft, replace.as_deref()).await;
+            notify(match r {
+                Ok(id) => Event::DraftSaved { ticket, id },
+                Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
+            });
+        }
     }
     Ok(())
+}
+
+fn mailbox_by_role(cache: &Cache, role: &str) -> postman_jmap::Result<String> {
+    cache
+        .mailboxes()
+        .map_err(db_err)?
+        .into_iter()
+        .find(|m| m.role.as_deref() == Some(role))
+        .map(|m| m.id)
+        .ok_or_else(|| postman_jmap::Error::Protocol(format!("нет папки с ролью {role}")))
+}
+
+fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
+    let now = jiff::Timestamp::now().as_second();
+    postman_compose::build(draft, now, &postman_compose::new_message_id(&draft.from, now))
+        .map_err(|e| postman_jmap::Error::Protocol(format!("сборка письма: {e}")))
+}
+
+async fn send(
+    client: &Client,
+    cache: &Cache,
+    identities: &[Identity],
+    draft: &Draft,
+    replace: Option<&str>,
+) -> postman_jmap::Result<()> {
+    let identity = identities
+        .iter()
+        .find(|i| i.email.eq_ignore_ascii_case(&draft.from.email))
+        .or(identities.first())
+        .ok_or_else(|| postman_jmap::Error::Protocol("на сервере нет Identity для отправки".into()))?;
+    let envelope = Envelope {
+        mail_from: identity.email.clone(),
+        rcpt_to: draft.recipients().map(|a| a.email.clone()).collect(),
+    };
+    let (drafts, sent) = (mailbox_by_role(cache, "drafts")?, mailbox_by_role(cache, "sent")?);
+    client.send(raw_message(draft)?, &identity.id, &envelope, &drafts, &sent).await?;
+    if let Some(old) = replace {
+        client.destroy_email(old).await?;
+    }
+    Ok(())
+}
+
+async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Option<&str>) -> postman_jmap::Result<String> {
+    let drafts = mailbox_by_role(cache, "drafts")?;
+    client.save_draft(raw_message(draft)?, &drafts, replace).await
 }
 
 fn db_err(e: postman_cache::Error) -> postman_jmap::Error {
     postman_jmap::Error::Protocol(format!("кэш: {e}"))
 }
 
-fn addresses(list: &[EmailAddress]) -> String {
+fn addresses(list: &[EmailAddress]) -> Vec<Addr> {
     list.iter()
-        .map(|a| match (&a.name, &a.email) {
-            (Some(n), Some(e)) if !n.is_empty() => format!("{n} <{e}>"),
-            _ => a.display().to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .filter_map(|a| Some(Addr { name: a.name.clone().unwrap_or_default(), email: a.email.clone()? }))
+        .collect()
 }
 
 fn mailbox_row(m: &Mailbox) -> MailboxRow {

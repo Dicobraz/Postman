@@ -1,0 +1,358 @@
+//! Windows: процесс создаётся приостановленным в AppContainer (без сетевых
+//! capability и доступа к профилю пользователя), с mitigation policies на
+//! старте (win32k off, только Microsoft-DLL, без динамического кода, без
+//! дочерних процессов), в Job Object (kill-on-close, 1 процесс, лимит памяти,
+//! UI-ограничения), и только потом запускается.
+//!
+//! Exe воркера должен быть читаем для AppContainer (ALL APPLICATION PACKAGES):
+//! так по умолчанию в Program Files. Если запуск в AppContainer отказан
+//! (например, dev-сборка в профиле пользователя), воркер запускается без него
+//! с остальными ограничениями, уровень — `Partial`.
+
+use std::ffi::c_void;
+use std::fs::File;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::FromRawHandle;
+use std::path::Path;
+use std::ptr::{null, null_mut};
+
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation,
+};
+use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName};
+use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
+};
+use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION,
+    ProcessSystemCallDisablePolicy, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetProcessMitigationPolicy,
+    TerminateProcess, UpdateProcThreadAttribute,
+};
+
+use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY};
+use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+
+use super::Level;
+use crate::Process;
+
+const PROFILE: &str = "Postman.MailWorker";
+const MEMORY_LIMIT: usize = 1 << 30;
+
+// PROCESS_CREATION_MITIGATION_POLICY_* (winbase.h), значения *_ALWAYS_ON.
+const DEP_ENABLE: u64 = 0x01;
+const HEAP_TERMINATE: u64 = 1 << 12;
+const BOTTOM_UP_ASLR: u64 = 1 << 16;
+const HIGH_ENTROPY_ASLR: u64 = 1 << 20;
+const STRICT_HANDLE_CHECKS: u64 = 1 << 24;
+const WIN32K_SYSTEM_CALL_DISABLE: u64 = 1 << 28;
+const EXTENSION_POINT_DISABLE: u64 = 1 << 32;
+const PROHIBIT_DYNAMIC_CODE: u64 = 1 << 36;
+const BLOCK_NON_MICROSOFT_BINARIES: u64 = 1 << 44;
+const FONT_DISABLE: u64 = 1 << 48;
+const IMAGE_LOAD_NO_REMOTE: u64 = 1 << 52;
+const IMAGE_LOAD_NO_LOW_LABEL: u64 = 1 << 56;
+const IMAGE_LOAD_PREFER_SYSTEM32: u64 = 1 << 60;
+
+const MITIGATIONS: u64 = DEP_ENABLE
+    | HEAP_TERMINATE
+    | BOTTOM_UP_ASLR
+    | HIGH_ENTROPY_ASLR
+    | STRICT_HANDLE_CHECKS
+    | WIN32K_SYSTEM_CALL_DISABLE
+    | EXTENSION_POINT_DISABLE
+    | PROHIBIT_DYNAMIC_CODE
+    | BLOCK_NON_MICROSOFT_BINARIES
+    | FONT_DISABLE
+    | IMAGE_LOAD_NO_REMOTE
+    | IMAGE_LOAD_NO_LOW_LABEL
+    | IMAGE_LOAD_PREFER_SYSTEM32;
+
+/// Закрывает HANDLE при выходе из области видимости.
+struct Owned(HANDLE);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: хэндл принадлежит нам и закрывается один раз.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+impl Owned {
+    fn terminate(&self) {
+        // SAFETY: хэндл процесса валиден, пока жив `self`.
+        unsafe { TerminateProcess(self.0, 1) };
+    }
+}
+
+// SAFETY: HANDLE процесса/джоба можно использовать из любого потока.
+unsafe impl Send for Owned {}
+
+fn last_error() -> io::Error {
+    io::Error::last_os_error()
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+pub(crate) fn spawn(exe: &Path) -> io::Result<Process> {
+    let sid = app_container_sid();
+    match create(exe, sid.as_ref().map(|s| s.0)) {
+        Err(e) if sid.is_some() && e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            create(exe, None).map(|mut p| {
+                p.level = Level::Partial;
+                p
+            })
+        }
+        Ok(mut p) => {
+            p.level = if sid.is_some() { Level::Full } else { Level::Partial };
+            Ok(p)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+struct Sid(PSID);
+
+impl Drop for Sid {
+    fn drop(&mut self) {
+        // SAFETY: SID получен из userenv и освобождается один раз.
+        unsafe { FreeSid(self.0) };
+    }
+}
+
+fn app_container_sid() -> Option<Sid> {
+    let name = wide(PROFILE);
+    let display = wide("Postman: разбор писем");
+    let mut sid: PSID = null_mut();
+    // SAFETY: строки нуль-терминированы; sid — выходной параметр.
+    let hr = unsafe { CreateAppContainerProfile(name.as_ptr(), display.as_ptr(), display.as_ptr(), null(), 0, &mut sid) };
+    if hr >= 0 {
+        return Some(Sid(sid));
+    }
+    // Профиль уже есть (HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) — берём его SID.
+    // SAFETY: см. выше.
+    let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+    (hr >= 0).then_some(Sid(sid))
+}
+
+/// Пара анонимных каналов; конец для дочернего процесса наследуемый.
+fn pipe(child_reads: bool) -> io::Result<(Owned, Owned)> {
+    let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: null_mut(), bInheritHandle: 1 };
+    let (mut r, mut w): (HANDLE, HANDLE) = (null_mut(), null_mut());
+    // SAFETY: выходные параметры — локальные переменные.
+    if unsafe { CreatePipe(&mut r, &mut w, &sa, 0) } == 0 {
+        return Err(last_error());
+    }
+    let (r, w) = (Owned(r), Owned(w));
+    let (child, parent) = if child_reads { (r, w) } else { (w, r) };
+    // SAFETY: хэндл валиден; снимаем наследование с родительского конца.
+    if unsafe { SetHandleInformation(parent.0, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(last_error());
+    }
+    Ok((child, parent))
+}
+
+fn job() -> io::Result<Owned> {
+    // SAFETY: безымянный джоб с атрибутами по умолчанию.
+    let job = Owned(unsafe { CreateJobObjectW(null(), null()) });
+    if job.0.is_null() {
+        return Err(last_error());
+    }
+    // SAFETY: структура полностью инициализирована нулями, дальше задаём поля.
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    limits.ProcessMemoryLimit = MEMORY_LIMIT;
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: JOB_OBJECT_UILIMIT_ALL };
+    // SAFETY: указатели на локальные структуры правильного размера.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0
+            && SetInformationJobObject(
+                job.0,
+                JobObjectBasicUIRestrictions,
+                (&raw const ui).cast(),
+                size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            ) != 0
+    };
+    if !ok {
+        return Err(last_error());
+    }
+    Ok(job)
+}
+
+/// Список атрибутов процесса; память и значения живут, пока жив список.
+struct Attributes {
+    buf: Vec<usize>,
+}
+
+impl Attributes {
+    fn new(count: u32) -> io::Result<Self> {
+        let mut size = 0usize;
+        // SAFETY: первый вызов только узнаёт размер (ожидаемо возвращает ошибку).
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size) };
+        let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
+        // SAFETY: буфер нужного размера и выравнивания.
+        if unsafe { InitializeProcThreadAttributeList(buf.as_mut_ptr().cast(), count, 0, &mut size) } == 0 {
+            return Err(last_error());
+        }
+        Ok(Self { buf })
+    }
+
+    fn ptr(&mut self) -> *mut c_void {
+        self.buf.as_mut_ptr().cast()
+    }
+
+    /// # Safety
+    /// `value` должен жить до `CreateProcessW`.
+    unsafe fn set(&mut self, attr: u32, value: *const c_void, size: usize) -> io::Result<()> {
+        // SAFETY: обязанность вызывающего — время жизни `value`.
+        if unsafe { UpdateProcThreadAttribute(self.ptr(), 0, attr as usize, value, size, null_mut(), null()) } == 0 {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Attributes {
+    fn drop(&mut self) {
+        // SAFETY: список был инициализирован в `new`.
+        unsafe { DeleteProcThreadAttributeList(self.ptr()) };
+    }
+}
+
+fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
+    let (child_in, parent_in) = pipe(true)?;
+    let (child_out, parent_out) = pipe(false)?;
+    let job = job()?;
+
+    let mitigations: u64 = MITIGATIONS;
+    let child_policy: u32 = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+    let handles: [HANDLE; 2] = [child_in.0, child_out.0];
+    let caps = sid.map(|sid| SECURITY_CAPABILITIES {
+        AppContainerSid: sid,
+        Capabilities: null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    });
+    let mut attrs = Attributes::new(if caps.is_some() { 4 } else { 3 })?;
+    // SAFETY: все значения — локальные переменные, живущие до CreateProcessW.
+    unsafe {
+        attrs.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, (&raw const mitigations).cast(), size_of::<u64>())?;
+        attrs.set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, (&raw const child_policy).cast(), size_of::<u32>())?;
+        attrs.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.as_ptr().cast(), size_of_val(&handles))?;
+        if let Some(c) = &caps {
+            attrs.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, (c as *const SECURITY_CAPABILITIES).cast(), size_of::<SECURITY_CAPABILITIES>())?;
+        }
+    }
+
+    // SAFETY: обнулённая структура — допустимое начальное состояние.
+    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = child_in.0;
+    si.StartupInfo.hStdOutput = child_out.0;
+    si.StartupInfo.hStdError = null_mut();
+    si.lpAttributeList = attrs.ptr();
+
+    let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut cmdline: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain(Some(0)).collect();
+    let env: [u16; 2] = [0, 0];
+    let cwd = wide("C:\\");
+    // SAFETY: обнулённая выходная структура.
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: все строки нуль-терминированы; список атрибутов инициализирован;
+    // блок окружения пустой (двойной ноль, UTF-16 — CREATE_UNICODE_ENVIRONMENT не нужен для пустого).
+    let ok = unsafe {
+        CreateProcessW(
+            app.as_ptr(),
+            cmdline.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            env.as_ptr().cast(),
+            cwd.as_ptr(),
+            &si.StartupInfo,
+            &mut pi,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    let process = Owned(pi.hProcess);
+    let thread = Owned(pi.hThread);
+    // SAFETY: хэндлы только что получены; процесс ещё не исполнял код.
+    unsafe {
+        if AssignProcessToJobObject(job.0, process.0) == 0 {
+            let e = last_error();
+            TerminateProcess(process.0, 1);
+            return Err(e);
+        }
+        if ResumeThread(thread.0) == u32::MAX {
+            let e = last_error();
+            TerminateProcess(process.0, 1);
+            return Err(e);
+        }
+    }
+    drop((child_in, child_out, thread));
+
+    let into_file = |h: Owned| {
+        let raw = h.0;
+        std::mem::forget(h);
+        // SAFETY: владение хэндлом передаётся File.
+        unsafe { File::from_raw_handle(raw) }
+    };
+    let stdin = into_file(parent_in);
+    let stdout = into_file(parent_out);
+    let mut job = Some(job);
+    Ok(Process {
+        stdin: Box::new(stdin),
+        stdout: Box::new(stdout),
+        kill: Box::new(move || {
+            process.terminate();
+            // Закрытие джоба (KILL_ON_JOB_CLOSE) добивает всё, что осталось.
+            job.take();
+        }),
+        level: Level::Partial,
+    })
+}
+
+/// Внутри воркера: повторно включить запрет win32k (если родитель не смог
+/// задать его при создании). Остальное уже наложено родителем.
+pub(crate) fn lockdown() -> Result<(), String> {
+    // SAFETY: обнулённая политика с одним выставленным битом.
+    let mut p: PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY = unsafe { std::mem::zeroed() };
+    // DisallowWin32kSystemCalls — младший бит.
+    p.Anonymous.Flags = 1;
+    // SAFETY: указатель на локальную структуру правильного размера.
+    let ok = unsafe {
+        SetProcessMitigationPolicy(
+            ProcessSystemCallDisablePolicy,
+            (&raw const p).cast(),
+            size_of::<PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY>(),
+        ) != 0
+    };
+    // Уже включено при создании процесса — тогда повторный вызов может вернуть ошибку; это не отказ.
+    let _ = ok;
+    Ok(())
+}
