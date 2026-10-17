@@ -12,7 +12,7 @@ use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{demo, ir_view, sync};
+use crate::{bench, demo, ir_view, sync};
 
 const ROW_HEIGHT: f32 = 40.0;
 /// Сколько строк сверх видимых держать в окне списка.
@@ -55,10 +55,19 @@ pub struct App {
     events: mpsc::Receiver<sync::Event>,
     rendered_tx: mpsc::Sender<(String, Document)>,
     rendered_rx: mpsc::Receiver<(String, Document)>,
+    /// Адаптер и API, на которых идёт рендер, — для статус-строки.
+    gpu: String,
+    bench: Option<bench::Bench>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, db: PathBuf, account: Option<sync::Account>, demo: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext,
+        db: PathBuf,
+        account: Option<sync::Account>,
+        demo: bool,
+        bench: Option<bench::Bench>,
+    ) -> Self {
         let cache = Cache::open(&db).expect("кэш");
         let (ev_tx, ev_rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
@@ -69,6 +78,14 @@ impl App {
             (None, _) => "Нет учётной записи: задайте POSTMAN_URL/POSTMAN_USER/POSTMAN_PASSWORD или --demo".to_string(),
         };
         configure_style(&cc.egui_ctx);
+        let gpu = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|r| {
+                let i = r.adapter.get_info();
+                format!("{} · {:?} · {:?}", i.name, i.backend, i.device_type)
+            })
+            .unwrap_or_default();
         let (rendered_tx, rendered_rx) = mpsc::channel();
         let mut app = Self {
             cache,
@@ -89,6 +106,8 @@ impl App {
             events: ev_rx,
             rendered_tx,
             rendered_rx,
+            gpu,
+            bench,
         };
         app.reload_mailboxes();
         app
@@ -559,9 +578,29 @@ impl App {
     }
 }
 
+impl App {
+    fn drive_bench(&mut self, ctx: &egui::Context) {
+        let Some(b) = &mut self.bench else { return };
+        match b.frame(self.count) {
+            bench::Step::Wait => {}
+            bench::Step::Select(i) => self.select(i),
+            bench::Step::Resize(w, h) => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(w, h))),
+            bench::Step::Done(report) => {
+                println!("bench gpu=\"{}\" rows={} {report}", self.gpu, self.count);
+                self.bench = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+        ctx.request_repaint();
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let frame_start = std::time::Instant::now();
+        self.drive_bench(&ctx);
         self.poll_background();
         self.hotkeys(&ctx);
 
@@ -571,6 +610,7 @@ impl eframe::App for App {
                 ui.weak(format!("Элементов: {}", self.count));
                 ui.separator();
                 ui.weak(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(&self.gpu));
             });
         });
         egui::Panel::left("folders").default_size(200.0).show(ui, |ui| self.folders(ui));
@@ -592,6 +632,9 @@ impl eframe::App for App {
                     ui.centered_and_justified(|ui| ui.weak("Контакты и справочник LDAP — недели 7–12"));
                 });
             }
+        }
+        if let Some(b) = &mut self.bench {
+            b.ui_time(frame_start.elapsed());
         }
     }
 }

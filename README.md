@@ -22,6 +22,18 @@ POSTMAN_URL=https://mail.example.com POSTMAN_USER=u POSTMAN_PASSWORD=p cargo run
 cargo test --workspace
 ```
 
+## GPU
+
+Рендер только на аппаратном адаптере (программные WARP/llvmpipe/lavapipe отвергаются; `POSTMAN_GPU_SOFTWARE=1` — для CI).
+API: `--gpu dx12|vulkan|gl` или `POSTMAN_GPU`. По умолчанию DX12 на Windows, GL на Linux; **Vulkan — только явно**
+(на Intel даёт чёрный кадр при ресайзе). При нескольких картах выбирается встроенная. Адаптер виден в статус-строке.
+
+## Замеры
+
+`postman --demo --bench [--gpu …]` — прогрев, 400 кадров листания с открытием писем, 120 кадров ресайза, без vsync;
+печатает одну строку: `first_frame_ms`, `scroll_p50/p99/max`, `resize_p50/p99/max` (мс на кадр), `ui_cpu_p50/p99`,
+`rss_mb`, `rss_peak_mb`. Это общий сценарий для сравнения бэкендов, машин и UI-фреймворков.
+
 Кэш: `%LOCALAPPDATA%\Postman\` (Windows), `$XDG_DATA_HOME/Postman` (Linux).
 
 ## Хоткеи
@@ -42,4 +54,4 @@ UI-оболочка с виртуальным списком на 50 тыс. п�
 - Композер (Markdown → multipart/alternative), вложения.
 - Рендер: настоящий полужирный шрифт (сейчас `strong` = контрастный цвет), выравнивание абзацев, группировка списка по датам, треды.
 - Вопросы из HANDOFF §4 (capabilities Stalwart, availability/free-busy) — проверить на тестовом стенде.
-- Замер RSS/FPS на Windows (DX12): в контейнере на программном Vulkan (lavapipe) RSS ≈ 185 МБ — не показатель.
+- Прогнать `--bench` на целевых Windows-машинах (Intel iGPU, DX12) — числа из контейнера (llvmpipe) не показатель.
