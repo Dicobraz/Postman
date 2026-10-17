@@ -3,7 +3,9 @@
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportBuilder, ViewportId};
 use postman_cache::BodyRow;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use postman_compose::{Address, Attachment, Draft, parse_addresses};
 use postman_ir::Document;
@@ -39,7 +41,21 @@ pub struct Composer {
     renderer: Option<Renderer>,
     preview_on: bool,
     preview_doc: Option<Document>,
+    /// Слепок содержимого, совпадающий с сохранённой версией (или исходной, если не сохраняли).
+    saved_snapshot: u64,
+    /// Слепок, отправленный на сохранение и ещё не подтверждённый сервером.
+    pending_snapshot: Option<u64>,
+    /// Слепок, автосохранение которого не удалось — не повторяем, пока текст не изменится.
+    autosave_failed: Option<u64>,
+    last_autosave: Instant,
+    /// Открыт вопрос «Сохранить изменения?».
+    confirm_close: bool,
+    /// Закрыть окно, как только сервер подтвердит сохранение.
+    close_after_save: bool,
 }
+
+/// Автосохранение изменённого черновика не чаще этого.
+const AUTOSAVE: Duration = Duration::from_secs(60);
 
 fn join(list: &[Address]) -> String {
     list.iter()
@@ -50,7 +66,7 @@ fn join(list: &[Address]) -> String {
 
 impl Composer {
     pub fn new(ticket: u64, draft: Draft) -> Self {
-        Self {
+        let mut c = Self {
             ticket,
             open: true,
             viewport: ViewportId::from_hash_of(("composer", ticket)),
@@ -68,7 +84,29 @@ impl Composer {
             renderer: None,
             preview_on: false,
             preview_doc: None,
+            saved_snapshot: 0,
+            pending_snapshot: None,
+            autosave_failed: None,
+            last_autosave: Instant::now(),
+            confirm_close: false,
+            close_after_save: false,
+        };
+        // Нетронутое новое письмо или ответ — не «изменения», закрывается без вопроса.
+        c.saved_snapshot = c.snapshot();
+        c
+    }
+
+    fn snapshot(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&self.to, &self.cc, &self.bcc, &self.subject, &self.body).hash(&mut h);
+        for a in &self.base.attachments {
+            (&a.name, a.data.len(), &a.blob_id).hash(&mut h);
         }
+        h.finish()
+    }
+
+    fn dirty(&self) -> bool {
+        self.snapshot() != self.saved_snapshot
     }
 
     fn attach(&mut self, paths: Vec<PathBuf>) {
@@ -98,12 +136,48 @@ impl Composer {
     pub fn saved(&mut self, id: String) {
         self.busy = false;
         self.server_id = Some(id);
-        self.status = "Черновик сохранён".into();
+        if let Some(s) = self.pending_snapshot.take() {
+            self.saved_snapshot = s;
+        }
+        let time = jiff::Zoned::now().strftime("%H:%M").to_string();
+        self.status = format!("Черновик сохранён в {time}");
+        if self.close_after_save {
+            self.open = false;
+        }
     }
 
     pub fn failed(&mut self, error: String) {
         self.busy = false;
+        self.autosave_failed = self.pending_snapshot.take();
+        self.close_after_save = false;
         self.status = format!("Ошибка: {error}");
+    }
+
+    /// Закрытие: без изменений — сразу, иначе вопрос.
+    fn request_close(&mut self) {
+        if self.dirty() {
+            self.confirm_close = true;
+        } else {
+            self.open = false;
+        }
+    }
+
+    fn close_dialog(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let (mut save, mut discard) = (false, false);
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::unique(("composer-close", self.ticket))).show(ui.ctx(), |ui| {
+            ui.label(egui::RichText::new("Сохранить изменения в черновике?").strong());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                save = ui.button("Сохранить").clicked();
+                discard = ui.button("Не сохранять").clicked();
+                cancel = ui.button("Отмена").clicked();
+            });
+        });
+        if cancel || modal.should_close() {
+            self.confirm_close = false;
+        }
+        (save, discard)
     }
 
     /// Собрать черновик из полей; ошибки адресов — до отправки, а не от сервера.
@@ -137,10 +211,15 @@ impl Composer {
         let mut want_send = false;
         let mut want_save = false;
         let mut toggle_preview = false;
+        let mut close = false;
+        let mut autosave = false;
         let mut attach: Vec<PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         ui.input_mut(|i| {
-            if i.viewport().close_requested() || i.consume_key(Modifiers::NONE, Key::Escape) {
-                self.open = false;
+            if i.viewport().close_requested() {
+                close = true;
+            }
+            if !self.confirm_close && i.consume_key(Modifiers::NONE, Key::Escape) {
+                close = true;
             }
             want_send = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter))
                 || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::ALT, Key::S));
@@ -167,6 +246,37 @@ impl Composer {
                 ui.weak(&self.status);
             });
         });
+        if close {
+            if ui.input(|i| i.viewport().close_requested()) && self.dirty() {
+                // Закрытие окна ОС отменяем до ответа пользователя.
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            self.request_close();
+        }
+        if self.confirm_close {
+            let (save, discard) = self.close_dialog(ui);
+            if discard {
+                self.open = false;
+            }
+            if save {
+                self.confirm_close = false;
+                self.close_after_save = true;
+                want_save = true;
+            }
+        }
+        // Автосохранение: изменённый черновик раз в минуту, если прошлая попытка с тем же текстом не провалилась.
+        let snap = self.snapshot();
+        if !self.busy
+            && self.dirty()
+            && self.autosave_failed != Some(snap)
+            && self.last_autosave.elapsed() >= AUTOSAVE
+            && !want_send
+            && !want_save
+        {
+            autosave = true;
+            want_save = true;
+        }
+        ui.ctx().request_repaint_after(AUTOSAVE);
         if !attach.is_empty() {
             self.attach(attach);
         }
@@ -248,14 +358,28 @@ impl Composer {
         self.first_frame = false;
 
         if want_send || want_save {
+            if want_save {
+                self.last_autosave = Instant::now();
+            }
             match self.draft(want_send) {
                 Ok(d) => {
                     self.busy = true;
-                    self.status = if want_send { "Отправка…".into() } else { "Сохранение…".into() };
+                    self.pending_snapshot = Some(self.snapshot());
+                    self.status = match (want_send, autosave) {
+                        (true, _) => "Отправка…".into(),
+                        (false, true) => "Автосохранение…".into(),
+                        (false, false) => "Сохранение…".into(),
+                    };
                     let replace = self.server_id.clone();
                     action = Some(if want_send { Action::Send(Box::new(d), replace) } else { Action::Save(Box::new(d), replace) });
                 }
-                Err(e) => self.status = e,
+                Err(e) => {
+                    if autosave {
+                        self.autosave_failed = Some(self.snapshot());
+                    }
+                    self.close_after_save = false;
+                    self.status = e;
+                }
             }
         }
         action
