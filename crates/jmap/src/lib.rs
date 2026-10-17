@@ -3,10 +3,12 @@
 //! ограничений добавлять Calendars/Contacts/Principals.
 
 mod mail;
+mod push;
 mod session;
 mod submission;
 
 pub use mail::*;
+pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};
 pub use submission::{Envelope, Identity};
 
@@ -62,6 +64,8 @@ struct Response {
     method_responses: Vec<Invocation>,
 }
 
+/// Дешёвый в клонировании: HTTP-клиент внутри разделяемый.
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     auth: Auth,

@@ -80,6 +80,7 @@ pub struct App {
     search_all: bool,
     search_view: Option<SearchView>,
     index: sync::Index,
+    extractor: Option<crate::extract::Extractor>,
     last_index_commit: std::time::Instant,
     /// Ящик, для которого уже запрошена следующая страница.
     loading_more: Option<String>,
@@ -112,8 +113,9 @@ impl App {
         let open_dir = db.parent().map(|d| d.join("open")).unwrap_or_default();
         let index_dir = db.with_extension("search");
         let index = postman_search::SearchIndex::open(&index_dir).ok().map(Arc::new);
-        if let Some(i) = index.clone().filter(|i| i.is_empty()) {
-            build_index(i, cache.clone());
+        let extractor = index.clone().map(|i| crate::extract::Extractor::spawn(cache.clone(), i));
+        if let (Some(i), Some(x)) = (index.clone().filter(|i| i.is_empty()), &extractor) {
+            build_index(i, cache.clone(), x);
         }
         let (ev_tx, ev_rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
@@ -151,6 +153,7 @@ impl App {
             search_all: false,
             search_view: None,
             index,
+            extractor,
             last_index_commit: std::time::Instant::now(),
             loading_more: None,
             status,
@@ -371,6 +374,11 @@ impl App {
                 sync::Event::Status(s) => self.status = s,
                 sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
                 sync::Event::BlobReady { blob_id, data } => self.blob_ready(&blob_id, data),
+                sync::Event::BodiesStored(ids) => {
+                    if let Some(x) = &self.extractor {
+                        x.queue(ids);
+                    }
+                }
                 sync::Event::LoadedMore { mailbox } => {
                     if self.loading_more.as_ref() == Some(&mailbox) {
                         self.loading_more = None;
@@ -1077,7 +1085,8 @@ impl eframe::App for App {
 }
 
 /// Первичное построение индекса по уже накопленному кэшу — в фоне.
-fn build_index(index: Arc<postman_search::SearchIndex>, cache: Cache) {
+fn build_index(index: Arc<postman_search::SearchIndex>, cache: Cache, extractor: &crate::extract::Extractor) {
+    let extractor = extractor.clone();
     std::thread::spawn(move || {
         let mut offset = 0;
         loop {
@@ -1087,6 +1096,16 @@ fn build_index(index: Arc<postman_search::SearchIndex>, cache: Cache) {
             }
             offset += rows.len();
             crate::indexer::rows(&index, &rows);
+        }
+        // Затем тексты уже загруженных тел — строго после строк списка, чтобы краткая
+        // версия документа не затёрла полную. HTML разбирается только в воркере.
+        let mut offset = 0;
+        while let Ok(ids) = cache.body_ids(offset, 5000) {
+            if ids.is_empty() {
+                break;
+            }
+            offset += ids.len();
+            extractor.queue(ids);
         }
     });
 }

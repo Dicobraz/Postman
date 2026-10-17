@@ -316,6 +316,30 @@ impl Cache {
         email.iter()?.skip(offset).take(limit).map(|r| dec(r?.1.value())).collect()
     }
 
+    /// id писем, у которых тело уже загружено (для пересборки поискового индекса).
+    pub fn body_ids(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
+        let tx = self.db.begin_read()?;
+        let body = tx.open_table(BODY)?;
+        body.iter()?.skip(offset).take(limit).map(|r| Ok(r?.0.value().to_string())).collect()
+    }
+
+    /// Письма без загруженного тела, свежие первыми (для фоновой предзагрузки).
+    pub fn missing_bodies(&self, limit: usize) -> Result<Vec<String>> {
+        let tx = self.db.begin_read()?;
+        let email = tx.open_table(EMAIL)?;
+        let body = tx.open_table(BODY)?;
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for r in email.iter()? {
+            let (k, v) = r?;
+            if body.get(k.value())?.is_none() {
+                let e: EmailRow = dec(v.value())?;
+                out.push((e.received_at, e.id));
+            }
+        }
+        out.sort_by_key(|e| std::cmp::Reverse(e.0));
+        Ok(out.into_iter().take(limit).map(|(_, id)| id).collect())
+    }
+
     /// Самое старое письмо ящика в кэше — якорь для догрузки следующей страницы.
     pub fn oldest(&self, mailbox_id: &str) -> Result<Option<String>> {
         let tx = self.db.begin_read()?;
@@ -515,7 +539,11 @@ mod tests {
             }],
             ..Default::default()
         };
+        c.upsert_emails(&[email("z", 5, &["in"])]).unwrap();
+        assert_eq!(c.missing_bodies(10).unwrap(), ["z", "a"]);
         c.put_body("a", &b).unwrap();
+        assert_eq!(c.missing_bodies(10).unwrap(), ["z"]);
+        assert_eq!(c.body_ids(0, 10).unwrap(), ["a"]);
         assert_eq!(c.body("a").unwrap(), Some(b));
         assert_eq!(c.attachments("a").unwrap().len(), 1);
         c.put_blob("B1", b"png").unwrap();

@@ -1,6 +1,7 @@
 //! Фоновая синхронизация: свой поток с tokio, своё соединение с кэшем.
 //! UI шлёт команды, в ответ получает события и перечитывает кэш.
 
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -9,12 +10,19 @@ use std::sync::Arc;
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_compose::{Address, Draft};
 use postman_search::SearchIndex;
-use postman_jmap::{Auth, Client, EmailAddress, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
+use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Сколько писем на ящик тянуть при первом входе (остальное — по мере прокрутки, позже).
 const INITIAL_PAGE: u64 = 500;
-const POLL: Duration = Duration::from_secs(30);
+/// Опрос — только страховка: изменения приходят через push (EventSource).
+const POLL: Duration = Duration::from_secs(120);
+/// Сервер шлёт ping с этим периодом; тишина втрое дольше — обрыв, переподключаемся.
+const PUSH_PING: u32 = 60;
+/// Предзагрузка тел: сколько писем за запрос, их размер и общий охват.
+const PREFETCH_BATCH: usize = 25;
+const PREFETCH_MAX_BYTES: u64 = 256 * 1024;
+const PREFETCH_LIMIT: usize = 20_000;
 /// Догрузка при прокрутке.
 const PAGE: u64 = 500;
 const SEARCH_LIMIT: u64 = 1000;
@@ -60,6 +68,8 @@ pub enum Event {
     EmailsChanged,
     BodyReady(String),
     BlobReady { blob_id: String, data: Arc<Vec<u8>> },
+    /// Тела загружены в фоне — их текст можно добавить в поиск.
+    BodiesStored(Vec<String>),
     LoadedMore { mailbox: String },
     SearchResults { ticket: u64, ids: Vec<String>, total: u64 },
     BlobFailed { blob_id: String, error: String },
@@ -119,26 +129,96 @@ async fn run(
     let mut email_state = initial_load(&client, &mut cache, &index, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
+    let (push_tx, mut push_rx) = unbounded_channel::<()>();
+    tokio::spawn(push_loop(client.clone(), push_tx));
+    // Тела писем без тела — в фоне, свежие первыми: чтение без сети и полнотекстовый поиск.
+    let mut prefetch: VecDeque<String> = cache.missing_bodies(PREFETCH_LIMIT).unwrap_or_default().into();
     loop {
         tokio::select! {
+            // Команды пользователя важнее фоновой работы.
+            biased;
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
                 if let Err(e) = handle(&client, &mut cache, &index, &identities, cmd, notify).await {
                     notify(Event::Error(e.to_string()));
                 }
             }
+            Some(()) = push_rx.recv() => {
+                while push_rx.try_recv().is_ok() {}
+                apply_refresh(&client, &mut cache, &index, &mut email_state, &mut prefetch, notify).await;
+            }
             _ = poll.tick() => {
-                match refresh(&client, &mut cache, &index, &email_state).await {
-                    Ok(Some(s)) => {
-                        email_state = s;
-                        notify(Event::MailboxesChanged);
-                        notify(Event::EmailsChanged);
+                apply_refresh(&client, &mut cache, &index, &mut email_state, &mut prefetch, notify).await;
+            }
+            _ = std::future::ready(()), if !prefetch.is_empty() => {
+                let n = prefetch.len().min(PREFETCH_BATCH);
+                let ids: Vec<String> = prefetch.drain(..n).collect();
+                match client.email_bodies(&ids, PREFETCH_MAX_BYTES).await {
+                    Ok(bodies) => {
+                        let mut stored = Vec::new();
+                        for (id, b) in bodies {
+                            if cache.put_body(&id, &body_row(b)).is_ok() {
+                                stored.push(id);
+                            }
+                        }
+                        notify(Event::BodiesStored(stored));
                     }
-                    Ok(None) => {}
-                    Err(e) => notify(Event::Error(e.to_string())),
+                    Err(e) => {
+                        // Не долбим сервер: остаток подберёт следующий цикл обновления.
+                        prefetch.clear();
+                        notify(Event::Error(format!("предзагрузка писем: {e}")));
+                    }
                 }
             }
         }
+    }
+}
+
+async fn apply_refresh(
+    client: &Client,
+    cache: &mut Cache,
+    index: &Index,
+    state: &mut String,
+    prefetch: &mut VecDeque<String>,
+    notify: &impl Fn(Event),
+) {
+    match refresh(client, cache, index, state, notify).await {
+        Ok(Some((s, created))) => {
+            *state = s;
+            // Новые письма — в начало очереди предзагрузки.
+            for id in created.into_iter().rev() {
+                prefetch.push_front(id);
+            }
+            notify(Event::MailboxesChanged);
+            notify(Event::EmailsChanged);
+        }
+        Ok(None) => {}
+        Err(e) => notify(Event::Error(e.to_string())),
+    }
+    if prefetch.is_empty() {
+        prefetch.extend(cache.missing_bodies(PREFETCH_LIMIT).unwrap_or_default());
+    }
+}
+
+/// Держит EventSource и будит основной цикл на каждое событие `state`.
+async fn push_loop(client: Client, wake: UnboundedSender<()>) {
+    let mut backoff = 5;
+    loop {
+        if let Ok(mut es) = client.event_source(PUSH_PING).await {
+            backoff = 5;
+            // Сразу после подключения — сверка: изменения могли случиться, пока связи не было.
+            if wake.send(()).is_err() {
+                return;
+            }
+            let silence = Duration::from_secs(u64::from(PUSH_PING) * 3);
+            while let Ok(Ok(Some(ev))) = tokio::time::timeout(silence, es.next()).await {
+                if ev.event == "state" && wake.send(()).is_err() {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(300);
     }
 }
 
@@ -153,7 +233,7 @@ async fn initial_load(client: &Client, cache: &mut Cache, index: &Index, notify:
     let mut state = String::new();
     for mb in order {
         let page = client.email_page(&mb.id, 0, INITIAL_PAGE).await?;
-        save(cache, index, page.emails.iter().map(email_row).collect())?;
+        save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
         state = page.state;
         notify(Event::EmailsChanged);
     }
@@ -162,18 +242,20 @@ async fn initial_load(client: &Client, cache: &mut Cache, index: &Index, notify:
     Ok(state)
 }
 
-/// Дельта через `Email/changes`; `Some(новое состояние)`, если что-то изменилось.
-async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str) -> postman_jmap::Result<Option<String>> {
+/// Дельта через `Email/changes`: `Some((новое состояние, новые письма))`, если что-то изменилось.
+async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<Option<(String, Vec<String>)>> {
     let mut state = since.to_string();
+    let mut created = Vec::new();
     loop {
         let ch = client.changes("Email", &state, 500).await?;
         if ch.new_state == state {
             return Ok(None);
         }
+        created.extend(ch.created.iter().cloned());
         let ids: Vec<String> = ch.created.into_iter().chain(ch.updated).collect();
         if !ids.is_empty() {
             let (emails, _) = client.email_get(&ids).await?;
-            save(cache, index, emails.iter().map(email_row).collect())?;
+            save(cache, index, emails.iter().map(email_row).collect(), notify)?;
         }
         cache.delete_emails(&ch.destroyed).map_err(db_err)?;
         if let Some(i) = index {
@@ -188,7 +270,7 @@ async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str)
     let (mailboxes, _) = client.mailboxes().await?;
     cache.replace_mailboxes(&mailboxes.iter().map(mailbox_row).collect::<Vec<_>>()).map_err(db_err)?;
     cache.set_state("Email", &state).map_err(db_err)?;
-    Ok(Some(state))
+    Ok(Some((state, created)))
 }
 
 async fn handle(
@@ -201,30 +283,7 @@ async fn handle(
 ) -> postman_jmap::Result<()> {
     match cmd {
         Command::Body(id) => {
-            let b = client.email_body(&id).await?;
-            let row = BodyRow {
-                to: addresses(&b.to),
-                cc: addresses(&b.cc),
-                reply_to: addresses(&b.reply_to),
-                message_id: b.message_id,
-                references: b.references,
-                html: b.html,
-                text: b.text,
-                attachments: b
-                    .attachments
-                    .iter()
-                    .filter_map(|p| {
-                        Some(AttachmentRow {
-                            blob_id: p.blob_id.clone()?,
-                            name: p.name.clone().unwrap_or_else(|| "вложение".into()),
-                            mime: p.mime.clone(),
-                            size: p.size,
-                            cid: p.cid.as_deref().map(|c| c.trim_matches(['<', '>']).to_string()),
-                            inline: p.disposition.as_deref() == Some("inline"),
-                        })
-                    })
-                    .collect(),
-            };
+            let row = body_row(client.email_body(&id).await?);
             cache.put_body(&id, &row).map_err(db_err)?;
             notify(Event::BodyReady(id));
         }
@@ -249,13 +308,13 @@ async fn handle(
                 }
                 p => p?,
             };
-            save(cache, index, page.emails.iter().map(email_row).collect())?;
+            save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
             notify(Event::LoadedMore { mailbox });
             notify(Event::EmailsChanged);
         }
         Command::Search { query, mailbox, ticket } => {
             let page = client.search(&query, mailbox.as_deref(), SEARCH_LIMIT).await?;
-            save(cache, index, page.emails.iter().map(email_row).collect())?;
+            save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
             notify(Event::SearchResults { ticket, ids: page.ids, total: page.total });
         }
         Command::Blob { blob_id, name, mime } => {
@@ -343,17 +402,49 @@ async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Opti
     client.save_draft(raw_message(draft)?, &drafts, replace).await
 }
 
-/// Записать письма в кэш и в поисковый индекс (тема, люди, превью).
-fn save(cache: &mut Cache, index: &Index, rows: Vec<EmailRow>) -> postman_jmap::Result<()> {
+/// Записать письма в кэш и в поисковый индекс. У писем с уже загруженным телом краткая
+/// запись затёрла бы текст — их индексирует заново извлечение (событие `BodiesStored`).
+fn save(cache: &mut Cache, index: &Index, rows: Vec<EmailRow>, notify: &impl Fn(Event)) -> postman_jmap::Result<()> {
     cache.upsert_emails(&rows).map_err(db_err)?;
     if let Some(i) = index {
-        crate::indexer::rows(i, &rows);
+        let (full, brief): (Vec<EmailRow>, Vec<EmailRow>) =
+            rows.into_iter().partition(|r| cache.body(&r.id).ok().flatten().is_some());
+        crate::indexer::rows(i, &brief);
+        if !full.is_empty() {
+            notify(Event::BodiesStored(full.into_iter().map(|r| r.id).collect()));
+        }
     }
     Ok(())
 }
 
 fn db_err(e: postman_cache::Error) -> postman_jmap::Error {
     postman_jmap::Error::Protocol(format!("кэш: {e}"))
+}
+
+fn body_row(b: EmailBody) -> BodyRow {
+    BodyRow {
+        to: addresses(&b.to),
+        cc: addresses(&b.cc),
+        reply_to: addresses(&b.reply_to),
+        message_id: b.message_id,
+        references: b.references,
+        html: b.html,
+        text: b.text,
+        attachments: b
+            .attachments
+            .iter()
+            .filter_map(|p| {
+                Some(AttachmentRow {
+                    blob_id: p.blob_id.clone()?,
+                    name: p.name.clone().unwrap_or_else(|| "вложение".into()),
+                    mime: p.mime.clone(),
+                    size: p.size,
+                    cid: p.cid.as_deref().map(|c| c.trim_matches(['<', '>']).to_string()),
+                    inline: p.disposition.as_deref() == Some("inline"),
+                })
+            })
+            .collect(),
+    }
 }
 
 fn addresses(list: &[EmailAddress]) -> Vec<Addr> {

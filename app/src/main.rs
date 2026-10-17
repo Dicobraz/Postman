@@ -12,6 +12,7 @@ mod app;
 mod bench;
 mod composer;
 mod demo;
+mod extract;
 mod files;
 mod gpu;
 mod indexer;

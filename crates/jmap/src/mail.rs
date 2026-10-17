@@ -81,6 +81,8 @@ pub struct BodyPart {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawBody {
+    #[serde(default)]
+    id: String,
     message_id: Option<Vec<String>>,
     references: Option<Vec<String>>,
     reply_to: Option<Vec<EmailAddress>>,
@@ -100,6 +102,31 @@ struct RawBody {
 #[derive(Debug, Clone, Deserialize)]
 struct BodyValue {
     value: String,
+}
+
+impl RawBody {
+    fn into_body(self) -> EmailBody {
+        let join = |parts: &[BodyPart], want: &str| -> Option<String> {
+            let mut out = String::new();
+            for p in parts.iter().filter(|p| p.mime == want) {
+                if let Some(v) = p.part_id.as_ref().and_then(|pid| self.body_values.get(pid)) {
+                    out.push_str(&v.value);
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        };
+        EmailBody {
+            message_id: self.message_id.as_ref().and_then(|v| v.first().cloned()),
+            references: self.references.clone().unwrap_or_default(),
+            reply_to: self.reply_to.clone().unwrap_or_default(),
+            sent_at: self.sent_at.clone(),
+            html: join(&self.html_body, "text/html"),
+            text: join(&self.text_body, "text/plain"),
+            to: self.to.clone().unwrap_or_default(),
+            cc: self.cc.clone().unwrap_or_default(),
+            attachments: self.attachments.clone(),
+        }
+    }
 }
 
 /// Тело письма, декодированное сервером (MIME на клиенте не разбираем).
@@ -254,38 +281,24 @@ impl Client {
     }
 
     pub async fn email_body(&self, id: &str) -> Result<EmailBody> {
+        let mut bodies = self.email_bodies(&[id.to_string()], 4 * 1024 * 1024).await?;
+        bodies.pop().map(|(_, b)| b).ok_or_else(|| crate::Error::Protocol(format!("письмо {id} не найдено")))
+    }
+
+    /// Тела нескольких писем одним запросом; части больше `max_bytes` усекаются сервером.
+    pub async fn email_bodies(&self, ids: &[String], max_bytes: u64) -> Result<Vec<(String, EmailBody)>> {
         let acc = self.mail_account()?;
         let args = json!({
             "accountId": acc,
-            "ids": [id],
-            "properties": ["messageId", "references", "replyTo", "sentAt", "to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
+            "ids": ids,
+            "properties": ["id", "messageId", "references", "replyTo", "sentAt", "to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
             "fetchTextBodyValues": true,
             "fetchHTMLBodyValues": true,
-            "maxBodyValueBytes": 4 * 1024 * 1024,
+            "maxBodyValueBytes": max_bytes,
         });
         let mut r = self.call(USING, &[inv("Email/get", args, "b")]).await?;
         let g: GetResponse<RawBody> = take(&mut r, "b")?;
-        let raw = g.list.into_iter().next().ok_or_else(|| crate::Error::Protocol(format!("письмо {id} не найдено")))?;
-        let join = |parts: &[BodyPart], want: &str| -> Option<String> {
-            let mut out = String::new();
-            for p in parts.iter().filter(|p| p.mime == want) {
-                if let Some(v) = p.part_id.as_ref().and_then(|pid| raw.body_values.get(pid)) {
-                    out.push_str(&v.value);
-                }
-            }
-            (!out.is_empty()).then_some(out)
-        };
-        Ok(EmailBody {
-            message_id: raw.message_id.as_ref().and_then(|v| v.first().cloned()),
-            references: raw.references.clone().unwrap_or_default(),
-            reply_to: raw.reply_to.clone().unwrap_or_default(),
-            sent_at: raw.sent_at.clone(),
-            html: join(&raw.html_body, "text/html"),
-            text: join(&raw.text_body, "text/plain"),
-            to: raw.to.clone().unwrap_or_default(),
-            cc: raw.cc.clone().unwrap_or_default(),
-            attachments: raw.attachments.clone(),
-        })
+        Ok(g.list.into_iter().map(|raw| (raw.id.clone(), raw.into_body())).collect())
     }
 
     /// Поставить/снять ключевое слово (`$seen`, `$flagged`, …).
