@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        # Не через RUSTFLAGS: он перекрыл бы +crt-static из .cargo/config.toml.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Сборка тестов
+        run: cargo test --workspace --no-run
+
+      # AppContainer читает exe воркера только при праве для ALL APPLICATION PACKAGES (S-1-15-2-1),
+      # как в Program Files. Выдаём его каталогу сборки и требуем полной изоляции в тестах.
+      - name: Права AppContainer на каталог сборки
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: icacls target /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q
+
+      - name: Тесты
+        run: cargo test --workspace
+        env:
+          POSTMAN_REQUIRE_FULL_SANDBOX: ${{ runner.os == 'Windows' && '1' || '' }}
+
+      - name: Release-сборка
+        run: cargo build --release --workspace
+
+      - name: Артефакт Windows
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: postman-windows-x64
+          path: |
+            target/release/postman.exe
+            target/release/postman-worker.exe

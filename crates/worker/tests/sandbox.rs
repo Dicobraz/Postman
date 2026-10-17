@@ -20,27 +20,36 @@ fn renders_and_survives_escape_attempts() {
     let mut c = client();
     let doc = c.render(&Request::Html("<p><b>Привет</b><script>x</script></p>".into())).unwrap();
     assert_eq!(postman_ir::to_markdown(&doc), "**Привет**");
-    assert_eq!(c.level(), Level::Full);
+    // Файл пользователя: AppContainer и Landlock не должны давать его прочитать.
+    let secret = std::env::temp_dir().join(format!("postman-secret-{}.txt", std::process::id()));
+    std::fs::write(&secret, "секрет").unwrap();
+    let secret_path = secret.to_string_lossy().into_owned();
 
-    let probes = if cfg!(windows) {
-        vec![
-            Probe::ReadFile(r"C:\Windows\win.ini".into()),
-            Probe::Connect("1.1.1.1:443".into()),
-            Probe::Spawn("cmd.exe".into()),
-        ]
+    // На Windows полная изоляция (AppContainer) требует права на чтение exe для
+    // ALL APPLICATION PACKAGES — так в Program Files и в CI (см. .github/workflows/ci.yml).
+    // В остальных случаях воркер работает без AppContainer: файлы и сеть ему доступны,
+    // проверяем только то, что даёт Job Object и mitigation policies.
+    let full = c.level() == Level::Full;
+    if cfg!(windows) && std::env::var_os("POSTMAN_REQUIRE_FULL_SANDBOX").is_none() {
+        assert!(matches!(c.level(), Level::Full | Level::Partial));
     } else {
-        vec![
-            Probe::ReadFile("/etc/hostname".into()),
-            Probe::Connect("1.1.1.1:443".into()),
-            Probe::Spawn("/bin/sh".into()),
-        ]
-    };
+        assert_eq!(c.level(), Level::Full);
+    }
+    let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+    let mut probes = vec![Probe::Spawn(shell.into())];
+    if full {
+        probes.push(Probe::ReadFile(secret_path));
+        probes.push(Probe::Connect("1.1.1.1:443".into()));
+    } else {
+        eprintln!("песочница частичная: проверки чтения файлов и сети пропущены");
+    }
     for p in probes {
         denied(c.render(&Request::Probe(p)));
         // После убитого процесса клиент поднимает новый.
         let doc = c.render(&Request::Text("ещё жив".into())).unwrap();
         assert_eq!(postman_ir::to_markdown(&doc), "ещё жив");
     }
+    let _ = std::fs::remove_file(&secret);
 }
 
 #[test]
