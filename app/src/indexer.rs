@@ -29,7 +29,6 @@ pub fn full(index: &SearchIndex, row: &EmailRow, body: &BodyRow, text: &str) {
     let attachments: Vec<&str> = body.attachments.iter().map(|a| a.name.as_str()).collect();
     let attachments = attachments.join(" ");
     let doc = Doc { id: &row.id, subject: &row.subject, people: &people, body: text, attachments: &attachments, received_at: row.received_at };
-    if index.upsert(&[doc]).is_ok() {
-        let _ = index.commit();
-    }
+    // Коммит — пакетно, из UI-цикла (см. `App::commit_index`): открытие писем подряд не плодит сегменты.
+    let _ = index.upsert(&[doc]);
 }

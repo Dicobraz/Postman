@@ -18,7 +18,7 @@ pub type Result<T> = tantivy::Result<T>;
 const STEM: &str = "pm_stem";
 const RAW: &str = "pm_raw";
 /// Память индексатора: больше не нужно для почтового ящика.
-const WRITER_HEAP: usize = 32 * 1024 * 1024;
+const WRITER_HEAP: usize = 15 * 1024 * 1024;
 
 /// Что индексируется о письме.
 pub struct Doc<'a> {
@@ -46,7 +46,8 @@ struct Fields {
 pub struct SearchIndex {
     index: Index,
     reader: IndexReader,
-    writer: Mutex<IndexWriter>,
+    /// Писатель живёт только между записью и коммитом: в покое память не держит.
+    writer: Mutex<Option<IndexWriter>>,
     f: Fields,
 }
 
@@ -132,13 +133,29 @@ impl SearchIndex {
     fn with(index: Index, f: Fields) -> Result<Self> {
         register(&index);
         let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
-        let writer = Mutex::new(index.writer(WRITER_HEAP)?);
-        Ok(Self { index, reader, writer, f })
+        Ok(Self { index, reader, writer: Mutex::new(None), f })
+    }
+
+    fn with_writer<R>(&self, f: impl FnOnce(&IndexWriter) -> Result<R>) -> Result<R> {
+        let mut guard = self.writer.lock().expect("writer");
+        if guard.is_none() {
+            // Один поток индексации с минимальным бюджетом: письма приходят порциями, память важнее.
+            *guard = Some(self.index.writer_with_num_threads(1, WRITER_HEAP)?);
+        }
+        f(guard.as_ref().expect("создан"))
+    }
+
+    /// Есть ли незакоммиченные изменения.
+    pub fn dirty(&self) -> bool {
+        self.writer.lock().expect("writer").is_some()
     }
 
     /// Добавить или заменить письма. Видны в поиске после [`commit`](Self::commit).
     pub fn upsert(&self, docs: &[Doc<'_>]) -> Result<()> {
-        let w = self.writer.lock().expect("writer");
+        self.with_writer(|w| self.write(w, docs))
+    }
+
+    fn write(&self, w: &IndexWriter, docs: &[Doc<'_>]) -> Result<()> {
         for d in docs {
             w.delete_term(Term::from_field_text(self.f.id, d.id));
             let raw = normalize(&format!("{} {} {} {}", d.subject, d.people, d.body, d.attachments));
@@ -154,15 +171,21 @@ impl SearchIndex {
         Ok(())
     }
 
-    pub fn delete(&self, ids: &[String]) {
-        let w = self.writer.lock().expect("writer");
-        for id in ids {
-            w.delete_term(Term::from_field_text(self.f.id, id));
-        }
+    pub fn delete(&self, ids: &[String]) -> Result<()> {
+        self.with_writer(|w| {
+            for id in ids {
+                w.delete_term(Term::from_field_text(self.f.id, id));
+            }
+            Ok(())
+        })
     }
 
+    /// Зафиксировать изменения и освободить писателя (вместе с его памятью).
     pub fn commit(&self) -> Result<()> {
-        self.writer.lock().expect("writer").commit()?;
+        let Some(mut w) = self.writer.lock().expect("writer").take() else { return Ok(()) };
+        w.commit()?;
+        // Дождаться фоновых слияний сегментов, чтобы не оставлять потоков.
+        w.wait_merging_threads()?;
         self.reader.reload()
     }
 
@@ -194,8 +217,9 @@ impl SearchIndex {
             move |doc: DocId, score: Score| {
                 let at = received.as_ref().and_then(|c| c.first(doc)).unwrap_or(0);
                 let age_days = ((now - at).max(0) as f32) / 86_400.0;
-                // До +50% к релевантности для свежих писем, затухание ~2 месяца.
-                score * (1.0 + 0.5 * (-age_days / 60.0).exp())
+                // До +50% к релевантности для свежих писем (затухание ~2 месяца)
+                // и слабая поправка на возраст, чтобы и среди старых новые были выше.
+                score * (1.0 + 0.5 * (-age_days / 60.0).exp() + 0.01 / (1.0 + age_days / 365.0))
             }
         });
         let top = searcher.search(&BooleanQuery::new(clauses), &collector)?;
@@ -305,7 +329,7 @@ mod tests {
     fn replace_and_delete() {
         let i = index();
         i.upsert(&[Doc { id: "2", subject: "Обед", people: "", body: "", attachments: "", received_at: 0 }]).unwrap();
-        i.delete(&["1".into()]);
+        i.delete(&["1".into()]).unwrap();
         i.commit().unwrap();
         assert!(i.search("совещание", 10).unwrap().is_empty());
         assert!(i.search("отчет", 10).unwrap().is_empty());

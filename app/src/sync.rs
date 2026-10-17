@@ -1,7 +1,6 @@
 //! Фоновая синхронизация: свой поток с tokio, своё соединение с кэшем.
 //! UI шлёт команды, в ответ получает события и перечитывает кэш.
 
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -78,7 +77,7 @@ pub type Index = Option<Arc<SearchIndex>>;
 
 pub fn spawn(
     account: Account,
-    db: PathBuf,
+    cache: Cache,
     index: Index,
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
@@ -93,7 +92,7 @@ pub fn spawn(
                 repaint();
             };
             rt.block_on(async {
-                if let Err(e) = run(account, db, index, rx, &notify).await {
+                if let Err(e) = run(account, cache, index, rx, &notify).await {
                     notify(Event::Error(e));
                 }
             });
@@ -104,12 +103,11 @@ pub fn spawn(
 
 async fn run(
     account: Account,
-    db: PathBuf,
+    mut cache: Cache,
     index: Index,
     mut rx: UnboundedReceiver<Command>,
     notify: &impl Fn(Event),
 ) -> Result<(), String> {
-    let mut cache = Cache::open(&db).map_err(|e| e.to_string())?;
     notify(Event::Status(format!("Подключение к {}…", account.url)));
     let client = Client::connect(&account.url, account.auth).await.map_err(|e| e.to_string())?;
     notify(Event::Status(format!("Вход выполнен: {}", client.session().username)));
@@ -179,7 +177,7 @@ async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str)
         }
         cache.delete_emails(&ch.destroyed).map_err(db_err)?;
         if let Some(i) = index {
-            i.delete(&ch.destroyed);
+            let _ = i.delete(&ch.destroyed);
             let _ = i.commit();
         }
         state = ch.new_state;

@@ -48,11 +48,11 @@ fn main() -> eframe::Result {
 
     let (db_path, account) = match demo {
         Some(n) => {
-            let path = dir.join("demo.sqlite");
+            let path = dir.join("demo.redb");
             demo::ensure(&path, n).expect("демо-кэш");
             (path, None)
         }
-        None => (dir.join("cache.sqlite"), sync::Account::from_env()),
+        None => (dir.join("cache.redb"), sync::Account::from_env()),
     };
 
     let options = eframe::NativeOptions {

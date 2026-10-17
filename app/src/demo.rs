@@ -24,7 +24,7 @@ const SUBJECTS: &[&str] = &[
 ];
 
 pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
-    let mut cache = Cache::open(path)?;
+    let cache = Cache::open(path)?;
     if cache.count("inbox").unwrap_or(0) + cache.count("archive").unwrap_or(0) >= n {
         return Ok(());
     }

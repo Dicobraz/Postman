@@ -80,6 +80,7 @@ pub struct App {
     search_all: bool,
     search_view: Option<SearchView>,
     index: sync::Index,
+    last_index_commit: std::time::Instant,
     /// Ящик, для которого уже запрошена следующая страница.
     loading_more: Option<String>,
     status: String,
@@ -112,11 +113,11 @@ impl App {
         let index_dir = db.with_extension("search");
         let index = postman_search::SearchIndex::open(&index_dir).ok().map(Arc::new);
         if let Some(i) = index.clone().filter(|i| i.is_empty()) {
-            build_index(i, db.clone());
+            build_index(i, cache.clone());
         }
         let (ev_tx, ev_rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
-        let commands = account.map(|a| sync::spawn(a, db, index.clone(), ev_tx, move || ctx.request_repaint()));
+        let commands = account.map(|a| sync::spawn(a, cache.clone(), index.clone(), ev_tx, move || ctx.request_repaint()));
         let status = match (&commands, demo) {
             (_, true) => "Демо-режим".to_string(),
             (Some(_), _) => "Запуск синхронизации…".to_string(),
@@ -150,6 +151,7 @@ impl App {
             search_all: false,
             search_view: None,
             index,
+            last_index_commit: std::time::Instant::now(),
             loading_more: None,
             status,
             commands,
@@ -229,6 +231,7 @@ impl App {
         self.next_ticket += 1;
         let ids = match &self.index {
             Some(i) => {
+                let _ = i.commit();
                 let ids = i.search(&query, 1000).unwrap_or_default();
                 match &scope {
                     Some(mb) => self.cache.filter_mailbox(&ids, mb).unwrap_or_default(),
@@ -455,6 +458,16 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Тексты открытых писем попадают в индекс пакетом, не чаще раза в несколько секунд.
+    fn commit_index(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+        let Some(i) = &self.index else { return };
+        if i.dirty() && self.last_index_commit.elapsed() >= EVERY {
+            let _ = i.commit();
+            self.last_index_commit = std::time::Instant::now();
         }
     }
 
@@ -1013,6 +1026,7 @@ impl eframe::App for App {
         self.drive_bench(&ctx);
         self.poll_background(&ctx);
         self.ensure_images();
+        self.commit_index();
         self.hotkeys(&ctx);
         self.show_composers(&ctx);
 
@@ -1063,9 +1077,8 @@ impl eframe::App for App {
 }
 
 /// Первичное построение индекса по уже накопленному кэшу — в фоне.
-fn build_index(index: Arc<postman_search::SearchIndex>, db: PathBuf) {
+fn build_index(index: Arc<postman_search::SearchIndex>, cache: Cache) {
     std::thread::spawn(move || {
-        let Ok(cache) = Cache::open(&db) else { return };
         let mut offset = 0;
         loop {
             let rows = cache.all_rows(offset, 5000).unwrap_or_default();
