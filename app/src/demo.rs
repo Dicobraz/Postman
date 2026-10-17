@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use postman_cache::{Addr, BodyRow, Cache, EmailRow, MailboxRow};
+use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 
 const SENDERS: &[(&str, &str)] = &[
     ("Иванова Мария", "m.ivanova@corp.example"),
@@ -90,17 +90,47 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
 /// чтобы видеть работу белого списка.
 pub fn body(id: &str) -> BodyRow {
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
-    let html = if n.is_multiple_of(2) { OUTLOOK } else { HOSTILE };
+    let att = |blob: &str, name: &str, mime: &str, size: u64, cid: Option<&str>| AttachmentRow {
+        blob_id: blob.into(),
+        name: name.into(),
+        mime: mime.into(),
+        size,
+        cid: cid.map(Into::into),
+        inline: cid.is_some(),
+    };
+    let (html, attachments) = if n.is_multiple_of(2) {
+        (OUTLOOK, vec![
+            att("logo", "logo.png", "image/png", LOGO.len() as u64, Some("logo@corp")),
+            att("xlsx", "Итоги Q3.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 18_432, None),
+        ])
+    } else {
+        (HOSTILE, vec![
+            att("exe", "invoice.pdf.exe", "application/octet-stream", 73_728, None),
+            att("rtlo", "счёт\u{202e}fdp.exe", "application/octet-stream", 73_728, None),
+        ])
+    };
     BodyRow {
         to: vec![Addr { name: "Команда проекта".into(), email: "team@corp.example".into() }],
         message_id: Some(format!("{id}@corp.example")),
         html: Some(html.into()),
+        attachments,
         ..Default::default()
     }
 }
 
+const LOGO: &[u8] = include_bytes!("../../crates/worker/tests/fixtures/img.png");
+
+/// Содержимое демо-вложений.
+pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
+    match blob_id {
+        "logo" => Some(LOGO.to_vec()),
+        "xlsx" | "exe" | "rtlo" => Some(b"demo".to_vec()),
+        _ => None,
+    }
+}
+
 const OUTLOOK: &str = r#"<html><head><style>p.MsoNormal{margin:0}</style></head><body>
-<div class=WordSection1><p class=MsoNormal>Коллеги, добрый день!</p>
+<div class=WordSection1><p class=MsoNormal><img src="cid:logo@corp" alt="Логотип"></p><p class=MsoNormal>Коллеги, добрый день!</p>
 <p class=MsoNormal>Направляю <b>итоги квартала</b>. Обратите внимание на <span style='color:red;font-weight:bold'>раздел 3</span>
 и <i>сроки</i>.</p>
 <table border=1><tr><th>Показатель</th><th>План</th><th>Факт</th></tr>

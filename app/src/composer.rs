@@ -3,11 +3,16 @@
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportBuilder, ViewportId};
 use postman_cache::BodyRow;
-use postman_compose::{Address, Draft, parse_addresses};
+use std::path::PathBuf;
+
+use postman_compose::{Address, Attachment, Draft, parse_addresses};
 use postman_ir::Document;
 
-use crate::ir_view;
+use crate::{files, ir_view};
 use crate::render::Renderer;
+
+/// Предупреждение о размере: типичный предел серверов — 25–35 МБ.
+const LARGE_TOTAL: usize = 25 * 1024 * 1024;
 
 pub enum Action {
     Send(Box<Draft>, Option<String>),
@@ -66,6 +71,26 @@ impl Composer {
         }
     }
 
+    fn attach(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "файл".into());
+            match std::fs::read(&p) {
+                Ok(data) => self.base.attachments.push(Attachment {
+                    mime: files::mime_for(&name).into(),
+                    name,
+                    data,
+                    inline_cid: None,
+                    blob_id: None,
+                }),
+                Err(e) => self.status = format!("«{name}»: {e}"),
+            }
+        }
+        let total: usize = self.base.attachments.iter().map(|a| a.data.len()).sum();
+        if total > LARGE_TOTAL {
+            self.status = format!("Вложения: {} — сервер может не принять письмо", files::human_size(total as u64));
+        }
+    }
+
     pub fn sent(&mut self) {
         self.open = false;
     }
@@ -112,6 +137,7 @@ impl Composer {
         let mut want_send = false;
         let mut want_save = false;
         let mut toggle_preview = false;
+        let mut attach: Vec<PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         ui.input_mut(|i| {
             if i.viewport().close_requested() || i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.open = false;
@@ -130,6 +156,9 @@ impl Composer {
                 ui.add_enabled_ui(!self.busy, |ui| {
                     want_send |= ui.button("➤ Отправить").on_hover_text("Ctrl+Enter / Alt+S").clicked();
                     want_save |= ui.button("💾 Сохранить").on_hover_text("Ctrl+S").clicked();
+                    if ui.button("📎 Вложить").on_hover_text("Или перетащите файлы в окно").clicked() {
+                        attach = files::pick();
+                    }
                 });
                 if ui.selectable_label(self.show_bcc, "Скрытая").on_hover_text("Ctrl+Shift+B").clicked() {
                     self.show_bcc = !self.show_bcc;
@@ -138,6 +167,9 @@ impl Composer {
                 ui.weak(&self.status);
             });
         });
+        if !attach.is_empty() {
+            self.attach(attach);
+        }
         if toggle_preview {
             self.toggle_preview(ui.ctx());
         }
@@ -159,17 +191,37 @@ impl Composer {
                 }
                 field(ui, "Тема", &mut self.subject, false);
             });
+            let mut remove = None;
+            // Картинки цитаты (cid) не показываем: они уходят вместе с ответом автоматически.
+            let listed: Vec<(usize, &Attachment)> =
+                self.base.attachments.iter().enumerate().filter(|(_, a)| a.inline_cid.is_none()).collect();
+            if !listed.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Вложения:");
+                    for (i, a) in listed {
+                        let size = if a.data.is_empty() { String::new() } else { format!(" ({})", files::human_size(a.data.len() as u64)) };
+                        if ui.button(format!("📎 {}{size}  ✕", files::safe_name(&a.name))).on_hover_text("Убрать").clicked() {
+                            remove = Some(i);
+                        }
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                self.base.attachments.remove(i);
+            }
         });
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(r) = &self.renderer {
                 while let Ok(done) = r.rx.try_recv() {
-                    self.preview_doc = Some(done.doc);
+                    if let crate::render::Rendered::Body { doc, .. } = done {
+                        self.preview_doc = Some(doc);
+                    }
                 }
             }
             if self.preview_on {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &self.preview_doc {
                     Some(doc) => {
-                        ir_view::show(ui, doc);
+                        ir_view::show(ui, doc, &ir_view::Images::new());
                     }
                     None => {
                         ui.spinner();

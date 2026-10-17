@@ -41,6 +41,17 @@ pub struct Addr {
     pub email: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AttachmentRow {
+    pub blob_id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// Content-ID для картинок в тексте (`cid:`).
+    pub cid: Option<String>,
+    pub inline: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BodyRow {
     pub to: Vec<Addr>,
@@ -50,7 +61,11 @@ pub struct BodyRow {
     pub references: Vec<String>,
     pub html: Option<String>,
     pub text: Option<String>,
+    pub attachments: Vec<AttachmentRow>,
 }
+
+/// Blob'ы больше этого не кэшируются (их скачивают заново по требованию).
+pub const MAX_CACHED_BLOB: usize = 16 * 1024 * 1024;
 
 /// Адреса хранятся строками `имя\tадрес` через перевод строки: ни то, ни другое
 /// не может содержать эти символы после разбора заголовков сервером.
@@ -69,9 +84,11 @@ fn addrs_from_db(s: &str) -> Vec<Addr> {
 }
 
 /// Кэш одноразовый: при смене версии схемы он пересоздаётся и заполняется заново.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const DROP: &str = "
+DROP TABLE IF EXISTS attachment;
+DROP TABLE IF EXISTS blob;
 DROP TABLE IF EXISTS body;
 DROP TABLE IF EXISTS email_mailbox;
 DROP TABLE IF EXISTS email;
@@ -121,6 +138,24 @@ CREATE TABLE IF NOT EXISTS body (
     refs TEXT NOT NULL,
     html TEXT,
     text TEXT
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS attachment (
+    email_id TEXT NOT NULL REFERENCES email(id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    blob_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    cid TEXT,
+    inline INTEGER NOT NULL,
+    PRIMARY KEY (email_id, idx)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS blob (
+    blob_id TEXT PRIMARY KEY,
+    data BLOB NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS trusted_sender (
+    email TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sync_state (
     kind TEXT PRIMARY KEY,
@@ -267,6 +302,15 @@ impl Cache {
     }
 
     pub fn body(&self, id: &str) -> Result<Option<BodyRow>> {
+        let body = self.body_only(id)?;
+        body.map(|mut b| {
+            b.attachments = self.attachments(id)?;
+            Ok(b)
+        })
+        .transpose()
+    }
+
+    fn body_only(&self, id: &str) -> Result<Option<BodyRow>> {
         self.db
             .prepare_cached(
                 "SELECT recipients_to, recipients_cc, reply_to, message_id, refs, html, text FROM body WHERE email_id = ?1",
@@ -280,13 +324,24 @@ impl Cache {
                     references: r.get::<_, String>(4)?.split_whitespace().map(str::to_string).collect(),
                     html: r.get(5)?,
                     text: r.get(6)?,
+                    attachments: Vec::new(),
                 })
             })
             .optional()
     }
 
-    pub fn put_body(&self, id: &str, b: &BodyRow) -> Result<()> {
-        self.db
+    pub fn put_body(&mut self, id: &str, b: &BodyRow) -> Result<()> {
+        let tx = self.db.transaction()?;
+        tx.prepare_cached("DELETE FROM attachment WHERE email_id = ?1")?.execute([id])?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT INTO attachment (email_id, idx, blob_id, name, mime, size, cid, inline) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            )?;
+            for (i, a) in b.attachments.iter().enumerate() {
+                st.execute(params![id, i as i64, a.blob_id, a.name, a.mime, a.size as i64, a.cid, a.inline])?;
+            }
+        }
+        tx
             .prepare_cached(
                 "INSERT OR REPLACE INTO body (email_id, recipients_to, recipients_cc, reply_to, message_id, refs, html, text)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -300,7 +355,51 @@ impl Cache {
                 b.references.join(" "),
                 b.html,
                 b.text
-            ])
+            ])?;
+        tx.commit()
+    }
+
+    pub fn attachments(&self, email_id: &str) -> Result<Vec<AttachmentRow>> {
+        self.db
+            .prepare_cached("SELECT blob_id, name, mime, size, cid, inline FROM attachment WHERE email_id = ?1 ORDER BY idx")?
+            .query_map([email_id], |r| {
+                Ok(AttachmentRow {
+                    blob_id: r.get(0)?,
+                    name: r.get(1)?,
+                    mime: r.get(2)?,
+                    size: r.get::<_, i64>(3)? as u64,
+                    cid: r.get(4)?,
+                    inline: r.get(5)?,
+                })
+            })?
+            .collect()
+    }
+
+    pub fn blob(&self, blob_id: &str) -> Result<Option<Vec<u8>>> {
+        self.db.prepare_cached("SELECT data FROM blob WHERE blob_id = ?1")?.query_row([blob_id], |r| r.get(0)).optional()
+    }
+
+    /// Сохраняет blob, если он не больше [`MAX_CACHED_BLOB`].
+    pub fn put_blob(&self, blob_id: &str, data: &[u8]) -> Result<()> {
+        if data.len() > MAX_CACHED_BLOB {
+            return Ok(());
+        }
+        self.db
+            .prepare_cached("INSERT OR REPLACE INTO blob (blob_id, data) VALUES (?1, ?2)")?
+            .execute(params![blob_id, data])
+            .map(drop)
+    }
+
+    pub fn is_trusted(&self, email: &str) -> Result<bool> {
+        self.db
+            .prepare_cached("SELECT 1 FROM trusted_sender WHERE email = ?1")?
+            .exists([email.to_lowercase()])
+    }
+
+    pub fn trust(&self, email: &str) -> Result<()> {
+        self.db
+            .prepare_cached("INSERT OR IGNORE INTO trusted_sender (email) VALUES (?1)")?
+            .execute([email.to_lowercase()])
             .map(drop)
     }
 
@@ -366,7 +465,13 @@ mod tests {
             references: vec!["a@x".into(), "b@x".into()],
             ..Default::default()
         };
+        let mut b = b;
+        b.attachments = vec![AttachmentRow { blob_id: "B1".into(), name: "x.png".into(), mime: "image/png".into(), size: 3, cid: Some("c1".into()), inline: true }];
         c.put_body("a", &b).unwrap();
+        c.put_blob("B1", b"png").unwrap();
+        assert_eq!(c.blob("B1").unwrap().as_deref(), Some(&b"png"[..]));
+        c.trust("Ivan@X.ru").unwrap();
+        assert!(c.is_trusted("ivan@x.ru").unwrap());
         assert_eq!(c.body("a").unwrap(), Some(b));
         c.set_state("Email", "s1").unwrap();
         assert_eq!(c.state("Email").unwrap().as_deref(), Some("s1"));

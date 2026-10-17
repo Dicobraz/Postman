@@ -7,37 +7,61 @@ use std::time::Duration;
 
 use postman_cache::BodyRow;
 use postman_ir::{Align, Block, Document, Inline};
-use postman_worker::{Client, Level, Request};
+use std::sync::Arc;
+
+use postman_worker::{Client, Level, Request, Rgba};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-pub struct Rendered {
-    pub id: String,
-    pub doc: Document,
-    pub level: Level,
+/// Наибольшая сторона картинки в области чтения.
+pub const MAX_IMAGE_SIDE: u32 = 1600;
+
+pub enum Rendered {
+    Body { id: String, doc: Document, level: Level },
+    Image { key: String, result: Result<Rgba, String> },
+}
+
+enum Job {
+    Body(String, BodyRow),
+    Image(String, Arc<Vec<u8>>),
 }
 
 pub struct Renderer {
-    tx: mpsc::Sender<(String, BodyRow)>,
+    tx: mpsc::Sender<Job>,
     pub rx: mpsc::Receiver<Rendered>,
 }
 
 impl Renderer {
     pub fn spawn(repaint: impl Fn() + Send + 'static) -> Self {
-        let (tx, jobs) = mpsc::channel::<(String, BodyRow)>();
+        let (tx, jobs) = mpsc::channel::<Job>();
         let (done, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("render".into())
             .spawn(move || {
                 let mut client = Client::new(Client::default_exe(), TIMEOUT);
-                while let Ok(mut job) = jobs.recv() {
-                    // При быстром листании важен только последний запрос.
-                    while let Ok(newer) = jobs.try_recv() {
-                        job = newer;
+                while let Ok(first) = jobs.recv() {
+                    // При быстром листании важно только последнее тело; картинки — все по порядку.
+                    let mut body = None;
+                    let mut images = Vec::new();
+                    for job in std::iter::once(first).chain(jobs.try_iter()) {
+                        match job {
+                            Job::Body(id, b) => body = Some((id, b)),
+                            Job::Image(key, bytes) => images.push((key, bytes)),
+                        }
                     }
-                    let doc = render(&mut client, &job.1);
-                    if done.send(Rendered { id: job.0, doc, level: client.level() }).is_err() {
-                        break;
+                    let mut out = Vec::new();
+                    if let Some((id, b)) = body {
+                        let doc = render(&mut client, &b);
+                        out.push(Rendered::Body { id, doc, level: client.level() });
+                    }
+                    for (key, bytes) in images {
+                        let result = client.decode_image(&bytes, MAX_IMAGE_SIDE);
+                        out.push(Rendered::Image { key, result });
+                    }
+                    for r in out {
+                        if done.send(r).is_err() {
+                            return;
+                        }
                     }
                     repaint();
                 }
@@ -47,7 +71,11 @@ impl Renderer {
     }
 
     pub fn request(&self, id: String, body: BodyRow) {
-        let _ = self.tx.send((id, body));
+        let _ = self.tx.send(Job::Body(id, body));
+    }
+
+    pub fn decode(&self, key: String, bytes: Arc<Vec<u8>>) {
+        let _ = self.tx.send(Job::Image(key, bytes));
     }
 }
 

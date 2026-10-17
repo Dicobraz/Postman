@@ -60,3 +60,32 @@ fn hostile_input() {
     let wide = "<p>a</p>".repeat(30_000);
     assert!(c.render(&Request::Html(wide)).is_ok());
 }
+
+#[test]
+fn decodes_images_and_rejects_others() {
+    let mut c = client();
+    // PNG 1x1, красный пиксель.
+    let png = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49,
+        0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0,
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let img = c.decode_image(&png, 512).unwrap();
+    assert_eq!((img.width, img.height), (1, 1));
+    assert_eq!(&img.pixels[..3], &[255, 0, 0]);
+    assert!(c.decode_image(b"<svg onload=alert(1)>", 512).is_err());
+    assert!(c.decode_image(&png[..20], 512).is_err());
+    // Воркер жив после ошибок разбора.
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+}
+
+#[test]
+fn all_supported_formats_decode_under_seccomp() {
+    let mut c = client();
+    for ext in ["jpg", "gif", "webp", "png"] {
+        let bytes = std::fs::read(format!("{}/tests/fixtures/img.{ext}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let img = c.decode_image(&bytes, 100).unwrap_or_else(|e| panic!("{ext}: {e}"));
+        assert_eq!((img.width, img.height), (100, 67), "{ext}");
+    }
+}

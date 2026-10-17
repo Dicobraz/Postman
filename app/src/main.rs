@@ -12,6 +12,7 @@ mod app;
 mod bench;
 mod composer;
 mod demo;
+mod files;
 mod gpu;
 mod ir_view;
 mod render;

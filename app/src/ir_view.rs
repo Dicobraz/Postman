@@ -1,30 +1,67 @@
 //! Отрисовка IR письма в egui. Никаких сетевых обращений: ссылки открываются
 //! только по клику, картинки `cid:` — заглушки до декодирования в воркере.
 
-use eframe::egui::{self, Color32, RichText, Ui};
+use std::collections::HashMap;
+
+use eframe::egui::{self, Color32, RichText, TextureHandle, Ui};
 use postman_ir::{Block, Document, Inline, Marks};
 
-/// Возвращает ссылку, по которой кликнули.
-pub fn show(ui: &mut Ui, doc: &Document) -> Option<String> {
-    let mut clicked = None;
-    blocks(ui, &doc.blocks, &mut clicked, 0);
-    clicked
+/// Картинки `cid:`, уже декодированные воркером.
+pub type Images = HashMap<String, TextureHandle>;
+
+struct View<'a> {
+    images: &'a Images,
+    clicked: Option<String>,
 }
 
-fn blocks(ui: &mut Ui, bs: &[Block], clicked: &mut Option<String>, depth: usize) {
+/// Возвращает ссылку, по которой кликнули.
+pub fn show(ui: &mut Ui, doc: &Document, images: &Images) -> Option<String> {
+    let mut v = View { images, clicked: None };
+    blocks(ui, &doc.blocks, &mut v, 0);
+    v.clicked
+}
+
+/// Все `cid:` картинок документа.
+pub fn cids(doc: &Document) -> Vec<String> {
+    fn inl(items: &[Inline], out: &mut Vec<String>) {
+        for i in items {
+            match i {
+                Inline::Image { cid, .. } => out.push(cid.clone()),
+                Inline::Link { content, .. } => inl(content, out),
+                _ => {}
+            }
+        }
+    }
+    fn blk(bs: &[Block], out: &mut Vec<String>) {
+        for b in bs {
+            match b {
+                Block::Paragraph { content, .. } | Block::Heading { content, .. } => inl(content, out),
+                Block::Quote(inner) => blk(inner, out),
+                Block::List { items, .. } => items.iter().for_each(|i| blk(i, out)),
+                Block::Table(rows) => rows.iter().flatten().for_each(|c| inl(c, out)),
+                Block::Code(_) | Block::Rule => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    blk(&doc.blocks, &mut out);
+    out
+}
+
+fn blocks(ui: &mut Ui, bs: &[Block], v: &mut View<'_>, depth: usize) {
     for (n, b) in bs.iter().enumerate() {
         if n > 0 {
             ui.add_space(6.0);
         }
-        block(ui, b, clicked, depth);
+        block(ui, b, v, depth);
     }
 }
 
-fn block(ui: &mut Ui, b: &Block, clicked: &mut Option<String>, depth: usize) {
+fn block(ui: &mut Ui, b: &Block, v: &mut View<'_>, depth: usize) {
     match b {
         // TODO: выравнивание (align) — после перехода абзацев на LayoutJob с hit-test ссылок.
         Block::Paragraph { content, .. } => {
-            ui.horizontal_wrapped(|ui| inlines(ui, content, None, clicked));
+            ui.horizontal_wrapped(|ui| inlines(ui, content, None, v));
         }
         Block::Heading { level, content } => {
             let size = match level {
@@ -33,10 +70,10 @@ fn block(ui: &mut Ui, b: &Block, clicked: &mut Option<String>, depth: usize) {
                 3 => 17.0,
                 _ => 15.0,
             };
-            ui.horizontal_wrapped(|ui| inlines(ui, content, Some(size), clicked));
+            ui.horizontal_wrapped(|ui| inlines(ui, content, Some(size), v));
         }
         Block::Quote(inner) => {
-            let r = ui.indent(("quote", depth), |ui| blocks(ui, inner, clicked, depth + 1));
+            let r = ui.indent(("quote", depth), |ui| blocks(ui, inner, v, depth + 1));
             let rect = r.response.rect;
             let x = rect.left() + 3.0;
             ui.painter().vline(x, rect.y_range(), (2.0, ui.visuals().weak_text_color()));
@@ -46,7 +83,7 @@ fn block(ui: &mut Ui, b: &Block, clicked: &mut Option<String>, depth: usize) {
                 ui.horizontal_wrapped(|ui| {
                     let marker = if *ordered { format!("{}.", n + 1) } else { "•".into() };
                     ui.add_sized([18.0, 14.0], egui::Label::new(marker));
-                    ui.vertical(|ui| blocks(ui, item, clicked, depth + 1));
+                    ui.vertical(|ui| blocks(ui, item, v, depth + 1));
                 });
             }
         }
@@ -63,7 +100,7 @@ fn block(ui: &mut Ui, b: &Block, clicked: &mut Option<String>, depth: usize) {
             egui::Grid::new(("table", ui.next_auto_id())).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
                 for row in rows {
                     for cell in row {
-                        ui.horizontal(|ui| inlines(ui, cell, None, clicked));
+                        ui.horizontal(|ui| inlines(ui, cell, None, v));
                     }
                     ui.end_row();
                 }
@@ -72,7 +109,7 @@ fn block(ui: &mut Ui, b: &Block, clicked: &mut Option<String>, depth: usize) {
     }
 }
 
-fn inlines(ui: &mut Ui, items: &[Inline], size: Option<f32>, clicked: &mut Option<String>) {
+fn inlines(ui: &mut Ui, items: &[Inline], size: Option<f32>, v: &mut View<'_>) {
     ui.spacing_mut().item_spacing.x = 0.0;
     for i in items {
         match i {
@@ -80,6 +117,12 @@ fn inlines(ui: &mut Ui, items: &[Inline], size: Option<f32>, clicked: &mut Optio
                 ui.label(rich(text, *marks, size));
             }
             Inline::LineBreak => ui.end_row(),
+            Inline::Image { cid, .. } if v.images.contains_key(cid) => {
+                let tex = &v.images[cid];
+                ui.end_row();
+                ui.add(egui::Image::from_texture(tex).max_width(ui.available_width().max(50.0)).fit_to_original_size(1.0));
+                ui.end_row();
+            }
             Inline::Image { alt, .. } => {
                 let label = if alt.is_empty() { "[изображение]".to_string() } else { format!("[изображение: {alt}]") };
                 ui.label(RichText::new(label).weak());
@@ -96,7 +139,7 @@ fn inlines(ui: &mut Ui, items: &[Inline], size: Option<f32>, clicked: &mut Optio
                 }
                 let r = ui.link(rich(&text, Marks::default(), size)).on_hover_text(hover);
                 if r.clicked() {
-                    *clicked = Some(href.clone());
+                    v.clicked = Some(href.clone());
                 }
             }
         }

@@ -1,22 +1,25 @@
 //! Оболочка в духе classic Outlook: панель команд, дерево папок с навигацией
 //! внизу, список писем и область чтения.
 
+use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, KeyboardShortcut, Modifiers, Rect, Sense, TextStyle, Vec2, pos2,
 };
-use postman_cache::{BodyRow, Cache, EmailRow, MailboxRow};
+use postman_cache::{AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
 use tokio::sync::mpsc::UnboundedSender;
 
-use postman_compose::{Address, Draft, Mode, Original};
+use postman_compose::{Address, Attachment, Draft, Mode, Original};
 
 use crate::composer::{Action, Composer};
-use crate::render::Renderer;
-use crate::{bench, demo, ir_view, sync};
+use crate::ir_view::Images;
+use crate::render::{Rendered, Renderer};
+use crate::{bench, demo, files, ir_view, sync};
 
 const ROW_HEIGHT: f32 = 40.0;
 /// Сколько строк сверх видимых держать в окне списка.
@@ -38,6 +41,16 @@ struct Reading {
     row: EmailRow,
     body: Option<BodyRow>,
     doc: Option<Document>,
+    /// Картинки `cid:` показываются только по разрешению (или для доверенного отправителя).
+    show_images: bool,
+    images: Images,
+    requested: HashSet<String>,
+}
+
+#[derive(Clone, Copy)]
+enum FileAct {
+    Open,
+    SaveAs,
 }
 
 pub struct App {
@@ -60,6 +73,9 @@ pub struct App {
     renderer: Renderer,
     sandbox: &'static str,
     composers: Vec<Composer>,
+    /// Действия с вложениями, ждущие скачивания blob'а.
+    pending_files: Vec<(AttachmentRow, FileAct)>,
+    open_dir: PathBuf,
     next_ticket: u64,
     me: Address,
     signature: String,
@@ -77,6 +93,7 @@ impl App {
         bench: Option<bench::Bench>,
     ) -> Self {
         let cache = Cache::open(&db).expect("кэш");
+        let open_dir = db.parent().map(|d| d.join("open")).unwrap_or_default();
         let (ev_tx, ev_rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         let commands = account.map(|a| sync::spawn(a, db, ev_tx, move || ctx.request_repaint()));
@@ -116,6 +133,8 @@ impl App {
             renderer,
             sandbox: "",
             composers: Vec::new(),
+            pending_files: Vec::new(),
+            open_dir,
             next_ticket: 1,
             me: if demo { Address::new("Я", "me@corp.example") } else { Address::default() },
             signature: String::new(),
@@ -184,7 +203,8 @@ impl App {
             self.set_flags(&row, true, row.flagged);
         }
         let body = self.load_body(&row.id);
-        self.reading = Some(Reading { row, body, doc: None });
+        let show_images = self.cache.is_trusted(&row.from_addr).unwrap_or(false);
+        self.reading = Some(Reading { row, body, doc: None, show_images, images: Images::new(), requested: HashSet::new() });
         self.render_body();
     }
 
@@ -256,11 +276,16 @@ impl App {
         }
     }
 
-    fn poll_background(&mut self) {
+    fn poll_background(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events.try_recv() {
             match ev {
                 sync::Event::Status(s) => self.status = s,
                 sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
+                sync::Event::BlobReady { blob_id, data } => self.blob_ready(&blob_id, data),
+                sync::Event::BlobFailed { blob_id, error } => {
+                    self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
+                    self.status = format!("Не удалось скачать вложение: {error}");
+                }
                 sync::Event::Me { address, signature } => {
                     self.me = address;
                     self.signature = signature;
@@ -302,15 +327,115 @@ impl App {
             }
         }
         while let Ok(done) = self.renderer.rx.try_recv() {
-            self.sandbox = match done.level {
-                postman_worker::Level::Full => "Песочница: полная",
-                postman_worker::Level::Partial => "Песочница: частичная",
-                postman_worker::Level::None => "Песочница: нет",
-            };
-            if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == done.id) {
-                r.doc = Some(done.doc);
+            match done {
+                Rendered::Body { id, doc, level } => {
+                    self.sandbox = match level {
+                        postman_worker::Level::Full => "Песочница: полная",
+                        postman_worker::Level::Partial => "Песочница: частичная",
+                        postman_worker::Level::None => "Песочница: нет",
+                    };
+                    if let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) {
+                        r.doc = Some(doc);
+                    }
+                }
+                Rendered::Image { key, result } => {
+                    let Some((id, cid)) = key.split_once('\n') else { continue };
+                    let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) else { continue };
+                    match result {
+                        Ok(img) => {
+                            let color = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.pixels);
+                            let tex = ctx.load_texture(&key, color, egui::TextureOptions::LINEAR);
+                            r.images.insert(cid.to_string(), tex);
+                        }
+                        Err(e) => self.status = format!("Картинка не показана: {e}"),
+                    }
+                }
             }
         }
+    }
+
+    /// Байты вложения, если они уже есть локально.
+    fn local_blob(&self, blob_id: &str) -> Option<Arc<Vec<u8>>> {
+        if self.demo {
+            return demo::blob(blob_id).map(Arc::new);
+        }
+        self.cache.blob(blob_id).ok().flatten().map(Arc::new)
+    }
+
+    fn request_blob(&self, a: &AttachmentRow) {
+        if let Some(tx) = &self.commands {
+            let _ = tx.send(sync::Command::Blob { blob_id: a.blob_id.clone(), name: a.name.clone(), mime: a.mime.clone() });
+        }
+    }
+
+    /// Запросить декодирование ещё не показанных картинок `cid:` текущего письма.
+    fn ensure_images(&mut self) {
+        let Some(r) = &self.reading else { return };
+        let (Some(doc), Some(body)) = (&r.doc, &r.body) else { return };
+        if !r.show_images {
+            return;
+        }
+        let wanted: Vec<(String, AttachmentRow)> = ir_view::cids(doc)
+            .into_iter()
+            .filter(|cid| !r.requested.contains(cid))
+            .filter_map(|cid| {
+                let a = body.attachments.iter().find(|a| a.cid.as_deref() == Some(cid.as_str()))?;
+                Some((cid, a.clone()))
+            })
+            .collect();
+        let id = r.row.id.clone();
+        for (cid, a) in wanted {
+            match self.local_blob(&a.blob_id) {
+                Some(bytes) => self.renderer.decode(format!("{id}\n{cid}"), bytes),
+                None => self.request_blob(&a),
+            }
+            if let Some(r) = self.reading.as_mut() {
+                r.requested.insert(cid);
+            }
+        }
+    }
+
+    fn blob_ready(&mut self, blob_id: &str, data: Arc<Vec<u8>>) {
+        if let Some(r) = &self.reading
+            && let Some(body) = &r.body
+        {
+            for a in body.attachments.iter().filter(|a| a.blob_id == blob_id) {
+                if let Some(cid) = &a.cid
+                    && r.requested.contains(cid)
+                {
+                    self.renderer.decode(format!("{}\n{cid}", r.row.id), data.clone());
+                }
+            }
+        }
+        let (ready, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_files).into_iter().partition(|(a, _)| a.blob_id == blob_id);
+        self.pending_files = rest;
+        for (a, act) in ready {
+            self.do_file(&a, act, &data);
+        }
+    }
+
+    fn file_action(&mut self, a: AttachmentRow, act: FileAct) {
+        match self.local_blob(&a.blob_id) {
+            Some(data) => self.do_file(&a, act, &data),
+            None if self.commands.is_some() => {
+                self.status = format!("Скачивание «{}»…", a.name);
+                self.request_blob(&a);
+                self.pending_files.push((a, act));
+            }
+            None => self.status = "Вложение недоступно без подключения".into(),
+        }
+    }
+
+    fn do_file(&mut self, a: &AttachmentRow, act: FileAct, data: &[u8]) {
+        let r = match act {
+            FileAct::Open => files::open(&self.open_dir, &a.name, data).map(Some),
+            FileAct::SaveAs => files::save_as(&a.name, data),
+        };
+        self.status = match r {
+            Ok(Some(p)) => format!("{} — {}", files::safe_name(&a.name), p.display()),
+            Ok(None) => String::new(),
+            Err(e) => format!("«{}»: {e}", files::safe_name(&a.name)),
+        };
     }
 
     fn hotkeys(&mut self, ctx: &egui::Context) {
@@ -411,7 +536,22 @@ impl App {
             subject: r.row.subject.clone(),
             date: format_full_date(r.row.received_at),
         };
-        Some(postman_compose::respond(&orig, doc, mode, &self.me, &self.signature))
+        let mut d = postman_compose::respond(&orig, doc, mode, &self.me, &self.signature);
+        // Пересылка — все вложения; ответ — только картинки, на которые ссылается цитата.
+        let quoted: HashSet<String> = ir_view::cids(doc).into_iter().collect();
+        for a in &body.attachments {
+            let keep = mode == Mode::Forward || a.cid.as_ref().is_some_and(|c| quoted.contains(c));
+            if keep {
+                d.attachments.push(Attachment {
+                    name: a.name.clone(),
+                    mime: a.mime.clone(),
+                    data: self.local_blob(&a.blob_id).map(|b| b.to_vec()).unwrap_or_default(),
+                    inline_cid: a.cid.clone(),
+                    blob_id: Some(a.blob_id.clone()),
+                });
+            }
+        }
+        Some(d)
     }
 
     fn open_composer(&mut self, draft: Draft) {
@@ -640,6 +780,33 @@ impl App {
                 }
             }
         });
+        // Вложения полосой под шапкой; картинки, показанные в тексте, сюда не попадают.
+        let mut file_act = None;
+        let shown_cids: HashSet<String> = r.doc.as_ref().map(|d| ir_view::cids(d).into_iter().collect()).unwrap_or_default();
+        if let Some(b) = &r.body {
+            let listed: Vec<&AttachmentRow> =
+                b.attachments.iter().filter(|a| a.cid.as_ref().is_none_or(|c| !shown_cids.contains(c))).collect();
+            if !listed.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for a in listed {
+                        let label = format!("📎 {} ({})", files::safe_name(&a.name), files::human_size(a.size));
+                        ui.menu_button(label, |ui| {
+                            let can_open = files::can_open(&a.name);
+                            let open = ui.add_enabled(can_open, egui::Button::new("Открыть"));
+                            let open = if can_open { open } else { open.on_disabled_hover_text("Этот тип файла опасен: его можно только сохранить") };
+                            if open.clicked() {
+                                file_act = Some((a.clone(), FileAct::Open));
+                            }
+                            if ui.button("Сохранить как…").clicked() {
+                                file_act = Some((a.clone(), FileAct::SaveAs));
+                            }
+                        });
+                    }
+                });
+            }
+        }
+        let mut show_images = false;
+        let mut trust_sender = false;
         ui.separator();
         let mut link = None;
         match &r.doc {
@@ -656,10 +823,31 @@ impl App {
                     });
                     ui.add_space(4.0);
                 }
+                if !r.show_images && !shown_cids.is_empty() {
+                    egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(4.0).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(format!("Картинки из письма скрыты ({}).", shown_cids.len()));
+                            show_images = ui.small_button("Показать").clicked();
+                            trust_sender = ui.small_button(format!("Всегда показывать от {}", r.row.from_addr)).clicked();
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    link = ir_view::show(ui, doc);
+                    link = ir_view::show(ui, doc, &r.images);
                 });
             }
+        }
+        if trust_sender {
+            let _ = self.cache.trust(&r.row.from_addr);
+        }
+        if (show_images || trust_sender)
+            && let Some(r) = self.reading.as_mut()
+        {
+            r.show_images = true;
+        }
+        if let Some((a, act)) = file_act {
+            self.file_action(a, act);
         }
         if let Some(a) = action {
             self.run(a);
@@ -693,7 +881,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let frame_start = std::time::Instant::now();
         self.drive_bench(&ctx);
-        self.poll_background();
+        self.poll_background(&ctx);
+        self.ensure_images();
         self.hotkeys(&ctx);
         self.show_composers(&ctx);
 

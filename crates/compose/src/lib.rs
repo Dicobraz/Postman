@@ -36,6 +36,8 @@ pub struct Attachment {
     pub data: Vec<u8>,
     /// Content-ID для картинок, вставленных в текст (`![](cid:…)`).
     pub inline_cid: Option<String>,
+    /// Вложение оригинала при пересылке: данные скачиваются с сервера перед отправкой.
+    pub blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -300,7 +302,13 @@ mod tests {
         d.markdown = format!("Привет, **коллеги**!\n\n<script>x</script>{}", d.markdown);
         d.subject = "Тема\r\nBcc: evil@x".into();
         d.bcc = vec![Address::new("", "secret@corp.example")];
-        d.attachments.push(Attachment { name: "a.txt".into(), mime: "text/plain".into(), data: b"data".to_vec(), inline_cid: None });
+        d.attachments.push(Attachment {
+            name: "a.txt".into(),
+            mime: "text/plain".into(),
+            data: b"data".to_vec(),
+            inline_cid: None,
+            blob_id: None,
+        });
         let raw = build(&d, 1_792_240_200, "id1@corp.example").unwrap();
         let text = String::from_utf8_lossy(&raw);
         assert!(!text.contains("secret@corp.example"), "Bcc не должен попадать в заголовки");

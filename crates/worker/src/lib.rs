@@ -1,7 +1,8 @@
 //! Изолированный воркер разбора писем (HANDOFF §3a).
 //!
-//! UI держит один процесс `postman-worker` и общается с ним кадрами
-//! `u32 LE длина + JSON` по stdin/stdout. Воркер запирает себя до чтения
+//! UI держит один процесс `postman-worker` и общается с ним сообщениями
+//! «JSON-заголовок + бинарная часть» (каждая — `u32 LE длина + байты`)
+//! по stdin/stdout. Бинарная часть — исходная картинка в запросе и RGBA в ответе. Воркер запирает себя до чтения
 //! первого запроса: без сети, без файловой системы, без дочерних процессов,
 //! на Windows — без win32k. Зависание или падение воркера стоит одного письма:
 //! клиент убивает процесс и поднимает новый.
@@ -25,6 +26,8 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 pub enum Request {
     Html(String),
     Text(String),
+    /// Картинка (PNG/JPEG/GIF/WebP) в бинарной части; ответ — RGBA не больше `max_side` по стороне.
+    Image { max_side: u32 },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -60,10 +63,51 @@ fn probe(p: Probe) -> Response {
 #[derive(Debug, Serialize, Deserialize)]
 enum Response {
     Ok(Document),
+    /// RGBA8 в бинарной части.
+    Image { width: u32, height: u32 },
     Err(String),
 }
 
+/// Декодированная картинка.
+pub struct Rgba {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+fn decode_image(bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
+    use image::{ImageFormat, ImageReader, Limits};
+    let mut reader = ImageReader::new(io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP)) {
+        return Err("формат картинки не поддерживается".into());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let mut img = reader.decode().map_err(|e| e.to_string())?;
+    let max_side = max_side.clamp(16, 4096);
+    if img.width() > max_side || img.height() > max_side {
+        img = img.thumbnail(max_side, max_side);
+    }
+    let rgba = img.into_rgba8();
+    Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
+}
+
+fn write_msg(w: &mut impl Write, json: &[u8], bin: &[u8]) -> io::Result<()> {
+    write_frame(w, json)?;
+    write_frame(w, bin)
+}
+
+fn read_msg(r: &mut impl Read) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    Ok((read_frame(r)?, read_frame(r)?))
+}
+
 fn write_frame(w: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+    if payload.len() > MAX_FRAME {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "кадр слишком большой"));
+    }
     w.write_all(&(payload.len() as u32).to_le_bytes())?;
     w.write_all(payload)?;
     w.flush()
@@ -87,20 +131,29 @@ pub fn serve() -> ! {
     let mut stdout = io::stdout().lock();
     if let Err(e) = sandbox::lockdown() {
         // Без песочницы не работаем: лучше показать письмо текстом, чем разбирать HTML без защиты.
-        let _ = write_frame(&mut stdout, &serde_json::to_vec(&Response::Err(format!("песочница: {e}"))).unwrap_or_default());
+        let json = serde_json::to_vec(&Response::Err(format!("песочница: {e}"))).unwrap_or_default();
+        let _ = write_msg(&mut stdout, &json, &[]);
         std::process::exit(3);
     }
     loop {
-        let Ok(frame) = read_frame(&mut stdin) else { std::process::exit(0) };
+        let Ok((frame, bin)) = read_msg(&mut stdin) else { std::process::exit(0) };
+        let mut out_bin = Vec::new();
         let resp = match serde_json::from_slice::<Request>(&frame) {
             Ok(Request::Html(h)) => Response::Ok(postman_ir::from_html(&h)),
             Ok(Request::Text(t)) => Response::Ok(postman_ir::from_plain(&t)),
+            Ok(Request::Image { max_side }) => match decode_image(&bin, max_side) {
+                Ok(img) => {
+                    out_bin = img.pixels;
+                    Response::Image { width: img.width, height: img.height }
+                }
+                Err(e) => Response::Err(e),
+            },
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
         };
         let out = serde_json::to_vec(&resp).unwrap_or_default();
-        if write_frame(&mut stdout, &out).is_err() {
+        if write_msg(&mut stdout, &out, &out_bin).is_err() {
             std::process::exit(0);
         }
     }
@@ -116,7 +169,7 @@ pub(crate) struct Process {
 
 struct Running {
     stdin: Box<dyn Write + Send>,
-    responses: mpsc::Receiver<io::Result<Vec<u8>>>,
+    responses: mpsc::Receiver<io::Result<(Vec<u8>, Vec<u8>)>>,
     kill: Box<dyn FnMut() + Send>,
 }
 
@@ -154,26 +207,43 @@ impl Client {
     }
 
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
-        let payload = serde_json::to_vec(req).map_err(|e| e.to_string())?;
-        let result = self.exchange(&payload);
-        if result.is_err() {
-            // Таймаут, падение или ошибка песочницы: процесс больше не используем.
-            self.running = None;
-        }
-        match serde_json::from_slice::<Response>(&result?).map_err(|e| e.to_string())? {
+        match self.call(req, &[])?.0 {
             Response::Ok(doc) => Ok(doc),
+            Response::Image { .. } => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
 
-    fn exchange(&mut self, payload: &[u8]) -> Result<Vec<u8>, String> {
+    /// Декодировать картинку из письма в песочнице.
+    pub fn decode_image(&mut self, bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
+        match self.call(&Request::Image { max_side }, bytes)? {
+            (Response::Image { width, height }, pixels) if pixels.len() == width as usize * height as usize * 4 => {
+                Ok(Rgba { width, height, pixels })
+            }
+            (Response::Err(e), _) => Err(e),
+            _ => Err("неожиданный ответ".into()),
+        }
+    }
+
+    fn call(&mut self, req: &Request, bin: &[u8]) -> Result<(Response, Vec<u8>), String> {
+        let json = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+        let result = self.exchange(&json, bin);
+        if result.is_err() {
+            // Таймаут, падение или ошибка песочницы: процесс больше не используем.
+            self.running = None;
+        }
+        let (json, bin) = result?;
+        Ok((serde_json::from_slice(&json).map_err(|e| e.to_string())?, bin))
+    }
+
+    fn exchange(&mut self, json: &[u8], bin: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
         if self.running.is_none() {
             self.running = Some(self.start()?);
         }
         let r = self.running.as_mut().expect("запущен");
-        write_frame(&mut r.stdin, payload).map_err(|e| format!("воркер недоступен: {e}"))?;
+        write_msg(&mut r.stdin, json, bin).map_err(|e| format!("воркер недоступен: {e}"))?;
         match r.responses.recv_timeout(self.timeout) {
-            Ok(Ok(frame)) => Ok(frame),
+            Ok(Ok(msg)) => Ok(msg),
             Ok(Err(e)) => Err(format!("воркер завершился: {e}")),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("воркер не ответил за {:?}", self.timeout)),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("воркер завершился".into()),
@@ -189,7 +259,7 @@ impl Client {
             .name("worker-reader".into())
             .spawn(move || {
                 loop {
-                    let r = read_frame(&mut stdout);
+                    let r = read_msg(&mut stdout);
                     let stop = r.is_err();
                     if tx.send(r).is_err() || stop {
                         break;

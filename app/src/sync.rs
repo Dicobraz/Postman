@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use postman_cache::{Addr, BodyRow, Cache, EmailRow, MailboxRow};
+use std::sync::Arc;
+
+use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_compose::{Address, Draft};
 use postman_jmap::{Auth, Client, EmailAddress, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -41,6 +43,8 @@ pub enum Command {
     /// `replace` — id прежней версии черновика на сервере.
     Send { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
     SaveDraft { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
+    /// Скачать вложение/картинку.
+    Blob { blob_id: String, name: String, mime: String },
 }
 
 pub enum Event {
@@ -48,6 +52,8 @@ pub enum Event {
     MailboxesChanged,
     EmailsChanged,
     BodyReady(String),
+    BlobReady { blob_id: String, data: Arc<Vec<u8>> },
+    BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
     Sent { ticket: u64 },
@@ -104,7 +110,7 @@ async fn run(
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
-                if let Err(e) = handle(&client, &cache, &identities, cmd, notify).await {
+                if let Err(e) = handle(&client, &mut cache, &identities, cmd, notify).await {
                     notify(Event::Error(e.to_string()));
                 }
             }
@@ -170,7 +176,7 @@ async fn refresh(client: &Client, cache: &mut Cache, since: &str) -> postman_jma
 
 async fn handle(
     client: &Client,
-    cache: &Cache,
+    cache: &mut Cache,
     identities: &[Identity],
     cmd: Command,
     notify: &impl Fn(Event),
@@ -186,6 +192,20 @@ async fn handle(
                 references: b.references,
                 html: b.html,
                 text: b.text,
+                attachments: b
+                    .attachments
+                    .iter()
+                    .filter_map(|p| {
+                        Some(AttachmentRow {
+                            blob_id: p.blob_id.clone()?,
+                            name: p.name.clone().unwrap_or_else(|| "вложение".into()),
+                            mime: p.mime.clone(),
+                            size: p.size,
+                            cid: p.cid.as_deref().map(|c| c.trim_matches(['<', '>']).to_string()),
+                            inline: p.disposition.as_deref() == Some("inline"),
+                        })
+                    })
+                    .collect(),
             };
             cache.put_body(&id, &row).map_err(db_err)?;
             notify(Event::BodyReady(id));
@@ -198,6 +218,16 @@ async fn handle(
                 Ok(()) => Event::Sent { ticket },
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
             });
+        }
+        Command::Blob { blob_id, name, mime } => {
+            let acc = client.mail_account()?.to_string();
+            match client.download(&acc, &blob_id, &name, &mime).await {
+                Ok(data) => {
+                    cache.put_blob(&blob_id, &data).map_err(db_err)?;
+                    notify(Event::BlobReady { blob_id, data: Arc::new(data) });
+                }
+                Err(e) => notify(Event::BlobFailed { blob_id, error: e.to_string() }),
+            }
         }
         Command::SaveDraft { draft, replace, ticket } => {
             let r = save_draft(client, cache, &draft, replace.as_deref()).await;
@@ -226,6 +256,19 @@ fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
         .map_err(|e| postman_jmap::Error::Protocol(format!("сборка письма: {e}")))
 }
 
+/// Догрузить вложения оригинала (пересылка), у которых есть только blob_id.
+async fn fill_attachments(client: &Client, cache: &Cache, draft: &mut Draft) -> postman_jmap::Result<()> {
+    let acc = client.mail_account()?.to_string();
+    for a in draft.attachments.iter_mut().filter(|a| a.data.is_empty()) {
+        let Some(blob) = a.blob_id.clone() else { continue };
+        a.data = match cache.blob(&blob).map_err(db_err)? {
+            Some(d) => d,
+            None => client.download(&acc, &blob, &a.name, &a.mime).await?,
+        };
+    }
+    Ok(())
+}
+
 async fn send(
     client: &Client,
     cache: &Cache,
@@ -233,6 +276,9 @@ async fn send(
     draft: &Draft,
     replace: Option<&str>,
 ) -> postman_jmap::Result<()> {
+    let mut draft = draft.clone();
+    fill_attachments(client, cache, &mut draft).await?;
+    let draft = &draft;
     let identity = identities
         .iter()
         .find(|i| i.email.eq_ignore_ascii_case(&draft.from.email))
@@ -251,6 +297,9 @@ async fn send(
 }
 
 async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Option<&str>) -> postman_jmap::Result<String> {
+    let mut draft = draft.clone();
+    fill_attachments(client, cache, &mut draft).await?;
+    let draft = &draft;
     let drafts = mailbox_by_role(cache, "drafts")?;
     client.save_draft(raw_message(draft)?, &drafts, replace).await
 }
