@@ -1,0 +1,15 @@
+[package]
+name = "postman-gpui"
+description = "Спайк UI на gpui (сравнение с egui по одному сценарию)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-ir.workspace = true
+postman-cache.workspace = true
+postman-worker.workspace = true
+postman-demo.workspace = true
+gpui-kit = "0.7"
+jiff = "0.2"
+memory-stats = "1"

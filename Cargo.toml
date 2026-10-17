@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "app"]
+members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "app", "app-gpui"]
 
 [workspace.package]
 edition = "2024"
@@ -13,6 +13,7 @@ postman-jmap = { path = "crates/jmap" }
 postman-cache = { path = "crates/cache" }
 postman-compose = { path = "crates/compose" }
 postman-search = { path = "crates/search" }
+postman-demo = { path = "crates/demo" }
 postman-worker = { path = "crates/worker" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,3 +24,7 @@ url = "2"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# gpui 0.2.2 тянет xattr 0.2.3, несовместимый со свежим libc (нет ENOATTR на Linux).
+[patch.crates-io]
+xattr = { path = "third_party/xattr" }

@@ -19,7 +19,8 @@ use postman_compose::{Address, Attachment, Draft, Mode, Original};
 use crate::composer::{Action, Composer};
 use crate::ir_view::Images;
 use crate::render::{Rendered, Renderer};
-use crate::{bench, demo, files, ir_view, sync};
+use crate::{bench, files, ir_view, sync};
+use postman_demo as demo;
 
 const ROW_HEIGHT: f32 = 40.0;
 /// Сколько строк сверх видимых держать в окне списка.

@@ -1,0 +1,10 @@
+[package]
+name = "postman-demo"
+description = "Синтетический ящик для замеров и демонстрации без сервера (общий для UI-вариантов)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-cache.workspace = true
+jiff = "0.2"

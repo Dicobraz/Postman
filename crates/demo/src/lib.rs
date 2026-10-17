@@ -118,7 +118,7 @@ pub fn body(id: &str) -> BodyRow {
     }
 }
 
-const LOGO: &[u8] = include_bytes!("../../crates/worker/tests/fixtures/img.png");
+const LOGO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.png");
 
 /// Содержимое демо-вложений.
 pub fn blob(blob_id: &str) -> Option<Vec<u8>> {

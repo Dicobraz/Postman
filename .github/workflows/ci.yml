@@ -22,6 +22,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: Системные библиотеки для gpui (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev pkg-config
+
       - name: Clippy
         # Не через RUSTFLAGS: он перекрыл бы +crt-static из .cargo/config.toml.
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -51,4 +55,5 @@ jobs:
           name: postman-windows-x64
           path: |
             target/release/postman.exe
+            target/release/postman-gpui.exe
             target/release/postman-worker.exe

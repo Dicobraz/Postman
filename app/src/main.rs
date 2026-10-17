@@ -11,7 +11,6 @@
 mod app;
 mod bench;
 mod composer;
-mod demo;
 mod extract;
 mod files;
 mod gpu;
@@ -50,7 +49,7 @@ fn main() -> eframe::Result {
     let (db_path, account) = match demo {
         Some(n) => {
             let path = dir.join("demo.redb");
-            demo::ensure(&path, n).expect("демо-кэш");
+            postman_demo::ensure(&path, n).expect("демо-кэш");
             (path, None)
         }
         None => (dir.join("cache.redb"), sync::Account::from_env()),
