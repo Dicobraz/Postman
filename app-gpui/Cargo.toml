@@ -13,4 +13,4 @@ postman-demo.workspace = true
 postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"
-memory-stats = "1"
+postman-core.workspace = true

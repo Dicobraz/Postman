@@ -6,10 +6,10 @@
 //!   (или POSTMAN_TOKEN=… вместо пользователя/пароля)
 //!
 //! Опции: --gpu dx12|vulkan|gl (или POSTMAN_GPU), --bench (замер и выход),
+//! --no-vsync (кадры без ожидания развёртки; в бенче по умолчанию vsync, как у gpui),
 //! POSTMAN_GPU_SOFTWARE=1 — разрешить программный адаптер (CI, контейнеры).
 
 mod app;
-mod bench;
 mod composer;
 mod gpu;
 mod invite_card;
@@ -17,7 +17,7 @@ mod ir_view;
 
 use std::path::PathBuf;
 
-use postman_core::{extract, files, indexer, render, sync};
+use postman_core::{bench, extract, files, indexer, render, sync};
 use std::time::Instant;
 
 fn data_dir() -> PathBuf {
@@ -37,6 +37,7 @@ fn main() -> eframe::Result {
         std::process::exit(2)
     });
     let bench = args.iter().any(|a| a == "--bench");
+    let no_vsync = args.iter().any(|a| a == "--no-vsync");
     let software = std::env::var_os("POSTMAN_GPU_SOFTWARE").is_some();
     let demo = args.iter().position(|a| a == "--demo").map(|i| {
         args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(50_000usize)
@@ -59,7 +60,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         renderer: eframe::Renderer::Wgpu,
-        wgpu_options: gpu::configuration(api, software, bench),
+        wgpu_options: gpu::configuration(api, software, no_vsync),
         ..Default::default()
     };
     eframe::run_native(

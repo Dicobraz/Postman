@@ -1142,9 +1142,9 @@ impl App {
             bench::Step::Select(i) => self.select(i),
             bench::Step::Resize(w, h) => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(w, h))),
             bench::Step::Done(report) => {
-                println!("bench gpu=\"{}\" rows={} {report}", self.gpu, self.count);
+                // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.
+                bench::finish(format!("bench ui=egui gpu=\"{}\" {report}", self.gpu));
                 self.bench = None;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
         }

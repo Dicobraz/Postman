@@ -15,6 +15,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use postman_cache::{Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
+use postman_core::bench::{self, Bench, Step};
 use postman_worker::{Client as Worker, Level, Request};
 
 actions!(postman, [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, FocusSearch, ClearSearch, ShowMail, ShowCalendar, NewMeeting]);
@@ -496,87 +497,30 @@ impl Render for Mailer {
                     .child("gpui"),
             );
         if let Some(b) = &mut self.bench {
-            b.ui_cpu.push(started.elapsed().as_secs_f32() * 1000.0);
+            b.ui_time(started.elapsed());
         }
         root
     }
 }
 
-// --- замер, тот же сценарий, что в egui-версии ---
-
-const WARMUP: usize = 30;
-const SCROLL_FRAMES: usize = 400;
-const STEP: usize = 25;
-const RESIZE_FRAMES: usize = 120;
-
-struct Bench {
-    start: Instant,
-    first_frame: Option<Duration>,
-    frame: usize,
-    last: Option<Instant>,
-    scroll: Vec<f32>,
-    resize: Vec<f32>,
-    ui_cpu: Vec<f32>,
-    rss_peak: usize,
-}
+// --- замер: общий сценарий из postman_core::bench, тот же, что в egui-версии ---
 
 impl Mailer {
     fn drive_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(b) = &mut self.bench else { return };
-        let now = Instant::now();
-        b.first_frame.get_or_insert(now - b.start);
-        let dt = b.last.map(|l| (now - l).as_secs_f32() * 1000.0);
-        b.last = Some(now);
-        b.frame += 1;
-        if b.frame.is_multiple_of(20) {
-            b.rss_peak = b.rss_peak.max(rss());
+        match b.frame(self.count) {
+            Step::Wait => {}
+            Step::Select(i) => self.select(i, cx),
+            Step::Resize(w, h) => window.resize(size(px(w), px(h))),
+            Step::Done(report) => {
+                // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.
+                bench::finish(format!("bench ui=gpui {report}"));
+                self.bench = None;
+                return;
+            }
         }
-        let f = b.frame;
         window.request_animation_frame();
-        if f <= WARMUP {
-            return;
-        }
-        let f = f - WARMUP;
-        if f <= SCROLL_FRAMES {
-            if let Some(dt) = dt.filter(|_| f > 1) {
-                b.scroll.push(dt);
-            }
-            let i = (f * STEP) % self.count.max(1);
-            self.select(i, cx);
-            return;
-        }
-        let f = f - SCROLL_FRAMES;
-        if f <= RESIZE_FRAMES {
-            if let Some(dt) = dt.filter(|_| f > 1) {
-                b.resize.push(dt);
-            }
-            let w = if (f / 4).is_multiple_of(2) { 1000. } else { 1280. };
-            window.resize(size(px(w), px(800.)));
-            return;
-        }
-        let stats = |v: &mut Vec<f32>| {
-            v.sort_by(f32::total_cmp);
-            if v.is_empty() {
-                return (0.0, 0.0, 0.0);
-            }
-            (v[v.len() / 2], v[((v.len() - 1) as f32 * 0.99) as usize], v[v.len() - 1])
-        };
-        let (s, r, c) = (stats(&mut b.scroll), stats(&mut b.resize), stats(&mut b.ui_cpu));
-        println!(
-            "bench ui=gpui rows={} first_frame_ms={:.0} scroll_p50={:.2} scroll_p99={:.2} scroll_max={:.2} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_mb={:.0} rss_peak_mb={:.0}",
-            self.count,
-            b.first_frame.unwrap_or_default().as_secs_f32() * 1000.0,
-            s.0, s.1, s.2, r.0, r.1, r.2, c.0, c.1,
-            rss() as f32 / 1_048_576.0,
-            b.rss_peak.max(rss()) as f32 / 1_048_576.0,
-        );
-        self.bench = None;
-        cx.quit();
     }
-}
-
-fn rss() -> usize {
-    memory_stats::memory_stats().map(|m| m.physical_mem).unwrap_or(0)
 }
 
 fn data_dir() -> std::path::PathBuf {
@@ -622,16 +566,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         gpui_kit::open_window(options, cx, |window, cx| {
-            let bench = bench.then(|| Bench {
-                start,
-                first_frame: None,
-                frame: 0,
-                last: None,
-                scroll: Vec::new(),
-                resize: Vec::new(),
-                ui_cpu: Vec::new(),
-                rss_peak: 0,
-            });
+            let bench = bench.then(|| Bench::new(start));
             let cache = cache.clone();
             cx.new(|cx| Mailer::new(cache, bench, window, cx))
         })
