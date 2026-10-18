@@ -2,3 +2,8 @@
 # без VC++ Redistributable не нужен vcruntime140.dll.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Кросс-сборка тестовых бинарей под Windows из Linux (mingw-w64): всё статически, без DLL рантайма.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
