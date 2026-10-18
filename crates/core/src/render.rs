@@ -5,7 +5,9 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+use jiff::tz::TimeZone;
 use postman_cache::BodyRow;
+use postman_calendar::Invitation;
 use postman_ir::{Align, Block, Document, Inline};
 use std::sync::Arc;
 
@@ -19,11 +21,14 @@ pub const MAX_IMAGE_SIDE: u32 = 1600;
 pub enum Rendered {
     Body { id: String, doc: Document, level: Level },
     Image { key: String, result: Result<Rgba, String> },
+    /// Приглашение из вложения: `key` — письмо, к которому оно относится.
+    Invite { key: String, result: Result<Box<Invitation>, String> },
 }
 
 enum Job {
     Body(String, BodyRow),
     Image(String, Arc<Vec<u8>>),
+    Calendar(String, Arc<Vec<u8>>),
 }
 
 pub struct Renderer {
@@ -43,10 +48,12 @@ impl Renderer {
                     // При быстром листании важно только последнее тело; картинки — все по порядку.
                     let mut body = None;
                     let mut images = Vec::new();
+                    let mut calendars = Vec::new();
                     for job in std::iter::once(first).chain(jobs.try_iter()) {
                         match job {
                             Job::Body(id, b) => body = Some((id, b)),
                             Job::Image(key, bytes) => images.push((key, bytes)),
+                            Job::Calendar(key, bytes) => calendars.push((key, bytes)),
                         }
                     }
                     let mut out = Vec::new();
@@ -57,6 +64,12 @@ impl Renderer {
                     for (key, bytes) in images {
                         let result = client.decode_image(&bytes, MAX_IMAGE_SIDE);
                         out.push(Rendered::Image { key, result });
+                    }
+                    for (key, bytes) in calendars {
+                        let result = client
+                            .parse_calendar(&bytes)
+                            .and_then(|v| Invitation::from_worker(&v, &TimeZone::system()).map(Box::new));
+                        out.push(Rendered::Invite { key, result });
                     }
                     for r in out {
                         if done.send(r).is_err() {
@@ -76,6 +89,11 @@ impl Renderer {
 
     pub fn decode(&self, key: String, bytes: Arc<Vec<u8>>) {
         let _ = self.tx.send(Job::Image(key, bytes));
+    }
+
+    /// Разобрать `.ics` в песочнице.
+    pub fn invitation(&self, key: String, bytes: Arc<Vec<u8>>) {
+        let _ = self.tx.send(Job::Calendar(key, bytes));
     }
 }
 

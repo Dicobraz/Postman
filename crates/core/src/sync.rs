@@ -8,7 +8,10 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
+use postman_calendar::{Invitation, Partstat};
 use postman_compose::{Address, Draft};
+
+use crate::invite::{self, Delivery};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -62,6 +65,8 @@ pub enum Command {
     Search { query: String, mailbox: Option<String>, ticket: u64 },
     /// Скачать вложение/картинку.
     Blob { blob_id: String, name: String, mime: String },
+    /// Ответить на приглашение из письма; `in_reply_to` — Message-ID письма с приглашением.
+    RespondInvite { invite: Box<Invitation>, status: Partstat, in_reply_to: Option<String> },
 }
 
 pub enum Event {
@@ -83,6 +88,8 @@ pub enum Event {
     DraftSaved { ticket: u64, id: String },
     /// Ошибка конкретной отправки/сохранения — показывается в окне письма.
     ComposeFailed { ticket: u64, error: String },
+    InviteAnswered { uid: String, status: Partstat, delivery: Delivery },
+    InviteFailed { uid: String, error: String },
     Error(String),
 }
 
@@ -337,6 +344,13 @@ async fn handle(
                 Err(e) => notify(Event::BlobFailed { blob_id, error: e.to_string() }),
             }
         }
+        Command::RespondInvite { invite, status, in_reply_to } => {
+            let uid = invite.event.uid.clone();
+            notify(match respond_invite(client, cache, identities, &invite, status, in_reply_to).await {
+                Ok(delivery) => Event::InviteAnswered { uid, status, delivery },
+                Err(e) => Event::InviteFailed { uid, error: e.to_string() },
+            });
+        }
         Command::SaveDraft { draft, replace, ticket } => {
             let r = save_draft(client, cache, &draft, replace.as_deref()).await;
             notify(match r {
@@ -402,6 +416,33 @@ async fn send(
         client.destroy_email(old).await?;
     }
     Ok(())
+}
+
+async fn respond_invite(
+    client: &Client,
+    cache: &Cache,
+    identities: &[Identity],
+    inv: &Invitation,
+    status: Partstat,
+    in_reply_to: Option<String>,
+) -> postman_jmap::Result<Delivery> {
+    // Отвечаем от того адреса, на который пришло приглашение (их может быть несколько).
+    let identity = identities
+        .iter()
+        .find(|i| inv.my_status(&i.email).is_some())
+        .or(identities.first())
+        .ok_or_else(|| postman_jmap::Error::Protocol("на сервере нет Identity для отправки".into()))?;
+    let me = Address::new(&identity.name, &identity.email);
+    if invite::via_server(client, inv, &me.email, status).await?.is_some() {
+        return Ok(Delivery::Server);
+    }
+    let now = jiff::Timestamp::now().as_second();
+    let draft = invite::reply_draft(inv, &me, status, in_reply_to, now)
+        .ok_or_else(|| postman_jmap::Error::Protocol("в приглашении нет организатора".into()))?;
+    send(client, cache, identities, &draft, None).await?;
+    // Ответ ушёл — дальше только своя копия; её сбой не повод слать ответ повторно.
+    let imported = invite::import(client, inv, &me.email, status).await.unwrap_or(false);
+    Ok(Delivery::Mail { imported })
 }
 
 async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Option<&str>) -> postman_jmap::Result<String> {

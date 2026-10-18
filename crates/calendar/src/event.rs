@@ -154,21 +154,20 @@ fn participant(v: &Value) -> Participant {
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let roles = v.get("roles");
     let role = |r: &str| roles.and_then(|x| x.get(r)).and_then(Value::as_bool).unwrap_or(false);
-    // Адрес: `email` или `sendTo.imip` = "mailto:…".
+    // Адрес: `email`, `calendarAddress` (JSCalendar 2.0) или `sendTo.imip` = "mailto:…".
+    let mailto = |m: &str| m.trim_start_matches("mailto:").trim_start_matches("MAILTO:").to_string();
     let email = match s("email") {
         e if !e.is_empty() => e,
-        _ => v
-            .get("sendTo")
-            .and_then(|t| t.get("imip"))
-            .and_then(Value::as_str)
-            .map(|m| m.trim_start_matches("mailto:").to_string())
-            .unwrap_or_default(),
+        _ => match s("calendarAddress") {
+            a if !a.is_empty() => mailto(&a),
+            _ => v.get("sendTo").and_then(|t| t.get("imip")).and_then(Value::as_str).map(mailto).unwrap_or_default(),
+        },
     };
     Participant {
         name: s("name"),
         email,
         owner: role("owner"),
-        attendee: role("attendee") || roles.is_none(),
+        attendee: role("attendee") || role("required") || role("optional") || roles.is_none(),
         optional: role("optional") || role("informational"),
         status: match s("participationStatus").as_str() {
             "accepted" => Partstat::Accepted,

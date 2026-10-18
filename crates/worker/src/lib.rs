@@ -26,6 +26,8 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 pub enum Request {
     Html(String),
     Text(String),
+    /// Приглашение iCalendar (.ics) в бинарной части; ответ — METHOD и JSCalendar (JSON).
+    Calendar,
     /// Картинка (PNG/JPEG/GIF/WebP) в бинарной части; ответ — RGBA не больше `max_side` по стороне.
     Image { max_side: u32 },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
@@ -65,6 +67,7 @@ enum Response {
     Ok(Document),
     /// RGBA8 в бинарной части.
     Image { width: u32, height: u32 },
+    Calendar(serde_json::Value),
     Err(String),
 }
 
@@ -93,6 +96,27 @@ fn decode_image(bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
     }
     let rgba = img.into_rgba8();
     Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
+}
+
+/// iCalendar → `{ "method": "REQUEST", "data": <JSCalendar> }`. Чужие данные — только в песочнице.
+/// Без песочницы — только для тестов и самого воркера.
+pub fn parse_calendar(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err("приглашение слишком большое".into());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "приглашение не в UTF-8".to_string())?;
+    let method = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("METHOD:"))
+        .map(|m| m.trim().to_ascii_uppercase())
+        .unwrap_or_default();
+    let ical = match calcard::Parser::new(text).entry() {
+        calcard::Entry::ICalendar(c) => c,
+        _ => return Err("не iCalendar".into()),
+    };
+    let js = ical.into_jscalendar::<String, String>();
+    let data = serde_json::to_value(&js.0).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "method": method, "data": data }))
 }
 
 fn write_msg(w: &mut impl Write, json: &[u8], bin: &[u8]) -> io::Result<()> {
@@ -141,6 +165,10 @@ pub fn serve() -> ! {
         let resp = match serde_json::from_slice::<Request>(&frame) {
             Ok(Request::Html(h)) => Response::Ok(postman_ir::from_html(&h)),
             Ok(Request::Text(t)) => Response::Ok(postman_ir::from_plain(&t)),
+            Ok(Request::Calendar) => match parse_calendar(&bin) {
+                Ok(v) => Response::Calendar(v),
+                Err(e) => Response::Err(e),
+            },
             Ok(Request::Image { max_side }) => match decode_image(&bin, max_side) {
                 Ok(img) => {
                     out_bin = img.pixels;
@@ -209,7 +237,7 @@ impl Client {
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
         match self.call(req, &[])?.0 {
             Response::Ok(doc) => Ok(doc),
-            Response::Image { .. } => Err("неожиданный ответ".into()),
+            Response::Image { .. } | Response::Calendar(_) => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
@@ -221,6 +249,15 @@ impl Client {
                 Ok(Rgba { width, height, pixels })
             }
             (Response::Err(e), _) => Err(e),
+            _ => Err("неожиданный ответ".into()),
+        }
+    }
+
+    /// Разобрать приглашение (.ics) в песочнице.
+    pub fn parse_calendar(&mut self, ics: &[u8]) -> Result<serde_json::Value, String> {
+        match self.call(&Request::Calendar, ics)?.0 {
+            Response::Calendar(v) => Ok(v),
+            Response::Err(e) => Err(e),
             _ => Err("неожиданный ответ".into()),
         }
     }

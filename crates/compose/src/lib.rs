@@ -6,6 +6,8 @@ use std::borrow::Cow;
 
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as MbAddress;
+use mail_builder::headers::content_type::ContentType;
+use mail_builder::mime::MimePart;
 use postman_ir::Document;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -53,6 +55,15 @@ pub struct Draft {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub attachments: Vec<Attachment>,
+    /// Часть `text/calendar` рядом с текстом (iMIP: ответ на приглашение).
+    pub calendar: Option<CalendarPart>,
+}
+
+/// Объект iCalendar в письме (RFC 6047): метод и текст VCALENDAR.
+#[derive(Debug, Clone)]
+pub struct CalendarPart {
+    pub method: String,
+    pub ics: String,
 }
 
 impl Draft {
@@ -220,7 +231,7 @@ pub fn build(d: &Draft, date: i64, message_id: &str) -> std::io::Result<Vec<u8>>
         .date(date)
         .message_id(message_id)
         .text_body(d.markdown.as_str())
-        .html_body(html);
+        .html_body(html.as_str());
     if !d.to.is_empty() {
         m = m.to(mb_list(&d.to));
     }
@@ -232,6 +243,33 @@ pub fn build(d: &Draft, date: i64, message_id: &str) -> std::io::Result<Vec<u8>>
     }
     if !d.references.is_empty() {
         m = m.references(d.references.as_slice());
+    }
+    if let Some(cal) = &d.calendar {
+        // multipart/alternative [text, html, text/calendar; method=…] — так его понимают Outlook и Gmail.
+        let alt = MimePart::new(
+            "multipart/alternative",
+            vec![
+                MimePart::new("text/plain", d.markdown.as_str()),
+                MimePart::new("text/html", html.as_str()),
+                MimePart::new(
+                    ContentType::new("text/calendar")
+                        .attribute("method", cal.method.as_str())
+                        .attribute("charset", "utf-8"),
+                    cal.ics.as_str(),
+                ),
+            ],
+        );
+        let body = if d.attachments.is_empty() {
+            alt
+        } else {
+            let mut parts = vec![alt];
+            parts.extend(d.attachments.iter().map(|a| match &a.inline_cid {
+                Some(cid) => MimePart::new(a.mime.as_str(), a.data.as_slice()).inline().cid(cid.as_str()),
+                None => MimePart::new(a.mime.as_str(), a.data.as_slice()).attachment(header_safe(&a.name)),
+            }));
+            MimePart::new("multipart/mixed", parts)
+        };
+        return m.body(body).write_to_vec();
     }
     for a in &d.attachments {
         let name = header_safe(&a.name).into_owned();
@@ -255,7 +293,7 @@ pub fn new_message_id(from: &Address, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mail_parser::MessageParser;
+    use mail_parser::{MessageParser, MimeHeaders};
 
     fn me() -> Address {
         Address::new("Я", "me@corp.example")
@@ -338,5 +376,25 @@ mod tests {
     fn message_id_domain() {
         let id = new_message_id(&me(), 5);
         assert!(id.starts_with("5.") && id.ends_with("@corp.example"));
+    }
+
+    #[test]
+    fn imip_reply_part() {
+        let d = Draft {
+            from: me(),
+            to: vec![Address::new("Иван", "ivan@partner.example")],
+            subject: "Принято: Встреча".into(),
+            markdown: "Принято".into(),
+            calendar: Some(CalendarPart { method: "REPLY".into(), ics: "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n".into() }),
+            ..Default::default()
+        };
+        let raw = build(&d, 0, "x@corp.example").unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/alternative"), "{text}");
+        assert!(text.to_ascii_lowercase().contains("text/calendar; method=\"reply\"") || text.contains("method=REPLY"), "{text}");
+        let msg = MessageParser::default().parse(&raw).unwrap();
+        let cal = msg.parts.iter().find(|p| p.is_content_type("text", "calendar")).unwrap();
+        assert!(cal.text_contents().unwrap().contains("METHOD:REPLY"));
+        assert_eq!(msg.body_text(0).as_deref(), Some("Принято"));
     }
 }

@@ -5,5 +5,6 @@ pub mod contacts;
 pub mod extract;
 pub mod files;
 pub mod indexer;
+pub mod invite;
 pub mod render;
 pub mod sync;

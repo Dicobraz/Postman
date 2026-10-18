@@ -98,3 +98,13 @@ fn all_supported_formats_decode_under_seccomp() {
         assert_eq!((img.width, img.height), (100, 67), "{ext}");
     }
 }
+
+#[test]
+fn parses_invitation_under_seccomp() {
+    let mut c = client();
+    let ics = std::fs::read(format!("{}/tests/fixtures/invite-outlook.ics", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let v = c.parse_calendar(&ics).unwrap();
+    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+    assert_eq!(v["method"], "REQUEST");
+    assert!(c.parse_calendar(b"not a calendar").is_err());
+}

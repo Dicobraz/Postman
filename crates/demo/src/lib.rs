@@ -98,7 +98,9 @@ pub fn body(id: &str) -> BodyRow {
         cid: cid.map(Into::into),
         inline: cid.is_some(),
     };
-    let (html, attachments) = if n.is_multiple_of(2) {
+    let (html, attachments) = if n.is_multiple_of(10) {
+        (INVITE_HTML, vec![att("ics", "invite.ics", "text/calendar", INVITE.len() as u64, None)])
+    } else if n.is_multiple_of(2) {
         (OUTLOOK, vec![
             att("logo", "logo.png", "image/png", LOGO.len() as u64, Some("logo@corp")),
             att("xlsx", "Итоги Q3.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 18_432, None),
@@ -119,11 +121,15 @@ pub fn body(id: &str) -> BodyRow {
 }
 
 const LOGO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.png");
+/// Приглашение Outlook (iMIP REQUEST) — каждое десятое демо-письмо.
+const INVITE: &[u8] = include_bytes!("../../worker/tests/fixtures/invite-outlook.ics");
+const INVITE_HTML: &str = "<p>Иван Петров приглашает вас на встречу «Обсуждение пилота SIEM».</p>";
 
 /// Содержимое демо-вложений.
 pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
     match blob_id {
         "logo" => Some(LOGO.to_vec()),
+        "ics" => Some(INVITE.to_vec()),
         "xlsx" | "exe" | "rtlo" => Some(b"demo".to_vec()),
         _ => None,
     }

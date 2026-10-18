@@ -19,7 +19,7 @@ use postman_compose::{Address, Attachment, Draft, Mode, Original};
 use crate::composer::{Action, Composer};
 use crate::ir_view::Images;
 use crate::render::{Rendered, Renderer};
-use crate::{bench, files, ir_view, sync};
+use crate::{bench, files, invite_card, ir_view, sync};
 use postman_demo as demo;
 
 const ROW_HEIGHT: f32 = 40.0;
@@ -56,6 +56,8 @@ struct Reading {
     show_images: bool,
     images: Images,
     requested: HashSet<String>,
+    invite: Option<invite_card::State>,
+    answer: Option<invite_card::Answer>,
 }
 
 #[derive(Clone, Copy)]
@@ -312,8 +314,18 @@ impl App {
         }
         let body = self.load_body(&row.id);
         let show_images = self.cache.is_trusted(&row.from_addr).unwrap_or(false);
-        self.reading = Some(Reading { row, body, doc: None, show_images, images: Images::new(), requested: HashSet::new() });
+        self.reading = Some(Reading {
+            row,
+            body,
+            doc: None,
+            show_images,
+            images: Images::new(),
+            requested: HashSet::new(),
+            invite: None,
+            answer: None,
+        });
         self.render_body();
+        self.ensure_invite();
     }
 
     fn load_body(&self, id: &str) -> Option<BodyRow> {
@@ -410,7 +422,29 @@ impl App {
                         self.reload_list();
                     }
                 }
+                sync::Event::InviteAnswered { uid, status, delivery } => {
+                    let _ = self.cache.set_state(&invite_card::state_key(&uid), invite_card::encode(status));
+                    if let Some(r) = self.reading.as_mut().filter(|r| reading_uid(r) == Some(uid.as_str())) {
+                        r.answer = Some(invite_card::Answer::Done(status));
+                    }
+                    self.status = match delivery {
+                        postman_core::invite::Delivery::Server => "Ответ на приглашение отправлен через календарь".into(),
+                        postman_core::invite::Delivery::Mail { imported: true } => "Ответ отправлен организатору, встреча добавлена в календарь".into(),
+                        postman_core::invite::Delivery::Mail { imported: false } => "Ответ отправлен организатору".into(),
+                    };
+                }
+                sync::Event::InviteFailed { uid, error } => {
+                    if let Some(r) = self.reading.as_mut().filter(|r| reading_uid(r) == Some(uid.as_str())) {
+                        r.answer = None;
+                    }
+                    self.status = format!("Ответ на приглашение не отправлен: {error}");
+                }
                 sync::Event::BlobFailed { blob_id, error } => {
+                    if let Some(r) = self.reading.as_mut()
+                        && matches!(&r.invite, Some(invite_card::State::Loading(b)) if *b == blob_id)
+                    {
+                        r.invite = Some(invite_card::State::Failed(error.clone()));
+                    }
                     self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
                     self.status = format!("Не удалось скачать вложение: {error}");
                 }
@@ -458,6 +492,7 @@ impl App {
                             r.body = body;
                         }
                         self.render_body();
+                        self.ensure_invite();
                     }
                 }
             }
@@ -475,6 +510,17 @@ impl App {
                             crate::indexer::full(i, &r.row, body, &postman_ir::to_markdown(&doc));
                         }
                         r.doc = Some(doc);
+                    }
+                }
+                Rendered::Invite { key, result } => {
+                    let Some(r) = self.reading.as_mut().filter(|r| r.row.id == key) else { continue };
+                    match result {
+                        Ok(inv) => {
+                            let stored = self.cache.state(&invite_card::state_key(&inv.event.uid)).ok().flatten();
+                            r.answer = stored.as_deref().and_then(invite_card::decode).map(invite_card::Answer::Done);
+                            r.invite = Some(invite_card::State::Ready(inv));
+                        }
+                        Err(e) => r.invite = Some(invite_card::State::Failed(e)),
                     }
                 }
                 Rendered::Image { key, result } => {
@@ -544,7 +590,48 @@ impl App {
         }
     }
 
+    /// Найти во вложениях приглашение (.ics) и отдать его на разбор в песочницу.
+    fn ensure_invite(&mut self) {
+        let Some(r) = &self.reading else { return };
+        if r.invite.is_some() {
+            return;
+        }
+        let Some(a) = r.body.as_ref().and_then(|b| b.attachments.iter().find(|a| invite_card::is_invite(a))).cloned() else {
+            return;
+        };
+        let id = r.row.id.clone();
+        match self.local_blob(&a.blob_id) {
+            Some(bytes) => self.renderer.invitation(id, bytes),
+            None => self.request_blob(&a),
+        }
+        if let Some(r) = self.reading.as_mut() {
+            r.invite = Some(invite_card::State::Loading(a.blob_id));
+        }
+    }
+
+    fn answer_invite(&mut self, status: postman_calendar::Partstat) {
+        let Some(r) = self.reading.as_mut() else { return };
+        let Some(invite_card::State::Ready(inv)) = &r.invite else { return };
+        let in_reply_to = r.body.as_ref().and_then(|b| b.message_id.clone());
+        match &self.commands {
+            Some(tx) => {
+                let _ = tx.send(sync::Command::RespondInvite { invite: inv.clone(), status, in_reply_to });
+                r.answer = Some(invite_card::Answer::Sending(status));
+            }
+            None => {
+                let _ = self.cache.set_state(&invite_card::state_key(&inv.event.uid), invite_card::encode(status));
+                r.answer = Some(invite_card::Answer::Done(status));
+                self.status = "Демо: ответ запомнен, но не отправлен".into();
+            }
+        }
+    }
+
     fn blob_ready(&mut self, blob_id: &str, data: Arc<Vec<u8>>) {
+        if let Some(r) = &self.reading
+            && matches!(&r.invite, Some(invite_card::State::Loading(b)) if b == blob_id)
+        {
+            self.renderer.invitation(r.row.id.clone(), data.clone());
+        }
         if let Some(r) = &self.reading
             && let Some(body) = &r.body
         {
@@ -958,9 +1045,15 @@ impl App {
         // Вложения полосой под шапкой; картинки, показанные в тексте, сюда не попадают.
         let mut file_act = None;
         let shown_cids: HashSet<String> = r.doc.as_ref().map(|d| ir_view::cids(d).into_iter().collect()).unwrap_or_default();
+        let invite_ready = matches!(r.invite, Some(invite_card::State::Ready(_)));
         if let Some(b) = &r.body {
             let listed: Vec<&AttachmentRow> =
-                b.attachments.iter().filter(|a| a.cid.as_ref().is_none_or(|c| !shown_cids.contains(c))).collect();
+                b.attachments
+                    .iter()
+                    .filter(|a| a.cid.as_ref().is_none_or(|c| !shown_cids.contains(c)))
+                    // Приглашение показано карточкой — как в Outlook, файлом его не дублируем.
+                    .filter(|a| !(invite_ready && invite_card::is_invite(a)))
+                    .collect();
             if !listed.is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     for a in listed {
@@ -983,6 +1076,11 @@ impl App {
         let mut show_images = false;
         let mut trust_sender = false;
         ui.separator();
+        let invite_answer = r.invite.as_ref().and_then(|state| {
+            let a = invite_card::show(ui, state, &self.me.email, r.answer);
+            ui.add_space(4.0);
+            a
+        });
         let mut link = None;
         match &r.doc {
             None => {
@@ -1023,6 +1121,9 @@ impl App {
         }
         if let Some((a, act)) = file_act {
             self.file_action(a, act);
+        }
+        if let Some(s) = invite_answer {
+            self.answer_invite(s);
         }
         if let Some(a) = action {
             self.run(a);
@@ -1132,6 +1233,13 @@ fn build_index(index: Arc<postman_search::SearchIndex>, cache: Cache, extractor:
             extractor.queue(ids);
         }
     });
+}
+
+fn reading_uid(r: &Reading) -> Option<&str> {
+    match &r.invite {
+        Some(invite_card::State::Ready(inv)) => Some(inv.event.uid.as_str()),
+        _ => None,
+    }
 }
 
 fn addr_list(list: &[postman_cache::Addr]) -> String {

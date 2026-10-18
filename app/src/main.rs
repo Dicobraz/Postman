@@ -12,6 +12,7 @@ mod app;
 mod bench;
 mod composer;
 mod gpu;
+mod invite_card;
 mod ir_view;
 
 use std::path::PathBuf;

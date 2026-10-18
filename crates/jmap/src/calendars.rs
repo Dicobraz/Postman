@@ -113,6 +113,27 @@ impl Client {
         v["created"]["new"]["id"].as_str().map(str::to_string).ok_or_else(|| Error::Protocol("CalendarEvent/set не вернул id".into()))
     }
 
+    /// Событие по UID (приглашение, пришедшее письмом, могло уже лечь в календарь сервером).
+    /// Фильтр `uid` — из черновика JMAP Calendars [проверить на Stalwart].
+    pub async fn event_by_uid(&self, uid: &str) -> Result<Option<Value>> {
+        let acc = self.calendar_account()?;
+        let calls = [
+            inv("CalendarEvent/query", json!({ "accountId": acc, "filter": { "uid": uid }, "limit": 1 }), "q"),
+            inv(
+                "CalendarEvent/get",
+                json!({
+                    "accountId": acc,
+                    "#ids": { "resultOf": "q", "name": "CalendarEvent/query", "path": "/ids" },
+                    "properties": EVENT_PROPERTIES,
+                }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let g: GetResponse<Value> = take(&mut r, "g")?;
+        Ok(g.list.into_iter().find(|e| e["uid"].as_str() == Some(uid)))
+    }
+
     /// Изменить событие патчем (`"title": …`, `"participants/<id>/participationStatus": …`).
     pub async fn update_event(&self, id: &str, patch: Map<String, Value>, send: bool) -> Result<()> {
         let acc = self.calendar_account()?;
