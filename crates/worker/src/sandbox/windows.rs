@@ -30,7 +30,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
     PROCESS_INFORMATION,
@@ -276,12 +276,15 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
 
     let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut cmdline: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain(Some(0)).collect();
-    let env: [u16; 2] = [0, 0];
+    // Окружение минимальное: только SystemRoot. Совсем пустой блок Windows не принимает
+    // (ERROR_ENVVAR_NOT_FOUND, 203) — загрузчику нужен путь к системным DLL.
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let env: Vec<u16> = "SystemRoot=".encode_utf16().chain(root.encode_wide()).chain([0, 0]).collect();
     let cwd = wide("C:\\");
     // SAFETY: обнулённая выходная структура.
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: все строки нуль-терминированы; список атрибутов инициализирован;
-    // блок окружения пустой (двойной ноль, UTF-16 — CREATE_UNICODE_ENVIRONMENT не нужен для пустого).
+    // блок окружения в UTF-16 с двойным нулём в конце.
     let ok = unsafe {
         CreateProcessW(
             app.as_ptr(),
@@ -289,7 +292,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
             null(),
             null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
             env.as_ptr().cast(),
             cwd.as_ptr(),
             &si.StartupInfo,

@@ -30,14 +30,9 @@ strip = true
 # gpui 0.2.2 тянет xattr 0.2.3, несовместимый со свежим libc (нет ENOATTR на Linux).
 [patch.crates-io]
 xattr = { path = "third_party/xattr" }
-
-# Кросс-сборка тестовых бинарей под Windows из Linux: fxc.exe (Windows SDK) недоступен,
-# поэтому шейдеры gpui компилируются при запуске (d3dcompiler_47.dll из Windows).
-[profile.xwin]
-inherits = "release"
-
-[profile.xwin.package.gpui-pre-windows]
-debug-assertions = true
+# Шейдеры встроены в exe и компилируются при запуске: кросс-сборка из Linux без fxc.exe
+# и без путей машины сборки в бинаре.
+gpui-pre-windows = { path = "third_party/gpui-pre-windows" }
 
 # Отладочная информация только для своего кода: target/debug не раздувается до десятков ГБ.
 [profile.dev]
