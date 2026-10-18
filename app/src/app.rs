@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use postman_cache::{AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
-use tokio::sync::mpsc::UnboundedSender;
+use crate::sync::UnboundedSender;
 
 use postman_compose::{Address, Attachment, Draft, Mode, Original};
 
@@ -82,6 +82,7 @@ pub struct App {
     search_view: Option<SearchView>,
     index: sync::Index,
     extractor: Option<crate::extract::Extractor>,
+    book: crate::composer::Book,
     last_index_commit: std::time::Instant,
     /// Ящик, для которого уже запрошена следующая страница.
     loading_more: Option<String>,
@@ -115,6 +116,19 @@ impl App {
         let index_dir = db.with_extension("search");
         let index = postman_search::SearchIndex::open(&index_dir).ok().map(Arc::new);
         let extractor = index.clone().map(|i| crate::extract::Extractor::spawn(cache.clone(), i));
+        // Адресная книга для подсказок: из истории переписки, в фоне.
+        let book: crate::composer::Book = Default::default();
+        {
+            let (book, cache) = (book.clone(), cache.clone());
+            std::thread::spawn(move || {
+                let built = postman_core::contacts::AddressBook::from_cache(&cache, "");
+                if let Ok(mut b) = book.lock() {
+                    // Контакты с сервера могли прийти раньше — не теряем их.
+                    let early = std::mem::replace(&mut *b, built);
+                    b.absorb(early);
+                }
+            });
+        }
         if let (Some(i), Some(x)) = (index.clone().filter(|i| i.is_empty()), &extractor) {
             build_index(i, cache.clone(), x);
         }
@@ -155,6 +169,7 @@ impl App {
             search_view: None,
             index,
             extractor,
+            book,
             last_index_commit: std::time::Instant::now(),
             loading_more: None,
             status,
@@ -399,7 +414,15 @@ impl App {
                     self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
                     self.status = format!("Не удалось скачать вложение: {error}");
                 }
+                sync::Event::Contacts(list) => {
+                    if let Ok(mut b) = self.book.lock() {
+                        b.add_contacts(list.iter().map(|(n, e)| (n.as_str(), e.as_str())));
+                    }
+                }
                 sync::Event::Me { address, signature } => {
+                    if let Ok(mut b) = self.book.lock() {
+                        b.remove(&address.email);
+                    }
                     self.me = address;
                     self.signature = signature;
                 }
@@ -681,7 +704,7 @@ impl App {
     }
 
     fn open_composer(&mut self, draft: Draft) {
-        self.composers.push(Composer::new(self.next_ticket, draft));
+        self.composers.push(Composer::new(self.next_ticket, draft, Some(self.book.clone())));
         self.next_ticket += 1;
     }
 

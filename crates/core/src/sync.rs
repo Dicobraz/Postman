@@ -11,7 +11,9 @@ use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 use postman_compose::{Address, Draft};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+/// Канал команд синхронизации (UI держит отправителя).
+pub use tokio::sync::mpsc::UnboundedSender;
 
 /// Сколько писем на ящик тянуть при первом входе (остальное — по мере прокрутки, позже).
 const INITIAL_PAGE: u64 = 500;
@@ -75,6 +77,8 @@ pub enum Event {
     BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
+    /// Личные контакты (имя, адрес) — для автодополнения.
+    Contacts(Vec<(String, String)>),
     Sent { ticket: u64 },
     DraftSaved { ticket: u64, id: String },
     /// Ошибка конкретной отправки/сохранения — показывается в окне письма.
@@ -125,6 +129,12 @@ async fn run(
     let identities = client.identities().await.unwrap_or_default();
     if let Some(i) = identities.first() {
         notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
+    }
+    if client.has(postman_jmap::CONTACTS)
+        && let Ok(cards) = client.contact_cards().await
+    {
+        let pairs = cards.into_iter().flat_map(|c| c.emails.into_iter().map(move |e| (c.name.clone(), e))).collect();
+        notify(Event::Contacts(pairs));
     }
     let mut email_state = initial_load(&client, &mut cache, &index, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);

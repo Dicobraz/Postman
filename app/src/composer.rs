@@ -52,6 +52,83 @@ pub struct Composer {
     confirm_close: bool,
     /// Закрыть окно, как только сервер подтвердит сохранение.
     close_after_save: bool,
+    book: Option<Book>,
+    /// Выбранная подсказка адреса.
+    suggest_sel: usize,
+}
+
+/// Общая адресная книга: строится в фоне, пополняется контактами с сервера.
+pub type Book = std::sync::Arc<std::sync::Mutex<postman_core::contacts::AddressBook>>;
+
+/// Поле адресов с подсказками: ↑/↓ — выбор, Enter или Tab — вставить вместо набираемого.
+fn address_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    focus: bool,
+    book: Option<&postman_core::contacts::AddressBook>,
+    sel: &mut usize,
+) {
+    ui.label(label);
+    // От родителя: у каждого окна письма свои поля.
+    let id = ui.make_persistent_id(("address-field", label));
+    let focused = ui.memory(|m| m.has_focus(id));
+    let start = value.rfind([',', ';']).map_or(0, |i| i + 1);
+    let token = value[start..].trim().to_string();
+    let now = jiff::Timestamp::now().as_second();
+    let suggestions: Vec<String> = match book {
+        Some(b) if focused && token.chars().count() >= 2 && !token.contains('<') => {
+            b.suggest(&token, 6, now).into_iter().map(|e| e.display()).collect()
+        }
+        _ => Vec::new(),
+    };
+    *sel = (*sel).min(suggestions.len().saturating_sub(1));
+    let mut accept = None;
+    if !suggestions.is_empty() {
+        ui.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
+                *sel = (*sel + 1).min(suggestions.len() - 1);
+            }
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
+                *sel = sel.saturating_sub(1);
+            }
+            if i.consume_key(egui::Modifiers::NONE, Key::Enter) || i.consume_key(egui::Modifiers::NONE, Key::Tab) {
+                accept = Some(*sel);
+            }
+        });
+    }
+    let r = ui.add(egui::TextEdit::singleline(value).id(id).desired_width(f32::INFINITY));
+    if focus {
+        r.request_focus();
+    }
+    if r.changed() {
+        *sel = 0;
+    }
+    ui.end_row();
+    if !suggestions.is_empty() && accept.is_none() {
+        ui.label("");
+        ui.vertical(|ui| {
+            for (n, s) in suggestions.iter().enumerate() {
+                if ui.selectable_label(n == *sel, s).clicked() {
+                    accept = Some(n);
+                }
+            }
+        });
+        ui.end_row();
+    }
+    if let Some(n) = accept {
+        let prefix = value[..start].trim_end().to_string();
+        let sep = if prefix.is_empty() { "" } else { " " };
+        *value = format!("{prefix}{sep}{}; ", suggestions[n]);
+        *sel = 0;
+        // Курсор в конец и фокус обратно в поле — можно набирать следующий адрес.
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+            let end = egui::text::CCursor::new(value.chars().count());
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), id);
+        }
+        ui.memory_mut(|m| m.request_focus(id));
+    }
 }
 
 /// Автосохранение изменённого черновика не чаще этого.
@@ -65,7 +142,7 @@ fn join(list: &[Address]) -> String {
 }
 
 impl Composer {
-    pub fn new(ticket: u64, draft: Draft) -> Self {
+    pub fn new(ticket: u64, draft: Draft, book: Option<Book>) -> Self {
         let mut c = Self {
             ticket,
             open: true,
@@ -90,6 +167,8 @@ impl Composer {
             last_autosave: Instant::now(),
             confirm_close: false,
             close_after_save: false,
+            book,
+            suggest_sel: 0,
         };
         // Нетронутое новое письмо или ответ — не «изменения», закрывается без вопроса.
         c.saved_snapshot = c.snapshot();
@@ -285,21 +364,17 @@ impl Composer {
         }
         egui::Panel::top("compose_fields").show(ui, |ui| {
             egui::Grid::new("fields").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                let field = |ui: &mut egui::Ui, label: &str, value: &mut String, focus: bool| {
-                    ui.label(label);
-                    let r = ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
-                    if focus {
-                        r.request_focus();
-                    }
-                    ui.end_row();
-                };
+                let book = self.book.clone();
+                let book = book.as_ref().and_then(|b| b.lock().ok());
                 let focus_to = self.first_frame && self.to.is_empty();
-                field(ui, "Кому", &mut self.to, focus_to);
-                field(ui, "Копия", &mut self.cc, false);
+                address_field(ui, "Кому", &mut self.to, focus_to, book.as_deref(), &mut self.suggest_sel);
+                address_field(ui, "Копия", &mut self.cc, false, book.as_deref(), &mut self.suggest_sel);
                 if self.show_bcc {
-                    field(ui, "Скрытая", &mut self.bcc, false);
+                    address_field(ui, "Скрытая", &mut self.bcc, false, book.as_deref(), &mut self.suggest_sel);
                 }
-                field(ui, "Тема", &mut self.subject, false);
+                ui.label("Тема");
+                ui.add(egui::TextEdit::singleline(&mut self.subject).desired_width(f32::INFINITY));
+                ui.end_row();
             });
             let mut remove = None;
             // Картинки цитаты (cid) не показываем: они уходят вместе с ответом автоматически.

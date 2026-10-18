@@ -11,15 +11,12 @@
 mod app;
 mod bench;
 mod composer;
-mod extract;
-mod files;
 mod gpu;
-mod indexer;
 mod ir_view;
-mod render;
-mod sync;
 
 use std::path::PathBuf;
+
+use postman_core::{extract, files, indexer, render, sync};
 use std::time::Instant;
 
 fn data_dir() -> PathBuf {

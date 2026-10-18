@@ -6065,16 +6065,14 @@ dependencies = [
  "eframe",
  "jiff",
  "memory-stats",
- "open",
  "postman-cache",
  "postman-compose",
+ "postman-core",
  "postman-demo",
  "postman-ir",
  "postman-jmap",
  "postman-search",
  "postman-worker",
- "rfd",
- "tokio",
 ]
 
 [[package]]
@@ -6102,6 +6100,22 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "postman-ir",
+]
+
+[[package]]
+name = "postman-core"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "open",
+ "postman-cache",
+ "postman-compose",
+ "postman-ir",
+ "postman-jmap",
+ "postman-search",
+ "postman-worker",
+ "rfd",
+ "tokio",
 ]
 
 [[package]]

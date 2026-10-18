@@ -3,12 +3,14 @@
 //! ограничений добавлять Calendars/Contacts/Principals.
 
 mod calendars;
+mod contacts;
 mod mail;
 mod push;
 mod session;
 mod submission;
 
 pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
+pub use contacts::ContactCard;
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};

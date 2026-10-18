@@ -1,0 +1,18 @@
+[package]
+name = "postman-core"
+description = "Слой без UI: синхронизация, поиск, извлечение текста, разбор писем в воркере, файлы, адресная книга"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-ir.workspace = true
+postman-jmap.workspace = true
+postman-cache.workspace = true
+postman-worker.workspace = true
+postman-compose.workspace = true
+postman-search.workspace = true
+jiff = "0.2"
+open = "5"
+rfd = "0.17"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
