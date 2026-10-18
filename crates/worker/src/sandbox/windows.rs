@@ -5,9 +5,9 @@
 //! UI-ограничения), и только потом запускается.
 //!
 //! Exe воркера должен быть читаем для AppContainer (ALL APPLICATION PACKAGES):
-//! так по умолчанию в Program Files. Если запуск в AppContainer отказан
-//! (например, dev-сборка в профиле пользователя), воркер запускается без него
-//! с остальными ограничениями, уровень — `Partial`.
+//! так по умолчанию в Program Files. Если запуск в AppContainer не удался или
+//! воркер в нём не ответил (например, сборка в профиле пользователя), он
+//! запускается без AppContainer с остальными ограничениями, уровень — `Partial`.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -16,9 +16,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle;
 use std::path::Path;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation,
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName};
 use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
@@ -31,6 +32,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetExitCodeProcess, WaitForSingleObject,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
     PROCESS_INFORMATION,
@@ -97,6 +99,9 @@ impl Owned {
 
 // SAFETY: HANDLE процесса/джоба можно использовать из любого потока.
 unsafe impl Send for Owned {}
+// SAFETY: через общий хэндл процесса вызываются только потокобезопасные функции ядра
+// (TerminateProcess, WaitForSingleObject, GetExitCodeProcess).
+unsafe impl Sync for Owned {}
 
 fn last_error() -> io::Error {
     io::Error::last_os_error()
@@ -106,21 +111,41 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-pub(crate) fn spawn(exe: &Path) -> io::Result<Process> {
-    let sid = app_container_sid();
-    match create(exe, sid.as_ref().map(|s| s.0)) {
-        Err(e) if sid.is_some() && e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
-            create(exe, None).map(|mut p| {
-                p.level = Level::Partial;
-                p
-            })
-        }
+/// `relaxed` — сразу без AppContainer (строгий запуск уже не дал воркеру работать).
+pub(crate) fn spawn(exe: &Path, relaxed: bool) -> io::Result<Process> {
+    let sid = if relaxed { None } else { app_container_sid() };
+    let Some(sid) = sid else {
+        return create(exe, None);
+    };
+    match create(exe, Some(sid.0)) {
         Ok(mut p) => {
-            p.level = if sid.is_some() { Level::Full } else { Level::Partial };
+            p.level = Level::Full;
             Ok(p)
         }
-        Err(e) => Err(e),
+        // Любой отказ AppContainer — запуск с остальными ограничениями; причина — в ошибке, если и он не удался.
+        Err(strict) => create(exe, None).map_err(|e| io::Error::new(e.kind(), format!("{e}; в AppContainer: {strict}"))),
     }
+}
+
+/// Блок окружения воркера: только системные пути, никаких секретов родителя.
+/// Совсем пустой блок Windows не принимает (ERROR_ENVVAR_NOT_FOUND, 203), а для
+/// AppContainer ей нужны пути профиля: TEMP, TMP и LOCALAPPDATA она подменяет на каталог контейнера.
+fn environment() -> Vec<u16> {
+    const KEEP: &[&str] = &["SystemRoot", "windir", "SystemDrive", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"];
+    let mut env = Vec::new();
+    for k in KEEP {
+        let Some(v) = std::env::var_os(k) else { continue };
+        env.extend(k.encode_utf16());
+        env.push(u16::from(b'='));
+        env.extend(v.encode_wide());
+        env.push(0);
+    }
+    if env.is_empty() {
+        env.extend("SystemRoot=C:\\Windows".encode_utf16());
+        env.push(0);
+    }
+    env.push(0);
+    env
 }
 
 struct Sid(PSID);
@@ -276,10 +301,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
 
     let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut cmdline: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain(Some(0)).collect();
-    // Окружение минимальное: только SystemRoot. Совсем пустой блок Windows не принимает
-    // (ERROR_ENVVAR_NOT_FOUND, 203) — загрузчику нужен путь к системным DLL.
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let env: Vec<u16> = "SystemRoot=".encode_utf16().chain(root.encode_wide()).chain([0, 0]).collect();
+    let env = environment();
     let cwd = wide("C:\\");
     // SAFETY: обнулённая выходная структура.
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -302,7 +324,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
     if ok == 0 {
         return Err(last_error());
     }
-    let process = Owned(pi.hProcess);
+    let process = Arc::new(Owned(pi.hProcess));
     let thread = Owned(pi.hThread);
     // SAFETY: хэндлы только что получены; процесс ещё не исполнял код.
     unsafe {
@@ -328,6 +350,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
     let stdin = into_file(parent_in);
     let stdout = into_file(parent_out);
     let mut job = Some(job);
+    let watched = process.clone();
     Ok(Process {
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
@@ -335,6 +358,13 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
             process.terminate();
             // Закрытие джоба (KILL_ON_JOB_CLOSE) добивает всё, что осталось.
             job.take();
+        }),
+        exit_code: Box::new(move || {
+            let mut code = 0u32;
+            // SAFETY: хэндл процесса жив, пока жив `watched`; ждём завершения не дольше 500 мс.
+            let done = unsafe { WaitForSingleObject(watched.0, 500) } == WAIT_OBJECT_0
+                && unsafe { GetExitCodeProcess(watched.0, &mut code) } != 0;
+            done.then_some(code)
         }),
         level: Level::Partial,
     })

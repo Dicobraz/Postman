@@ -16,7 +16,8 @@ use crate::Process;
 /// Предел адресного пространства воркера.
 const MEMORY_LIMIT: u64 = 1 << 30;
 
-pub(crate) fn spawn(exe: &Path) -> io::Result<Process> {
+/// `_relaxed` на Linux не используется: ослабление решает сам воркер (namespaces — по возможности).
+pub(crate) fn spawn(exe: &Path, _relaxed: bool) -> io::Result<Process> {
     let mut cmd = Command::new(exe);
     cmd.env_clear().current_dir("/").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     // SAFETY: в pre_exec вызываются только async-signal-safe системные вызовы.
@@ -39,6 +40,7 @@ pub(crate) fn spawn(exe: &Path) -> io::Result<Process> {
             let _ = child.kill();
             let _ = child.wait();
         }),
+        exit_code: Box::new(|| None),
         // Фактический уровень сообщает сам воркер через отказ работать без seccomp;
         // namespaces — бонус, поэтому здесь считаем полную изоляцию.
         level: Level::Full,

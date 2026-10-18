@@ -192,6 +192,8 @@ pub(crate) struct Process {
     pub stdin: Box<dyn Write + Send>,
     pub stdout: Box<dyn Read + Send>,
     pub kill: Box<dyn FnMut() + Send>,
+    /// Код завершения, если процесс уже завершился (для текста ошибки).
+    pub exit_code: Box<dyn FnMut() -> Option<u32> + Send>,
     pub level: Level,
 }
 
@@ -199,6 +201,9 @@ struct Running {
     stdin: Box<dyn Write + Send>,
     responses: mpsc::Receiver<io::Result<(Vec<u8>, Vec<u8>)>>,
     kill: Box<dyn FnMut() + Send>,
+    exit_code: Box<dyn FnMut() -> Option<u32> + Send>,
+    /// Воркер ответил хотя бы раз — значит, в этой песочнице он работоспособен.
+    answered: bool,
 }
 
 impl Drop for Running {
@@ -213,11 +218,13 @@ pub struct Client {
     timeout: Duration,
     running: Option<Running>,
     level: Level,
+    /// Строгая песочница не дала воркеру работать — запускаем с ослабленной (Windows: без AppContainer).
+    relaxed: bool,
 }
 
 impl Client {
     pub fn new(exe: PathBuf, timeout: Duration) -> Self {
-        Self { exe, timeout, running: None, level: Level::None }
+        Self { exe, timeout, running: None, level: Level::None, relaxed: false }
     }
 
     /// Рядом с основным исполняемым файлом.
@@ -264,7 +271,18 @@ impl Client {
 
     fn call(&mut self, req: &Request, bin: &[u8]) -> Result<(Response, Vec<u8>), String> {
         let json = serde_json::to_vec(req).map_err(|e| e.to_string())?;
-        let result = self.exchange(&json, bin);
+        let mut result = self.exchange(&json, bin);
+        // Воркер не ответил ни разу в полной изоляции (например, AppContainer не может прочитать
+        // свой exe в профиле пользователя) — одна попытка с ослабленной, уровень станет «частичная».
+        if let Err(strict) = &result
+            && !self.relaxed
+            && self.level == Level::Full
+            && self.running.as_ref().is_some_and(|r| !r.answered)
+        {
+            self.running = None;
+            self.relaxed = true;
+            result = self.exchange(&json, bin).map_err(|e| format!("{e}; в полной изоляции: {strict}"));
+        }
         if result.is_err() {
             // Таймаут, падение или ошибка песочницы: процесс больше не используем.
             self.running = None;
@@ -280,15 +298,20 @@ impl Client {
         let r = self.running.as_mut().expect("запущен");
         write_msg(&mut r.stdin, json, bin).map_err(|e| format!("воркер недоступен: {e}"))?;
         match r.responses.recv_timeout(self.timeout) {
-            Ok(Ok(msg)) => Ok(msg),
-            Ok(Err(e)) => Err(format!("воркер завершился: {e}")),
+            Ok(Ok(msg)) => {
+                r.answered = true;
+                Ok(msg)
+            }
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(match (r.exit_code)() {
+                Some(code) => format!("воркер завершился, код {}", exit_name(code)),
+                None => "воркер завершился".into(),
+            }),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("воркер не ответил за {:?}", self.timeout)),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("воркер завершился".into()),
         }
     }
 
     fn start(&mut self) -> Result<Running, String> {
-        let p = sandbox::spawn(&self.exe).map_err(|e| format!("запуск {}: {e}", self.exe.display()))?;
+        let p = sandbox::spawn(&self.exe, self.relaxed).map_err(|e| format!("запуск {}: {e}", self.exe.display()))?;
         self.level = p.level;
         let (tx, rx) = mpsc::channel();
         let mut stdout = p.stdout;
@@ -304,6 +327,24 @@ impl Client {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Running { stdin: p.stdin, responses: rx, kill: p.kill })
+        Ok(Running { stdin: p.stdin, responses: rx, kill: p.kill, exit_code: p.exit_code, answered: false })
     }
+}
+
+/// Код завершения с расшифровкой частых NTSTATUS.
+fn exit_name(code: u32) -> String {
+    let name = match code {
+        0xC000_0005 => " (нарушение доступа к памяти)",
+        0xC000_0022 => " (нет доступа — вероятно, AppContainer не может прочитать файлы воркера)",
+        0xC000_0135 => " (не найдена DLL)",
+        0xC000_0139 => " (не найдена точка входа DLL)",
+        0xC000_0142 => " (ошибка инициализации DLL)",
+        0xC000_0409 => " (аварийное завершение / fail-fast)",
+        0xC000_0602 => " (fail-fast)",
+        0xC000_0374 => " (повреждение кучи)",
+        0xC000_00FD => " (переполнение стека)",
+        0xC000_0017 | 0xC000_012D => " (не хватило памяти)",
+        _ => "",
+    };
+    if code > 0xFFFF { format!("0x{code:08X}{name}") } else { format!("{code}{name}") }
 }

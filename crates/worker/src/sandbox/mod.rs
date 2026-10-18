@@ -16,7 +16,7 @@ pub(crate) fn lockdown() -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn spawn(_: &std::path::Path) -> std::io::Result<crate::Process> {
+pub(crate) fn spawn(_: &std::path::Path, _relaxed: bool) -> std::io::Result<crate::Process> {
     Err(std::io::Error::other("платформа не поддерживается"))
 }
 
