@@ -37,11 +37,13 @@ jobs:
         shell: pwsh
         run: icacls target /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q
 
-      - name: Тесты
-        run: cargo test --workspace
-        env:
-          POSTMAN_REQUIRE_FULL_SANDBOX: ${{ runner.os == 'Windows' && '1' || '' }}
+      # Диагностика: какое ограничение песочницы мешает воркеру стартовать (по одному снимаем).
+      - name: Диагностика песочницы
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: cargo test -p postman-worker --test windows_probe -- --ignored --nocapture
 
+      # Сборка для тестировщиков — до тестов, чтобы красные тесты не лишали архива.
       - name: Release-сборка
         run: cargo build --release --workspace
 
@@ -54,3 +56,11 @@ jobs:
             target/release/postman.exe
             target/release/postman-gpui.exe
             target/release/postman-worker.exe
+            scripts/windows/README.txt
+            scripts/windows/bench.cmd
+            scripts/windows/sandbox.cmd
+
+      - name: Тесты
+        run: cargo test --workspace
+        env:
+          POSTMAN_REQUIRE_FULL_SANDBOX: ${{ runner.os == 'Windows' && '1' || '' }}

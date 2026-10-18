@@ -78,6 +78,30 @@ const MITIGATIONS: u64 = DEP_ENABLE
     | IMAGE_LOAD_NO_LOW_LABEL
     | IMAGE_LOAD_PREFER_SYSTEM32;
 
+/// Диагностика (только отладочные сборки): `POSTMAN_SANDBOX_DROP=win32k,dyncode,…` снимает
+/// перечисленные ограничения, чтобы найти то, из-за которого воркер не стартует.
+/// В release переменная не читается — ослабить песочницу снаружи нельзя.
+fn dropped(name: &str) -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("POSTMAN_SANDBOX_DROP").is_ok_and(|v| v.split(',').any(|x| x.trim() == name || x.trim() == "all"))
+}
+
+fn mitigations() -> u64 {
+    let off = [
+        ("dep", DEP_ENABLE),
+        ("heap", HEAP_TERMINATE),
+        ("aslr", BOTTOM_UP_ASLR | HIGH_ENTROPY_ASLR),
+        ("strict", STRICT_HANDLE_CHECKS),
+        ("win32k", WIN32K_SYSTEM_CALL_DISABLE),
+        ("ext", EXTENSION_POINT_DISABLE),
+        ("dyncode", PROHIBIT_DYNAMIC_CODE),
+        ("msonly", BLOCK_NON_MICROSOFT_BINARIES),
+        ("font", FONT_DISABLE),
+        ("imageload", IMAGE_LOAD_NO_REMOTE | IMAGE_LOAD_NO_LOW_LABEL | IMAGE_LOAD_PREFER_SYSTEM32),
+    ];
+    off.iter().filter(|(n, _)| dropped(n)).fold(MITIGATIONS, |m, (_, bits)| m & !bits)
+}
+
 /// Закрывает HANDLE при выходе из области видимости.
 struct Owned(HANDLE);
 
@@ -113,7 +137,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// `relaxed` — сразу без AppContainer (строгий запуск уже не дал воркеру работать).
 pub(crate) fn spawn(exe: &Path, relaxed: bool) -> io::Result<Process> {
-    let sid = if relaxed { None } else { app_container_sid() };
+    let sid = if relaxed || dropped("appcontainer") { None } else { app_container_sid() };
     let Some(sid) = sid else {
         return create(exe, None);
     };
@@ -203,7 +227,7 @@ fn job() -> io::Result<Owned> {
         | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
     limits.BasicLimitInformation.ActiveProcessLimit = 1;
     limits.ProcessMemoryLimit = MEMORY_LIMIT;
-    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: JOB_OBJECT_UILIMIT_ALL };
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: if dropped("job_ui") { 0 } else { JOB_OBJECT_UILIMIT_ALL } };
     // SAFETY: указатели на локальные структуры правильного размера.
     let ok = unsafe {
         SetInformationJobObject(
@@ -270,7 +294,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
     let (child_out, parent_out) = pipe(false)?;
     let job = job()?;
 
-    let mitigations: u64 = MITIGATIONS;
+    let mitigations: u64 = mitigations();
     let child_policy: u32 = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
     let handles: [HANDLE; 2] = [child_in.0, child_out.0];
     let caps = sid.map(|sid| SECURITY_CAPABILITIES {
@@ -283,7 +307,9 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
     // SAFETY: все значения — локальные переменные, живущие до CreateProcessW.
     unsafe {
         attrs.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, (&raw const mitigations).cast(), size_of::<u64>())?;
-        attrs.set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, (&raw const child_policy).cast(), size_of::<u32>())?;
+        if !dropped("childproc") {
+            attrs.set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, (&raw const child_policy).cast(), size_of::<u32>())?;
+        }
         attrs.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.as_ptr().cast(), size_of_val(&handles))?;
         if let Some(c) = &caps {
             attrs.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, (c as *const SECURITY_CAPABILITIES).cast(), size_of::<SECURITY_CAPABILITIES>())?;
@@ -328,7 +354,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
     let thread = Owned(pi.hThread);
     // SAFETY: хэндлы только что получены; процесс ещё не исполнял код.
     unsafe {
-        if AssignProcessToJobObject(job.0, process.0) == 0 {
+        if !dropped("job") && AssignProcessToJobObject(job.0, process.0) == 0 {
             let e = last_error();
             TerminateProcess(process.0, 1);
             return Err(e);
