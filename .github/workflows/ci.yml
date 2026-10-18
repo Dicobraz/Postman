@@ -14,17 +14,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Целевая платформа — только Windows; Linux остаётся для разработки в контейнере.
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-
-      - name: Системные библиотеки для gpui (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev pkg-config
 
       - name: Clippy
         # Не через RUSTFLAGS: он перекрыл бы +crt-static из .cargo/config.toml.
