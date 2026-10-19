@@ -35,8 +35,36 @@ struct Reading {
     doc: Option<Document>,
 }
 
+/// Запись флагов в хранилище по очереди в отдельном потоке: поток интерфейса не ждёт диск
+/// (каждый коммит redb — fsync, на листании с открытием писем это до 30 мс на кадр).
+struct FlagWriter {
+    tx: std::sync::mpsc::Sender<(String, bool, bool)>,
+    cache: Cache,
+}
+
+impl FlagWriter {
+    fn new(cache: Cache) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, bool)>();
+        let writer = cache.clone();
+        // Не запустился поток — получатель закрыт, `set` пишет сам (медленнее, но без потерь).
+        let _ = std::thread::Builder::new().name("cache-flags".into()).spawn(move || {
+            for (id, seen, flagged) in rx {
+                let _ = writer.set_flags(&id, seen, flagged);
+            }
+        });
+        Self { tx, cache }
+    }
+
+    fn set(&self, id: &str, seen: bool, flagged: bool) {
+        if self.tx.send((id.to_owned(), seen, flagged)).is_err() {
+            let _ = self.cache.set_flags(id, seen, flagged);
+        }
+    }
+}
+
 struct Mailer {
     cache: Cache,
+    flags: FlagWriter,
     focus: FocusHandle,
     mailboxes: Vec<MailboxRow>,
     mailbox: Option<String>,
@@ -69,6 +97,7 @@ impl Mailer {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut m = Self {
+            flags: FlagWriter::new(cache.clone()),
             cache,
             focus,
             mailboxes: Vec::new(),
@@ -151,7 +180,7 @@ impl Mailer {
         }
         if !row.seen {
             row.seen = true;
-            let _ = self.cache.set_flags(&row.id, true, row.flagged);
+            self.flags.set(&row.id, true, row.flagged);
             self.patch_row(&row);
         }
         let body = Some(postman_demo::body(&row.id));
@@ -226,7 +255,7 @@ impl Mailer {
         if toggle_flag {
             row.flagged = !row.flagged;
         }
-        let _ = self.cache.set_flags(&row.id, row.seen, row.flagged);
+        self.flags.set(&row.id, row.seen, row.flagged);
         self.patch_row(&row);
         cx.notify();
     }

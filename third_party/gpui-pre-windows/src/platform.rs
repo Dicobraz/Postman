@@ -42,6 +42,7 @@ use gpui::*;
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frame_request: FrameRequest,
 }
 
 impl TrackedWindow {
@@ -427,6 +428,7 @@ impl WindowsPlatform {
             // Not joined: the thread can be sending this thread a message. It exits after its
             // next vsync, and drops its reference to the devices then.
             stop.store(true, Ordering::Release);
+            FRAME_DEMAND.notify();
         }
         if let Some(text_system) = &self.direct_write_text_system {
             text_system.release_gpu();
@@ -455,8 +457,9 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
-                    let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                    // Postman patch: sleep until a window asks for a frame (or the periodic
+                    // check), instead of waking every window on every vsync.
+                    FRAME_DEMAND.wait(IDLE_VSYNC_CHECK);
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
@@ -473,10 +476,25 @@ impl WindowsPlatform {
                             panic!("Device lost: {err}");
                         }
                     }
-                    let Some(all_windows) = all_windows.upgrade() else {
+                    let Some(windows) = all_windows.upgrade() else {
                         break;
                     };
-                    for hwnd in all_windows.read().iter() {
+                    if !windows.read().iter().any(|w| w.frame_request.is_requested()) {
+                        continue;
+                    }
+                    drop(windows);
+                    let signal_source = vsync_provider.wait_for_vsync();
+                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Some(windows) = all_windows.upgrade() else {
+                        break;
+                    };
+                    for hwnd in windows.read().iter() {
+                        if !hwnd.frame_request.take() {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -774,6 +792,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frame_request: window.state.frame_request.clone(),
         });
 
         Ok(Box::new(window))
@@ -1405,6 +1424,7 @@ impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
             stop.store(true, Ordering::Release);
+            FRAME_DEMAND.notify();
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
