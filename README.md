@@ -37,8 +37,10 @@ API: `--gpu dx12|vulkan|gl` или `POSTMAN_GPU`. По умолчанию DX12 �
 ## Замеры
 
 `postman --demo --bench [--gpu …]` — прогрев, 400 кадров листания с открытием писем, 120 кадров ресайза, без vsync;
-печатает одну строку: `first_frame_ms`, `scroll_p50/p99/max`, `resize_p50/p99/max` (мс на кадр), `ui_cpu_p50/p99`,
-`rss_mb`, `rss_peak_mb`. Это общий сценарий для сравнения бэкендов, машин и UI-фреймворков.
+печатает одну строку: `exe_mb`, `first_frame_ms`, `scroll_p50/p99/max`, `resize_p50/p99/max` (мс на кадр),
+`scroll_cpu_pct` и `scroll_ui_thread_cpu_pct`, `ui_cpu_p50/p99`, `rss_peak_mb`, `private_peak_mb`, затем простой:
+`idle_cpu_pct`, `idle_rss_mb`, `idle_private_mb` (private bytes на Windows). `POSTMAN_BENCH_SCROLL_FRAMES=N` —
+длиннее листание, например для профилировщика. Это общий сценарий для сравнения бэкендов, машин и UI-фреймворков.
 
 Кэш: `%LOCALAPPDATA%\Postman\` (Windows), `$XDG_DATA_HOME/Postman` (Linux).
 

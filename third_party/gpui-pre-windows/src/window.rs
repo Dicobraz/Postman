@@ -55,6 +55,8 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    /// Set when GPUI wants this window drawn on the next vsync (Postman patch).
+    pub frame_request: FrameRequest,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -170,6 +172,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frame_request: FrameRequest::new_requested(),
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -970,6 +973,17 @@ impl PlatformWindow for WindowsWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
+    }
+
+    // Postman patch: frames are demand-driven. GPUI calls these when the window becomes dirty
+    // or has next-frame callbacks; the vsync thread then redraws only this window.
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let request = self.state.frame_request.clone();
+        Some(Rc::new(move || request.request()))
+    }
+
+    fn schedule_frame(&self) {
+        self.state.frame_request.request();
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
