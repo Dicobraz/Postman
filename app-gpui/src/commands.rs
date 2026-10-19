@@ -102,11 +102,107 @@ mod tests {
         }
     }
 
+    /// `ru.ftl` и `en.ftl`: у каждой команды есть название, лишних ключей `cmd-…` нет.
+    #[test]
+    fn every_command_has_a_name_in_both_languages() {
+        for (lang, ftl) in [("ru", super::parity::RU_FTL), ("en", include_str!("../i18n/en.ftl"))] {
+            let names = super::parity::ftl_names(ftl);
+            for c in COMMANDS {
+                assert!(names.iter().any(|(k, _)| *k == c.name_key()), "{lang}.ftl: нет {}", c.name_key());
+            }
+            for (k, _) in names.iter().filter(|(k, _)| k.starts_with("cmd-")) {
+                assert!(COMMANDS.iter().any(|c| c.name_key() == *k), "{lang}.ftl: {k} — нет такой команды");
+            }
+        }
+    }
+
+    /// `docs/PARITY.md` — из реестра; доля сделанного не падает.
+    /// Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
+    #[test]
+    fn parity_doc_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PARITY.md");
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let (doc, done) = super::parity::document(include_str!("main.rs"));
+        if let Some(was) = super::parity::done_count(&old) {
+            assert!(done >= was, "сделанных функций стало меньше: было {was}, стало {done}");
+        }
+        if std::env::var_os("POSTMAN_UPDATE_DOCS").is_some() {
+            std::fs::write(&path, &doc).expect("запись docs/PARITY.md");
+        } else {
+            assert!(
+                old.replace("\r\n", "\n") == doc,
+                "docs/PARITY.md устарел: POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity"
+            );
+        }
+    }
+
     /// Хоткеи classic Outlook из `docs/HANDOFF.md` §2a.
     #[test]
     fn outlook_hotkeys_are_bound() {
         for keys in ["ctrl-n", "ctrl-r", "ctrl-shift-r", "ctrl-f", "ctrl-e", "ctrl-1", "ctrl-2", "ctrl-3", "delete", "ctrl-q", "ctrl-u"] {
             assert!(!pets_commands::bound_to(COMMANDS, keys).is_empty(), "хоткей Outlook {keys} не привязан");
         }
+    }
+}
+
+/// Чек-лист соответствия Outlook (S2-04): `docs/PARITY.md` из реестра команд.
+#[cfg(test)]
+mod parity {
+    use super::COMMANDS;
+
+    pub const RU_FTL: &str = include_str!("../i18n/ru.ftl");
+
+    /// Пары `ключ = значение` из `.ftl` (только простые сообщения в одну строку).
+    pub fn ftl_names(ftl: &str) -> Vec<(&str, &str)> {
+        ftl.lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with(' '))
+            .filter_map(|l| l.split_once(" = "))
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .collect()
+    }
+
+    /// Действия, у которых в коде экрана есть обработчик: `on_action(… _: &mail::Next …)`.
+    fn handled(source: &str) -> Vec<String> {
+        source
+            .split("_: &")
+            .skip(1)
+            .filter_map(|rest| rest.split([',', ')']).next())
+            .map(|path| {
+                let parts: Vec<&str> = path.trim().split("::").collect();
+                parts[parts.len().saturating_sub(2)..].join("::")
+            })
+            .collect()
+    }
+
+    /// Число сделанных функций из прошлой версии документа (`Сделано: N из M`).
+    pub fn done_count(doc: &str) -> Option<usize> {
+        let rest = doc.split("Сделано: ").nth(1)?;
+        rest.split_whitespace().next()?.parse().ok()
+    }
+
+    /// Текст документа и число сделанных функций.
+    pub fn document(screen_source: &str) -> (String, usize) {
+        let names = ftl_names(RU_FTL);
+        let handled = handled(screen_source);
+        let done = COMMANDS.iter().filter(|c| handled.contains(&c.action_name())).count();
+        let mut s = String::new();
+        s.push_str("# Соответствие classic Outlook\n\n");
+        s.push_str("> Генерируется из реестра команд (`app-gpui/src/commands.rs`) тестом `parity_doc_is_current`.\n");
+        s.push_str("> Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.\n");
+        s.push_str("> «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).\n\n");
+        s.push_str(&format!(
+            "Сделано: {done} из {} ({} %).\n\n",
+            COMMANDS.len(),
+            done * 100 / COMMANDS.len().max(1)
+        ));
+        s.push_str("| Функция | Команда | Хоткей | Статус |\n|---|---|---|---|\n");
+        for c in COMMANDS {
+            let key = c.name_key();
+            let name = names.iter().find(|(k, _)| *k == key).map_or(key.as_str(), |(_, v)| v);
+            let keys: Vec<String> = c.keys.iter().map(|k| format!("`{k}`")).collect();
+            let status = if handled.contains(&c.action_name()) { "есть" } else { "нет" };
+            s.push_str(&format!("| {name} | `{}` | {} | {status} |\n", c.id, keys.join(", ")));
+        }
+        (s, done)
     }
 }
