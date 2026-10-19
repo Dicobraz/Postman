@@ -1,0 +1,30 @@
+# Соответствие classic Outlook
+
+> Генерируется из реестра команд (`app-gpui/src/commands.rs`) тестом `parity_doc_is_current`.
+> Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
+> «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
+
+Сделано: 14 из 20 (70 %).
+
+| Функция | Команда | Хоткей | Статус |
+|---|---|---|---|
+| Следующее письмо | `mail.next` | `j`, `down` | есть |
+| Предыдущее письмо | `mail.prev` | `k`, `up` | есть |
+| Первое письмо | `mail.first` | `home` | есть |
+| Последнее письмо | `mail.last` | `end` | есть |
+| Страница вниз | `mail.page_down` | `pagedown` | есть |
+| Страница вверх | `mail.page_up` | `pageup` | есть |
+| Отметить как прочитанное | `mail.mark_read` | `ctrl-q` | есть |
+| Отметить как непрочитанное | `mail.mark_unread` | `ctrl-u` | есть |
+| Флаг | `mail.toggle_flag` | `insert` | есть |
+| Создать письмо | `mail.new` | `ctrl-n` | нет |
+| Ответить | `mail.reply` | `ctrl-r` | нет |
+| Ответить всем | `mail.reply_all` | `ctrl-shift-r` | нет |
+| Переслать | `mail.forward` | `ctrl-f` | нет |
+| Удалить | `mail.delete` | `delete` | нет |
+| Почта | `view.mail` | `ctrl-1` | есть |
+| Календарь | `view.calendar` | `ctrl-2` | есть |
+| Контакты | `view.contacts` | `ctrl-3` | нет |
+| Поиск | `search.focus` | `ctrl-e` | есть |
+| Сбросить поиск | `search.clear` | `escape` | есть |
+| Новая встреча (помощник планирования) | `calendar.new_meeting` | `ctrl-shift-q` | есть |
