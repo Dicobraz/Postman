@@ -78,6 +78,8 @@ struct Mailer {
     reading: Option<Reading>,
     worker: Arc<Mutex<Worker>>,
     sandbox: &'static str,
+    /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
+    last_key: String,
     search: Entity<InputState>,
     bench: Option<Bench>,
     section: Section,
@@ -88,11 +90,14 @@ struct Mailer {
 impl Mailer {
     fn new(cache: Cache, bench: Option<Bench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск (Ctrl+E), Enter — искать, Esc — сбросить"));
-        let sub = cx.subscribe_in(&search, window, |this: &mut Self, state, ev: &InputEvent, _window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
+        let keylog = std::env::var_os("POSTMAN_KEYLOG").is_some();
+        let sub = cx.subscribe_in(&search, window, move |this: &mut Self, state, ev: &InputEvent, _window, cx| match ev {
+            InputEvent::PressEnter { .. } => {
                 let q = state.read(cx).value().to_string();
                 this.run_search(&q, cx);
             }
+            InputEvent::Change if keylog => println!("search \"{}\"", state.read(cx).value()),
+            _ => {}
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -111,11 +116,12 @@ impl Mailer {
             reading: None,
             worker: Arc::new(Mutex::new(Worker::new(Worker::default_exe(), Duration::from_secs(5)))),
             sandbox: "",
+            last_key: String::new(),
             search,
             bench,
             section: Section::Mail,
             cal: calendar::CalendarView::demo(),
-            _subscriptions: vec![sub],
+            _subscriptions: vec![sub, Self::observe_keys(cx)],
         };
         m.mailboxes = m.cache.mailboxes().unwrap_or_default();
         let inbox = m.mailboxes.iter().find(|b| b.role.as_deref() == Some("inbox")).or(m.mailboxes.first());
@@ -123,6 +129,20 @@ impl Mailer {
             m.open_mailbox(id);
         }
         m
+    }
+
+    /// «Ctrl-e (у) → FocusSearch» в строке состояния; `POSTMAN_KEYLOG=1` — то же строкой `key …` в stdout.
+    fn observe_keys(cx: &mut Context<Self>) -> Subscription {
+        let to_stdout = std::env::var_os("POSTMAN_KEYLOG").is_some();
+        cx.observe_keystrokes(move |this, ev, _window, cx| {
+            let k = &ev.keystroke;
+            let action = ev.action.as_ref().map_or("—", |a| a.name());
+            this.last_key = format!("{} ({}) → {action}", k.unparse(), k.key_char.as_deref().unwrap_or(""));
+            if to_stdout {
+                println!("key {}", this.last_key);
+            }
+            cx.notify();
+        })
     }
 
     fn open_mailbox(&mut self, id: String) {
@@ -522,6 +542,7 @@ impl Render for Mailer {
                     .text_color(rgb(0x888888))
                     .child(status)
                     .child(div().flex_1())
+                    .child(self.last_key.clone())
                     .child(self.sandbox)
                     .child("gpui"),
             );
@@ -574,18 +595,20 @@ fn main() {
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // Клавиши без модификаторов — только вне поля ввода: в поиске j/k, стрелки, Home/End — это текст и курсор.
+        const LIST: Option<&str> = Some("Mailer && !Input");
         cx.bind_keys([
-            KeyBinding::new("j", Next, Some("Mailer")),
-            KeyBinding::new("down", Next, Some("Mailer")),
-            KeyBinding::new("k", Prev, Some("Mailer")),
-            KeyBinding::new("up", Prev, Some("Mailer")),
-            KeyBinding::new("home", First, Some("Mailer")),
-            KeyBinding::new("end", Last, Some("Mailer")),
-            KeyBinding::new("pagedown", PageDown, Some("Mailer")),
-            KeyBinding::new("pageup", PageUp, Some("Mailer")),
+            KeyBinding::new("j", Next, LIST),
+            KeyBinding::new("down", Next, LIST),
+            KeyBinding::new("k", Prev, LIST),
+            KeyBinding::new("up", Prev, LIST),
+            KeyBinding::new("home", First, LIST),
+            KeyBinding::new("end", Last, LIST),
+            KeyBinding::new("pagedown", PageDown, LIST),
+            KeyBinding::new("pageup", PageUp, LIST),
             KeyBinding::new("ctrl-q", MarkRead, Some("Mailer")),
             KeyBinding::new("ctrl-u", MarkUnread, Some("Mailer")),
-            KeyBinding::new("insert", ToggleFlag, Some("Mailer")),
+            KeyBinding::new("insert", ToggleFlag, LIST),
             KeyBinding::new("ctrl-e", FocusSearch, None),
             KeyBinding::new("ctrl-1", ShowMail, None),
             KeyBinding::new("ctrl-2", ShowCalendar, None),
