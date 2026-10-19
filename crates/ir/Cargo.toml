@@ -11,3 +11,6 @@ markup5ever_rcdom = "0.39.0"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde.workspace = true
 url.workspace = true
+
+[lints]
+workspace = true

@@ -104,21 +104,28 @@ pub fn spawn(
     repaint: impl Fn() + Send + 'static,
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
-    std::thread::Builder::new()
+    let failed = events.clone();
+    let started = std::thread::Builder::new()
         .name("sync".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
             let notify = |e: Event| {
                 let _ = events.send(e);
                 repaint();
+            };
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => return notify(Event::Error(format!("синхронизация не запустилась: {e}"))),
             };
             rt.block_on(async {
                 if let Err(e) = run(account, cache, index, rx, &notify).await {
                     notify(Event::Error(e));
                 }
             });
-        })
-        .expect("поток синхронизации");
+        });
+    // Ошибка видна в окне (как любая ошибка синхронизации); команды уходят в никуда, клиент работает с кэшем.
+    if let Err(e) = started {
+        let _ = failed.send(Event::Error(format!("поток синхронизации не запустился: {e}")));
+    }
     tx
 }
 

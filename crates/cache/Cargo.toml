@@ -9,3 +9,6 @@ license.workspace = true
 redb = "4"
 serde.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+
+[lints]
+workspace = true

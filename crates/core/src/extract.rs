@@ -20,7 +20,9 @@ pub struct Extractor {
 impl Extractor {
     pub fn spawn(cache: Cache, index: Arc<SearchIndex>) -> Self {
         let (tx, rx) = mpsc::channel::<Vec<String>>();
-        std::thread::Builder::new()
+        // Поток не запустился — очередь никто не читает, текст писем просто не индексируется.
+        // В журнал — с S2-06 (pets-shell); пока stderr.
+        let started = std::thread::Builder::new()
             .name("extract".into())
             .spawn(move || {
                 let mut worker = Client::new(Client::default_exe(), Duration::from_secs(5));
@@ -34,8 +36,10 @@ impl Extractor {
                     }
                     let _ = index.commit();
                 }
-            })
-            .expect("поток извлечения текста");
+            });
+        if let Err(e) = started {
+            eprintln!("поток извлечения текста не запустился: {e}");
+        }
         Self { tx }
     }
 

@@ -15,3 +15,6 @@ gpui-kit = "0.7"
 jiff = "0.2"
 postman-core.workspace = true
 pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "3106838be4bd94edefb43a27342eea6c5e4a7ed2" }
+
+[lints]
+workspace = true

@@ -374,7 +374,8 @@ impl ReadingPane {
         let id = r.row.id.clone();
         let worker = self.worker.clone();
         let task = cx.background_spawn(async move {
-            let mut w = worker.lock().expect("воркер");
+            // Отравленный мьютекс (паника в прошлом разборе) не мешает: клиент воркера сам перезапускает процесс.
+            let mut w = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let req = match (body.html, body.text) {
                 (Some(h), _) => Request::Html(h),
                 (None, Some(t)) => Request::Text(t),
@@ -799,24 +800,31 @@ fn data_dir() -> std::path::PathBuf {
         .join("Postman")
 }
 
+/// Запуск невозможен (нет каталога данных, хранилище или окно не открылись): сообщение и выход с кодом 1,
+/// без паники. В журнал Windows — с S2-06 (pets-shell).
+fn fatal(what: &str, e: impl std::fmt::Display) -> ! {
+    eprintln!("Postman не запустился: {what}: {e}");
+    std::process::exit(1)
+}
+
 fn main() {
     let start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let bench = args.iter().any(|a| a == "--bench");
     let dir = data_dir();
-    std::fs::create_dir_all(&dir).expect("каталог данных");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("каталог данных", e));
     // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
     let prepared = Instant::now();
     let path = if bench {
-        postman_demo::bench_copy(&dir, n).expect("ящик для замера")
+        postman_demo::bench_copy(&dir, n).unwrap_or_else(|e| fatal("ящик для замера", e))
     } else {
         let path = dir.join("demo.redb");
-        postman_demo::ensure(&path, n).expect("демо-ящик");
+        postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("демо-ящик", e));
         path
     };
     let start = if bench { start + prepared.elapsed() } else { start };
-    let cache = Cache::open(&path).expect("хранилище");
+    let cache = Cache::open(&path).unwrap_or_else(|e| fatal("хранилище", e));
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -824,12 +832,14 @@ fn main() {
         commands::bind(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-        gpui_kit::open_window(options, cx, |window, cx| {
+        let opened = gpui_kit::open_window(options, cx, |window, cx| {
             let bench = bench.then(|| Bench::new(start));
             let cache = cache.clone();
             cx.new(|cx| Mailer::new(cache, bench, window, cx))
-        })
-        .expect("окно");
+        });
+        if let Err(e) = opened {
+            fatal("окно", e);
+        }
         cx.activate(true);
     });
 }

@@ -40,7 +40,9 @@ impl Renderer {
     pub fn spawn(repaint: impl Fn() + Send + 'static) -> Self {
         let (tx, jobs) = mpsc::channel::<Job>();
         let (done, rx) = mpsc::channel();
-        std::thread::Builder::new()
+        // Поток не запустился — письма показываются без разбора (заглушкой ожидания), без падения.
+        // В журнал — с S2-06 (pets-shell); пока stderr.
+        let started = std::thread::Builder::new()
             .name("render".into())
             .spawn(move || {
                 let mut client = Client::new(Client::default_exe(), TIMEOUT);
@@ -78,8 +80,10 @@ impl Renderer {
                     }
                     repaint();
                 }
-            })
-            .expect("поток рендера");
+            });
+        if let Err(e) = started {
+            eprintln!("поток рендера не запустился: {e}");
+        }
         Self { tx, rx }
     }
 

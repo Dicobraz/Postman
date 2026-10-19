@@ -295,7 +295,7 @@ impl Client {
         if self.running.is_none() {
             self.running = Some(self.start()?);
         }
-        let r = self.running.as_mut().expect("запущен");
+        let Some(r) = self.running.as_mut() else { return Err("воркер не запущен".into()) };
         write_msg(&mut r.stdin, json, bin).map_err(|e| format!("воркер недоступен: {e}"))?;
         match r.responses.recv_timeout(self.timeout) {
             Ok(Ok(msg)) => {

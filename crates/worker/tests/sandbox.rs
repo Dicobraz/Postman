@@ -1,5 +1,7 @@
 //! Воркер в настоящей песочнице: рендер работает, побег — нет.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
+
 use std::path::PathBuf;
 use std::time::Duration;
 

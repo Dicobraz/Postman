@@ -9,3 +9,6 @@ license.workspace = true
 postman-cache.workspace = true
 jiff = "0.2"
 postman-calendar.workspace = true
+
+[lints]
+workspace = true

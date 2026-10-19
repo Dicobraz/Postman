@@ -9,11 +9,11 @@ const WORDS: &[&str] = &[
     "сотрудник", "отпуск", "командировка", "презентация", "заказчик", "требования", "аудит", "безопасность", "сертификат",
 ];
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let dir = std::env::temp_dir().join("postman-search-bench");
     let _ = std::fs::remove_dir_all(&dir);
-    let idx = SearchIndex::open(&dir).unwrap();
+    let idx = SearchIndex::open(&dir)?;
     let mut rng = 0x2545F4914F6CDD1Du64;
     let mut next = move || {
         rng ^= rng << 13;
@@ -33,20 +33,21 @@ fn main() {
             .iter()
             .map(|(id, s, p, b)| Doc { id, subject: s, people: p, body: b, attachments: "", received_at: 0 })
             .collect();
-        idx.upsert(&docs).unwrap();
+        idx.upsert(&docs)?;
     }
-    idx.commit().unwrap();
+    idx.commit()?;
     let index_time = t.elapsed();
-    let size: u64 = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+    let size: u64 = std::fs::read_dir(&dir)?.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum();
     println!("docs={} index={:?} size={:.1}MB", idx.len(), index_time, size as f64 / 1e6);
     for q in ["отчеты", "кваратл", "jnxtn", "командир", "отчет квартал безопасность", "deploying", "сотрудник 17", "лиценз"] {
         let t = Instant::now();
         let mut hits = 0;
         for _ in 0..20 {
-            hits = idx.search(q, 50).unwrap().len();
+            hits = idx.search(q, 50)?.len();
         }
         println!("{q:28} hits={hits:3} {:?}/запрос", t.elapsed() / 20);
     }
     let rss = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     println!("{}", rss.lines().find(|l| l.starts_with("VmRSS")).unwrap_or(""));
+    Ok(())
 }
