@@ -1341,7 +1341,9 @@ fn create_swap_chain(
         },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: BUFFER_COUNT as u32,
-        Scaling: DXGI_SCALING_NONE,
+        // Postman patch: while the window grows faster than frames arrive, DWM stretches the last frame
+        // instead of showing black in the new area (as wgpu does). NONE left a black strip on live resize.
+        Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: 0,
