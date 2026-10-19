@@ -668,7 +668,7 @@ impl App {
     fn do_file(&mut self, a: &AttachmentRow, act: FileAct, data: &[u8]) {
         let r = match act {
             FileAct::Open => files::open(&self.open_dir, &a.name, data).map(Some),
-            FileAct::SaveAs => files::save_as(&a.name, data),
+            FileAct::SaveAs => crate::dialogs::save_as(&a.name, data),
         };
         self.status = match r {
             Ok(Some(p)) => format!("{} — {}", files::safe_name(&a.name), p.display()),

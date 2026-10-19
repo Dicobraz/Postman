@@ -6138,6 +6138,7 @@ dependencies = [
  "postman-jmap",
  "postman-search",
  "postman-worker",
+ "rfd",
 ]
 
 [[package]]
@@ -6183,7 +6184,6 @@ dependencies = [
  "postman-jmap",
  "postman-search",
  "postman-worker",
- "rfd",
  "serde_json",
  "tokio",
 ]
