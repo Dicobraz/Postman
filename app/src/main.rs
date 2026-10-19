@@ -11,6 +11,7 @@
 
 mod app;
 mod composer;
+mod dialogs;
 mod gpu;
 mod invite_card;
 mod ir_view;

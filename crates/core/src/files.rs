@@ -65,6 +65,7 @@ pub fn human_size(n: u64) -> String {
     }
 }
 
+/// Записать файл по выбранному пользователем пути (диалог — в интерфейсе) с Mark-of-the-Web.
 pub fn write(path: &Path, data: &[u8]) -> io::Result<()> {
     std::fs::write(path, data)?;
     mark_of_the_web(path);
@@ -81,13 +82,6 @@ fn mark_of_the_web(path: &Path) {
 #[cfg(not(windows))]
 fn mark_of_the_web(_: &Path) {}
 
-/// Диалог «Сохранить как…». `Ok(None)` — пользователь отменил.
-pub fn save_as(name: &str, data: &[u8]) -> io::Result<Option<PathBuf>> {
-    let Some(path) = rfd::FileDialog::new().set_file_name(safe_name(name)).save_file() else { return Ok(None) };
-    write(&path, data)?;
-    Ok(Some(path))
-}
-
 /// Сохранить во временный каталог и открыть системным приложением.
 pub fn open(dir: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> {
     if !can_open(name) {
@@ -100,11 +94,6 @@ pub fn open(dir: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> {
     write(&path, data)?;
     open::that_detached(&path)?;
     Ok(path)
-}
-
-/// Выбор файлов для вложения.
-pub fn pick() -> Vec<PathBuf> {
-    rfd::FileDialog::new().pick_files().unwrap_or_default()
 }
 
 /// MIME по расширению — для заголовка Content-Type вложения.

@@ -315,7 +315,7 @@ impl Composer {
                     want_send |= ui.button("➤ Отправить").on_hover_text("Ctrl+Enter / Alt+S").clicked();
                     want_save |= ui.button("💾 Сохранить").on_hover_text("Ctrl+S").clicked();
                     if ui.button("📎 Вложить").on_hover_text("Или перетащите файлы в окно").clicked() {
-                        attach = files::pick();
+                        attach = crate::dialogs::pick();
                     }
                 });
                 if ui.selectable_label(self.show_bcc, "Скрытая").on_hover_text("Ctrl+Shift+B").clicked() {
