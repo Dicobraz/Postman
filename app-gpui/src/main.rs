@@ -62,11 +62,13 @@ impl FlagWriter {
     }
 }
 
-struct Mailer {
+// --- список писем ---
+
+/// Список писем — отдельное view: при листании gpui раскладывает и рисует только его,
+/// остальные части экрана берутся из прошлого кадра (S1-06).
+struct MailList {
     cache: Cache,
     flags: FlagWriter,
-    focus: FocusHandle,
-    mailboxes: Vec<MailboxRow>,
     mailbox: Option<String>,
     /// id результатов поиска вместо папки.
     search_ids: Option<Vec<String>>,
@@ -80,37 +82,18 @@ struct Mailer {
     visible: Range<usize>,
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
-    reading: Option<Reading>,
-    worker: Arc<Mutex<Worker>>,
-    sandbox: &'static str,
-    /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
-    last_key: String,
-    search: Entity<InputState>,
-    bench: Option<Bench>,
-    section: Section,
-    cal: calendar::CalendarView,
-    _subscriptions: Vec<Subscription>,
 }
 
-impl Mailer {
-    fn new(cache: Cache, bench: Option<Bench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск (Ctrl+E), Enter — искать, Esc — сбросить"));
-        let keylog = std::env::var_os("POSTMAN_KEYLOG").is_some();
-        let sub = cx.subscribe_in(&search, window, move |this: &mut Self, state, ev: &InputEvent, _window, cx| match ev {
-            InputEvent::PressEnter { .. } => {
-                let q = state.read(cx).value().to_string();
-                this.run_search(&q, cx);
-            }
-            InputEvent::Change if keylog => println!("search \"{}\"", state.read(cx).value()),
-            _ => {}
-        });
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        let mut m = Self {
+/// Письмо открыто (строка уже помечена прочитанной).
+struct OpenRow(EmailRow);
+
+impl EventEmitter<OpenRow> for MailList {}
+
+impl MailList {
+    fn new(cache: Cache) -> Self {
+        Self {
             flags: FlagWriter::new(cache.clone()),
             cache,
-            focus,
-            mailboxes: Vec::new(),
             mailbox: None,
             search_ids: None,
             count: 0,
@@ -121,44 +104,19 @@ impl Mailer {
             visible: 0..30,
             selected: None,
             scroll: UniformListScrollHandle::new(),
-            reading: None,
-            worker: Arc::new(Mutex::new(Worker::new(Worker::default_exe(), Duration::from_secs(5)))),
-            sandbox: "",
-            last_key: String::new(),
-            search,
-            bench,
-            section: Section::Mail,
-            cal: calendar::CalendarView::demo(),
-            _subscriptions: vec![sub, Self::observe_keys(cx)],
-        };
-        m.mailboxes = m.cache.mailboxes().unwrap_or_default();
-        let inbox = m.mailboxes.iter().find(|b| b.role.as_deref() == Some("inbox")).or(m.mailboxes.first());
-        if let Some(id) = inbox.map(|b| b.id.clone()) {
-            m.open_mailbox(id);
         }
-        m
     }
 
-    /// «Ctrl-e (у) → FocusSearch» в строке состояния; `POSTMAN_KEYLOG=1` — то же строкой `key …` в stdout.
-    fn observe_keys(cx: &mut Context<Self>) -> Subscription {
-        let to_stdout = std::env::var_os("POSTMAN_KEYLOG").is_some();
-        cx.observe_keystrokes(move |this, ev, _window, cx| {
-            let k = &ev.keystroke;
-            let action = ev.action.as_ref().map_or("—", |a| a.name());
-            this.last_key = format!("{} ({}) → {action}", k.unparse(), k.key_char.as_deref().unwrap_or(""));
-            if to_stdout {
-                println!("key {}", this.last_key);
-            }
-            cx.notify();
-        })
-    }
-
-    fn open_mailbox(&mut self, id: String) {
+    fn show_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
         self.mailbox = Some(id);
-        self.search_ids = None;
+        self.show_search(None, cx);
+    }
+
+    fn show_search(&mut self, ids: Option<Vec<String>>, cx: &mut Context<Self>) {
+        self.search_ids = ids;
         self.selected = None;
-        self.reading = None;
         self.reload();
+        cx.notify();
     }
 
     fn reload(&mut self) {
@@ -233,6 +191,7 @@ impl Mailer {
         self.selected = Some(i);
         self.scroll.scroll_to_item(i, ScrollStrategy::Center);
         self.ensure(i..i + 1, cx);
+        cx.notify();
         let Some(row) = self.row(i).cloned() else {
             self.pending_open = Some(i);
             return;
@@ -241,25 +200,170 @@ impl Mailer {
         self.open_row(row, cx);
     }
 
-    /// Показать письмо в области чтения; при первом открытии — пометить прочитанным.
+    /// При первом открытии письмо помечается прочитанным, затем уходит в область чтения.
     fn open_row(&mut self, mut row: EmailRow, cx: &mut Context<Self>) {
-        if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
-            return;
-        }
         if !row.seen {
             row.seen = true;
             self.flags.set(&row.id, true, row.flagged);
             self.patch_row(&row);
         }
-        let body = Some(postman_demo::body(&row.id));
-        self.reading = Some(Reading { row, body, doc: None });
-        self.render_body(cx);
+        cx.emit(OpenRow(row));
     }
 
     fn patch_row(&mut self, row: &EmailRow) {
         for r in self.rows.1.iter_mut().filter(|r| r.id == row.id) {
             *r = row.clone();
         }
+    }
+
+    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let cur = self.selected.map_or(0, |i| i as isize);
+        let next = if self.selected.is_none() { 0 } else { (cur + delta).max(0) as usize };
+        self.select(next, cx);
+    }
+
+    fn set_flags(&mut self, seen: Option<bool>, toggle_flag: bool, cx: &mut Context<Self>) {
+        let Some(mut row) = self.selected.and_then(|i| self.row(i)).cloned() else { return };
+        if let Some(s) = seen {
+            row.seen = s;
+        }
+        if toggle_flag {
+            row.flagged = !row.flagged;
+        }
+        self.flags.set(&row.id, row.seen, row.flagged);
+        self.patch_row(&row);
+        cx.notify();
+    }
+
+    fn page(&self) -> isize {
+        self.visible.len().max(1) as isize
+    }
+
+    /// Замер: строка `i` — первая видимая.
+    fn scroll_to_top(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_item(i, ScrollStrategy::Top);
+        cx.notify();
+    }
+}
+
+impl Render for MailList {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().border_r_1().border_color(rgb(0xdddddd)).child(
+            uniform_list(
+                "messages",
+                self.count,
+                cx.processor(|this, range: Range<usize>, _window, cx| {
+                    // Одну строку gpui запрашивает, чтобы измерить высоту, — это не видимая область.
+                    if range.len() > 1 {
+                        this.visible = range.clone();
+                        this.ensure(range.clone(), cx);
+                    }
+                    range
+                        .map(|i| match this.row(i).cloned() {
+                            Some(r) => list_row(i, &r, this.selected == Some(i), cx),
+                            None => empty_row(i),
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .track_scroll(&self.scroll)
+            .h_full(),
+        )
+    }
+}
+
+// --- папки ---
+
+struct Folders {
+    mailboxes: Vec<MailboxRow>,
+    current: Option<String>,
+    /// Число результатов, пока показан поиск.
+    results: Option<usize>,
+    section: Section,
+}
+
+enum FolderEvent {
+    Open(String),
+    Section(Section),
+}
+
+impl EventEmitter<FolderEvent> for Folders {}
+
+impl Render for Folders {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut col = div().flex().flex_col().size_full().border_r_1().border_color(rgb(0xdddddd)).bg(rgb(0xf7f7f7));
+        if let Some(n) = self.results {
+            col = col.child(div().px_3().py_1().bg(rgb(0xcce4ff)).child(format!("🔍 Результаты ({n})")));
+        }
+        let mut list = div().flex().flex_col().flex_1().p_1();
+        for m in &self.mailboxes {
+            let selected = self.results.is_none() && self.current.as_deref() == Some(&m.id);
+            let id = m.id.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("mb-{}", m.id)))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(selected, |d| d.bg(rgb(0xcce4ff)))
+                    .hover(|d| d.bg(rgb(0xe8f1fb)))
+                    .cursor_pointer()
+                    .child(m.name.clone())
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Open(id.clone())))),
+            );
+        }
+        col.child(list).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .p_2()
+                .border_t_1()
+                .border_color(rgb(0xdddddd))
+                .child(nav("nav-mail", "✉ Почта", self.section == Section::Mail, Section::Mail, cx))
+                .child(nav("nav-cal", "📅 Календарь", self.section == Section::Calendar, Section::Calendar, cx))
+                .child("👥 Контакты"),
+        )
+    }
+}
+
+fn nav(id: &'static str, label: &'static str, active: bool, section: Section, cx: &mut Context<Folders>) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(active, |d| d.bg(rgb(0xcce4ff)))
+        .child(label)
+        .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Section(section))))
+}
+
+// --- область чтения ---
+
+struct ReadingPane {
+    worker: Arc<Mutex<Worker>>,
+    reading: Option<Reading>,
+}
+
+/// Уровень песочницы последнего разбора — для строки состояния.
+struct SandboxLevel(&'static str);
+
+impl EventEmitter<SandboxLevel> for ReadingPane {}
+
+impl ReadingPane {
+    fn open(&mut self, row: EmailRow, cx: &mut Context<Self>) {
+        if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
+            return;
+        }
+        let body = Some(postman_demo::body(&row.id));
+        self.reading = Some(Reading { row, body, doc: None });
+        self.render_body(cx);
+        cx.notify();
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.reading = None;
+        cx.notify();
     }
 
     /// HTML → IR в воркере-песочнице, в фоновом исполнителе gpui.
@@ -280,11 +384,11 @@ impl Mailer {
         cx.spawn(async move |this, cx| {
             let (result, level) = task.await;
             this.update(cx, |this, cx| {
-                this.sandbox = match level {
+                cx.emit(SandboxLevel(match level {
                     Level::Full => "Песочница: полная",
                     Level::Partial => "Песочница: частичная",
                     Level::None => "Песочница: нет",
-                };
+                }));
                 if let Some(r) = this.reading.as_mut().filter(|r| r.row.id == id) {
                     r.doc = Some(result.unwrap_or_else(|e| postman_ir::from_plain(&format!("⚠ {e}"))));
                 }
@@ -294,113 +398,12 @@ impl Mailer {
         })
         .detach();
     }
+}
 
-    fn run_search(&mut self, q: &str, cx: &mut Context<Self>) {
-        let q = q.trim();
-        if q.is_empty() {
-            self.search_ids = None;
-        } else {
-            self.search_ids = Some(self.cache.search(q, self.mailbox.as_deref(), 1000).unwrap_or_default());
-        }
-        self.selected = None;
-        self.reading = None;
-        self.reload();
-        cx.notify();
-    }
-
-    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let cur = self.selected.map_or(0, |i| i as isize);
-        let next = if self.selected.is_none() { 0 } else { (cur + delta).max(0) as usize };
-        self.select(next, cx);
-        cx.notify();
-    }
-
-    fn set_flags(&mut self, seen: Option<bool>, toggle_flag: bool, cx: &mut Context<Self>) {
-        let Some(mut row) = self.selected.and_then(|i| self.row(i)).cloned() else { return };
-        if let Some(s) = seen {
-            row.seen = s;
-        }
-        if toggle_flag {
-            row.flagged = !row.flagged;
-        }
-        self.flags.set(&row.id, row.seen, row.flagged);
-        self.patch_row(&row);
-        cx.notify();
-    }
-
-    fn page(&self) -> isize {
-        self.visible.len().max(1) as isize
-    }
-
-    // --- отрисовка ---
-
-    fn folders(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex().flex_col().w(px(200.)).h_full().border_r_1().border_color(rgb(0xdddddd)).bg(rgb(0xf7f7f7));
-        if self.search_ids.is_some() {
-            col = col.child(div().px_3().py_1().bg(rgb(0xcce4ff)).child(format!("🔍 Результаты ({})", self.count)));
-        }
-        let mut list = div().flex().flex_col().flex_1().p_1();
-        for m in &self.mailboxes {
-            let selected = self.search_ids.is_none() && self.mailbox.as_deref() == Some(&m.id);
-            let id = m.id.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("mb-{}", m.id)))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .when(selected, |d| d.bg(rgb(0xcce4ff)))
-                    .hover(|d| d.bg(rgb(0xe8f1fb)))
-                    .cursor_pointer()
-                    .child(m.name.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_mailbox(id.clone());
-                        cx.notify();
-                    })),
-            );
-        }
-        col.child(list).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .p_2()
-                .border_t_1()
-                .border_color(rgb(0xdddddd))
-                .child(nav("nav-mail", "✉ Почта", self.section == Section::Mail, Section::Mail, cx))
-                .child(nav("nav-cal", "📅 Календарь", self.section == Section::Calendar, Section::Calendar, cx))
-                .child("👥 Контакты"),
-        )
-    }
-
-    fn list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.count;
-        div().w(px(380.)).h_full().border_r_1().border_color(rgb(0xdddddd)).child(
-            uniform_list(
-                "messages",
-                count,
-                cx.processor(|this, range: Range<usize>, _window, cx| {
-                    // Одну строку gpui запрашивает, чтобы измерить высоту, — это не видимая область.
-                    if range.len() > 1 {
-                        this.visible = range.clone();
-                        this.ensure(range.clone(), cx);
-                    }
-                    range
-                        .map(|i| match this.row(i).cloned() {
-                            Some(r) => list_row(i, &r, this.selected == Some(i), cx),
-                            None => empty_row(i),
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .track_scroll(&self.scroll)
-            .h_full(),
-        )
-    }
-
-    fn reading_pane(&self, cx: &mut Context<Self>) -> AnyElement {
+impl Render for ReadingPane {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(r) = &self.reading else {
-            return div().flex().flex_1().items_center().justify_center().text_color(rgb(0x888888)).child("Выберите письмо").into_any_element();
+            return div().flex().size_full().items_center().justify_center().text_color(rgb(0x888888)).child("Выберите письмо").into_any_element();
         };
         let from = format!("{} <{}>", r.row.from_name, r.row.from_addr);
         let to = r
@@ -439,7 +442,7 @@ impl Mailer {
             .id("reading")
             .flex()
             .flex_col()
-            .flex_1()
+            .size_full()
             .p_3()
             .gap_2()
             .overflow_y_scroll()
@@ -449,18 +452,168 @@ impl Mailer {
     }
 }
 
-fn nav(id: &'static str, label: &'static str, active: bool, section: Section, cx: &mut Context<Mailer>) -> impl IntoElement {
-    div()
-        .id(id)
-        .px_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(active, |d| d.bg(rgb(0xcce4ff)))
-        .child(label)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.section = section;
+// --- строка команд ---
+
+/// Высота строки команд: кэшированное view не измеряется по содержимому, размер задаётся явно.
+const BAR_HEIGHT: f32 = 40.0;
+
+struct CommandBar {
+    search: Entity<InputState>,
+}
+
+impl Render for CommandBar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .size_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .border_b_1()
+            .border_color(rgb(0xdddddd))
+            .children(["✉ Создать", "↩ Ответить", "↩↩ Ответить всем", "↪ Переслать", "🗑 Удалить", "⚑ Флаг"].map(|l| {
+                div().px_2().py_0p5().rounded_md().bg(rgb(0xececec)).child(l)
+            }))
+            .child(div().flex_1())
+            .child(div().w(px(320.)).child(Input::new(&self.search)))
+    }
+}
+
+// --- экран ---
+
+/// Экран почты: связывает части, держит хоткеи, поиск, календарь и строку состояния.
+/// Части — отдельные кэшируемые view; заново строится та, что получила `notify`.
+struct Mailer {
+    cache: Cache,
+    focus: FocusHandle,
+    list: Entity<MailList>,
+    folders: Entity<Folders>,
+    reading: Entity<ReadingPane>,
+    bar: Entity<CommandBar>,
+    search: Entity<InputState>,
+    sandbox: &'static str,
+    /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
+    last_key: String,
+    bench: Option<Bench>,
+    section: Section,
+    cal: calendar::CalendarView,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Mailer {
+    fn new(cache: Cache, bench: Option<Bench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск (Ctrl+E), Enter — искать, Esc — сбросить"));
+        let keylog = std::env::var_os("POSTMAN_KEYLOG").is_some();
+        let on_search = cx.subscribe_in(&search, window, move |this: &mut Self, state, ev: &InputEvent, _window, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                let q = state.read(cx).value().to_string();
+                this.run_search(&q, cx);
+            }
+            InputEvent::Change if keylog => println!("search \"{}\"", state.read(cx).value()),
+            _ => {}
+        });
+        let mailboxes = cache.mailboxes().unwrap_or_default();
+        let inbox = mailboxes.iter().find(|b| b.role.as_deref() == Some("inbox")).or(mailboxes.first()).map(|b| b.id.clone());
+        let list = cx.new(|cx| {
+            let mut l = MailList::new(cache.clone());
+            if let Some(id) = inbox.clone() {
+                l.show_mailbox(id, cx);
+            }
+            l
+        });
+        let folders = cx.new(|_| Folders { mailboxes, current: inbox, results: None, section: Section::Mail });
+        let reading = cx.new(|_| ReadingPane {
+            worker: Arc::new(Mutex::new(Worker::new(Worker::default_exe(), Duration::from_secs(5)))),
+            reading: None,
+        });
+        let bar = cx.new(|_| CommandBar { search: search.clone() });
+        let subscriptions = vec![
+            on_search,
+            Self::observe_keys(cx),
+            cx.subscribe(&list, |this, _, OpenRow(row), cx| {
+                this.reading.update(cx, |r, cx| r.open(row.clone(), cx));
+            }),
+            cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
+                FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
+                FolderEvent::Section(s) => this.set_section(*s, cx),
+            }),
+            cx.subscribe(&reading, |this, _, SandboxLevel(level), cx| {
+                this.sandbox = level;
+                cx.notify();
+            }),
+        ];
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        Self {
+            cache,
+            focus,
+            list,
+            folders,
+            reading,
+            bar,
+            search,
+            sandbox: "",
+            last_key: String::new(),
+            bench,
+            section: Section::Mail,
+            cal: calendar::CalendarView::demo(),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// «Ctrl-e (у) → FocusSearch» в строке состояния; `POSTMAN_KEYLOG=1` — то же строкой `key …` в stdout.
+    fn observe_keys(cx: &mut Context<Self>) -> Subscription {
+        let to_stdout = std::env::var_os("POSTMAN_KEYLOG").is_some();
+        cx.observe_keystrokes(move |this, ev, _window, cx| {
+            let k = &ev.keystroke;
+            let action = ev.action.as_ref().map_or("—", |a| a.name());
+            this.last_key = format!("{} ({}) → {action}", k.unparse(), k.key_char.as_deref().unwrap_or(""));
+            if to_stdout {
+                println!("key {}", this.last_key);
+            }
             cx.notify();
-        }))
+        })
+    }
+
+    fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
+        self.folders.update(cx, |f, cx| {
+            f.current = Some(id.clone());
+            f.results = None;
+            cx.notify();
+        });
+        self.list.update(cx, |l, cx| l.show_mailbox(id, cx));
+        self.reading.update(cx, |r, cx| r.clear(cx));
+    }
+
+    fn run_search(&mut self, q: &str, cx: &mut Context<Self>) {
+        let q = q.trim();
+        let mailbox = self.list.read(cx).mailbox.clone();
+        let ids = (!q.is_empty()).then(|| self.cache.search(q, mailbox.as_deref(), 1000).unwrap_or_default());
+        let results = ids.as_ref().map(Vec::len);
+        self.folders.update(cx, |f, cx| {
+            f.results = results;
+            cx.notify();
+        });
+        self.list.update(cx, |l, cx| l.show_search(ids, cx));
+        self.reading.update(cx, |r, cx| r.clear(cx));
+    }
+
+    fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.section = section;
+        self.folders.update(cx, |f, cx| {
+            f.section = section;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Сдвиг выделения; `delta` считается по состоянию списка (страница, число писем).
+    fn step(&mut self, delta: impl Fn(&MailList) -> isize, cx: &mut Context<Self>) {
+        self.list.update(cx, |l, cx| {
+            let d = delta(l);
+            l.step(d, cx);
+        });
+    }
 }
 
 fn field(label: &'static str, value: String) -> impl IntoElement {
@@ -496,7 +649,7 @@ fn empty_row(i: usize) -> AnyElement {
     div().id(i).h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
 }
 
-fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<Mailer>) -> AnyElement {
+fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<MailList>) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let mut icons = String::new();
     if r.has_attachment {
@@ -531,10 +684,7 @@ fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<Mailer>) ->
                 .child(div().text_sm().text_color(rgb(0x888888)).child(format_date(r.received_at))),
         )
         .child(div().text_sm().truncate().text_color(if r.seen { rgb(0x777777) } else { rgb(0x1a6fd1) }).child(line2))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.select(i, cx);
-            cx.notify();
-        }))
+        .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
         .into_any_element()
 }
 
@@ -549,31 +699,24 @@ impl Render for Mailer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
         self.drive_bench(window, cx);
-        let status = format!("Элементов: {}", self.count);
+        let status = format!("Элементов: {}", self.list.read(cx).count);
         let root = div()
             .key_context("Mailer")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
-            .on_action(cx.listener(|this, _: &Prev, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &First, _, cx| this.step(-(this.count as isize), cx)))
-            .on_action(cx.listener(|this, _: &Last, _, cx| this.step(this.count as isize, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.step(this.page(), cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.step(-this.page(), cx)))
-            .on_action(cx.listener(|this, _: &MarkRead, _, cx| this.set_flags(Some(true), false, cx)))
-            .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.set_flags(Some(false), false, cx)))
-            .on_action(cx.listener(|this, _: &ToggleFlag, _, cx| this.set_flags(None, true, cx)))
-            .on_action(cx.listener(|this, _: &ShowMail, _, cx| {
-                this.section = Section::Mail;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ShowCalendar, _, cx| {
-                this.section = Section::Calendar;
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &Next, _, cx| this.step(|_| 1, cx)))
+            .on_action(cx.listener(|this, _: &Prev, _, cx| this.step(|_| -1, cx)))
+            .on_action(cx.listener(|this, _: &First, _, cx| this.step(|l| -(l.count as isize), cx)))
+            .on_action(cx.listener(|this, _: &Last, _, cx| this.step(|l| l.count as isize, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.step(MailList::page, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.step(|l| -l.page(), cx)))
+            .on_action(cx.listener(|this, _: &MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
+            .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
+            .on_action(cx.listener(|this, _: &ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
+            .on_action(cx.listener(|this, _: &ShowMail, _, cx| this.set_section(Section::Mail, cx)))
+            .on_action(cx.listener(|this, _: &ShowCalendar, _, cx| this.set_section(Section::Calendar, cx)))
             .on_action(cx.listener(|this, _: &NewMeeting, _, cx| {
-                this.section = Section::Calendar;
                 this.cal.assistant = !this.cal.assistant;
-                cx.notify();
+                this.set_section(Section::Calendar, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
@@ -589,28 +732,17 @@ impl Render for Mailer {
             .bg(rgb(0xfafafa))
             .text_color(rgb(0x222222))
             .text_size(px(13.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(rgb(0xdddddd))
-                    .children(["✉ Создать", "↩ Ответить", "↩↩ Ответить всем", "↪ Переслать", "🗑 Удалить", "⚑ Флаг"].map(|l| {
-                        div().px_2().py_0p5().rounded_md().bg(rgb(0xececec)).child(l)
-                    }))
-                    .child(div().flex_1())
-                    .child(div().w(px(320.)).child(Input::new(&self.search))),
-            )
+            .child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.folders(cx))
-                    .when(self.section == Section::Mail, |d| d.child(self.list(cx)).child(self.reading_pane(cx)))
+                    .child(self.folders.clone().cached(StyleRefinement::default().w(px(200.)).h_full().flex_none()))
+                    .when(self.section == Section::Mail, |d| {
+                        d.child(self.list.clone().cached(StyleRefinement::default().w(px(380.)).h_full().flex_none()))
+                            .child(self.reading.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
+                    })
                     .when(self.section == Section::Calendar, |d| d.child(calendar::render(self, cx))),
             )
             .child(
@@ -639,11 +771,12 @@ impl Render for Mailer {
 
 impl Mailer {
     fn drive_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.list.read(cx).count;
         let Some(b) = &mut self.bench else { return };
-        match b.frame(self.count) {
+        match b.frame(count) {
             Step::Wait => {}
-            Step::Select(i) => self.select(i, cx),
-            Step::Scroll(i) => self.scroll.scroll_to_item(i, ScrollStrategy::Top),
+            Step::Select(i) => self.list.update(cx, |l, cx| l.select(i, cx)),
+            Step::Scroll(i) => self.list.update(cx, |l, cx| l.scroll_to_top(i, cx)),
             Step::Resize(w, h) => window.resize(size(px(w), px(h))),
             Step::Done(report) => {
                 // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.
