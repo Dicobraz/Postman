@@ -2,7 +2,7 @@
 
 Корпоративный клиент почта + календарь + контакты под **Stalwart** по **JMAP**.
 Чистый Rust, GPU-рендер (wgpu → DX12/Vulkan), раскладка и хоткеи classic Outlook.
-Исходное ТЗ и решения — [docs/HANDOFF.md](docs/HANDOFF.md). Учётные записи, файлы и связь с системой учёта — [docs/IDENTITY.md](docs/IDENTITY.md). Сравнение egui и gpui — [docs/UI-SPIKE.md](docs/UI-SPIKE.md).
+Правила для Claude Code — [CLAUDE.md](CLAUDE.md). План — [docs/PLAN.md](docs/PLAN.md). Исходное ТЗ и решения — [docs/HANDOFF.md](docs/HANDOFF.md). Учётные записи, файлы и связь с системой учёта — [docs/IDENTITY.md](docs/IDENTITY.md). Сравнение egui и gpui — [docs/UI-SPIKE.md](docs/UI-SPIKE.md).
 
 ## Структура
 
