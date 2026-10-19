@@ -30,6 +30,13 @@ fn data_dir() -> PathBuf {
     base.join("Postman")
 }
 
+/// Запуск невозможен (нет каталога данных, хранилище или окно не открылись): сообщение и выход с кодом 1,
+/// без паники. В журнал Windows — с S2-06 (pets-shell).
+pub(crate) fn fatal(what: &str, e: impl std::fmt::Display) -> ! {
+    eprintln!("Postman не запустился: {what}: {e}");
+    std::process::exit(1)
+}
+
 fn main() -> eframe::Result {
     let mut start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,19 +51,19 @@ fn main() -> eframe::Result {
         args.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(50_000usize)
     });
     let dir = data_dir();
-    std::fs::create_dir_all(&dir).expect("каталог данных");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("каталог данных", e));
 
     let (db_path, account) = match demo {
         Some(n) => {
             // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
             let path = if bench {
                 let prepared = Instant::now();
-                let path = postman_demo::bench_copy(&dir, n).expect("ящик для замера");
+                let path = postman_demo::bench_copy(&dir, n).unwrap_or_else(|e| fatal("ящик для замера", e));
                 start += prepared.elapsed();
                 path
             } else {
                 let path = dir.join("demo.redb");
-                postman_demo::ensure(&path, n).expect("демо-кэш");
+                postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("демо-кэш", e));
                 path
             };
             (path, None)

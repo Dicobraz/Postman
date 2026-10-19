@@ -2,6 +2,8 @@
 //! слой ниже не зависит от слоя выше, у каждого крейта есть слой. Проверка по `cargo tree`
 //! (обычные зависимости, по Cargo.lock, без сети).
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
+
 use std::collections::BTreeSet;
 use std::process::Command;
 

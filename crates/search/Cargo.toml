@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 tantivy = { version = "0.27", default-features = false, features = ["mmap", "stemmer", "lz4-compression"] }
+
+[lints]
+workspace = true

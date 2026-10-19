@@ -115,7 +115,7 @@ impl App {
         demo: bool,
         bench: Option<bench::Bench>,
     ) -> Self {
-        let cache = Cache::open(&db).expect("кэш");
+        let cache = Cache::open(&db).unwrap_or_else(|e| crate::fatal("кэш", e));
         let open_dir = db.parent().map(|d| d.join("open")).unwrap_or_default();
         let index_dir = db.with_extension("search");
         let index = postman_search::SearchIndex::open(&index_dir).ok().map(Arc::new);

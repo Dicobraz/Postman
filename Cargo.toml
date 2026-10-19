@@ -28,6 +28,12 @@ codegen-units = 1
 strip = true
 
 # gpui 0.2.2 тянет xattr 0.2.3, несовместимый со свежим libc (нет ENOATTR на Linux).
+# «Не падать» (S2-03): вне тестов нет unwrap/expect/panic!; в тестах разрешены (clippy.toml).
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
 [patch.crates-io]
 xattr = { path = "third_party/xattr" }
 # Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — общий для приложений Pets:

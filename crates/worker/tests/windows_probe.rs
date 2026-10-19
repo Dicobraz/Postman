@@ -1,5 +1,7 @@
 //! Диагностика песочницы Windows: какое ограничение не даёт воркеру стартовать.
 //! Запуск: `cargo test -p postman-worker --test windows_probe -- --ignored --nocapture` (отладочная сборка).
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 #![cfg(windows)]
 
 use std::path::PathBuf;

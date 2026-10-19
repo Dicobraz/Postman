@@ -136,18 +136,25 @@ impl SearchIndex {
         Ok(Self { index, reader, writer: Mutex::new(None), f })
     }
 
+    /// Писатель индекса. Мьютекс, отравленный паникой в другом потоке, не роняет поиск: писатель
+    /// tantivy сам по себе цел, незакоммиченное просто повторится.
+    fn writer(&self) -> std::sync::MutexGuard<'_, Option<IndexWriter>> {
+        self.writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn with_writer<R>(&self, f: impl FnOnce(&IndexWriter) -> Result<R>) -> Result<R> {
-        let mut guard = self.writer.lock().expect("writer");
-        if guard.is_none() {
+        let mut guard = self.writer();
+        let w = match guard.as_mut() {
+            Some(w) => w,
             // Один поток индексации с минимальным бюджетом: письма приходят порциями, память важнее.
-            *guard = Some(self.index.writer_with_num_threads(1, WRITER_HEAP)?);
-        }
-        f(guard.as_ref().expect("создан"))
+            None => guard.insert(self.index.writer_with_num_threads(1, WRITER_HEAP)?),
+        };
+        f(w)
     }
 
     /// Есть ли незакоммиченные изменения.
     pub fn dirty(&self) -> bool {
-        self.writer.lock().expect("writer").is_some()
+        self.writer().is_some()
     }
 
     /// Добавить или заменить письма. Видны в поиске после [`commit`](Self::commit).
@@ -182,7 +189,7 @@ impl SearchIndex {
 
     /// Зафиксировать изменения и освободить писателя (вместе с его памятью).
     pub fn commit(&self) -> Result<()> {
-        let Some(mut w) = self.writer.lock().expect("writer").take() else { return Ok(()) };
+        let Some(mut w) = self.writer().take() else { return Ok(()) };
         w.commit()?;
         // Дождаться фоновых слияний сегментов, чтобы не оставлять потоков.
         w.wait_merging_threads()?;
@@ -268,7 +275,8 @@ impl SearchIndex {
     }
 
     fn stem_terms(&self, field: Field, word: &str) -> Vec<Term> {
-        let mut analyzer = self.index.tokenizers().get(STEM).expect("зарегистрирован");
+        // Анализатор регистрируется при открытии индекса; если его нет — ищем без словоформ.
+        let Some(mut analyzer) = self.index.tokenizers().get(STEM) else { return Vec::new() };
         let mut stream = analyzer.token_stream(word);
         let mut out = Vec::new();
         while stream.advance() {
@@ -294,6 +302,25 @@ mod tests {
         .unwrap();
         i.commit().unwrap();
         i
+    }
+
+    /// S2-03: паника в потоке, державшем писателя, не роняет индекс — запись и поиск продолжают работать.
+    #[test]
+    fn poisoned_writer_lock_does_not_break_the_index() {
+        let i = std::sync::Arc::new(index());
+        let held = i.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.writer.lock();
+            panic!("паника с захваченным писателем");
+        })
+        .join();
+        assert!(i.writer.is_poisoned());
+        assert!(!i.dirty());
+        let d = Doc { id: "5", subject: "Отпуск", people: "Кадры", body: "Заявление", attachments: "", received_at: 0 };
+        i.upsert(&[d]).unwrap();
+        assert!(i.dirty());
+        i.commit().unwrap();
+        assert_eq!(i.search("отпуск", 10).unwrap(), ["5"]);
     }
 
     #[test]

@@ -24,6 +24,8 @@ Windows. Приложение семейства «Pets»: общий архит
 - Коммиты на русском, суть в первой строке. Перед PR: `cargo clippy --workspace --all-targets -- -D warnings`
   и `cargo test --workspace`. CI (`.github/workflows/ci.yml`, только Windows) собирает и выкладывает
   архив `postman-windows-x64` в Actions.
+- «Не падать»: вне тестов нет `unwrap`/`expect`/`panic!` (clippy `deny` на всю рабочую область); ошибка — `Result`,
+  отравленный мьютекс — `PoisonError::into_inner`, сбой старта — `fatal` (сообщение и выход).
 - Платформа: Windows — основа, другие ОС — по запросу. Код вне платформенных модулей не завязываем на Windows,
   чтобы их можно было вернуть.
 - Бюджеты — свои, из ТЗ (`docs/HANDOFF.md` §2c), а не из базиса.
