@@ -5819,6 +5819,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pets-commands"
+version = "0.1.0"
+source = "git+https://github.com/Dicobraz/pets?rev=1e2603193a0a06035221545b0de576fcc9c14d35#1e2603193a0a06035221545b0de576fcc9c14d35"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "phf"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6203,6 +6211,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "jiff",
+ "pets-commands",
  "postman-cache",
  "postman-calendar",
  "postman-core",
