@@ -4,6 +4,7 @@
 //!   postman-gpui [--demo N] [--bench]
 
 mod calendar;
+mod commands;
 mod ir_view;
 
 use std::ops::Range;
@@ -18,7 +19,7 @@ use postman_ir::Document;
 use postman_core::bench::{self, Bench, Step};
 use postman_worker::{Client as Worker, Level, Request};
 
-actions!(postman, [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, FocusSearch, ClearSearch, ShowMail, ShowCalendar, NewMeeting]);
+use commands::{mail, search, view};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -703,25 +704,25 @@ impl Render for Mailer {
         let root = div()
             .key_context("Mailer")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Next, _, cx| this.step(|_| 1, cx)))
-            .on_action(cx.listener(|this, _: &Prev, _, cx| this.step(|_| -1, cx)))
-            .on_action(cx.listener(|this, _: &First, _, cx| this.step(|l| -(l.count as isize), cx)))
-            .on_action(cx.listener(|this, _: &Last, _, cx| this.step(|l| l.count as isize, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.step(MailList::page, cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.step(|l| -l.page(), cx)))
-            .on_action(cx.listener(|this, _: &MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
-            .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
-            .on_action(cx.listener(|this, _: &ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
-            .on_action(cx.listener(|this, _: &ShowMail, _, cx| this.set_section(Section::Mail, cx)))
-            .on_action(cx.listener(|this, _: &ShowCalendar, _, cx| this.set_section(Section::Calendar, cx)))
-            .on_action(cx.listener(|this, _: &NewMeeting, _, cx| {
+            .on_action(cx.listener(|this, _: &mail::Next, _, cx| this.step(|_| 1, cx)))
+            .on_action(cx.listener(|this, _: &mail::Prev, _, cx| this.step(|_| -1, cx)))
+            .on_action(cx.listener(|this, _: &mail::First, _, cx| this.step(|l| -(l.count as isize), cx)))
+            .on_action(cx.listener(|this, _: &mail::Last, _, cx| this.step(|l| l.count as isize, cx)))
+            .on_action(cx.listener(|this, _: &mail::PageDown, _, cx| this.step(MailList::page, cx)))
+            .on_action(cx.listener(|this, _: &mail::PageUp, _, cx| this.step(|l| -l.page(), cx)))
+            .on_action(cx.listener(|this, _: &mail::MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
+            .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
+            .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
+            .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
+            .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {
                 this.cal.assistant = !this.cal.assistant;
                 this.set_section(Section::Calendar, cx);
             }))
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+            .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+            .on_action(cx.listener(|this, _: &search::Clear, window, cx| {
                 this.search.update(cx, |s, cx| s.set_value("", window, cx));
                 this.run_search("", cx);
                 window.focus(&this.focus, cx);
@@ -819,26 +820,8 @@ fn main() {
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        // Клавиши без модификаторов — только вне поля ввода: в поиске j/k, стрелки, Home/End — это текст и курсор.
-        const LIST: Option<&str> = Some("Mailer && !Input");
-        cx.bind_keys([
-            KeyBinding::new("j", Next, LIST),
-            KeyBinding::new("down", Next, LIST),
-            KeyBinding::new("k", Prev, LIST),
-            KeyBinding::new("up", Prev, LIST),
-            KeyBinding::new("home", First, LIST),
-            KeyBinding::new("end", Last, LIST),
-            KeyBinding::new("pagedown", PageDown, LIST),
-            KeyBinding::new("pageup", PageUp, LIST),
-            KeyBinding::new("ctrl-q", MarkRead, Some("Mailer")),
-            KeyBinding::new("ctrl-u", MarkUnread, Some("Mailer")),
-            KeyBinding::new("insert", ToggleFlag, LIST),
-            KeyBinding::new("ctrl-e", FocusSearch, None),
-            KeyBinding::new("ctrl-1", ShowMail, None),
-            KeyBinding::new("ctrl-2", ShowCalendar, None),
-            KeyBinding::new("ctrl-shift-q", NewMeeting, None),
-            KeyBinding::new("escape", ClearSearch, None),
-        ]);
+        // Клавиши — из реестра команд (S2-02); в поле ввода клавиши без модификаторов — текст.
+        commands::bind(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         gpui_kit::open_window(options, cx, |window, cx| {

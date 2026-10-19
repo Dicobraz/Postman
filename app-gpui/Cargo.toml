@@ -14,3 +14,4 @@ postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"
 postman-core.workspace = true
+pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "1e2603193a0a06035221545b0de576fcc9c14d35" }
