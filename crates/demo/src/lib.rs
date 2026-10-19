@@ -1,6 +1,6 @@
 //! Синтетический ящик для замеров памяти/FPS без сервера.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 
@@ -22,6 +22,16 @@ const SUBJECTS: &[&str] = &[
     "Fwd: Договор — правки юристов",
     "Обновление регламента",
 ];
+
+/// Свежий ящик для `--bench`: копия шаблона `bench-template-<n>.redb` (создаётся один раз) в `bench.redb`.
+/// Бенч помечает письма прочитанными; без свежей копии каждый следующий прогон делал бы меньше работы.
+pub fn bench_copy(dir: &Path, n: usize) -> postman_cache::Result<PathBuf> {
+    let template = dir.join(format!("bench-template-{n}.redb"));
+    ensure(&template, n)?;
+    let path = dir.join("bench.redb");
+    std::fs::copy(&template, &path)?;
+    Ok(path)
+}
 
 pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     let cache = Cache::open(path)?;

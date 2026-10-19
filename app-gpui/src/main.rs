@@ -72,6 +72,11 @@ struct Mailer {
     search_ids: Option<Vec<String>>,
     count: usize,
     rows: (usize, Vec<EmailRow>),
+    /// Окно строк, которое читается в фоне, и номер запроса: ответы на устаревшие запросы отбрасываются.
+    page_pending: Option<Range<usize>>,
+    page_gen: u64,
+    /// Письмо выбрано, а его строка ещё не прочитана — открыть, когда страница придёт.
+    pending_open: Option<usize>,
     visible: Range<usize>,
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
@@ -110,6 +115,9 @@ impl Mailer {
             search_ids: None,
             count: 0,
             rows: (0, Vec::new()),
+            page_pending: None,
+            page_gen: 0,
+            pending_open: None,
             visible: 0..30,
             selected: None,
             scroll: UniformListScrollHandle::new(),
@@ -159,27 +167,58 @@ impl Mailer {
             (None, Some(mb)) => self.cache.count(mb).unwrap_or(0),
             _ => 0,
         };
-        self.rows = (0, Vec::new());
-        self.ensure(self.visible.clone());
+        // Первое окно — сразу: первый кадр папки рисуется со строками, а не с заглушками.
+        self.page_gen += 1;
+        self.page_pending = None;
+        self.pending_open = None;
+        let (offset, limit) = page_window(&self.visible);
+        self.rows = (offset, self.page_source().read(&self.cache, offset, limit));
     }
 
-    /// Окно строк из хранилища вокруг видимого диапазона.
-    fn ensure(&mut self, range: Range<usize>) {
-        let (off, rows) = &self.rows;
-        if range.start >= *off && range.end <= off + rows.len() && !rows.is_empty() {
+    /// Окно строк вокруг видимого диапазона. Читается в фоне — поток интерфейса не ждёт хранилище;
+    /// следующее окно запрашивается заранее, когда до края загруженного меньше половины запаса.
+    fn ensure(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let (off, rows) = (self.rows.0, self.rows.1.len());
+        let end = off + rows;
+        let loaded = rows > 0 && range.start >= off && range.end <= end;
+        let near_edge = (off > 0 && range.start < off + WINDOW_MARGIN / 2)
+            || (end < self.count && range.end + WINDOW_MARGIN / 2 > end);
+        if loaded && !near_edge {
             return;
         }
-        let offset = range.start.saturating_sub(WINDOW_MARGIN);
-        let limit = range.len() + 2 * WINDOW_MARGIN;
-        let rows = match (&self.search_ids, &self.mailbox) {
-            (Some(ids), _) => {
-                let end = (offset + limit).min(ids.len());
-                self.cache.rows_by_ids(&ids[offset.min(end)..end]).unwrap_or_default()
-            }
-            (None, Some(mb)) => self.cache.page(mb, offset, limit).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        self.rows = (offset, rows);
+        if self.page_pending.as_ref().is_some_and(|p| range.start >= p.start && range.end <= p.end) {
+            return;
+        }
+        let (offset, limit) = page_window(&range);
+        self.page_gen += 1;
+        let generation = self.page_gen;
+        self.page_pending = Some(offset..offset + limit);
+        let (source, cache) = (self.page_source(), self.cache.clone());
+        let task = cx.background_spawn(async move { source.read(&cache, offset, limit) });
+        cx.spawn(async move |this, cx| {
+            let rows = task.await;
+            let _ = this.update(cx, |m, cx| {
+                if m.page_gen != generation {
+                    return;
+                }
+                m.page_pending = None;
+                m.rows = (offset, rows);
+                if let Some(row) = m.pending_open.take().and_then(|i| m.row(i).cloned()) {
+                    m.open_row(row, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Откуда читать строки списка: папка или результаты поиска.
+    fn page_source(&self) -> PageSource {
+        match (&self.search_ids, &self.mailbox) {
+            (Some(ids), _) => PageSource::Ids(ids.clone()),
+            (None, Some(mb)) => PageSource::Mailbox(mb.clone()),
+            _ => PageSource::Empty,
+        }
     }
 
     fn row(&self, i: usize) -> Option<&EmailRow> {
@@ -193,8 +232,17 @@ impl Mailer {
         let i = i.min(self.count - 1);
         self.selected = Some(i);
         self.scroll.scroll_to_item(i, ScrollStrategy::Center);
-        self.ensure(i..i + 1);
-        let Some(mut row) = self.row(i).cloned() else { return };
+        self.ensure(i..i + 1, cx);
+        let Some(row) = self.row(i).cloned() else {
+            self.pending_open = Some(i);
+            return;
+        };
+        self.pending_open = None;
+        self.open_row(row, cx);
+    }
+
+    /// Показать письмо в области чтения; при первом открытии — пометить прочитанным.
+    fn open_row(&mut self, mut row: EmailRow, cx: &mut Context<Self>) {
         if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
             return;
         }
@@ -332,11 +380,16 @@ impl Mailer {
                 "messages",
                 count,
                 cx.processor(|this, range: Range<usize>, _window, cx| {
-                    this.visible = range.clone();
-                    this.ensure(range.clone());
+                    // Одну строку gpui запрашивает, чтобы измерить высоту, — это не видимая область.
+                    if range.len() > 1 {
+                        this.visible = range.clone();
+                        this.ensure(range.clone(), cx);
+                    }
                     range
-                        .filter_map(|i| this.row(i).map(|r| (i, r.clone())))
-                        .map(|(i, r)| list_row(i, &r, this.selected == Some(i), cx))
+                        .map(|i| match this.row(i).cloned() {
+                            Some(r) => list_row(i, &r, this.selected == Some(i), cx),
+                            None => empty_row(i),
+                        })
                         .collect::<Vec<_>>()
                 }),
             )
@@ -412,6 +465,35 @@ fn nav(id: &'static str, label: &'static str, active: bool, section: Section, cx
 
 fn field(label: &'static str, value: String) -> impl IntoElement {
     div().flex().gap_2().child(div().w(px(48.)).text_color(rgb(0x888888)).child(label)).child(value)
+}
+
+/// Окно чтения вокруг диапазона: (смещение, число строк).
+fn page_window(range: &Range<usize>) -> (usize, usize) {
+    (range.start.saturating_sub(WINDOW_MARGIN), range.len() + 2 * WINDOW_MARGIN)
+}
+
+enum PageSource {
+    Mailbox(String),
+    Ids(Vec<String>),
+    Empty,
+}
+
+impl PageSource {
+    fn read(&self, cache: &Cache, offset: usize, limit: usize) -> Vec<EmailRow> {
+        match self {
+            PageSource::Mailbox(mb) => cache.page(mb, offset, limit).unwrap_or_default(),
+            PageSource::Ids(ids) => {
+                let end = (offset + limit).min(ids.len());
+                cache.rows_by_ids(&ids[offset.min(end)..end]).unwrap_or_default()
+            }
+            PageSource::Empty => Vec::new(),
+        }
+    }
+}
+
+/// Строка, которая ещё читается из хранилища: та же высота, без текста.
+fn empty_row(i: usize) -> AnyElement {
+    div().id(i).h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
 }
 
 fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<Mailer>) -> AnyElement {
@@ -561,6 +643,7 @@ impl Mailer {
         match b.frame(self.count) {
             Step::Wait => {}
             Step::Select(i) => self.select(i, cx),
+            Step::Scroll(i) => self.scroll.scroll_to_item(i, ScrollStrategy::Top),
             Step::Resize(w, h) => window.resize(size(px(w), px(h))),
             Step::Done(report) => {
                 // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.
@@ -589,8 +672,16 @@ fn main() {
     let bench = args.iter().any(|a| a == "--bench");
     let dir = data_dir();
     std::fs::create_dir_all(&dir).expect("каталог данных");
-    let path = dir.join("demo.redb");
-    postman_demo::ensure(&path, n).expect("демо-ящик");
+    // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
+    let prepared = Instant::now();
+    let path = if bench {
+        postman_demo::bench_copy(&dir, n).expect("ящик для замера")
+    } else {
+        let path = dir.join("demo.redb");
+        postman_demo::ensure(&path, n).expect("демо-ящик");
+        path
+    };
+    let start = if bench { start + prepared.elapsed() } else { start };
     let cache = Cache::open(&path).expect("хранилище");
 
     gpui_kit::application().run(move |cx: &mut App| {
