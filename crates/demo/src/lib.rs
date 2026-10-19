@@ -23,9 +23,24 @@ const SUBJECTS: &[&str] = &[
     "Обновление регламента",
 ];
 
-/// Свежий ящик для `--bench`: копия шаблона `bench-template-<n>.redb` (создаётся один раз) в `bench.redb`.
-/// Бенч помечает письма прочитанными; без свежей копии каждый следующий прогон делал бы меньше работы.
+/// Каталог тестовых данных Postman (H-01): `%LOCALAPPDATA%\Pets\testdata\postman` — общий для приложений Pets,
+/// не во временном каталоге; чистится `pets/scripts/stand/clean.ps1 -Testdata`.
+pub fn testdata_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Pets")
+        .join("testdata")
+        .join("postman")
+}
+
+/// Свежий ящик для `--bench`: копия шаблона `bench-template-<n>.redb` (создаётся один раз и переиспользуется:
+/// сид фиксирован) в `bench.redb`. Бенч помечает письма прочитанными; без свежей копии каждый следующий прогон
+/// делал бы меньше работы. Рабочую копию удаляет бенч после прогона (`bench::remove_on_finish`).
 pub fn bench_copy(dir: &Path, n: usize) -> postman_cache::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
     let template = dir.join(format!("bench-template-{n}.redb"));
     ensure(&template, n)?;
     let path = dir.join("bench.redb");

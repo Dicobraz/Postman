@@ -6,12 +6,18 @@
 # Capture: PrintWindow (the window surface) by default; -Screen captures what is on screen instead (the window
 # is made topmost for the run) - this is what the user sees. PrintWindow also catches surfaces DWM never
 # shows, e.g. while the window is being minimized.
-# Usage: powershell -File scripts\resize-check.ps1 [-Exe target\release\postman-gpui.exe] [-ExeArgs "--demo 50000"] [-Screen]
+# Usage: powershell -File scripts\resize-check.ps1 [-Exe <path to postman-gpui.exe>] [-ExeArgs "--demo 50000"] [-Screen]
 param(
-  [string]$Exe = "$PSScriptRoot\..\target\release\postman-gpui.exe",
+  [string]$Exe = "",
   [string]$ExeArgs = "--demo 50000",
   [switch]$Screen
 )
+# Build directory from cargo (honours CARGO_TARGET_DIR) - never a hard-coded target\ (H-01).
+function Release-Exe([string]$name) {
+  $meta = cargo metadata --format-version 1 --no-deps --manifest-path "$PSScriptRoot\..\Cargo.toml" | ConvertFrom-Json
+  Join-Path $meta.target_directory "release\$name"
+}
+if (-not $Exe) { $Exe = Release-Exe "postman-gpui.exe" }
 
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
 using System;

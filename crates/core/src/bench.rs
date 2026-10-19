@@ -2,6 +2,8 @@
 //! Прогрев → листание с открытием письма каждый кадр → листание списка без открытия → ресайз окна → простой.
 //! Итог — одна строка key=value в stdout, затем процесс завершается.
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cpu_time::{ProcessTime, ThreadTime};
@@ -187,6 +189,14 @@ impl Bench {
     }
 }
 
+/// Рабочая копия данных бенча — удалить при завершении (H-01).
+static WORK_COPY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Удалить файл данных бенча, когда замер закончится (флаг `--keep` у приложения — не вызывать).
+pub fn remove_on_finish(path: PathBuf) {
+    let _ = WORK_COPY.set(path);
+}
+
 /// Замер простоя в отдельном потоке: печатает `prefix report idle_…` и завершает процесс.
 /// Интерфейс к этому моменту должен перестать запрашивать кадры.
 pub fn finish(line: String) {
@@ -201,6 +211,11 @@ pub fn finish(line: String) {
             mb(m.rss),
             mb(m.private)
         );
+        // Хранилище ещё открыто, но std открывает файлы с FILE_SHARE_DELETE: файл исчезнет, когда процесс
+        // закроет его при выходе.
+        if let Some(p) = WORK_COPY.get() {
+            let _ = std::fs::remove_file(p);
+        }
         std::process::exit(0);
     });
 }

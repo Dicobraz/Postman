@@ -1,11 +1,19 @@
 # S1-01: hotkeys in the Russian layout. Starts postman-gpui with POSTMAN_KEYLOG=1, switches its window
 # to the given layout, presses keys and prints what the app received ("key <keystroke> (<char>) -> <action>").
 # Keys are sent only while the Postman window is in the foreground; otherwise the script stops.
-# Usage: powershell -File scripts\keys-ru.ps1 [-Exe target\release\postman-gpui.exe] [-Layout 00000419]
+# The keystroke log is written to %TEMP%\postman-keys-<pid>.txt and removed afterwards (-Keep leaves it).
+# Usage: powershell -File scripts\keys-ru.ps1 [-Exe <path to postman-gpui.exe>] [-Layout 00000419] [-Keep]
 param(
-  [string]$Exe = "$PSScriptRoot\..\target\release\postman-gpui.exe",
-  [string]$Layout = "00000419"
+  [string]$Exe = "",
+  [string]$Layout = "00000419",
+  [switch]$Keep
 )
+# Build directory from cargo (honours CARGO_TARGET_DIR) - never a hard-coded target\ (H-01).
+function Release-Exe([string]$name) {
+  $meta = cargo metadata --format-version 1 --no-deps --manifest-path "$PSScriptRoot\..\Cargo.toml" | ConvertFrom-Json
+  Join-Path $meta.target_directory "release\$name"
+}
+if (-not $Exe) { $Exe = Release-Exe "postman-gpui.exe" }
 
 Add-Type -TypeDefinition @"
 using System;
@@ -20,7 +28,8 @@ public static class K {
 }
 "@
 
-$out = Join-Path $env:TEMP "postman-keys.txt"
+$out = Join-Path $env:TEMP "postman-keys-$PID.txt"
+trap { if (-not $Keep) { Remove-Item $out -ErrorAction SilentlyContinue }; break }
 $env:POSTMAN_KEYLOG = "1"
 $p = Start-Process -FilePath $Exe -ArgumentList "--demo 50000" -PassThru -RedirectStandardOutput $out
 Start-Sleep -Seconds 5
@@ -80,3 +89,4 @@ Start-Sleep -Milliseconds 500
 Stop-Process -Id $p.Id -Force
 Start-Sleep -Milliseconds 300
 Get-Content -Encoding UTF8 $out | Where-Object { $_ -like "key *" -or $_ -like "search *" }
+if (-not $Keep) { Remove-Item $out -ErrorAction SilentlyContinue }

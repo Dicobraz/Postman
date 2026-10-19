@@ -65,7 +65,12 @@ cargo run --release -p postman -- --demo                # egui, запасной
 POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный сервер (или POSTMAN_TOKEN)
 ```
 
-Windows: тестам песочницы нужен один раз `icacls target /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q`.
+Windows: тестам песочницы нужен один раз на каталог сборки (из `cargo metadata`, учитывает `CARGO_TARGET_DIR`):
+`icacls (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q`.
+
+Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
+данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
+`pets/scripts/stand/clean.ps1 -Repos . -Testdata` (без `-Apply` только показывает).
 Диагностика песочницы (только отладочная сборка):
 `cargo test -p postman-worker --test windows_probe -- --ignored --nocapture`.
 

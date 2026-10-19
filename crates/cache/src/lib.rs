@@ -558,15 +558,14 @@ mod tests {
 
     #[test]
     fn reopen_and_replace_foreign_file() {
-        let dir = std::env::temp_dir().join(format!("postman-cache-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("c.redb");
+        // Каталог удаляется при выходе из теста, даже при падении (H-01).
+        let dir = tempfile::Builder::new().prefix("postman-cache-").tempdir().unwrap();
+        let path = dir.path().join("c.redb");
         std::fs::write(&path, b"SQLite format 3\0 not redb").unwrap();
         {
             let c = Cache::open(&path).unwrap();
             c.upsert_emails(&[email("a", 1, &["in"])]).unwrap();
         }
         assert_eq!(Cache::open(&path).unwrap().count("in").unwrap(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

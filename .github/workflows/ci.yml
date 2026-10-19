@@ -6,6 +6,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Каталог сборки задан явно (H-01): шаги ниже ссылаются на него, а не на зашитый target/.
+  CARGO_TARGET_DIR: target
 
 jobs:
   test:
@@ -35,7 +37,7 @@ jobs:
       - name: Права AppContainer на каталог сборки
         if: runner.os == 'Windows'
         shell: pwsh
-        run: icacls target /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q
+        run: icacls "${{ env.CARGO_TARGET_DIR }}" /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q
 
       # Диагностика: какое ограничение песочницы мешает воркеру стартовать (по одному снимаем).
       - name: Диагностика песочницы
@@ -53,9 +55,9 @@ jobs:
         with:
           name: postman-windows-x64
           path: |
-            target/release/postman.exe
-            target/release/postman-gpui.exe
-            target/release/postman-worker.exe
+            ${{ env.CARGO_TARGET_DIR }}/release/postman.exe
+            ${{ env.CARGO_TARGET_DIR }}/release/postman-gpui.exe
+            ${{ env.CARGO_TARGET_DIR }}/release/postman-worker.exe
             scripts/windows/README.txt
             scripts/windows/bench.cmd
             scripts/windows/sandbox.cmd
