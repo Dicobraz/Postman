@@ -6,13 +6,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use postman_ir::{Align, Block, Inline, Marks};
 
-use crate::Mailer;
-
-pub fn blocks(bs: &[Block], key: &str, cx: &mut Context<Mailer>) -> Vec<AnyElement> {
+pub fn blocks(bs: &[Block], key: &str, cx: &mut App) -> Vec<AnyElement> {
     bs.iter().enumerate().map(|(n, b)| block(b, &format!("{key}.{n}"), cx)).collect()
 }
 
-fn block(b: &Block, key: &str, cx: &mut Context<Mailer>) -> AnyElement {
+fn block(b: &Block, key: &str, cx: &mut App) -> AnyElement {
     match b {
         Block::Paragraph { align, content } => {
             let d = div().child(paragraph(content, key, None));
