@@ -30,9 +30,9 @@ strip = true
 # gpui 0.2.2 тянет xattr 0.2.3, несовместимый со свежим libc (нет ENOATTR на Linux).
 [patch.crates-io]
 xattr = { path = "third_party/xattr" }
-# Шейдеры встроены в exe и компилируются при запуске: кросс-сборка из Linux без fxc.exe
-# и без путей машины сборки в бинаре.
-gpui-pre-windows = { path = "third_party/gpui-pre-windows" }
+# Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — общий для приложений Pets:
+# github.com/Dicobraz/pets, crates/pets-gpui-windows.
+gpui-pre-windows = { git = "https://github.com/Dicobraz/pets", rev = "3106838be4bd94edefb43a27342eea6c5e4a7ed2" }
 
 # Отладочная информация только для своего кода: target/debug не раздувается до десятков ГБ.
 [profile.dev]

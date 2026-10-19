@@ -3401,6 +3401,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
+source = "git+https://github.com/Dicobraz/pets?rev=3106838be4bd94edefb43a27342eea6c5e4a7ed2#3106838be4bd94edefb43a27342eea6c5e4a7ed2"
 dependencies = [
  "accesskit 0.24.1",
  "accesskit_windows 0.34.0",
@@ -5821,7 +5822,7 @@ dependencies = [
 [[package]]
 name = "pets-commands"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=1e2603193a0a06035221545b0de576fcc9c14d35#1e2603193a0a06035221545b0de576fcc9c14d35"
+source = "git+https://github.com/Dicobraz/pets?rev=3106838be4bd94edefb43a27342eea6c5e4a7ed2#3106838be4bd94edefb43a27342eea6c5e4a7ed2"
 dependencies = [
  "thiserror 2.0.21",
 ]

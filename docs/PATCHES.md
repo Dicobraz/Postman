@@ -1,6 +1,8 @@
 # Наши патчи gpui
 
-Крейт `third_party/gpui-pre-windows` (Windows-платформа gpui-pre 0.3.9) подключён через `[patch]`.
+С 2026-10-19 (S2-07) патч живёт в репозитории `pets` — `crates/pets-gpui-windows` (пакет `gpui-pre-windows`
+0.3.9), Postman подключает его `[patch]` на ревизию `pets`. Таблица ниже — история и состав; актуальный список —
+`pets/crates/pets-gpui-windows/README.md`.
 Каждый патч в коде помечен «Postman patch». При обновлении gpui-kit переносим непринятые патчи.
 
 | Патч | Файлы | Зачем | Upstream |

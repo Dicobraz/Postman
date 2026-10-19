@@ -25,7 +25,7 @@
 
 ### Патчи и upstream
 
-- Держим только то, что патчим: крейт `gpui-pre-windows` в `third_party/` через `[patch]`, остальное — crates.io.
+- Держим только то, что патчим: крейт `gpui-pre-windows` (с S2-07 — в репозитории `pets`) через `[patch]`, остальное — crates.io.
 - Исправления gpui (хоткеи, VSyncProvider) — pull request в zed-industries/zed; компонентов — в longbridge/gpui-kit.
   Принятый патч выпадает из списка при обновлении gpui-kit.
 - Не принятые — переносим на каждую новую версию gpui-kit. Замораживать версию не будем.
