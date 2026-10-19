@@ -247,8 +247,12 @@ impl WindowsPlatform {
             .context("CreateWindowExW did not run correctly")?;
         let handle = result?;
 
-        let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
-            .is_ok_and(|value| value == "true" || value == "1");
+        // Postman patch: DirectComposition is off by default. With it, a live edge drag shows a black
+        // strip and the content lags the frame (the visual is not stretched to the new window size);
+        // the plain window swap chain with DXGI_SCALING_STRETCH has neither. `=0` / `=false` turns
+        // DirectComposition back on (needed only for transparent / blurred window backgrounds).
+        let disable_direct_composition = !std::env::var(DISABLE_DIRECT_COMPOSITION)
+            .is_ok_and(|value| value == "false" || value == "0");
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
 

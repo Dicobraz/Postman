@@ -97,7 +97,7 @@ impl WindowsWindowInner {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
-            WM_SIZE => self.handle_size_msg(wparam, lparam),
+            WM_SIZE => self.handle_size_msg(handle, wparam, lparam),
             WM_GETMINMAXINFO => self.handle_get_min_max_info_msg(lparam),
             WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => self.handle_size_move_loop(handle),
             WM_EXITSIZEMOVE | WM_EXITMENULOOP => self.handle_size_move_loop_exit(handle),
@@ -220,7 +220,7 @@ impl WindowsWindowInner {
         Some(0)
     }
 
-    fn handle_size_msg(self: &Rc<Self>, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_size_msg(self: &Rc<Self>, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         // Minimizing and restoring both arrive as `WM_SIZE`; the deferred report
         // reads `IsIconic` at delivery, so one call covers both directions.
         self.report_visibility();
@@ -250,6 +250,14 @@ impl WindowsWindowInner {
         }
 
         self.handle_size_change(new_size, scale_factor, should_resize_renderer);
+        // Postman patch: while the user drags an edge, draw the new size right here, before the modal
+        // size loop shows the resized window. Otherwise the swap chain has the new size but no frame until
+        // the size-loop timer (~15.6 ms) or a WM_PAINT that mouse messages starve: the new area is black and
+        // the content lags the frame. Only inside the loop: a WM_SIZE sent from GPUI code itself
+        // (`Window::resize`) arrives while the app is borrowed and must not draw re-entrantly.
+        if should_resize_renderer && self.state.in_size_move.get() {
+            self.draw_window(handle, false);
+        }
         Some(0)
     }
 
@@ -277,6 +285,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop(&self, handle: HWND) -> Option<isize> {
+        self.state.in_size_move.set(true);
         unsafe {
             let ret = SetTimer(
                 Some(handle),
@@ -295,6 +304,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop_exit(&self, handle: HWND) -> Option<isize> {
+        self.state.in_size_move.set(false);
         unsafe {
             KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID).log_err();
         }
