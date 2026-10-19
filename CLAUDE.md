@@ -43,7 +43,9 @@ Windows. Приложение семейства «Pets»: общий архит
 - `worker` — отдельный процесс-песочница для разбора чужих данных (HTML, картинки, .ics).
   Windows: AppContainer + Job Object + mitigation policies, запуск без консоли (`DETACHED_PROCESS`).
   Linux (dev): seccomp + Landlock. Чужие данные в UI-процессе не разбираются никогда.
-- `third_party/gpui-pre-windows` — наш патч gpui (шейдеры встроены в exe); `third_party/xattr` — для Linux.
+- Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — в репозитории `pets`
+  (`crates/pets-gpui-windows`), подключён `[patch]` на ревизию; правки — там, затем поднять `rev` здесь.
+  `third_party/xattr` — для Linux.
   Патчи gpui держим минимальными, предлагаем upstream (Zed, longbridge), на новые версии переносим.
 - Действия пользователя — команды из реестра (`app-gpui/src/commands.rs`, модель `pets-commands`): id `область.действие`
   → действие gpui `область::Действие` и хоткеи; новая клавиша или действие — только через таблицу команд.
