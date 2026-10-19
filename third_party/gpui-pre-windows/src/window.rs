@@ -75,6 +75,8 @@ pub struct WindowsWindowState {
     /// and when a forced render was requested while another draw was in
     /// progress and had to be deferred.
     pub force_render_pending: Cell<bool>,
+    /// Inside the modal move/size loop (between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`) — Postman patch.
+    pub in_size_move: Cell<bool>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -182,6 +184,7 @@ impl WindowsWindowState {
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
+            in_size_move: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
