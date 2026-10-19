@@ -1,5 +1,5 @@
 //! `--bench`: один сценарий для обоих интерфейсов (egui и gpui), чтобы сравнение было честным.
-//! Прогрев → листание с открытием письма каждый кадр → ресайз окна → простой.
+//! Прогрев → листание с открытием письма каждый кадр → листание списка без открытия → ресайз окна → простой.
 //! Итог — одна строка key=value в stdout, затем процесс завершается.
 
 use std::time::{Duration, Instant};
@@ -7,10 +7,14 @@ use std::time::{Duration, Instant};
 use cpu_time::{ProcessTime, ThreadTime};
 
 const WARMUP: usize = 30;
-/// Листание: прыжок на STEP строк с открытием письма каждый кадр.
+/// Листание с открытием: прыжок на STEP строк и открытие письма каждый кадр (худший случай).
 /// `POSTMAN_BENCH_SCROLL_FRAMES` — другое число кадров, например для профилировщика.
 const SCROLL_FRAMES: usize = 400;
 const STEP: usize = 25;
+/// Листание списка без открытия писем: LIST_STEP строк за кадр, как прокрутка колесом.
+/// `POSTMAN_BENCH_LIST_FRAMES` — другое число кадров.
+const LIST_FRAMES: usize = 400;
+const LIST_STEP: usize = 3;
 /// Ресайз окна туда-обратно.
 const RESIZE_FRAMES: usize = 120;
 /// Простой: окно открыто, ввода нет. Сначала даём улечься фоновым задачам.
@@ -19,10 +23,53 @@ const IDLE: Duration = Duration::from_secs(10);
 
 pub enum Step {
     Wait,
+    /// Открыть письмо `i` (список прокручивается к нему).
     Select(usize),
+    /// Прокрутить список так, чтобы строка `i` была первой; письмо не открывать.
+    Scroll(usize),
     Resize(f32, f32),
     /// Сценарий окончен: остановить перерисовку и вызвать [`finish`].
     Done(String),
+}
+
+/// Замеры одной фазы: интервалы кадров, загрузка процесса и потока интерфейса.
+#[derive(Default)]
+struct Phase {
+    frames: Vec<f32>,
+    load: Option<Load>,
+    ui_load: Option<(Instant, ThreadTime)>,
+    cpu: f32,
+    ui_cpu: f32,
+}
+
+impl Phase {
+    /// Кадр `f` фазы (с 1); `dt` — интервал от прошлого кадра.
+    fn frame(&mut self, f: usize, dt: Option<f32>) {
+        if f == 1 {
+            self.load = Some(Load::start());
+            self.ui_load = ThreadTime::try_now().ok().map(|t| (Instant::now(), t));
+        } else if let Some(dt) = dt {
+            self.frames.push(dt);
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(l) = self.load.take() {
+            self.cpu = l.percent();
+        }
+        if let Some((wall, cpu)) = self.ui_load.take() {
+            self.ui_cpu = percent(cpu.elapsed(), wall.elapsed());
+        }
+    }
+
+    /// `name_p50 name_p99 name_max name_cpu_pct name_ui_thread_cpu_pct`.
+    fn report(&mut self, name: &str) -> String {
+        let (p50, p99, max) = stats(&mut self.frames);
+        format!(
+            "{name}_p50={p50:.2} {name}_p99={p99:.2} {name}_max={max:.2} {name}_cpu_pct={:.0} {name}_ui_thread_cpu_pct={:.0}",
+            self.cpu, self.ui_cpu
+        )
+    }
 }
 
 pub struct Bench {
@@ -30,18 +77,19 @@ pub struct Bench {
     first_frame: Option<Duration>,
     frame: usize,
     last: Option<Instant>,
-    scroll: Vec<f32>,
+    scroll: Phase,
+    list: Phase,
     resize: Vec<f32>,
     ui_cpu: Vec<f32>,
     rss_peak: usize,
     private_peak: usize,
-    /// Загрузка процесса за время листания.
-    scroll_load: Option<Load>,
-    scroll_cpu: f32,
-    /// Загрузка потока интерфейса (того, что вызывает [`Bench::frame`]) за время листания.
-    scroll_ui_load: Option<(Instant, ThreadTime)>,
-    scroll_ui_cpu: f32,
     scroll_frames: usize,
+    list_frames: usize,
+}
+
+/// Число кадров фазы из переменной окружения или по умолчанию.
+fn frames(var: &str, default: usize) -> usize {
+    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 impl Bench {
@@ -52,19 +100,14 @@ impl Bench {
             first_frame: None,
             frame: 0,
             last: None,
-            scroll: Vec::new(),
+            scroll: Phase::default(),
+            list: Phase::default(),
             resize: Vec::new(),
             ui_cpu: Vec::new(),
             rss_peak: 0,
             private_peak: 0,
-            scroll_load: None,
-            scroll_cpu: 0.0,
-            scroll_ui_load: None,
-            scroll_ui_cpu: 0.0,
-            scroll_frames: std::env::var("POSTMAN_BENCH_SCROLL_FRAMES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(SCROLL_FRAMES),
+            scroll_frames: frames("POSTMAN_BENCH_SCROLL_FRAMES", SCROLL_FRAMES),
+            list_frames: frames("POSTMAN_BENCH_LIST_FRAMES", LIST_FRAMES),
         }
     }
 
@@ -78,32 +121,29 @@ impl Bench {
         if self.frame.is_multiple_of(20) {
             self.sample_memory();
         }
+        let rows = rows.max(1);
         let f = self.frame;
         if f <= WARMUP {
             return Step::Wait;
         }
         let f = f - WARMUP;
         if f <= self.scroll_frames {
-            if f == 1 {
-                self.scroll_load = Some(Load::start());
-                self.scroll_ui_load = ThreadTime::try_now().ok().map(|t| (Instant::now(), t));
-            }
-            if let Some(dt) = dt.filter(|_| f > 1) {
-                self.scroll.push(dt);
-            }
-            return Step::Select((f * STEP) % rows.max(1));
+            self.scroll.frame(f, dt);
+            return Step::Select((f * STEP) % rows);
         }
         let f = f - self.scroll_frames;
-        if f == 1
-            && let Some(l) = self.scroll_load.take()
-        {
-            self.scroll_cpu = l.percent();
-            if let Some((wall, cpu)) = self.scroll_ui_load.take() {
-                self.scroll_ui_cpu = percent(cpu.elapsed(), wall.elapsed());
+        if f <= self.list_frames {
+            if f == 1 {
+                self.scroll.stop();
             }
+            self.list.frame(f, dt);
+            return Step::Scroll((f * LIST_STEP) % rows);
         }
+        let f = f - self.list_frames;
         if f <= RESIZE_FRAMES {
-            if let Some(dt) = dt.filter(|_| f > 1) {
+            if f == 1 {
+                self.list.stop();
+            } else if let Some(dt) = dt {
                 self.resize.push(dt);
             }
             let w = if (f / 4).is_multiple_of(2) { 1000.0 } else { 1280.0 };
@@ -127,20 +167,15 @@ impl Bench {
 
     fn report(&mut self, rows: usize) -> String {
         self.sample_memory();
-        let s = stats(&mut self.scroll);
         let r = stats(&mut self.resize);
         let c = stats(&mut self.ui_cpu);
         format!(
-            "rows={rows} exe_mb={:.1} first_frame_ms={:.0} scroll_p50={:.2} scroll_p99={:.2} scroll_max={:.2} \
-             scroll_cpu_pct={:.0} scroll_ui_thread_cpu_pct={:.0} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
+            "rows={rows} exe_mb={:.1} first_frame_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
              ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_peak_mb={:.0} private_peak_mb={:.0}",
             exe_mb(),
             self.first_frame.unwrap_or_default().as_secs_f32() * 1000.0,
-            s.0,
-            s.1,
-            s.2,
-            self.scroll_cpu,
-            self.scroll_ui_cpu,
+            self.scroll.report("scroll"),
+            self.list.report("list"),
             r.0,
             r.1,
             r.2,

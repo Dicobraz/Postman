@@ -77,6 +77,8 @@ pub struct App {
     visible: Range<usize>,
     selected: Option<usize>,
     scroll_to_selected: bool,
+    /// Замер: прокрутить список так, чтобы строка была первой.
+    bench_scroll_to: Option<usize>,
     reading: Option<Reading>,
     search: String,
     focus_search: bool,
@@ -164,6 +166,7 @@ impl App {
             visible: 0..0,
             selected: None,
             scroll_to_selected: false,
+            bench_scroll_to: None,
             reading: None,
             search: String::new(),
             focus_search: false,
@@ -938,6 +941,9 @@ impl App {
                 area = area.vertical_scroll_offset(first as f32 * ROW_HEIGHT);
             }
         }
+        if let Some(first) = self.bench_scroll_to.take() {
+            area = area.vertical_scroll_offset(first as f32 * ROW_HEIGHT);
+        }
         let mut clicked = None;
         area.show_rows(ui, ROW_HEIGHT, self.count, |ui, range| {
             self.visible = range.clone();
@@ -1140,6 +1146,7 @@ impl App {
         match b.frame(self.count) {
             bench::Step::Wait => {}
             bench::Step::Select(i) => self.select(i),
+            bench::Step::Scroll(i) => self.bench_scroll_to = Some(i),
             bench::Step::Resize(w, h) => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(w, h))),
             bench::Step::Done(report) => {
                 // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.

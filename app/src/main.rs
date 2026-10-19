@@ -30,7 +30,7 @@ fn data_dir() -> PathBuf {
 }
 
 fn main() -> eframe::Result {
-    let start = Instant::now();
+    let mut start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let api = gpu::Api::from_args(&args).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -47,8 +47,17 @@ fn main() -> eframe::Result {
 
     let (db_path, account) = match demo {
         Some(n) => {
-            let path = dir.join("demo.redb");
-            postman_demo::ensure(&path, n).expect("демо-кэш");
+            // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
+            let path = if bench {
+                let prepared = Instant::now();
+                let path = postman_demo::bench_copy(&dir, n).expect("ящик для замера");
+                start += prepared.elapsed();
+                path
+            } else {
+                let path = dir.join("demo.redb");
+                postman_demo::ensure(&path, n).expect("демо-кэш");
+                path
+            };
             (path, None)
         }
         None => (dir.join("cache.redb"), sync::Account::from_env()),
