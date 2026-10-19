@@ -6157,6 +6157,7 @@ dependencies = [
  "postcard",
  "redb",
  "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -6249,6 +6250,7 @@ name = "postman-search"
 version = "0.1.0"
 dependencies = [
  "tantivy",
+ "tempfile",
 ]
 
 [[package]]
@@ -6263,6 +6265,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 

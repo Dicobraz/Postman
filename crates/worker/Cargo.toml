@@ -30,5 +30,8 @@ features = [
     "Win32_System_WindowsProgramming",
 ]
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

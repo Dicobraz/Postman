@@ -812,12 +812,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let bench = args.iter().any(|a| a == "--bench");
+    // `--keep`: оставить рабочую копию данных бенча (для разбора).
+    let keep = args.iter().any(|a| a == "--keep");
     let dir = data_dir();
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("каталог данных", e));
     // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
     let prepared = Instant::now();
     let path = if bench {
-        postman_demo::bench_copy(&dir, n).unwrap_or_else(|e| fatal("ящик для замера", e))
+        let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("ящик для замера", e));
+        if !keep {
+            bench::remove_on_finish(path.clone());
+        }
+        path
     } else {
         let path = dir.join("demo.redb");
         postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("демо-ящик", e));

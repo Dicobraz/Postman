@@ -23,7 +23,9 @@ fn renders_and_survives_escape_attempts() {
     let doc = c.render(&Request::Html("<p><b>Привет</b><script>x</script></p>".into())).unwrap();
     assert_eq!(postman_ir::to_markdown(&doc), "**Привет**");
     // Файл пользователя: AppContainer и Landlock не должны давать его прочитать.
-    let secret = std::env::temp_dir().join(format!("postman-secret-{}.txt", std::process::id()));
+    // Каталог удаляется при выходе из теста, даже при падении (H-01).
+    let secret_dir = tempfile::Builder::new().prefix("postman-secret-").tempdir().unwrap();
+    let secret = secret_dir.path().join("secret.txt");
     std::fs::write(&secret, "секрет").unwrap();
     let secret_path = secret.to_string_lossy().into_owned();
 
@@ -51,7 +53,6 @@ fn renders_and_survives_escape_attempts() {
         let doc = c.render(&Request::Text("ещё жив".into())).unwrap();
         assert_eq!(postman_ir::to_markdown(&doc), "ещё жив");
     }
-    let _ = std::fs::remove_file(&secret);
 }
 
 #[test]

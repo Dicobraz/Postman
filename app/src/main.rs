@@ -45,6 +45,8 @@ fn main() -> eframe::Result {
         std::process::exit(2)
     });
     let bench = args.iter().any(|a| a == "--bench");
+    // `--keep`: оставить рабочую копию данных бенча (для разбора).
+    let keep = args.iter().any(|a| a == "--keep");
     let no_vsync = args.iter().any(|a| a == "--no-vsync");
     let software = std::env::var_os("POSTMAN_GPU_SOFTWARE").is_some();
     let demo = args.iter().position(|a| a == "--demo").map(|i| {
@@ -58,7 +60,11 @@ fn main() -> eframe::Result {
             // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
             let path = if bench {
                 let prepared = Instant::now();
-                let path = postman_demo::bench_copy(&dir, n).unwrap_or_else(|e| fatal("ящик для замера", e));
+                let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n)
+                    .unwrap_or_else(|e| fatal("ящик для замера", e));
+                if !keep {
+                    bench::remove_on_finish(path.clone());
+                }
                 start += prepared.elapsed();
                 path
             } else {
