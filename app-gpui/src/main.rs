@@ -45,6 +45,10 @@ use pets_ui::Level as Toast;
 use postman_cache::Cache;
 use postman_core::bench::{self, Bench};
 
+/// Замер кучи Rust (S4-08): `cargo build --release -p postman-gpui --features alloc-count`, поля `heap_…` в бенче.
+#[cfg(feature = "alloc-count")]
+#[global_allocator]
+static ALLOC: sys::alloc::Counting = sys::alloc::Counting;
 
 /// Тексты интерфейса (S2-06): ключи `.ftl`, RU и EN; `pets_ui::FTL` добавляется при запуске.
 /// Файл на часть экрана (`i18n/<язык>/<часть>.ftl`): параллельные задачи не правят один файл.
@@ -154,6 +158,9 @@ fn main() {
     let keep = args.iter().any(|a| a == "--keep");
     // `--bench --live --warm`: замер живого ящика на кэше прошлого прогона (`--keep`), без — с первой синхронизации.
     let warm = args.iter().any(|a| a == "--warm");
+    if bench {
+        bench::on_idle(sys::bench_idle_fields);
+    }
     let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
     pets_shell::init_logging("Postman", "POSTMAN_LOG");
     for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
