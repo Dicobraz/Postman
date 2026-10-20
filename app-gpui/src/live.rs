@@ -213,6 +213,8 @@ impl Mailer {
                 c.refresh(cx);
             }
         });
+        // Контакты и справочник — с сервера (S4-02): поток синхронизации присылает их после входа.
+        self.contacts.update(cx, |c, cx| c.go_live(cx));
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));

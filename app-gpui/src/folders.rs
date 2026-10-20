@@ -57,7 +57,7 @@ impl Render for Folders {
                 .border_color(rgb(0xdddddd))
                 .child(nav("nav-mail", tr!("nav-mail"), self.section == Section::Mail, Section::Mail, cx))
                 .child(nav("nav-cal", tr!("nav-calendar"), self.section == Section::Calendar, Section::Calendar, cx))
-                .child(tr!("nav-contacts")),
+                .child(nav("nav-contacts", tr!("nav-contacts"), self.section == Section::Contacts, Section::Contacts, cx)),
         )
     }
 }

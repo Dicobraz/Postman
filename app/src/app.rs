@@ -504,7 +504,13 @@ impl App {
                 | sync::Event::MeetingCreated { .. }
                 | sync::Event::MeetingFailed { .. }
                 | sync::Event::FreeBusyShared { .. }
-                | sync::Event::CalendarFailed(_) => {}
+                | sync::Event::CalendarFailed(_)
+                // Контакты (S4-02) — только в gpui-версии.
+                | sync::Event::ContactsLoaded(_)
+                | sync::Event::DirectoryLoaded(_)
+                | sync::Event::ContactSaved { .. }
+                | sync::Event::ContactDeleted { .. }
+                | sync::Event::ContactFailed { .. } => {}
             }
         }
         while let Ok(done) = self.renderer.rx.try_recv() {
