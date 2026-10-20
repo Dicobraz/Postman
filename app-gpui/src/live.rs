@@ -173,9 +173,16 @@ pub(crate) fn error_text(e: &SyncError) -> String {
     tr!("sync-error", what = what, detail = e.detail.clone())
 }
 
-/// Входящие, иначе первая папка.
+/// Свои «Входящие», иначе первая своя папка, иначе первая (общих ящиков — S4-06).
 pub(crate) fn inbox(mailboxes: &[MailboxRow]) -> Option<String> {
-    mailboxes.iter().find(|b| b.role.as_deref() == Some("inbox")).or(mailboxes.first()).map(|b| b.id.clone())
+    let own = |b: &&MailboxRow| postman_cache::account_of(&b.id).is_none();
+    mailboxes
+        .iter()
+        .filter(own)
+        .find(|b| b.role.as_deref() == Some("inbox"))
+        .or_else(|| mailboxes.iter().find(own))
+        .or(mailboxes.first())
+        .map(|b| b.id.clone())
 }
 
 /// Кэш и индекс поиска учётной записи (`<кэш>.search`). Индекс не открылся — поиск по кэшу.
@@ -485,17 +492,20 @@ impl Mailer {
     /// Папки изменились: перечитать в фоне; текущей папки больше нет (или не было) — открыть входящие.
     fn reload_folders(&mut self, cx: &mut Context<Self>) {
         let cache = self.cache.clone();
-        let task = cx.background_spawn(async move { cache.mailboxes().unwrap_or_default() });
+        let task =
+            cx.background_spawn(async move { (cache.mailboxes().unwrap_or_default(), cache.accounts().unwrap_or_default()) });
         cx.spawn(async move |this, cx| {
-            let rows = task.await;
+            let (rows, accounts) = task.await;
             let _ = this.update(cx, |m, cx| {
                 let current = m.folders.read(cx).current.clone();
                 let open = match current {
                     Some(id) if rows.iter().any(|b| b.id == id) => None,
                     _ => inbox(&rows),
                 };
+                m.list.update(cx, |l, _| l.set_rights(&rows));
                 m.folders.update(cx, |f, cx| {
                     f.mailboxes = rows;
+                    f.accounts = accounts;
                     cx.notify();
                 });
                 if let Some(id) = open {
@@ -753,8 +763,12 @@ mod tests {
             sort_order: 0,
             total: 0,
             unread: 0,
+            rights: postman_cache::Rights::ALL,
         };
         assert_eq!(inbox(&[mb("sent", Some("sent")), mb("in", Some("inbox"))]), Some("in".into()));
+        // «Входящие» общего ящика (S4-06) — не свои.
+        assert_eq!(inbox(&[mb("i/in", Some("inbox")), mb("x", None), mb("in", Some("inbox"))]), Some("in".into()));
+        assert_eq!(inbox(&[mb("i/in", Some("inbox")), mb("x", None)]), Some("x".into()));
         assert_eq!(inbox(&[mb("a", None), mb("b", None)]), Some("a".into()));
         assert_eq!(inbox(&[]), None);
     }

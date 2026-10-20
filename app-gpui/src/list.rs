@@ -8,7 +8,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::*;
 use gpui_kit::prelude::*;
 use pets_i18n::tr;
-use postman_cache::{Cache, EmailRow};
+use postman_cache::{Cache, EmailRow, MailboxRow, Rights};
 
 use crate::*;
 
@@ -68,6 +68,8 @@ pub(crate) struct MailList {
     pub(crate) confirm: Option<(usize, EmailRow)>,
     /// Догрузка с сервера при прокрутке (живой ящик, S4-03).
     pub(crate) more: More,
+    /// Папки с урезанными правами (общие ящики, S4-06): id → права. Своих папок здесь нет.
+    pub(crate) rights: HashMap<String, Rights>,
 }
 
 /// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
@@ -152,6 +154,16 @@ pub(crate) struct Flagged {
 
 impl EventEmitter<Flagged> for MailList {}
 
+/// Флаг не изменён: письмо в папке общего ящика, открытой только для чтения (S4-06).
+pub(crate) struct ReadOnly;
+
+impl EventEmitter<ReadOnly> for MailList {}
+
+/// Можно ли действие с письмом: хоть в одной его папке есть право (`check`). Папки без записи в `rights` — свои.
+pub(crate) fn may(rights: &HashMap<String, Rights>, row: &EmailRow, check: impl Fn(&Rights) -> bool) -> bool {
+    row.mailbox_ids.is_empty() || row.mailbox_ids.iter().any(|m| rights.get(m).is_none_or(&check))
+}
+
 /// Ключевые слова JMAP, которые меняются при переходе флагов строки `old` в (`seen`, `flagged`).
 pub(crate) fn keyword_changes(old: &EmailRow, seen: bool, flagged: bool) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
@@ -188,7 +200,13 @@ impl MailList {
             positions: Positions::default(),
             confirm: None,
             more: More::default(),
+            rights: HashMap::new(),
         }
+    }
+
+    /// Права папок после перечитывания папок: запоминаются только урезанные.
+    pub(crate) fn set_rights(&mut self, mailboxes: &[MailboxRow]) {
+        self.rights = mailboxes.iter().filter(|m| m.rights != Rights::ALL).map(|m| (m.id.clone(), m.rights)).collect();
     }
 
     pub(crate) fn show_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
@@ -405,7 +423,8 @@ impl MailList {
 
     /// При первом открытии письмо помечается прочитанным, затем уходит в область чтения.
     pub(crate) fn open_row(&mut self, mut row: EmailRow, cx: &mut Context<Self>) {
-        if !row.seen {
+        // Папка общего ящика без права `maySetSeen` — письмо остаётся непрочитанным.
+        if !row.seen && may(&self.rights, &row, |r| r.seen) {
             row.seen = true;
             self.flags.set(&row.id, true, row.flagged);
             self.patch_row(&row);
@@ -428,6 +447,12 @@ impl MailList {
 
     pub(crate) fn set_flags(&mut self, seen: Option<bool>, toggle_flag: bool, cx: &mut Context<Self>) {
         let Some(mut row) = self.selected.and_then(|i| self.row(i)).cloned() else { return };
+        let allowed = (seen.is_none() || may(&self.rights, &row, |r| r.seen))
+            && (!toggle_flag || may(&self.rights, &row, |r| r.keywords));
+        if !allowed {
+            cx.emit(ReadOnly);
+            return;
+        }
         let old = row.clone();
         if let Some(s) = seen {
             row.seen = s;
@@ -591,7 +616,9 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{EmailRow, More, Positions, ROW_HEIGHT, WINDOW_MARGIN, keyword_changes, reselect, rows_at};
+    use super::{EmailRow, More, Positions, ROW_HEIGHT, WINDOW_MARGIN, keyword_changes, may, reselect, rows_at};
+    use postman_cache::Rights;
+    use std::collections::HashMap;
 
     fn row(id: &str, seen: bool, flagged: bool) -> EmailRow {
         EmailRow {
@@ -670,5 +697,20 @@ mod tests {
         // Письмо исчезло (удалено, перенесено) — выделения нет.
         assert_eq!(reselect(Some("gone"), 0, &rows, 3), None);
         assert_eq!(reselect(None, 0, &rows, 3), None);
+    }
+
+    /// Права общих ящиков (S4-06): действие можно, если хоть одна папка письма его разрешает; свои папки — всегда.
+    #[test]
+    fn shared_folder_rights_gate_actions() {
+        let ro = Rights { read: true, add: false, remove: false, seen: true, keywords: false, submit: false };
+        let rights: HashMap<String, Rights> = [("j/in".to_string(), ro)].into();
+        let mut r = row("j/1", false, false);
+        r.mailbox_ids = vec!["j/in".into()];
+        assert!(may(&rights, &r, |x| x.seen));
+        assert!(!may(&rights, &r, |x| x.keywords) && !may(&rights, &r, |x| x.remove));
+        r.mailbox_ids.push("j/other".into());
+        assert!(may(&rights, &r, |x| x.remove), "папка без урезанных прав");
+        let own = row("1", false, false);
+        assert!(may(&rights, &own, |x| x.remove));
     }
 }
