@@ -49,18 +49,52 @@ jobs:
       - name: Release-сборка
         run: cargo build --release --workspace
 
+      # Подпись (S4-01, решение владельца 1): только если заданы секреты с сертификатом, иначе — уведомление.
+      # WINDOWS_CERT_PFX_BASE64 — .pfx в base64, WINDOWS_CERT_PASSWORD — пароль; сервер меток времени —
+      # переменная WINDOWS_TIMESTAMP_URL (по умолчанию DigiCert).
+      - name: Подпись exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:PFX_BASE64 -or -not $env:PFX_PASSWORD) {
+            "::notice title=Подпись::Секреты WINDOWS_CERT_PFX_BASE64 и WINDOWS_CERT_PASSWORD не заданы — архив без подписи"
+            exit 0
+          }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+          $ts = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          $exes = "postman.exe", "postman-worker.exe" | ForEach-Object { Join-Path "$env:CARGO_TARGET_DIR/release" $_ }
+          $pfx = Join-Path $env:RUNNER_TEMP "postman-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_BASE64))
+          try {
+            & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:PFX_PASSWORD /tr $ts /td SHA256 /d Postman @exes
+            if ($LASTEXITCODE) { throw "signtool sign failed ($LASTEXITCODE)" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          # Цепочка внутреннего CA на раннере может быть недоверенной — тогда предупреждение, не ошибка.
+          & $signtool.FullName verify /pa @exes
+          if ($LASTEXITCODE) { "::warning title=Подпись::signtool verify: цепочка сертификата не проверена на раннере" }
+
+      - name: Архив
+        id: package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows/package.ps1 -TargetDir "$env:CARGO_TARGET_DIR" -Out dist
+
+      # Артефакт скачивается как Postman-<версия>-windows-x64.zip с четырьмя файлами внутри.
       - name: Артефакт Windows
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: postman-windows-x64
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/release/postman.exe
-            ${{ env.CARGO_TARGET_DIR }}/release/postman-gpui.exe
-            ${{ env.CARGO_TARGET_DIR }}/release/postman-worker.exe
-            scripts/windows/README.txt
-            scripts/windows/bench.cmd
-            scripts/windows/sandbox.cmd
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.dir }}
+          if-no-files-found: error
 
       - name: Тесты
         run: cargo test --workspace

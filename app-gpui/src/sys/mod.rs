@@ -6,6 +6,25 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+mod console;
+
+/// Вывод в консоль родителя, если stdout или stderr не перенаправлены (release без консоли, S4-01):
+/// для `--bench`, `--screens`, `--help`, `--version`.
+#[cfg(windows)]
+pub fn attach_parent_console() {
+    console::attach_parent();
+}
+
+#[cfg(not(windows))]
+pub fn attach_parent_console() {}
+
+/// Кодовая страница ANSI процесса (65001 — манифест exe действует).
+#[cfg(all(test, windows))]
+pub fn active_code_page() -> u32 {
+    console::active_code_page()
+}
+
 /// Пароль учётной записи — в диспетчере учётных данных Windows (S3-04).
 #[cfg(windows)]
 pub mod credentials;
@@ -50,4 +69,13 @@ pub fn capture(window: isize) -> Result<Image, String> {
 #[cfg(not(windows))]
 pub fn capture(_window: isize) -> Result<Image, String> {
     Err("window capture is Windows only".into())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// Манифест из build.rs действует, хотя gpui вшивает свой: кодовая страница процесса — UTF-8.
+    #[test]
+    fn manifest_is_applied() {
+        assert_eq!(super::active_code_page(), 65001);
+    }
 }

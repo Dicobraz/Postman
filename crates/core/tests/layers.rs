@@ -19,7 +19,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-worker", 1),
     ("postman-core", 2),
     ("postman-demo", 2),
-    ("postman", 3),
     ("postman-gpui", 3),
 ];
 const UI_LAYER: u8 = 3;
