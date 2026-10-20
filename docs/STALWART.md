@@ -50,6 +50,9 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_labels::categories_are_set_queried_and_cleared` | S5-02, user3: письмо создаётся во «Входящих» (`Email/set create`, без SMTP) → категории патчем `keywords/<слово>` (в том числе слово с `~` и `/`) → `hasKeyword` в папке и во всех папках, `notKeyword`, счётчики `limit: 0` → снятие одной категории не трогает другие → неизвестный id — `notUpdated` (`notFound`) → письмо удалено |
 | `stand_labels::categories_through_sync` | S5-02, user3, через поток синхронизации: кэш поменян, `SetKeywords` доводит метку до сервера, `Query` → `SearchResults`, `Counts` → `Counts`; снятие — и в кэше, и на сервере |
 | `stand_labels::category_table_fits_in_a_file_node` | S5-02: таблица категорий (JSON) — blob → `FileNode/set create` → `FileNode/get` и чтение blob → `destroy` |
+| `stand_categories::table_is_shared_between_sessions_last_writer_wins` | S5-02б, user3: таблицы нет → первая запись создаёт `.postman/categories.json` → вторая сессия читает то же → правки двух клиентов последовательно и одновременно (`tokio::join!`) сводятся по категориям (поздняя побеждает, удаление и новая на месте) → запись с прежним `ifInState` — `stateMismatch`, создание существующего — `alreadyExists` → как было |
+| `stand_categories::tables_through_sync_and_shared_mailbox` | S5-02б, через поток синхронизации: при входе `Loaded` своей таблицы и таблицы `shared-sales` (своя у ящика), `Unsupported` у папки `shared-ro` → `Save` командой → `Saved` → запись другого клиента приходит push (`FileNode`) → `Loaded` с ней (29 мс – 1 с) → `Save` в аккаунт ящика не трогает свою → как было |
+| `stand_categories::purge_removes_the_keyword_from_messages` | S5-02б: удаление категории «и с писем» — `Purge` снимает слово с двух писем во всех папках, `$seen` остаётся → письма удалены |
 | `stand_send_later::held_submission_is_canceled_and_not_delivered` | S5-06: user1 → user3 с `HOLDFOR` 30 → `pending`, `sendAt` через 30 с, в списке ждущих → `canceled` → письмо в «Черновиках» с `$draft`, повторная отмена — `cannotUnsend` → после срока у user3 ничего → убрано |
 | `stand_send_later::held_submission_is_delivered_after_the_delay` | S5-06: `HOLDUNTIL` через 20 с → `sendAt` тот же; через 8 с у user3 ничего, затем письмо приходит, `receivedAt` ≥ `sendAt`; отмена после выпуска — `cannotUnsend` → убрано |
 | `stand_send_later::send_later_through_sync` | S5-06, через поток синхронизации: `Scheduled` при входе (`max_delay` 7 дней) → `Send` с `Release::At` (+2 мин) → `Sent` со сроком → `Scheduled` с ним → `Unsend` → `Unsent`, в `Scheduled` его нет → убрано |
@@ -158,8 +161,8 @@ cargo test -p postman-core --test stand -- --ignored
     вызовов; `maxObjectsInSet` = 500). Неизвестный id в `Email/set update` — `notUpdated` с `notFound`, не ошибка запроса.
 24. **FileNode** (`urn:ietf:params:jmap:filenode`, черновик IETF): есть у своего аккаунта и у аккаунтов общих ящиков.
     `FileNode/set create` с `blobId` загруженного blob, `parentId: null` — файл в корне; `FileNode/get` отдаёт свой
-    `blobId` (не загруженный), имя, тип, права; `destroy` удаляет. Кандидат на таблицу категорий на сервере
-    (`docs/specs/S5.md`, решение №4). Виден ли файл в «Файлах» (WebDAV) пользователя — [проверить].
+    `blobId` (не загруженный), имя, тип, права; `destroy` удаляет. Таблица категорий на сервере — здесь
+    (`docs/specs/S5.md`, решение №4, S5-02б; п. 29–32). Файл виден в «Файлах» (WebDAV) пользователя — п. 29.
 25. **Отложенная отправка — FUTURERELEASE** (S5-06, тест `stand_send_later`). У аккаунта в `submission`:
     `maxDelayedSend: 2592000` (30 дней), `submissionExtensions`: `FUTURERELEASE`, `SIZE`, `DSN`, `DELIVERYBY`,
     `MT-PRIORITY` (`MIXER`), `REQUIRETLS`. Срок задают параметры `envelope.mailFrom.parameters`: `HOLDFOR` (секунды) или
@@ -183,6 +186,28 @@ cargo test -p postman-core --test stand -- --ignored
     сервер его не перенесёт. Папки «Исходящие» у Stalwart по умолчанию нет. Клиент (S5-06): обычная отправка —
     `HOLDFOR` 13 с (окно «Отменить» 10 с + запас 3 с на ответ сервера), «Отправить позже» — `HOLDUNTIL`; письмо держит
     сервер, поэтому выход из Postman в окне «Отменить» ничего не теряет — письмо уйдёт в срок.
+29. **FileNode: папки и имена** (S5-02б, тест `stand_categories`). Узел без `blobId` — папка (`nodeType: directory`);
+    имя с точкой (`.postman`) допустимо (запрещены только `.`, `..`, имена устройств Windows и `/<>:"\|?*` —
+    `forbiddenNodeNames`, `forbiddenNameChars` в `accountCapabilities`), имена сравниваются с учётом регистра
+    (`caseInsensitiveNames: false`). Второй узел с тем же именем в той же папке — `notCreated` `alreadyExists` с
+    `existingId`: так клиент узнаёт, что папку или файл только что создал другой. Непустая папка не удаляется
+    (`nodeHasChildren`), с `onDestroyRemoveChildren: true` — вместе с содержимым. **Файлы видны пользователю:** папка
+    `.postman` и `categories.json` — в WebDAV (`PROPFIND /dav/file/<ящик>/`, Depth 1); скрытых или служебных
+    узлов у FileNode нет (`role: null`). Пользователь может удалить таблицу — Postman тогда вернётся к умолчанию.
+30. **`FileNode/query`:** фильтр `name` — точное совпадение (без подстроки, с учётом регистра), `parentId: "<id>"` —
+    работает; `parentId: null` («в корне») — весь запрос отклоняется (HTTP 400 `notRequest`), `hasParentId: false`
+    молча игнорируется (отдаёт и вложенные). Клиент ищет узел в корне фильтром по имени и сам отбирает `parentId: null`
+    (`Client::file_node`).
+31. **Замена содержимого и `ifInState`.** `FileNode/set update { blobId }` заменяет содержимое (у узла — свой новый
+    `blobId`, `modified` меняется); `ifInState` у `FileNode/set` поддержан: не то состояние — ошибка метода
+    `stateMismatch`. Состояние — одно на все файлы аккаунта: любая правка в «Файлах» пользователя сдвигает его, и
+    запись таблицы тогда перечитывает и сводит заново (`categories::save`, до 5 попыток). Push: `StateChange` несёт
+    `changed.<аккаунт>.FileNode` — и своего, и общего ящика; правка таблицы другим клиентом доходит за 29 мс – 1 с.
+32. **FileNode в чужих аккаунтах.** Общий ящик группы (`shared-sales`): файлы свои, права полные
+    (`mayCreateTopLevelFileNode: true`), загрузка blob в аккаунт ящика (`/jmap/upload/<аккаунт>/`) работает — у ящика
+    своя таблица. Аккаунт пользователя, открывшего user3 папку (`shared-ro`): сессия объявляет у него FileNode
+    (`mayCreateTopLevelFileNode: false`), но любой метод FileNode — `forbidden` «You do not have access to account j».
+    Клиент считает, что таблицы у такого аккаунта нет (`Reply::Unsupported`), и берёт свою.
 
 ## Общие ящики на стенде (S4-06)
 

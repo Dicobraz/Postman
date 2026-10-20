@@ -11,6 +11,7 @@ use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, M
 use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
+use crate::categories;
 use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
@@ -117,6 +118,8 @@ pub enum Command {
     SaveContact { card: Box<ContactCard>, old: Option<Box<ContactCard>>, ticket: u64 },
     /// Удалить карточку → `ContactDeleted` или `ContactFailed`, затем `ContactsLoaded`.
     DeleteContact { id: String, ticket: u64 },
+    /// Таблица категорий аккаунта на сервере (`categories.rs`, S5-02б) → `Event::Categories`.
+    Categories(categories::Request),
 }
 
 /// Что делает синхронизация. Текст — у интерфейса (`sync.ftl`), здесь только код и данные.
@@ -280,6 +283,8 @@ pub enum Event {
     ContactDeleted { ticket: u64, id: String },
     /// Ошибка контактов: `ticket` — сохранения или удаления, `0` — загрузки.
     ContactFailed { ticket: u64, error: String },
+    /// Таблица категорий: прочитана при входе или по push, записана, снята с писем (`categories.rs`).
+    Categories(categories::Reply),
     Error(SyncError),
 }
 
@@ -357,13 +362,15 @@ impl MailChange {
 pub struct Changed {
     pub mail: MailChange,
     pub calendar: bool,
+    /// Файлы аккаунтов (FileNode): в них таблица категорий (S5-02б).
+    pub files: MailChange,
 }
 
 impl Changed {
-    const ALL: Self = Self { mail: MailChange::All, calendar: true };
+    const ALL: Self = Self { mail: MailChange::All, calendar: true, files: MailChange::All };
 
     fn or(self, o: Self) -> Self {
-        Self { mail: self.mail.or(o.mail), calendar: self.calendar || o.calendar }
+        Self { mail: self.mail.or(o.mail), calendar: self.calendar || o.calendar, files: self.files.or(o.files) }
     }
 
     /// Разбор `StateChange` (RFC 8620 §7.1): `{"@type":"StateChange","changed":{"<аккаунт>":{"Email":"…",…}}}`.
@@ -372,6 +379,7 @@ impl Changed {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { return Self::ALL };
         let Some(accounts) = v.get("changed").and_then(|c| c.as_object()) else { return Self::ALL };
         let mut mail = BTreeSet::new();
+        let mut files = BTreeSet::new();
         let mut calendar = false;
         for (account, types) in accounts.iter().filter_map(|(a, t)| Some((a, t.as_object()?))) {
             for kind in types.keys() {
@@ -380,11 +388,15 @@ impl Changed {
                         mail.insert(account.clone());
                     }
                     "CalendarEvent" | "Calendar" | "CalendarEventNotification" => calendar = true,
+                    "FileNode" => {
+                        files.insert(account.clone());
+                    }
                     _ => {}
                 }
             }
         }
-        Self { mail: if mail.is_empty() { MailChange::None } else { MailChange::In(mail) }, calendar }
+        let set = |s: BTreeSet<String>| if s.is_empty() { MailChange::None } else { MailChange::In(s) };
+        Self { mail: set(mail), calendar, files: set(files) }
     }
 }
 
@@ -540,6 +552,9 @@ async fn run(
     // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
     load_people(&client, notify).await;
     settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
+    // Таблицы категорий (свои и общих ящиков) — до писем: полосы и метки списка — сразу с ними.
+    let shared_ids: Vec<String> = shared.iter().map(|a| a.id.clone()).collect();
+    categories::load_all(&client, &own_id, &shared_ids, &|r| notify(Event::Categories(r))).await;
 
     let mail = |id: &str, scope: Option<String>, client: Client| MailAccount { id: id.into(), scope, client, state: None };
     let mut accounts = Accounts {
@@ -593,6 +608,12 @@ async fn run(
                 }
                 if changed.calendar {
                     calendar.poke(tokio::time::Instant::now(), CALENDAR_DEBOUNCE);
+                }
+                // Таблицу категорий поправил другой клиент (или эта же запись вернулась push) — перечитать.
+                let files = std::iter::once(&accounts.own).chain(&accounts.shared);
+                for acc in files.filter(|a| changed.files.touches(&a.id)) {
+                    let request = categories::Request::Load { account: acc.scope.clone() };
+                    categories::handle(&client, &own_id, None, request, &|r| notify(Event::Categories(r))).await;
                 }
                 for acc in accounts.all_mut().filter(|a| changed.mail.touches(&a.id)) {
                     if apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await {
@@ -701,7 +722,7 @@ async fn push_loop(client: Client, wake: UnboundedSender<Changed>) {
     let mut backoff = 5;
     // Первое подключение — сразу после загрузки: календарь ещё не открывали, сверять только почту.
     let mut first = true;
-    let mail = || Changed { mail: MailChange::All, calendar: false };
+    let mail = || Changed { mail: MailChange::All, calendar: false, files: MailChange::None };
     loop {
         match client.event_source(PUSH_PING).await {
             Ok(mut es) => {
@@ -1016,6 +1037,10 @@ async fn handle(
             });
         }
         Command::Settings(request) => settings::handle(client, request, &|r| notify(Event::Settings(r))).await,
+        Command::Categories(request) => {
+            let notify = |r| notify(Event::Categories(r));
+            categories::handle(client, &accounts.own.id, Some(&*cache), request, &notify).await;
+        }
         Command::Contacts => load_people(client, notify).await,
         Command::SaveContact { card, old, ticket } => {
             let saved = match &old {
@@ -1464,15 +1489,20 @@ mod tests {
     fn push_tells_mail_from_calendar() {
         let mail = r#"{"@type":"StateChange","changed":{"a1":{"Email":"s1","Mailbox":"s2"}}}"#;
         let only = |ids: &[&str]| MailChange::In(ids.iter().map(|s| s.to_string()).collect());
-        assert_eq!(Changed::of(mail), Changed { mail: only(&["a1"]), calendar: false });
+        assert_eq!(Changed::of(mail), Changed { mail: only(&["a1"]), calendar: false, files: MailChange::None });
         let cal = r#"{"@type":"StateChange","changed":{"a1":{"CalendarEvent":"s3"}}}"#;
-        assert_eq!(Changed::of(cal), Changed { mail: MailChange::None, calendar: true });
+        assert_eq!(Changed::of(cal), Changed { mail: MailChange::None, calendar: true, files: MailChange::None });
         let other = r#"{"@type":"StateChange","changed":{"a1":{"ContactCard":"s4"}}}"#;
         assert_eq!(Changed::of(other), Changed::default());
         // Не разобралось — сверить всё.
         assert_eq!(Changed::of("not json"), Changed::ALL);
         assert_eq!(Changed::of("{}"), Changed::ALL);
-        assert_eq!(Changed::of(mail).or(Changed::of(cal)), Changed { mail: only(&["a1"]), calendar: true });
+        let both = Changed { mail: only(&["a1"]), calendar: true, files: MailChange::None };
+        assert_eq!(Changed::of(mail).or(Changed::of(cal)), both);
+        // Таблица категорий — файл аккаунта: push называет аккаунт, почта не сверяется.
+        let file = r#"{"@type":"StateChange","changed":{"i":{"FileNode":"sem"}}}"#;
+        assert_eq!(Changed::of(file), Changed { mail: MailChange::None, calendar: false, files: only(&["i"]) });
+        assert_eq!(Changed::ALL.files, MailChange::All);
     }
 
     /// Общие ящики (S4-06): push называет аккаунты — сверяются только они.

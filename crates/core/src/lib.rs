@@ -2,6 +2,7 @@
 //! Интерфейс шлёт команды и получает события; данные читает из хранилища.
 
 pub mod bench;
+pub mod categories;
 pub mod contacts;
 pub mod extract;
 pub mod files;

@@ -85,12 +85,13 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
 /// Части цвета категории: точка и полоса, текст и подложка метки.
 const CAT_PARTS: [&str; 3] = ["dot", "text", "bg"];
 
-/// Имена ролей категорий `app.cat.<слот палитры>.<часть>` — строки живут весь процесс (роль pets-ui — `&'static str`).
+/// Имена ролей категорий `app.cat.<цвет Fluent>.<часть>` по порядку `palette::PALETTE` — строки живут весь процесс
+/// (имя роли pets-ui — `&'static str`).
 static CAT_NAMES: LazyLock<Vec<[String; 3]>> = LazyLock::new(|| {
-    palette::HUES.iter().map(|h| CAT_PARTS.map(|part| format!("app.cat.{}.{part}", h.key))).collect()
+    palette::PALETTE.iter().map(|c| CAT_PARTS.map(|part| format!("app.cat.{}.{part}", c.key))).collect()
 });
 
-/// Все роли Postman для `Themes::init`: постоянные, угроза и срок из палитры, категории по слотам палитры.
+/// Все роли Postman для `Themes::init`: постоянные, угроза и срок из палитры, цвета категорий (общие цвета Fluent 2).
 pub(crate) static ROLES: LazyLock<Vec<AppRole>> = LazyLock::new(roles);
 
 fn roles() -> Vec<AppRole> {
@@ -105,9 +106,8 @@ fn roles() -> Vec<AppRole> {
         AppRole { name: "app.threat.dot", light: c(tl.dot), dark: c(td.dot), hc: Role::CriticalFg },
         AppRole { name: "app.deadline.fg", light: c(dl.text), dark: c(dd.text), hc: Role::CautionFg },
     ]);
-    for (slot, names) in CAT_NAMES.iter().enumerate() {
-        let slot = u8::try_from(slot).unwrap_or(palette::NEUTRAL);
-        let (l, d) = (palette::swatch(slot, palette::Theme::Light), palette::swatch(slot, palette::Theme::Dark));
+    for (color, names) in palette::PALETTE.iter().zip(CAT_NAMES.iter()) {
+        let (l, d) = (color.swatch(palette::Theme::Light), color.swatch(palette::Theme::Dark));
         let hc = [Role::TextPrimary, Role::TextPrimary, Role::LayerPanel];
         for (i, (light, dark)) in [(l.dot, d.dot), (l.text, d.text), (l.bg, d.bg)].into_iter().enumerate() {
             out.push(AppRole { name: names[i].as_str(), light: c(light), dark: c(dark), hc: hc[i] });
@@ -192,10 +192,11 @@ impl Look {
         self.pm[r as usize]
     }
 
-    /// Цвета категории по слоту палитры; неизвестный слот — нейтральный.
-    pub(crate) fn cat(&self, slot: u8) -> Cat {
-        let i = usize::from(slot);
-        self.cats.get(i).or(self.cats.first()).copied().unwrap_or(Cat {
+    /// Цвета категории по имени цвета Fluent; неизвестный цвет — нейтральный.
+    pub(crate) fn cat(&self, key: &str) -> Cat {
+        let index = |k: &str| palette::PALETTE.iter().position(|c| c.key == k);
+        let i = index(key).or_else(|| index(palette::NEUTRAL));
+        i.and_then(|i| self.cats.get(i)).copied().unwrap_or(Cat {
             dot: self.c(Role::TextTertiary),
             text: self.text2(),
             bg: self.c(Role::FillCursor),
@@ -464,9 +465,10 @@ mod tests {
         assert_eq!(hex(d.pm(Pm::Text)), "#D2D2D2");
         assert_eq!(hex(d.pm(Pm::Text2)), "#A6A6A6");
         let blue = postman_core::palette::BLUE;
-        assert_eq!(hex(d.cat(blue).bg), format!("#{:06X}", postman_core::palette::swatch(blue, postman_core::palette::Theme::Dark).bg));
+        let dark_bg = postman_core::palette::swatch(blue, postman_core::palette::Theme::Dark).bg;
+        assert_eq!(hex(d.cat(blue).bg), format!("#{dark_bg:06X}"));
         assert_ne!(l.cat(blue).bg, d.cat(blue).bg);
-        // Неизвестный слот — нейтральный.
-        assert_eq!(l.cat(200), l.cat(postman_core::palette::NEUTRAL));
+        // Неизвестный цвет — нейтральный.
+        assert_eq!(l.cat("no-such-color"), l.cat(postman_core::palette::NEUTRAL));
     }
 }

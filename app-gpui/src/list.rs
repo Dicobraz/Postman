@@ -735,7 +735,7 @@ pub(crate) fn list_row(
 ) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let roomy = !l.compact();
-    let stripe = labels.stripe.map(|slot| l.cat(slot).dot);
+    let stripe = labels.stripe.map(|c| l.cat(c).dot);
     let avatar = roomy.then(|| {
         let c = l.cat(labels.stripe.unwrap_or(postman_core::palette::NEUTRAL));
         div()
@@ -757,7 +757,7 @@ pub(crate) fn list_row(
         .justify_end()
         .gap(px(4.))
         .overflow_hidden()
-        .children(labels.chips.into_iter().map(|(name, slot)| crate::labels::chip(name, slot, l)));
+        .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color, l)));
     let line1 = div()
         .flex()
         .items_center()
