@@ -120,8 +120,10 @@ const BLOB: TableDefinition<&str, &[u8]> = TableDefinition::new("blob");
 const TRUSTED: TableDefinition<&str, ()> = TableDefinition::new("trusted_sender");
 const STATE: TableDefinition<&str, &str> = TableDefinition::new("sync_state");
 
-/// Страничный кэш redb: памяти важнее, чем лишнее чтение с SSD.
-const CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// Страничный кэш redb: памяти важнее, чем лишнее чтение с SSD. Листание демо-ящика на 50 тыс. заполняло 16 МБ
+/// целиком (куча процесса +16 МБ, S4-08, `docs/MEMORY.md`); 4 МБ хватает внутренним страницам деревьев, листовые
+/// страницы берутся из файлового кэша ОС — кадр листания не меняется.
+const CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>> {
     Ok(postcard::to_stdvec(v)?)
