@@ -42,8 +42,25 @@ impl ReadingPane {
         cx.notify();
     }
 
+    /// Живой ящик (S3-04): тело — из кэша или с сервера, приходит позже (`show_body`).
+    pub(crate) fn open_live(&mut self, row: EmailRow, cx: &mut Context<Self>) {
+        if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
+            return;
+        }
+        self.reading = Some(Reading { row, body: None, doc: None });
+        cx.notify();
+    }
+
+    /// Тело открытого письма пришло (кэш, `BodyReady`): разобрать в воркере.
+    pub(crate) fn show_body(&mut self, id: &str, body: postman_cache::BodyRow, cx: &mut Context<Self>) {
+        let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) else { return };
+        r.body = Some(body);
+        r.doc = None;
+        self.render_body(cx);
+        cx.notify();
+    }
+
     /// Событие синхронизации (тело, блоб, ответ на приглашение) — S3-03 берёт свои.
-    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
     pub(crate) fn on_sync(&mut self, _ev: &postman_core::sync::Event, _cx: &mut Context<Self>) {}
 
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {

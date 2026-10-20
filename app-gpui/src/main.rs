@@ -1,7 +1,10 @@
 //! Спайк UI на gpui (gpui-kit): тот же экран, что и в egui-версии, и тот же `--bench`.
 //! Ядро (хранилище, IR, воркер-песочница, демо-ящик) — общее; здесь только интерфейс.
 //!
-//!   postman-gpui [--demo N] [--bench] [--screens <каталог>] [--lang ru|en|auto]
+//!   postman-gpui [--demo N] [--bench] [--screens <каталог> [--live]] [--sign-out] [--lang ru|en|auto]
+//!
+//! Без `--demo` — живой ящик: `POSTMAN_URL` + `POSTMAN_USER`/`POSTMAN_PASSWORD` (или `POSTMAN_TOKEN`), иначе
+//! сохранённый вход, иначе строка входа в окне. `--sign-out` — забыть сохранённый вход.
 
 mod calendar;
 mod commands;
@@ -14,6 +17,9 @@ mod reading;
 mod backend;
 mod bar;
 mod mailer;
+mod account;
+mod live;
+mod signin;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -32,8 +38,10 @@ use postman_core::bench::{self, Bench};
 pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/app.ftl")),
     ("ru", include_str!("../i18n/ru/commands.ftl")),
+    ("ru", include_str!("../i18n/ru/account.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
+    ("en", include_str!("../i18n/en/account.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
@@ -43,7 +51,7 @@ pub(crate) fn format_date(ts: i64) -> String {
     if t.date() == now.date() { t.strftime("%H:%M").to_string() } else { t.strftime("%d.%m %H:%M").to_string() }
 }
 
-fn data_dir() -> std::path::PathBuf {
+pub(crate) fn data_dir() -> std::path::PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("XDG_DATA_HOME"))
         .map(std::path::PathBuf::from)
@@ -77,10 +85,13 @@ fn listen_second_instance(listener: pets_shell::Listener, (window, mailer): (Any
 }
 
 fn main() {
-    let start = Instant::now();
+    let mut start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let bench = args.iter().any(|a| a == "--bench");
+    let demo = args.iter().any(|a| a == "--demo");
+    // `--screens --live`: снимки живого ящика (учётная запись — из окружения).
+    let live = args.iter().any(|a| a == "--live");
     // `--keep`: оставить рабочую копию данных бенча (для разбора).
     let keep = args.iter().any(|a| a == "--keep");
     let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
@@ -88,8 +99,8 @@ fn main() {
     for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
         tracing::warn!("i18n: {p}");
     }
-    let screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
-        screens::Driver::new(d.into()).unwrap_or_else(|e| fatal("fatal-screens-dir", e))
+    let mut screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
+        screens::Driver::new(d.into(), live).unwrap_or_else(|e| fatal("fatal-screens-dir", e))
     });
     // Второй запуск отдаёт аргументы первому (тот показывает окно) и выходит; замеры и снимки — всегда отдельно.
     let listener = if bench || screens.is_some() {
@@ -106,23 +117,20 @@ fn main() {
     };
     let dir = data_dir();
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("fatal-data-dir", e));
-    // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
-    let prepared = Instant::now();
-    let path = if bench || screens.is_some() {
-        // Снимки — на небольшой свежей копии: письма в первой строке те же от прогона к прогону.
-        let n = if screens.is_some() { 2000 } else { n };
-        let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("fatal-bench-mailbox", e));
-        if !keep {
-            bench::remove_on_finish(path.clone());
-        }
-        path
-    } else {
-        let path = dir.join("demo.redb");
-        postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("fatal-demo-mailbox", e));
-        path
+    if args.iter().any(|a| a == "--sign-out") {
+        account::forget(&dir);
+    }
+    let flags = account::Flags { demo, bench, screens: screens.is_some(), live };
+    let start_with = account::choose(flags, postman_core::sync::Account::from_env(), || account::load_stored(&dir));
+    if let (Some(d), account::Start::SignIn(_)) = (&mut screens, &start_with) {
+        d.sign_in();
+    }
+    // Живой ящик: кэш учётной записи; нет учётной записи — пустой кэш в памяти до входа.
+    let (cache, index) = match &start_with {
+        account::Start::Demo => (demo_cache(&dir, bench, screens.is_some(), keep, n, &mut start), None),
+        account::Start::Live(a) => live::open_store(&account::cache_path(&dir, a)).unwrap_or_else(|e| fatal("fatal-store", e)),
+        account::Start::SignIn(_) => (Cache::open_in_memory().unwrap_or_else(|e| fatal("fatal-store", e)), None),
     };
-    let start = if bench { start + prepared.elapsed() } else { start };
-    let cache = Cache::open(&path).unwrap_or_else(|e| fatal("fatal-store", e));
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -133,7 +141,15 @@ fn main() {
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             let bench = bench.then(|| Bench::new(start));
             let cache = cache.clone();
-            cx.new(|cx| Mailer { screens, ..Mailer::new(cache, bench, window, cx) })
+            cx.new(|cx| {
+                let mut m = Mailer { screens, ..Mailer::new(cache, bench, window, cx) };
+                match start_with {
+                    account::Start::Demo => {}
+                    account::Start::Live(a) => m.start_sync(a, index, false, cx),
+                    account::Start::SignIn(prefill) => m.show_signin(prefill, window, cx),
+                }
+                m
+            })
         });
         match opened {
             Ok(handle) => {
@@ -145,6 +161,28 @@ fn main() {
         }
         cx.activate(true);
     });
+}
+
+/// Демо-ящик. Бенч и снимки — на свежей копии; подготовка данных не входит в first_frame_ms.
+fn demo_cache(dir: &std::path::Path, bench: bool, screens: bool, keep: bool, n: usize, start: &mut Instant) -> Cache {
+    let prepared = Instant::now();
+    let path = if bench || screens {
+        // Снимки — на небольшой свежей копии: письма в первой строке те же от прогона к прогону.
+        let n = if screens { 2000 } else { n };
+        let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("fatal-bench-mailbox", e));
+        if !keep {
+            bench::remove_on_finish(path.clone());
+        }
+        path
+    } else {
+        let path = dir.join("demo.redb");
+        postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("fatal-demo-mailbox", e));
+        path
+    };
+    if bench {
+        *start += prepared.elapsed();
+    }
+    Cache::open(&path).unwrap_or_else(|e| fatal("fatal-store", e))
 }
 
 #[cfg(test)]
