@@ -128,6 +128,49 @@ async fn mail_is_sent_received_searched_and_flagged() {
     b.client.destroy_email(&id).await.unwrap();
 }
 
+/// Удаление (S3-02): письмо — в «Удалённые» (`Email/set` mailboxIds), оттуда — насовсем (`destroy`).
+/// Один пользователь пишет себе: прогон не трогает чужие ящики.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn mail_moves_to_trash_and_is_destroyed() {
+    let u = user(2).await;
+    let subject = format!("Postman trash {}", stamp());
+    let (boxes, _) = u.client.mailboxes().await.unwrap();
+    let role = |r: &str| boxes.iter().find(|m| m.role.as_deref() == Some(r)).map(|m| m.id.clone()).unwrap();
+    let (inbox, trash) = (role("inbox"), role("trash"));
+    let identity = u.client.identities().await.unwrap().into_iter().find(|i| i.email == u.email).unwrap();
+    let draft = Draft {
+        from: Address::new("User 2", &u.email),
+        to: vec![Address::new("User 2", &u.email)],
+        subject: subject.clone(),
+        markdown: "В корзину.".into(),
+        ..Default::default()
+    };
+    let now = jiff::Timestamp::now().as_second();
+    let raw = postman_compose::build(&draft, now, &postman_compose::new_message_id(&draft.from, now)).unwrap();
+    let envelope = Envelope { mail_from: u.email.clone(), rcpt_to: vec![u.email.clone()] };
+    u.client.send(raw, &identity.id, &envelope, &role("drafts"), &role("sent")).await.unwrap();
+    let id = eventually("письмо во «Входящих»", || async {
+        let page = u.client.search(&subject, Some(&inbox), 5).await.ok()?;
+        page.emails.into_iter().find(|e| e.subject.as_deref() == Some(subject.as_str())).map(|e| e.id)
+    })
+    .await;
+
+    u.client.move_email(&id, &inbox, &trash).await.unwrap();
+    let (emails, _) = u.client.email_get(std::slice::from_ref(&id)).await.unwrap();
+    let boxes_of: Vec<&String> = emails[0].mailbox_ids.iter().filter(|(_, on)| **on).map(|(k, _)| k).collect();
+    assert_eq!(boxes_of, [&trash], "письмо не перенесено в «Удалённые»");
+
+    u.client.destroy_email(&id).await.unwrap();
+    let (emails, _) = u.client.email_get(std::slice::from_ref(&id)).await.unwrap();
+    assert!(emails.is_empty(), "письмо не удалено");
+    // Копия в «Отправленных» — тоже прочь.
+    let sent = u.client.search(&subject, Some(&role("sent")), 5).await.unwrap();
+    for e in sent.emails {
+        u.client.destroy_email(&e.id).await.unwrap();
+    }
+}
+
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn push_delivers_state_change() {

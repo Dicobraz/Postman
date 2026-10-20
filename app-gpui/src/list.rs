@@ -1,9 +1,13 @@
-//! Список писем: окно строк в фоне, выделение, флаги (S1-03, S1-06).
+//! Список писем: окно строк в фоне, выделение, флаги (S1-03, S1-06); полоса прокрутки и позиция в каждой
+//! папке, строка «Удалить навсегда?» (S3-02).
 
+use std::collections::HashMap;
 use std::ops::Range;
 
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::*;
 use gpui_kit::prelude::*;
+use pets_i18n::tr;
 use postman_cache::{Cache, EmailRow};
 
 use crate::*;
@@ -58,7 +62,39 @@ pub(crate) struct MailList {
     pub(crate) visible: Range<usize>,
     pub(crate) selected: Option<usize>,
     pub(crate) scroll: UniformListScrollHandle,
+    /// Прокрутка каждой папки: вернулись в папку — список там же, где был.
+    pub(crate) positions: Positions,
+    /// Строка «Удалить навсегда? Да / Нет» над списком: письмо из «Удалённых» и его номер.
+    pub(crate) confirm: Option<(usize, EmailRow)>,
 }
+
+/// Позиция прокрутки (смещение по вертикали, px) каждой папки; результаты поиска — всегда сверху.
+#[derive(Default)]
+pub(crate) struct Positions(HashMap<String, f32>);
+
+impl Positions {
+    /// Уходим из вида `from` (папка; `None` — поиск) с прокруткой `y`; куда прокрутить вид `to`.
+    pub(crate) fn switch(&mut self, from: Option<&str>, y: f32, to: Option<&str>) -> f32 {
+        if let Some(mb) = from {
+            self.0.insert(mb.to_owned(), y);
+        }
+        to.and_then(|mb| self.0.get(mb)).copied().unwrap_or(0.)
+    }
+}
+
+/// Видимые строки при прокрутке `y` (смещение содержимого вверх — отрицательное) и прежнем их числе.
+pub(crate) fn rows_at(y: f32, len: usize) -> Range<usize> {
+    let start = (-y / ROW_HEIGHT).max(0.) as usize;
+    start..start + len
+}
+
+/// «Да» в строке «Удалить навсегда?»: письмо и его номер в списке.
+pub(crate) struct Purge {
+    pub(crate) index: usize,
+    pub(crate) row: EmailRow,
+}
+
+impl EventEmitter<Purge> for MailList {}
 
 /// Письмо открыто (строка уже помечена прочитанной).
 pub(crate) struct OpenRow(pub(crate) EmailRow);
@@ -107,19 +143,87 @@ impl MailList {
             visible: 0..30,
             selected: None,
             scroll: UniformListScrollHandle::new(),
+            positions: Positions::default(),
+            confirm: None,
         }
     }
 
     pub(crate) fn show_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
-        self.mailbox = Some(id);
-        self.show_search(None, cx);
-    }
-
-    pub(crate) fn show_search(&mut self, ids: Option<Vec<String>>, cx: &mut Context<Self>) {
-        self.search_ids = ids;
+        self.switch_view(Some(id), None);
         self.selected = None;
         self.reload();
         cx.notify();
+    }
+
+    pub(crate) fn show_search(&mut self, ids: Option<Vec<String>>, cx: &mut Context<Self>) {
+        let mailbox = self.mailbox.clone();
+        self.switch_view(mailbox, ids);
+        self.selected = None;
+        self.reload();
+        cx.notify();
+    }
+
+    /// Первые результаты поиска живого ящика (дальше они дополняются через `refresh`).
+    pub(crate) fn begin_search(&mut self, ids: Vec<String>) {
+        let mailbox = self.mailbox.clone();
+        self.switch_view(mailbox, Some(ids));
+        self.selected = None;
+    }
+
+    /// Другая папка или поиск: запомнить прокрутку прежнего вида, поставить прокрутку нового.
+    fn switch_view(&mut self, mailbox: Option<String>, search: Option<Vec<String>>) {
+        let key = |mailbox: &Option<String>, search: &Option<Vec<String>>| match search {
+            Some(_) => None,
+            None => mailbox.clone(),
+        };
+        let from = key(&self.mailbox, &self.search_ids);
+        let to = key(&mailbox, &search);
+        let y = self.positions.switch(from.as_deref(), self.offset_y(), to.as_deref());
+        self.mailbox = mailbox;
+        self.search_ids = search;
+        self.confirm = None;
+        self.set_offset_y(y);
+        self.visible = rows_at(y, self.visible.len());
+    }
+
+    fn offset_y(&self) -> f32 {
+        f32::from(self.scroll.0.borrow().base_handle.offset().y)
+    }
+
+    fn set_offset_y(&self, y: f32) {
+        let mut s = self.scroll.0.borrow_mut();
+        s.deferred_scroll_to_item = None;
+        s.base_handle.set_offset(point(px(0.), px(y)));
+    }
+
+    pub(crate) fn selected_row(&self) -> Option<EmailRow> {
+        self.selected.and_then(|i| self.row(i)).cloned()
+    }
+
+    /// «Удалить» в «Удалённых»: строка подтверждения над списком.
+    pub(crate) fn ask_purge(&mut self, index: usize, row: EmailRow, cx: &mut Context<Self>) {
+        self.confirm = Some((index, row));
+        cx.notify();
+    }
+
+    /// Ответ на «Удалить навсегда?»; `false` — «Нет» и Esc.
+    pub(crate) fn answer_purge(&mut self, yes: bool, cx: &mut Context<Self>) {
+        if let Some((index, row)) = self.confirm.take()
+            && yes
+        {
+            cx.emit(Purge { index, row });
+        }
+        cx.notify();
+    }
+
+    /// Письмо ушло из списка (в «Удалённые» или насовсем): перечитать и выделить следующее — оно теперь на
+    /// месте удалённого.
+    pub(crate) fn removed(&mut self, id: &str, index: usize, cx: &mut Context<Self>) {
+        if let Some(ids) = &mut self.search_ids {
+            ids.retain(|x| x != id);
+        }
+        self.confirm = None;
+        self.reread(Some(index), cx);
     }
 
     pub(crate) fn reload(&mut self) {
@@ -138,6 +242,11 @@ impl MailList {
 
     /// Данные изменились (синхронизация): число писем и окно строк — в фоне, выделение остаётся на том же письме.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reread(None, cx);
+    }
+
+    /// Перечитать в фоне; `select` — затем выделить и открыть письмо с этим номером (иначе — то же письмо).
+    fn reread(&mut self, select: Option<usize>, cx: &mut Context<Self>) {
         let selected = self.selected.and_then(|i| self.row(i)).map(|r| r.id.clone());
         let (offset, limit) = page_window(&self.visible);
         self.page_gen += 1;
@@ -155,6 +264,12 @@ impl MailList {
                 m.count = count;
                 m.selected = reselect(selected.as_deref(), offset, &rows, count);
                 m.rows = (offset, rows);
+                if let Some(i) = select {
+                    m.selected = None;
+                    if count > 0 {
+                        m.select(i.min(count - 1), cx);
+                    }
+                }
                 cx.notify();
             });
         })
@@ -216,6 +331,10 @@ impl MailList {
             return;
         }
         let i = i.min(self.count - 1);
+        // Другое письмо — вопрос об удалении прежнего снят.
+        if self.confirm.as_ref().is_some_and(|(c, _)| *c != i) {
+            self.confirm = None;
+        }
         self.selected = Some(i);
         self.scroll.scroll_to_item(i, ScrollStrategy::Center);
         self.ensure(i..i + 1, cx);
@@ -281,7 +400,34 @@ impl MailList {
 
 impl Render for MailList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().border_r_1().border_color(rgb(0xdddddd)).child(
+        let confirm = self.confirm.as_ref().map(|_| {
+            let button = |id: &'static str, text: String, yes: bool| {
+                div()
+                    .id(id)
+                    .px_3()
+                    .py_0p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(yes, |d| d.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)).hover(|d| d.bg(rgb(0xa52517))))
+                    .when(!yes, |d| d.bg(rgb(0xececec)).hover(|d| d.bg(rgb(0xe0e0e0))))
+                    .child(text)
+                    .on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
+            };
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .bg(rgb(0xfff4ce))
+                .border_b_1()
+                .border_color(rgb(0xdddddd))
+                .child(div().flex_1().child(tr!("actions-purge-confirm")))
+                .child(button("purge-yes", tr!("actions-purge-yes"), true))
+                .child(button("purge-no", tr!("actions-purge-no"), false))
+        });
+        let list = div().relative().flex_1().min_h_0().child(
             uniform_list(
                 "messages",
                 self.count,
@@ -300,8 +446,11 @@ impl Render for MailList {
                 }),
             )
             .track_scroll(&self.scroll)
-            .h_full(),
-        )
+            .size_full(),
+        );
+        // Полоса прокрутки видна всегда и перетаскивается; кадры — только пока её двигают.
+        let list = list.child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always));
+        div().size_full().flex().flex_col().border_r_1().border_color(rgb(0xdddddd)).children(confirm).child(list)
     }
 }
 
@@ -339,7 +488,7 @@ impl PageSource {
 
 /// Строка, которая ещё читается из хранилища: та же высота, без текста.
 pub(crate) fn empty_row(i: usize) -> AnyElement {
-    div().id(i).h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
+    div().id(i).w_full().h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
 }
 
 pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<MailList>) -> AnyElement {
@@ -354,6 +503,7 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
     let line2 = format!("{}  —  {}", r.subject, r.preview);
     div()
         .id(i)
+        .w_full()
         .relative()
         .h(px(ROW_HEIGHT))
         .flex()
@@ -384,7 +534,7 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{EmailRow, keyword_changes, reselect};
+    use super::{EmailRow, Positions, ROW_HEIGHT, keyword_changes, reselect, rows_at};
 
     fn row(id: &str, seen: bool, flagged: bool) -> EmailRow {
         EmailRow {
@@ -410,6 +560,23 @@ mod tests {
         assert_eq!(keyword_changes(&r, true, false), vec![("$seen", true)]);
         assert_eq!(keyword_changes(&r, true, true), vec![("$seen", true), ("$flagged", true)]);
         assert_eq!(keyword_changes(&row("a", true, true), true, false), vec![("$flagged", false)]);
+    }
+
+    #[test]
+    fn each_folder_keeps_its_scroll_position() {
+        let mut p = Positions::default();
+        // Входящие прокручены на 10 строк вниз → Архив открывается сверху.
+        let inbox = -10. * ROW_HEIGHT;
+        assert_eq!(p.switch(Some("inbox"), inbox, Some("archive")), 0.);
+        // Архив прокручен на 3 строки → во Входящих снова 10-я строка, в Архиве — 3-я.
+        assert_eq!(p.switch(Some("archive"), -3. * ROW_HEIGHT, Some("inbox")), inbox);
+        assert_eq!(p.switch(Some("inbox"), inbox, Some("archive")), -3. * ROW_HEIGHT);
+        // Поиск — сверху и не запоминается; сброс поиска — назад в папку, где была прокрутка.
+        assert_eq!(p.switch(Some("archive"), -3. * ROW_HEIGHT, None), 0.);
+        assert_eq!(p.switch(None, -50. * ROW_HEIGHT, Some("archive")), -3. * ROW_HEIGHT);
+        // Окно строк для первого чтения — там, куда прокручено.
+        assert_eq!(rows_at(inbox, 30), 10..40);
+        assert_eq!(rows_at(0., 30), 0..30);
     }
 
     #[test]
