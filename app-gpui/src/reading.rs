@@ -59,6 +59,10 @@ pub(crate) struct ReadingPane {
     pub(crate) in_flight: HashSet<String>,
     /// Куда «Открыть» кладёт файл перед запуском системного приложения.
     pub(crate) open_dir: PathBuf,
+    /// Картинки закрытого письма: убрать из атласа gpui при следующей отрисовке (S4-08). Сам gpui их не
+    /// убирает, пока жив процесс: без этого каждое открытое письмо с картинкой оставляло в атласе (память GPU,
+    /// на встроенной графике — память процесса) свой кадр.
+    pub(crate) retired: Vec<Arc<RenderImage>>,
     /// Беседа открытого письма (S5-05, `thread.rs`); `feed_on` — показана лента, `quotes` — с цитатами.
     pub(crate) feed: Option<crate::thread::Feed>,
     pub(crate) feed_on: bool,
@@ -114,10 +118,18 @@ impl ReadingPane {
             pending_files: Vec::new(),
             in_flight: HashSet::new(),
             open_dir: data_dir().join("open"),
+            retired: Vec::new(),
             feed: None,
             feed_on: false,
             quotes: false,
             mine: Vec::new(),
+        }
+    }
+
+    /// Показать другое письмо (или ничего): картинки прежнего — в [`ReadingPane::retired`].
+    fn replace(&mut self, next: Option<Reading>) {
+        if let Some(old) = std::mem::replace(&mut self.reading, next) {
+            self.retired.extend(old.images.into_values());
         }
     }
 
@@ -126,7 +138,7 @@ impl ReadingPane {
             return;
         }
         let body = Some(postman_demo::body(&row.id));
-        self.reading = Some(Reading { row, body, doc: None, images: Images::new(), requested: HashSet::new(), invite: None });
+        self.replace(Some(Reading { row, body, doc: None, images: Images::new(), requested: HashSet::new(), invite: None }));
         self.render_body(cx);
         self.ensure_invite(cx);
         self.sync_thread(cx);
@@ -138,7 +150,7 @@ impl ReadingPane {
         if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
             return;
         }
-        self.reading = Some(Reading { row, body: None, doc: None, images: Images::new(), requested: HashSet::new(), invite: None });
+        self.replace(Some(Reading { row, body: None, doc: None, images: Images::new(), requested: HashSet::new(), invite: None }));
         self.sync_thread(cx);
         cx.notify();
     }
@@ -216,7 +228,7 @@ impl ReadingPane {
     }
 
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
-        self.reading = None;
+        self.replace(None);
         self.feed = None;
         cx.notify();
     }
@@ -539,7 +551,10 @@ fn downloads_dir() -> PathBuf {
 }
 
 impl Render for ReadingPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
         let Some(r) = &self.reading else {
             return div().flex().size_full().items_center().justify_center().text_color(rgb(0x888888)).child(tr!("reading-empty")).into_any_element();
         };
