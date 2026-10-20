@@ -91,6 +91,7 @@ impl Mailer {
             on_search,
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
+            cx.subscribe(&list, |this, _, NeedMore(mailbox), cx| this.load_more(mailbox.clone(), cx)),
             crate::actions::watch_list(&list, cx),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
@@ -181,6 +182,7 @@ impl Mailer {
             cx.notify();
         });
         self.list.update(cx, |l, cx| l.show_mailbox(id, cx));
+        self.sync_total(cx);
         self.reading.update(cx, |r, cx| r.clear(cx));
     }
 
@@ -228,9 +230,13 @@ impl Mailer {
 impl Render for Mailer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
+        // Сервер отклонил сохранённый вход: строка входа (ей нужно окно — здесь оно есть).
+        if let Some(prefill) = self.live.reauth.take() {
+            cx.defer_in(window, move |this, window, cx| this.show_reauth(prefill, window, cx));
+        }
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
-        let status = tr!("status-items", n = self.list.read(cx).count);
+        let status = self.items_status(cx);
         let unread = self.toasts.read(cx).unread();
         let root = crate::actions::handlers(div(), cx)
             .key_context("Mailer")

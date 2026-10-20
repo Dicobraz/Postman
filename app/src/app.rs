@@ -402,7 +402,8 @@ impl App {
     fn poll_background(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events.try_recv() {
             match ev {
-                sync::Event::Status(s) => self.status = s,
+                sync::Event::Status(s) => self.status = s.to_string(),
+                sync::Event::CalendarChanged => {}
                 sync::Event::Error(e) => self.status = format!("Ошибка: {e}"),
                 sync::Event::BlobReady { blob_id, data } => self.blob_ready(&blob_id, data),
                 sync::Event::BodiesStored(ids) => {
@@ -410,7 +411,7 @@ impl App {
                         x.queue(ids);
                     }
                 }
-                sync::Event::LoadedMore { mailbox } => {
+                sync::Event::LoadedMore { mailbox, .. } => {
                     if self.loading_more.as_ref() == Some(&mailbox) {
                         self.loading_more = None;
                     }

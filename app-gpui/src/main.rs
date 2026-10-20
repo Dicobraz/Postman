@@ -48,6 +48,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/account.ftl")),
     ("ru", include_str!("../i18n/ru/actions.ftl")),
     ("ru", include_str!("../i18n/ru/calendar.ftl")),
+    ("ru", include_str!("../i18n/ru/sync.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -55,6 +56,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/account.ftl")),
     ("en", include_str!("../i18n/en/actions.ftl")),
     ("en", include_str!("../i18n/en/calendar.ftl")),
+    ("en", include_str!("../i18n/en/sync.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
@@ -107,6 +109,8 @@ fn main() {
     let live = args.iter().any(|a| a == "--live");
     // `--keep`: оставить рабочую копию данных бенча (для разбора).
     let keep = args.iter().any(|a| a == "--keep");
+    // `--bench --live --warm`: замер живого ящика на кэше прошлого прогона (`--keep`), без — с первой синхронизации.
+    let warm = args.iter().any(|a| a == "--warm");
     let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
     pets_shell::init_logging("Postman", "POSTMAN_LOG");
     for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
@@ -135,12 +139,16 @@ fn main() {
     }
     let flags = account::Flags { demo, bench, screens: screens.is_some(), live };
     let start_with = account::choose(flags, postman_core::sync::Account::from_env(), || account::load_stored(&dir));
+    if bench && live && !matches!(start_with, account::Start::Live(_)) {
+        fatal("fatal-bench-account", "POSTMAN_URL");
+    }
     if let (Some(d), account::Start::SignIn(_)) = (&mut screens, &start_with) {
         d.sign_in();
     }
     // Живой ящик: кэш учётной записи; нет учётной записи — пустой кэш в памяти до входа.
     let (cache, index) = match &start_with {
         account::Start::Demo => (demo_cache(&dir, bench, screens.is_some(), keep, n, &mut start), None),
+        account::Start::Live(_) if bench => live::bench_store(warm, keep, &mut start).unwrap_or_else(|e| fatal("fatal-store", e)),
         account::Start::Live(a) => live::open_store(&account::cache_path(&dir, a)).unwrap_or_else(|e| fatal("fatal-store", e)),
         account::Start::SignIn(_) => (Cache::open_in_memory().unwrap_or_else(|e| fatal("fatal-store", e)), None),
     };
@@ -152,7 +160,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            let bench = bench.then(|| Bench::new(start));
+            let bench = bench.then(|| if live { Bench::live(start) } else { Bench::new(start) });
             let cache = cache.clone();
             cx.new(|cx| {
                 let mut m = Mailer { screens, ..Mailer::new(cache, bench, window, cx) };

@@ -11,7 +11,6 @@ signin-busy = Connecting…
 signin-demo = No server? Run with --demo.
 signin-fill = Fill in the server address, login and password.
 signin-failed = Sign-in failed: { $error }
-account-connecting = Connecting to { $url }…
 account-sync-error = Sync: { $error }
 account-sync-stopped = No connection to the server: sync stopped, working with the local copy.
 account-remember-failed = Signed in, but the password was not saved: { $error }

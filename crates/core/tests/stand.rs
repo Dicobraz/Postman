@@ -439,3 +439,116 @@ async fn calendar_through_sync() {
     }
     c.client.destroy_event(&busy_id, false).await.unwrap();
 }
+
+type SyncEvents = std::sync::mpsc::Receiver<postman_core::sync::Event>;
+
+/// Поток синхронизации user`n` на кэше в памяти: команды и события.
+fn sync_of(n: u8, password: String) -> (postman_core::sync::UnboundedSender<postman_core::sync::Command>, SyncEvents) {
+    use postman_core::sync::{self, Account};
+    let user = env(&format!("POSTMAN_STAND_USER{n}"));
+    let account = Account { url: env("POSTMAN_STAND_URL"), auth: Auth::Basic { user, password } };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
+    (commands, rx)
+}
+
+/// Ждать событие синхронизации, на котором `pick` возвращает `Some`; ошибка синхронизации — провал.
+fn wait_for<T>(rx: &SyncEvents, what: &str, pick: impl Fn(&postman_core::sync::Event) -> Option<T>) -> T {
+    use postman_core::sync::Event as SyncEvent;
+    let start = Instant::now();
+    loop {
+        let left = DELIVERY.checked_sub(start.elapsed()).unwrap_or_else(|| panic!("не дождались: {what}"));
+        match rx.recv_timeout(left) {
+            Ok(ev) => {
+                if let Some(v) = pick(&ev) {
+                    return v;
+                }
+                if let SyncEvent::Error(e) = ev {
+                    panic!("синхронизация ({what}): {e}");
+                }
+            }
+            Err(e) => panic!("не дождались: {what} ({e})"),
+        }
+    }
+}
+
+/// S4-03: неверный пароль — ошибка рода `Auth` (HTTP 401), синхронизация останавливается сама (канал событий
+/// закрывается), без повторных попыток. Одна попытка входа: сервер блокирует адрес за перебор паролей.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn rejected_password_stops_sync_with_auth_error() {
+    use postman_core::sync::{ErrorKind, Event as SyncEvent, Stage};
+    let (_commands, rx) = sync_of(3, "not-the-password".into());
+    let err = wait_for(&rx, "ошибка входа", |e| match e {
+        SyncEvent::Error(e) => Some(e.clone()),
+        _ => None,
+    });
+    assert_eq!((err.kind, err.stage), (ErrorKind::Auth, Stage::Connect), "{err}");
+    // Поток закончился: больше событий нет, отправитель закрыт.
+    loop {
+        match rx.recv_timeout(DELIVERY) {
+            Ok(SyncEvent::Status(_)) => {}
+            Ok(SyncEvent::Error(e)) => panic!("вторая ошибка после отказа во входе: {e}"),
+            Ok(_) => panic!("событие после отказа во входе"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(e) => panic!("синхронизация не остановилась: {e}"),
+        }
+    }
+}
+
+/// S4-03: догрузка папки — `LoadMore` после первой страницы (500) отдаёт `LoadedMore` с числом пришедших писем:
+/// следующая страница, если на сервере писем больше, иначе 0.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn load_more_through_sync() {
+    use postman_core::sync::{Command, Event as SyncEvent, Status};
+    let u = user(1).await;
+    let (boxes, _) = u.client.mailboxes().await.unwrap();
+    let inbox = boxes.iter().find(|m| m.role.as_deref() == Some("inbox")).unwrap();
+    let (commands, rx) = sync_of(1, env("POSTMAN_STAND_PASSWORD1"));
+    wait_for(&rx, "первая синхронизация", |e| matches!(e, SyncEvent::Status(Status::Synced)).then_some(()));
+    assert!(commands.send(Command::LoadMore { mailbox: inbox.id.clone() }).is_ok());
+    let (mailbox, added) = wait_for(&rx, "LoadedMore", |e| match e {
+        SyncEvent::LoadedMore { mailbox, added } => Some((mailbox.clone(), *added)),
+        _ => None,
+    });
+    let total = inbox.total_emails as usize;
+    assert_eq!((mailbox.as_str(), added), (inbox.id.as_str(), total.saturating_sub(500).min(500)));
+}
+
+/// S4-03: изменение календаря на сервере (событие создано другим клиентом) приходит push и после задержки на
+/// пачку — одним `CalendarChanged`; письма при этом не перечитываются (`EmailsChanged` нет).
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn calendar_change_arrives_by_push() {
+    use postman_core::schedule::{self, Meeting};
+    use postman_core::sync::{Event as SyncEvent, Status};
+    let u = user(2).await;
+    let (_commands, rx) = sync_of(2, env("POSTMAN_STAND_PASSWORD2"));
+    wait_for(&rx, "первая синхронизация", |e| matches!(e, SyncEvent::Status(Status::Synced)).then_some(()));
+    // Сверка после подключения push — дать ей пройти.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    while rx.try_recv().is_ok() {}
+    let meeting = Meeting {
+        uid: format!("postman-s403-{}@itt.test", stamp()),
+        title: "Postman: push календаря".into(),
+        location: String::new(),
+        description: String::new(),
+        start: start_in(12),
+        time_zone: "Europe/Moscow".into(),
+        duration_secs: 1800,
+        attendees: Vec::new(),
+    };
+    let identities = u.client.identities().await.unwrap();
+    let id = schedule::create(&u.client, &identities, &meeting).await.unwrap();
+    let started = Instant::now();
+    wait_for(&rx, "CalendarChanged", |e| matches!(e, SyncEvent::CalendarChanged).then_some(()));
+    let elapsed = started.elapsed();
+    let mut mail = false;
+    while let Ok(ev) = rx.try_recv() {
+        mail |= matches!(ev, SyncEvent::EmailsChanged);
+    }
+    u.client.destroy_event(&id, false).await.unwrap();
+    assert!(!mail, "календарное изменение перечитало письма");
+    println!("calendar push → CalendarChanged in {elapsed:?}");
+}
