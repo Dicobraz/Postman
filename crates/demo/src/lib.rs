@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Rights, scoped};
 
 /// Отправители демо-писем (имя, адрес); их же берёт заполнение ящика стенда (`postman-core`, пример `fill_stand`).
 pub const SENDERS: &[(&str, &str)] = &[
@@ -69,8 +69,9 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
         sort_order: order,
         total: 0,
         unread: 0,
+        rights: Rights::ALL,
     };
-    cache.replace_mailboxes(&[
+    cache.replace_mailboxes(None, &[
         mb("inbox", "Входящие", 1),
         mb("drafts", "Черновики", 2),
         mb("sent", "Отправленные", 3),
@@ -116,12 +117,66 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
         }
     }
     cache.upsert_emails(&batch)?;
+    shared(&cache, now)
+}
+
+/// Общие ящики демо (S4-06): ящик отдела, где можно всё, и ящик руководителя, открытый только для чтения.
+pub const SHARED: &[(&str, &str, bool)] = &[("sales", "sales@corp.example", false), ("boss", "director@corp.example", true)];
+
+fn shared(cache: &Cache, now: i64) -> postman_cache::Result<()> {
+    let ro = Rights { read: true, add: false, remove: false, seen: false, keywords: false, submit: false };
+    let acc = |id: &str, name: &str| AccountRow { id: id.into(), name: name.into(), is_personal: false, read_only: false };
+    cache.replace_accounts(&SHARED.iter().map(|(id, name, _)| acc(id, name)).collect::<Vec<_>>())?;
+    for (n, &(account, _, read_only)) in SHARED.iter().enumerate() {
+        let scope = Some(account);
+        let mb = |id: &str, name: &str, order| MailboxRow {
+            id: scoped(scope, id),
+            parent_id: None,
+            name: name.into(),
+            role: Some(id.into()),
+            sort_order: order,
+            total: 0,
+            unread: 0,
+            rights: if read_only { ro } else { Rights::ALL },
+        };
+        let boxes = if read_only {
+            vec![mb("inbox", "Входящие", 1)]
+        } else {
+            vec![mb("inbox", "Входящие", 1), mb("drafts", "Черновики", 2), mb("sent", "Отправленные", 3), mb("trash", "Удалённые", 4)]
+        };
+        cache.replace_mailboxes(scope, &boxes)?;
+        let rows: Vec<EmailRow> = (0..12)
+            .map(|i| {
+                let (name, addr) = SENDERS[(i + n) % SENDERS.len()];
+                EmailRow {
+                    id: scoped(scope, &format!("demo{}", i * 2 + n)),
+                    thread_id: scoped(scope, &format!("t{i}")),
+                    mailbox_ids: vec![scoped(scope, "inbox")],
+                    received_at: now - (i as i64 + 1) * 5400,
+                    subject: format!("{} {}", SHARED_SUBJECTS[(i + n) % SHARED_SUBJECTS.len()], 100 + i),
+                    from_name: name.into(),
+                    from_addr: addr.into(),
+                    preview: PREVIEW.into(),
+                    seen: i > 2,
+                    flagged: false,
+                    has_attachment: i % 4 == 0,
+                    size: 8192,
+                }
+            })
+            .collect();
+        cache.upsert_emails(&rows)?;
+    }
     Ok(())
 }
+
+/// Темы писем общих ящиков демо.
+const SHARED_SUBJECTS: &[&str] = &["Заявка клиента №", "Коммерческое предложение", "Re: Счёт на оплату №", "Вопрос по поставке"];
 
 /// Тела писем в демо-режиме: типичное письмо Outlook и «враждебное» —
 /// чтобы видеть работу белого списка.
 pub fn body(id: &str) -> BodyRow {
+    // Письма общих ящиков демо — с префиксом аккаунта, тела — те же.
+    let id = postman_cache::unscoped(id).1;
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
     let att = |blob: &str, name: &str, mime: &str, size: u64, cid: Option<&str>| AttachmentRow {
         blob_id: blob.into(),

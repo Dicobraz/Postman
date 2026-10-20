@@ -78,15 +78,17 @@ impl Mailer {
             _ => {}
         });
         let mailboxes = cache.mailboxes().unwrap_or_default();
-        let inbox = mailboxes.iter().find(|b| b.role.as_deref() == Some("inbox")).or(mailboxes.first()).map(|b| b.id.clone());
+        let accounts = cache.accounts().unwrap_or_default();
+        let inbox = crate::live::inbox(&mailboxes);
         let list = cx.new(|cx| {
             let mut l = MailList::new(cache.clone());
+            l.set_rights(&mailboxes);
             if let Some(id) = inbox.clone() {
                 l.show_mailbox(id, cx);
             }
             l
         });
-        let folders = cx.new(|_| Folders { mailboxes, current: inbox, results: None, section: Section::Mail });
+        let folders = cx.new(|_| Folders::new(mailboxes, accounts, inbox));
         let reading = cx.new(|_| ReadingPane::new(cache.clone()));
         let bar = cx.new(|_| CommandBar { search: search.clone() });
         let toasts = cx.new(|_| Toasts::new());
@@ -99,6 +101,9 @@ impl Mailer {
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
             cx.subscribe(&list, |this, _, NeedMore(mailbox), cx| this.load_more(mailbox.clone(), cx)),
+            cx.subscribe(&list, |this, _, _: &ReadOnly, cx| {
+                this.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("shared-read-only-flags"), cx));
+            }),
             crate::actions::watch_list(&list, cx),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => {

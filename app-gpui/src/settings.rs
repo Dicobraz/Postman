@@ -96,8 +96,9 @@ impl Mailer {
             return;
         }
         let live = self.backend.is_live();
+        // Правила (Sieve) — своего ящика: папки общих ящиков (S4-06) в них не выбрать.
         let mailboxes: Vec<(String, String)> =
-            self.folders.read(cx).mailboxes.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+            self.folders.read(cx).of(None).map(|m| (m.id.clone(), m.name.clone())).collect();
         let state = if live { self.settings.rules.clone() } else { Some(rules_sample(&mailboxes)) };
         if live && !self.backend.send(Command::Settings(Request::Rules)) {
             self.sync_stopped(cx);

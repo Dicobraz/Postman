@@ -11,7 +11,7 @@
 //! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
-//! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07);
+//! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
 //! без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
@@ -63,9 +63,11 @@ enum Scene {
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
     Rules,
+    /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06).
+    Shared,
 }
 
-const SCENES: [Scene; 15] = [
+const SCENES: [Scene; 16] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -81,11 +83,12 @@ const SCENES: [Scene; 15] = [
     Scene::Meeting,
     Scene::Vacation,
     Scene::Rules,
+    Scene::Shared,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
 /// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
-const LIVE_SCENES: [Scene; 9] = [
+const LIVE_SCENES: [Scene; 10] = [
     Scene::List,
     Scene::Letter,
     Scene::Reply,
@@ -95,6 +98,7 @@ const LIVE_SCENES: [Scene; 9] = [
     Scene::Contacts,
     Scene::Vacation,
     Scene::Rules,
+    Scene::Shared,
 ];
 const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
 /// Первая синхронизация живого ящика дольше сцены демо.
@@ -119,6 +123,7 @@ impl Scene {
             Scene::ContactEdit => "contact-edit",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
+            Scene::Shared => "shared",
         }
     }
 }
@@ -285,6 +290,16 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.contacts.update(cx, |c, cx| c.select_first(cx));
         }
         Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
+        Scene::Shared => {
+            m.set_section(Section::Mail, cx);
+            let Some(id) = shared_inbox(m, cx) else { return Err("no shared mailbox in the folder tree".into()) };
+            m.open_mailbox(id, cx);
+            m.list.update(cx, |l, cx| {
+                if l.count > 0 {
+                    l.select(0, cx);
+                }
+            });
+        }
         Scene::Meeting => {
             // Окно письма прошлой сцены остаётся: снимается своё окно.
             m.set_section(Section::Calendar, cx);
@@ -392,7 +407,24 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 _ => false,
             }
         }
+        Scene::Shared => {
+            // Живой общий ящик может быть пуст: тогда снимок — без письма.
+            let want = shared_inbox(m, cx);
+            let opened = want.is_some() && list.mailbox == want && list.search_ids.is_none();
+            let first = list.row(0).map(|r| r.id.as_str());
+            let letter = rows_loaded && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == first);
+            m.section == Section::Mail && opened && (list.count == 0 || letter)
+        }
     }
+}
+
+/// «Входящие» первого общего ящика, где можно писать (иначе первого любого), — сцена `shared`.
+fn shared_inbox(m: &Mailer, cx: &App) -> Option<String> {
+    let f = m.folders.read(cx);
+    let account = f.accounts.iter().find(|a| !f.read_only(a)).or(f.accounts.first())?;
+    let mut boxes = f.of(Some(&account.id));
+    let first = f.of(Some(&account.id)).next().map(|b| b.id.clone());
+    boxes.find(|b| b.role.as_deref() == Some("inbox")).map(|b| b.id.clone()).or(first)
 }
 
 /// Первое прочитанное письмо демо-ящика для сцены: с картинкой `cid:` (и без приглашения) или с приглашением.
