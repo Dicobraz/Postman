@@ -80,9 +80,12 @@ pub struct Client {
 impl Client {
     /// Автообнаружение: `GET {base}/.well-known/jmap`.
     pub async fn connect(base: &str, auth: Auth) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let mut builder = reqwest::Client::builder().user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")));
+        if insecure_tls() {
+            tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let http = builder.build()?;
         let base = url::Url::parse(base)?;
         let well_known = base.join("/.well-known/jmap")?;
         let resp = authorize(http.get(well_known), &auth).send().await?.error_for_status()?;
@@ -154,6 +157,12 @@ impl Client {
         let bytes = authorize(self.http.get(url), &self.auth).send().await?.error_for_status()?.bytes().await?;
         Ok(bytes.to_vec())
     }
+}
+
+/// `POSTMAN_INSECURE_TLS=1` — не проверять сертификат сервера. Только для стенда с самоподписанным
+/// сертификатом без нужного имени (`docs/STALWART.md`); у рабочего сервера сертификат должен проверяться.
+fn insecure_tls() -> bool {
+    std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }
 
 fn authorize(rb: reqwest::RequestBuilder, auth: &Auth) -> reqwest::RequestBuilder {
