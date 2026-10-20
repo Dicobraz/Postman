@@ -70,6 +70,7 @@ cargo run --release -p postman-gpui -- --demo 50000     # основной UI
 cargo run --release -p postman -- --demo                # egui, запасной
 ... --bench                                             # замер: строка key=value в stdout
 POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный сервер (или POSTMAN_TOKEN)
+cargo run --release -p postman-gpui                     # без окружения: сохранённый вход или строка входа; --sign-out — забыть
 ```
 
 Windows: тестам песочницы нужен один раз на каталог сборки (из `cargo metadata`, учитывает `CARGO_TARGET_DIR`):
@@ -85,6 +86,8 @@ cargo run --release -p postman-gpui -- --screens <каталог>
 в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `search`, `calendar`, `assistant`;
 на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
 stderr и код 1. Только Windows.
+`--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list` и `letter` после первой синхронизации;
+без учётной записи в окружении — `signin` (строка входа).
 
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
 данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
