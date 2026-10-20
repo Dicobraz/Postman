@@ -314,7 +314,7 @@ impl Mailer {
     }
 
     /// Команда не ушла: поток синхронизации остановился (ошибка уже показана).
-    fn sync_stopped(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_stopped(&mut self, cx: &mut Context<Self>) {
         let text = tr!("account-sync-stopped");
         if self.live.last_error.as_deref() != Some(text.as_str()) {
             self.live.last_error = Some(text.clone());
@@ -449,11 +449,13 @@ impl Mailer {
             cx.notify();
         });
         self.list.update(cx, |l, cx| {
-            // Первый ответ — новый список без выделения; второй дополняет его, выделение остаётся.
+            // Первый ответ — новый список без выделения и сверху (прокрутка папки запомнена); второй дополняет его,
+            // выделение остаётся.
             if l.search_ids.is_none() {
-                l.selected = None;
+                l.begin_search(ids);
+            } else {
+                l.search_ids = Some(ids);
             }
-            l.search_ids = Some(ids);
             l.refresh(cx);
         });
     }

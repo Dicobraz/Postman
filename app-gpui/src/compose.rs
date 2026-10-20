@@ -438,6 +438,11 @@ impl Composers {
         self.windows.retain(|w| w.update(cx, |c, cx| c.on_sync(ev, cx)).is_ok());
     }
 
+    /// Мой адрес и подпись из Identity (живой ящик), если сервер их уже прислал.
+    pub(crate) fn me(&self) -> Option<&(Address, String)> {
+        self.me.as_ref()
+    }
+
     /// Последнее открытое окно (снимки `--screens`).
     pub(crate) fn last(&self) -> Option<Entity<Composer>> {
         self.windows.iter().rev().find_map(WeakEntity::upgrade)
