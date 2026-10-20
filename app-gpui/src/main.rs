@@ -13,6 +13,7 @@
 mod calendar;
 mod commands;
 mod ir_view;
+#[cfg(test)]
 mod keys_doc;
 mod screens;
 mod sys;

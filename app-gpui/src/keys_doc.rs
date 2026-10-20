@@ -1,8 +1,8 @@
 //! Таблица клавиш инструкции пользователя (`docs/USER-GUIDE.md`, S4-04) — из реестра команд, как `docs/PARITY.md`.
 //! Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui user_guide`.
 
-#![cfg(test)]
-
+// Модуль только для тестов (`#[cfg(test)] mod keys_doc` в `main.rs`); метка ниже — граница для теста сырых строк.
+#[cfg(test)]
 use crate::commands::COMMANDS;
 
 const BEGIN: &str = "<!-- keys:begin -->";
