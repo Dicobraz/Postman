@@ -12,6 +12,7 @@ pub mod palette;
 pub mod render;
 pub mod rules;
 pub mod schedule;
+pub mod send_later;
 pub mod settings;
 pub mod sync;
 pub mod thread;

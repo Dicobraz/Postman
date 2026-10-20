@@ -69,6 +69,8 @@ pub(crate) struct ReadingPane {
     pub(crate) quotes: bool,
     /// Мои адреса отправителя (`Event::Senders`): свои письма в ленте беседы.
     pub(crate) mine: Vec<String>,
+    /// Отправки, которые держит сервер (S5-06): у такого письма — строка «Отправится …» с отменой.
+    pub(crate) scheduled: Vec<postman_core::send_later::Scheduled>,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -82,6 +84,8 @@ pub(crate) enum ReadingEvent {
     Sync(SyncRequest),
     /// Открыть письмо (щелчок по письму в ленте беседы).
     Open(EmailRow),
+    /// «Отменить отправку» запланированного письма.
+    Unsend(postman_core::send_later::Scheduled),
 }
 
 /// Запрос области чтения к серверу: клонируемая форма `Command` (событие gpui отдаётся по ссылке).
@@ -123,7 +127,39 @@ impl ReadingPane {
             feed_on: false,
             quotes: false,
             mine: Vec::new(),
+            scheduled: Vec::new(),
         }
+    }
+
+    /// Открытое письмо ждёт отправки на сервере: «Отправится ср 21.10 09:00 · Отменить отправку».
+    fn scheduled_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = &self.reading.as_ref()?.row.id;
+        let now = jiff::Timestamp::now().as_second();
+        let s = self.scheduled.iter().find(|s| &s.email == id && s.send_at > now)?.clone();
+        let text = tr!("send-scheduled-bar", when = crate::send_later::when(s.send_at));
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(0xeef4fb))
+            .child(div().flex_1().child(text))
+            .child(
+                div()
+                    .id("unsend")
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0xdddddd))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(0xececec)))
+                    .child(tr!("send-scheduled-cancel"))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::Unsend(s.clone())))),
+            );
+        Some(bar.into_any_element())
     }
 
     /// Показать другое письмо (или ничего): картинки прежнего — в [`ReadingPane::retired`].
@@ -576,6 +612,7 @@ impl Render for ReadingPane {
             .child(field(tr!("reading-to"), to))
             .child(field(tr!("reading-date"), format_date(r.row.received_at)));
         let bar = self.feed_bar(cx);
+        let scheduled = self.scheduled_bar(cx);
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
         if let Some(feed) = self.feed_view(cx) {
             return div()
@@ -587,6 +624,7 @@ impl Render for ReadingPane {
                 .gap_2()
                 .overflow_y_scroll()
                 .child(header)
+                .children(scheduled)
                 .children(bar)
                 .child(feed)
                 .into_any_element();
@@ -618,6 +656,7 @@ impl Render for ReadingPane {
             .gap_2()
             .overflow_y_scroll()
             .child(header)
+            .children(scheduled)
             .children(bar)
             .children(strip)
             .children(card)

@@ -52,6 +52,8 @@ enum Scene {
     SignIn,
     /// Окно письма с заполненными полями (своё окно: снимается его HWND).
     Compose,
+    /// То же окно письма с открытым меню «Отправить позже» у кнопки «Отправить» (S5-06).
+    SendLater,
     /// Ответ на письмо: окно письма с цитатой (S3-02).
     Reply,
     /// Окно новой встречи с помощником планирования (своё окно, S3-05).
@@ -73,7 +75,7 @@ enum Scene {
     Thread,
 }
 
-const SCENES: [Scene; 18] = [
+const SCENES: [Scene; 19] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -85,6 +87,7 @@ const SCENES: [Scene; 18] = [
     Scene::Contacts,
     Scene::ContactEdit,
     Scene::Compose,
+    Scene::SendLater,
     Scene::Reply,
     Scene::Meeting,
     Scene::Vacation,
@@ -126,6 +129,7 @@ impl Scene {
             Scene::Event => "event",
             Scene::SignIn => "signin",
             Scene::Compose => "compose",
+            Scene::SendLater => "send-later",
             Scene::Reply => "reply",
             Scene::Meeting => "meeting",
             Scene::Contacts => "contacts",
@@ -281,6 +285,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let mailer = cx.entity();
             cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_compose_screen(cx)));
         }
+        Scene::SendLater => {
+            let Some(c) = m.compose.last() else { return Err("no compose window".into()) };
+            c.update(cx, |c, cx| c.toggle_later_menu(cx));
+        }
         Scene::Reply => {
             // Демо — письмо с картинкой в тексте и цитатой Outlook; живой ящик — первое письмо.
             let live = m.screens.as_ref().is_some_and(|d| d.live);
@@ -414,6 +422,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::SignIn => m.live.signin.is_some(),
         Scene::Compose => compose_hwnd(m, cx).is_some(),
+        Scene::SendLater => {
+            compose_hwnd(m, cx).is_some() && m.compose.last().is_some_and(|c| c.read(cx).later_menu_open())
+        }
         Scene::Reply => {
             // Новое окно письма — ответ (окно сцены `compose` ещё открыто).
             let before = m.screens.as_ref().and_then(|d| d.composer);
@@ -495,7 +506,7 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     let Some(d) = &m.screens else { return };
     let path = d.dir.join(format!("{}.png", scene.name()));
     let hwnd = match scene {
-        Scene::Compose | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
+        Scene::Compose | Scene::SendLater | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
         Scene::Meeting => meeting_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no meeting window")),
         _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
     };

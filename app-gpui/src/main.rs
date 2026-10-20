@@ -37,6 +37,7 @@ mod contacts;
 mod rules;
 mod labels;
 mod thread;
+mod send_later;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -70,6 +71,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/shared.ftl")),
     ("ru", include_str!("../i18n/ru/labels.ftl")),
     ("ru", include_str!("../i18n/ru/threads.ftl")),
+    ("ru", include_str!("../i18n/ru/send.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -83,6 +85,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/shared.ftl")),
     ("en", include_str!("../i18n/en/labels.ftl")),
     ("en", include_str!("../i18n/en/threads.ftl")),
+    ("en", include_str!("../i18n/en/send.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

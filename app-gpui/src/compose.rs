@@ -22,7 +22,8 @@ use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_compose::{Address, Attachment, Draft, parse_addresses};
 use postman_core::contacts::AddressBook;
-use postman_core::sync::{Command, Event, Sender};
+use postman_core::send_later::{self, Choice, Reject};
+use postman_core::sync::{Command, Event, Release, Sender};
 use postman_ir::Document;
 use postman_worker::{Client as Worker, Request};
 
@@ -64,9 +65,18 @@ impl Field {
 /// Зачем черновик уходит на сервер.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Purpose {
+    /// Отправить с окном «Отменить» (сервер держит письмо `send_later::UNDO_HOLD_SECS`).
     Send,
+    /// «Отправить позже»: сервер выпустит письмо в этот момент (Unix-секунды).
+    SendLater(i64),
     Save,
     Autosave,
+}
+
+impl Purpose {
+    fn sends(self) -> bool {
+        matches!(self, Purpose::Send | Purpose::SendLater(_))
+    }
 }
 
 /// Строка состояния окна; текст — в view (Fluent).
@@ -268,16 +278,19 @@ impl Model {
 
     /// Начать отправку или сохранение: команда для `Backend::send` или `None` (ошибка — в `status`).
     pub(crate) fn begin(&mut self, purpose: Purpose, ticket: u64, now: Instant) -> Option<Command> {
-        if purpose != Purpose::Send {
+        if !purpose.sends() {
             self.last_save = now;
         }
-        match self.draft(purpose == Purpose::Send) {
+        match self.draft(purpose.sends()) {
             Ok(d) => {
                 self.pending = Some(Pending { ticket, snapshot: self.snapshot(), purpose });
                 self.status = Status::Busy(purpose);
                 let (draft, replace) = (Box::new(d), self.server_id.clone());
                 Some(match purpose {
-                    Purpose::Send => Command::Send { draft, replace, ticket },
+                    Purpose::Send => {
+                        Command::Send { draft, replace, ticket, release: Release::After(send_later::UNDO_HOLD_SECS) }
+                    }
+                    Purpose::SendLater(at) => Command::Send { draft, replace, ticket, release: Release::At(at) },
                     Purpose::Save | Purpose::Autosave => Command::SaveDraft { draft, replace, ticket },
                 })
             }
@@ -309,6 +322,16 @@ impl Model {
         self.saved = p.snapshot;
         self.status = Status::Saved { at };
         std::mem::take(&mut self.close_after_save)
+    }
+
+    /// Версия на сервере (письмо вернулось в «Черновики» после отмены отправки): её заменит следующее сохранение.
+    pub(crate) fn set_server_id(&mut self, id: String) {
+        self.server_id = Some(id);
+    }
+
+    /// Идёт «Отправить позже» (а не обычная отправка с окном «Отменить»).
+    pub(crate) fn sending_later(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| matches!(p.purpose, Purpose::SendLater(_)))
     }
 
     /// Письмо ушло. `true` — это наша отправка, окно закрывается.
@@ -432,12 +455,23 @@ pub(crate) struct Composers {
     /// Общая с окном встречи (S3-05).
     pub(crate) book: Book,
     book_started: bool,
+    /// Сколько сервер держит письма (`Event::Scheduled`); 0 — «Отправить позже» нет.
+    max_delay: u64,
+}
+
+/// Отправленное окном письмо: что вернуть в окно, если отправку отменят (S5-06).
+pub(crate) struct SentDraft {
+    pub(crate) draft: Draft,
+    /// «Отправить позже», а не обычная отправка с окном «Отменить».
+    pub(crate) later: bool,
 }
 
 impl Composers {
     /// Событие синхронизации: Identity и контакты — себе, итоги отправки — окнам (каждое ищет свой тикет).
-    pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) {
+    /// Отправленное окном письмо — экрану (окно «Отменить»).
+    pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) -> Option<SentDraft> {
         match ev {
+            Event::Scheduled { max_delay, .. } => self.max_delay = *max_delay,
             Event::Me { address, signature } => {
                 self.me = Some((address.clone(), signature.clone()));
                 self.book.borrow_mut().remove(&address.email);
@@ -453,7 +487,16 @@ impl Composers {
             }
             _ => {}
         }
-        self.windows.retain(|w| w.update(cx, |c, cx| c.on_sync(ev, cx)).is_ok());
+        let mut sent = None;
+        self.windows.retain(|w| {
+            w.update(cx, |c, cx| {
+                if let Some(s) = c.on_sync(ev, cx) {
+                    sent = Some(s);
+                }
+            })
+            .is_ok()
+        });
+        sent
     }
 
     /// Мой адрес и подпись из Identity (живой ящик), если сервер их уже прислал.
@@ -481,8 +524,11 @@ impl Mailer {
     pub(crate) fn open_compose(&mut self, draft: Draft, cx: &mut Context<Self>) -> Option<Entity<Composer>> {
         self.load_address_book(cx);
         let senders = if self.backend.is_live() { self.compose.senders.clone() } else { demo_senders() };
+        // Демо: меню «Отправить позже» видно (отправка всё равно скажет «нет сервера»).
+        let max_delay = if self.backend.is_live() { self.compose.max_delay } else { send_later::SERVER_HOLD_MAX };
         let open = Open {
             senders,
+            max_delay,
             me: self.compose.me.clone(),
             book: self.compose.book.clone(),
             worker: self.reading.read(cx).worker.clone(),
@@ -581,6 +627,7 @@ fn demo_senders() -> Vec<Sender> {
 pub(crate) struct Open {
     me: Option<(Address, String)>,
     senders: Vec<Sender>,
+    max_delay: u64,
     book: Book,
     worker: Arc<Mutex<Worker>>,
     mailer: WeakEntity<Mailer>,
@@ -599,6 +646,17 @@ struct Suggest {
     field: Option<Field>,
     items: Vec<String>,
     selected: usize,
+}
+
+/// «Отправить позже» (S5-06): меню у кнопки «Отправить» и строка выбора даты и времени в окне.
+struct Later {
+    /// Сколько сервер держит письма (секунды); 0 — меню нет.
+    max_delay: u64,
+    menu: bool,
+    picking: bool,
+    date: Entity<InputState>,
+    time: Entity<InputState>,
+    error: Option<Reject>,
 }
 
 /// Снимок окна для `--screens`: кадры и дескриптор окна.
@@ -633,6 +691,7 @@ pub(crate) struct Composer {
     close: bool,
     title: String,
     screen: Screen,
+    later: Later,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -655,6 +714,9 @@ impl Composer {
         let cc = line(Field::Cc, "compose-cc-placeholder", cx);
         let bcc = line(Field::Bcc, "compose-bcc-placeholder", cx);
         let subject = line(Field::Subject, "compose-subject-placeholder", cx);
+        let date = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("send-later-date-placeholder")));
+        let time = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("send-later-time-placeholder")));
+        let later = Later { max_delay: open.max_delay, menu: false, picking: false, date, time, error: None };
         let body_text = model.body.clone();
         let body = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder(tr!("compose-body-placeholder")).default_value(body_text)
@@ -670,6 +732,14 @@ impl Composer {
             let value = state.read(cx).value().to_string();
             this.on_input(Field::Body, value, ev, cx);
         }));
+        // Enter в строке «Отправить позже» — «Запланировать».
+        for state in [&later.date, &later.time] {
+            subscriptions.push(cx.subscribe_in(state, window, |this, _, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.schedule_picked(window, cx);
+                }
+            }));
+        }
         // Крестик окна: с несохранённым — строка в окне, окно остаётся.
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
@@ -706,6 +776,7 @@ impl Composer {
             close: false,
             title: String::new(),
             screen: Screen { on: open.screens, ..Default::default() },
+            later,
             _subscriptions: subscriptions,
         }
     }
@@ -833,10 +904,19 @@ impl Composer {
         cx.notify();
     }
 
-    /// Итог отправки или сохранения — по тикету.
-    fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) {
+    /// Итог отправки или сохранения — по тикету. Своё отправленное письмо — экрану (окно «Отменить»).
+    fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) -> Option<SentDraft> {
+        let mut sent = None;
         match ev {
-            Event::Sent { ticket } => self.close |= self.model.on_sent(*ticket),
+            Event::Sent { ticket, .. } => {
+                let later = self.model.sending_later();
+                let draft = self.model.draft(false).ok();
+                if self.model.on_sent(*ticket) {
+                    self.close = true;
+                    sent = draft.map(|draft| SentDraft { draft, later });
+                }
+            }
+            Event::Scheduled { max_delay, .. } => self.later.max_delay = *max_delay,
             Event::DraftSaved { ticket, id } => {
                 let at = jiff::Zoned::now().strftime("%H:%M").to_string();
                 self.close |= self.model.on_saved(*ticket, id.clone(), at);
@@ -848,12 +928,86 @@ impl Composer {
             }
             Event::Me { address, signature } => self.sync_inputs |= self.model.set_identity(address.clone(), signature),
             Event::Senders(list) => self.senders = list.clone(),
-            _ => return,
+            _ => return None,
+        }
+        cx.notify();
+        sent
+    }
+
+    /// Меню «Отправить позже» открыто (снимок `send-later`).
+    pub(crate) fn later_menu_open(&self) -> bool {
+        self.later.menu
+    }
+
+    /// Меню «Отправить позже» у кнопки «Отправить».
+    pub(crate) fn toggle_later_menu(&mut self, cx: &mut Context<Self>) {
+        self.later.menu = !self.later.menu && self.later.max_delay > 0;
+        cx.notify();
+    }
+
+    /// Вариант меню: проверить срок и отправить; срок не годится — строка выбора с этим временем и причиной.
+    fn send_at_choice(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+        let now = jiff::Zoned::now();
+        self.later.menu = false;
+        if let Some(at) = choice.at(&now) {
+            self.schedule(at, &now, window, cx);
         }
         cx.notify();
     }
 
+    /// «Выбрать дату и время…»: строка в окне, поля — завтра 09:00.
+    fn pick_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = jiff::Zoned::now();
+        let start = Choice::TomorrowMorning.at(&now).unwrap_or_else(|| now.clone());
+        self.open_picker(&start, None, window, cx);
+    }
+
+    fn open_picker(&mut self, at: &jiff::Zoned, error: Option<Reject>, window: &mut Window, cx: &mut Context<Self>) {
+        let (date, time) = (at.strftime("%d.%m.%Y").to_string(), at.strftime("%H:%M").to_string());
+        self.later.date.update(cx, |s, cx| s.set_value(date, window, cx));
+        self.later.time.update(cx, |s, cx| s.set_value(time, window, cx));
+        self.later.time.update(cx, |s, cx| s.focus(window, cx));
+        self.later.menu = false;
+        self.later.picking = true;
+        self.later.error = error;
+        cx.notify();
+    }
+
+    /// «Запланировать» в строке выбора.
+    fn schedule_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = jiff::Zoned::now();
+        let (date, time) = (self.later.date.read(cx).value().to_string(), self.later.time.read(cx).value().to_string());
+        match send_later::parse(&date, &time, &now) {
+            Ok(at) => self.schedule(at, &now, window, cx),
+            Err(e) => self.later.error = Some(e),
+        }
+        cx.notify();
+    }
+
+    fn schedule(&mut self, at: jiff::Zoned, now: &jiff::Zoned, window: &mut Window, cx: &mut Context<Self>) {
+        match send_later::check(&at, now, self.later.max_delay) {
+            Ok(ts) => {
+                self.later.picking = false;
+                self.later.error = None;
+                self.dispatch(Purpose::SendLater(ts), cx);
+            }
+            Err(e) => self.open_picker(&at, Some(e), window, cx),
+        }
+    }
+
+    fn close_later(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.later.menu || self.later.picking;
+        self.later.menu = false;
+        self.later.picking = false;
+        self.later.error = None;
+        cx.notify();
+        open
+    }
+
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_later(cx) {
+            return;
+        }
         if !self.suggest.items.is_empty() {
             self.suggest.items.clear();
         } else if self.model.confirm_close {
@@ -959,6 +1113,7 @@ impl Composer {
     fn status_line(&self) -> Option<(String, bool)> {
         let busy = |p: Purpose| match p {
             Purpose::Send => tr!("compose-sending"),
+            Purpose::SendLater(_) => tr!("send-later-scheduling"),
             Purpose::Save => tr!("compose-saving"),
             Purpose::Autosave => tr!("compose-autosaving"),
         };
@@ -968,7 +1123,7 @@ impl Composer {
             Status::Saved { at } => (tr!("compose-saved", time = at.clone()), false),
             Status::BadAddresses(bad) => (tr!("compose-bad-addresses", list = bad.join(", ")), true),
             Status::NoRecipients => (tr!("compose-no-recipients"), true),
-            Status::NoServer(Purpose::Send) => (tr!("compose-no-server-send"), true),
+            Status::NoServer(Purpose::Send | Purpose::SendLater(_)) => (tr!("compose-no-server-send"), true),
             Status::NoServer(_) => (tr!("compose-no-server-save"), true),
             Status::Failed(e) => (tr!("compose-failed", error = e.clone()), true),
             Status::Attach { name, error } => {
@@ -1096,6 +1251,104 @@ impl Composer {
     }
 }
 
+impl Composer {
+    /// «Отправить» и рядом «▾» — меню «Отправить позже» (если сервер умеет отложенную отправку).
+    fn send_group(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let send = button("send", tr!("compose-send"), true)
+            .when(busy, |d| d.opacity(0.5))
+            .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx)));
+        let group = div().relative().flex().items_center().gap_px().child(send);
+        if self.later.max_delay == 0 {
+            return group.into_any_element();
+        }
+        let caret = button("send-later", "▾".into(), true)
+            .px_2()
+            .when(busy, |d| d.opacity(0.5))
+            .when(self.later.menu, |d| d.bg(rgb(0x115ea3)))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_later_menu(cx)));
+        group.child(caret).when(self.later.menu, |d| d.child(deferred(self.later_menu(cx)).with_priority(1))).into_any_element()
+    }
+
+    /// Меню под кнопкой: завтра утром и днём, понедельник, выбор даты; справа — когда уйдёт письмо.
+    fn later_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let now = jiff::Zoned::now();
+        let item = |id: ElementId, label: String, hint: String| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_1p5()
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(0xececec)))
+                .child(div().flex_1().child(label))
+                .child(div().text_color(rgb(MUTED)).child(hint))
+        };
+        let mut menu = div()
+            .id("later-menu")
+            .absolute()
+            .top(px(32.))
+            .left_0()
+            .w(px(300.))
+            .occlude()
+            .flex()
+            .flex_col()
+            .py_1()
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded_md()
+            .shadow_lg()
+            .child(div().px_3().py_1().text_xs().text_color(rgb(MUTED)).child(tr!("send-later-menu")));
+        for (i, choice) in Choice::ALL.into_iter().enumerate() {
+            let hint = choice.at(&now).map(|at| crate::send_later::menu_hint(choice, &at)).unwrap_or_default();
+            let id = ElementId::NamedInteger("later-choice".into(), i as u64);
+            menu = menu.child(
+                item(id, crate::send_later::choice_label(choice), hint)
+                    .on_click(cx.listener(move |this, _, window, cx| this.send_at_choice(choice, window, cx))),
+            );
+        }
+        menu.child(div().h_px().my_1().bg(rgb(BORDER))).child(
+            item("later-pick".into(), tr!("send-later-pick"), String::new())
+                .on_click(cx.listener(|this, _, window, cx| this.pick_later(window, cx))),
+        )
+    }
+
+    /// Строка «Выбрать дату и время» в окне (без модального окна).
+    fn later_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.later.picking {
+            return None;
+        }
+        let label = |text: String| div().flex_none().text_color(rgb(MUTED)).child(text);
+        let error = self.later.error.map(|e| crate::send_later::reject_text(e, self.later.max_delay));
+        let row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .bg(rgb(0xf3f8fd))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(div().flex_none().text_color(rgb(ACCENT)).child(tr!("send-later-menu")))
+            .child(label(tr!("send-later-date")))
+            .child(div().w(px(120.)).child(Input::new(&self.later.date)))
+            .child(label(tr!("send-later-time")))
+            .child(div().w(px(72.)).child(Input::new(&self.later.time)))
+            .child(
+                button("later-schedule", tr!("send-later-schedule"), true)
+                    .on_click(cx.listener(|this, _, window, cx| this.schedule_picked(window, cx))),
+            )
+            .child(button("later-cancel", tr!("send-later-cancel"), false).on_click(cx.listener(|this, _, _, cx| {
+                this.close_later(cx);
+            })))
+            .children(error.map(|e| div().text_color(rgb(ERROR)).child(e)));
+        Some(row.into_any_element())
+    }
+}
+
 fn button(id: &'static str, text: String, primary: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -1149,11 +1402,7 @@ impl Render for Composer {
             .py_2()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .child(
-                button("send", tr!("compose-send"), true)
-                    .when(busy, |d| d.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx))),
-            )
+            .child(self.send_group(busy, cx))
             .child(
                 button("attach", tr!("compose-attach"), false)
                     .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx))),
@@ -1299,6 +1548,7 @@ impl Render for Composer {
             .text_color(rgb(0x222222))
             .text_size(px(13.))
             .child(toolbar)
+            .children(self.later_picker(cx))
             .child(fields)
             .child(content)
             .children(confirm)
@@ -1310,8 +1560,8 @@ impl Render for Composer {
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
     use super::{
-        AUTOSAVE, Address, Attachment, CloseAnswer, CloseStep, Command, Draft, Field, Instant, Model, Purpose, Status,
-        accept_suggestion, current_token,
+        AUTOSAVE, Address, Attachment, CloseAnswer, CloseStep, Command, Draft, Field, Instant, Model, Purpose, Release,
+        Status, accept_suggestion, current_token, send_later,
     };
 
     fn model() -> Model {
@@ -1354,6 +1604,29 @@ mod tests {
         assert!(!m.on_sent(8), "чужой тикет");
         assert!(m.on_sent(7));
         assert!(!m.is_dirty() && !m.busy());
+    }
+
+    /// S5-06: обычная отправка — с окном «Отменить» (сервер держит письмо), «Отправить позже» — к сроку; отменённое
+    /// письмо снова черновик на сервере — следующая отправка заменяет его.
+    #[test]
+    fn send_holds_for_undo_and_send_later_goes_at_the_time() {
+        let mut m = model();
+        fill(&mut m);
+        let Some(Command::Send { release, .. }) = m.begin(Purpose::Send, 1, Instant::now()) else { panic!("send") };
+        assert_eq!(release, Release::After(send_later::UNDO_HOLD_SECS));
+        assert!(!m.sending_later());
+        assert!(m.on_sent(1));
+        m.set_server_id("draft-1".into());
+        let Some(Command::Send { release, replace, .. }) = m.begin(Purpose::SendLater(1_792_562_400), 2, Instant::now())
+        else {
+            panic!("send later")
+        };
+        assert_eq!((release, replace.as_deref()), (Release::At(1_792_562_400), Some("draft-1")));
+        assert!(m.sending_later());
+        // Без получателей не планируется, как и не отправляется.
+        let mut empty = model();
+        assert!(empty.begin(Purpose::SendLater(1), 3, Instant::now()).is_none());
+        assert_eq!(empty.status, Status::NoRecipients);
     }
 
     #[test]

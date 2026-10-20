@@ -14,9 +14,11 @@ use postman_compose::{Address, Draft};
 use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
+use crate::send_later::{self, Scheduled};
 use postman_search::SearchIndex;
+pub use postman_jmap::Release;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Filter, Identity, Mailbox, utc_to_unix};
-use postman_jmap::{MailboxRights, SharedAccount};
+use postman_jmap::{MailboxRights, SharedAccount, UnsendError};
 use postman_jmap::{ContactCard, Principal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 /// Канал команд синхронизации (UI держит отправителя).
@@ -82,8 +84,14 @@ pub enum Command {
     Move { id: String, from: String, to: String },
     /// Удалить письмо насовсем (из «Удалённых»). UI уже убрал его из кэша; сбой — письмо с сервера заново.
     Destroy(String),
-    /// `replace` — id прежней версии черновика на сервере.
-    Send { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
+    /// `replace` — id прежней версии черновика на сервере. `release` — когда сервер выпустит письмо (S5-06):
+    /// `After` — окно «Отменить» (без FUTURERELEASE у сервера — сразу), `At` — «Отправить позже» → `Sent`.
+    Send { draft: Box<Draft>, replace: Option<String>, ticket: u64, release: Release },
+    /// Отменить отправку, которую сервер ещё держит, и вернуть письмо в «Черновики» → `Unsent` или `UnsendFailed`,
+    /// затем `Scheduled`.
+    Unsend { scheduled: Scheduled, ticket: u64 },
+    /// Перечитать отложенные отправки → `Scheduled`.
+    Scheduled,
     SaveDraft { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
     /// Догрузить следующую страницу ящика (после самого старого письма в кэше).
     LoadMore { mailbox: String },
@@ -238,7 +246,15 @@ pub enum Event {
     Senders(Vec<Sender>),
     /// Личные контакты (имя, адрес) — для автодополнения.
     Contacts(Vec<(String, String)>),
-    Sent { ticket: u64 },
+    /// Письмо отправлено; `scheduled` — сервер держит его до срока (окно «Отменить» или «Отправить позже»).
+    Sent { ticket: u64, scheduled: Option<Scheduled> },
+    /// Отправка отменена, письмо — снова черновик в «Черновиках» (`email` — ключ кэша).
+    Unsent { ticket: u64, email: String },
+    /// Отмена не удалась: `too_late` — письмо уже ушло.
+    UnsendFailed { ticket: u64, too_late: bool, error: String },
+    /// Отправки, которые сервер держит, и сколько он позволяет задержать письмо (секунды, `send_later::max_delay`;
+    /// 0 — отложенной отправки нет).
+    Scheduled { list: Vec<Scheduled>, max_delay: u64 },
     DraftSaved { ticket: u64, id: String },
     /// Ошибка конкретной отправки/сохранения — показывается в окне письма.
     ComposeFailed { ticket: u64, error: String },
@@ -544,6 +560,7 @@ async fn run(
         }
     }
     notify(Event::Status(Status::Synced));
+    notify_scheduled(&accounts, &send_as, notify).await;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
     let (push_tx, mut push_rx) = unbounded_channel::<Changed>();
@@ -907,13 +924,27 @@ async fn handle(
                 let _ = i.commit();
             }
         }
-        Command::Send { draft, replace, ticket } => {
-            let r = send(accounts, cache, send_as, &draft, replace.as_deref()).await;
+        Command::Send { draft, replace, ticket, release } => {
+            let r = send(accounts, cache, send_as, &draft, replace.as_deref(), release).await;
+            let later = matches!((&r, release), (Ok(Some(_)), Release::At(_)));
             notify(match r {
-                Ok(()) => Event::Sent { ticket },
+                Ok(scheduled) => Event::Sent { ticket, scheduled },
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
             });
+            // Запланированное — в список отложенных («Отправится в …»); окно «Отменить» закроется само.
+            if later {
+                notify_scheduled(accounts, send_as, notify).await;
+            }
         }
+        Command::Unsend { scheduled, ticket } => {
+            notify(match unsend(accounts, cache, &scheduled).await {
+                Ok(()) => Event::Unsent { ticket, email: scheduled.email.clone() },
+                Err(UnsendError::TooLate) => Event::UnsendFailed { ticket, too_late: true, error: String::new() },
+                Err(UnsendError::Jmap(e)) => Event::UnsendFailed { ticket, too_late: false, error: e.to_string() },
+            });
+            notify_scheduled(accounts, send_as, notify).await;
+        }
+        Command::Scheduled => notify_scheduled(accounts, send_as, notify).await,
         Command::LoadMore { mailbox } => {
             // Ответ — всегда: интерфейс ждёт его, прежде чем просить следующую страницу.
             let added = match accounts.locate(&mailbox) {
@@ -1189,14 +1220,16 @@ fn sender_of<'a>(send_as: &'a [SendAs], draft: &Draft) -> postman_jmap::Result<&
         .ok_or_else(|| postman_jmap::Error::Protocol("no Identity on the server to send from".into()))
 }
 
-/// Отправить из аккаунта отправителя: черновик — в его «Черновики», копия — в его «Отправленные».
+/// Отправить из аккаунта отправителя: черновик — в его «Черновики», копия — в его «Отправленные». Сервер держит
+/// письмо до срока (`release`) — отправка, которую можно отменить.
 async fn send(
     accounts: &Accounts,
     cache: &Cache,
     send_as: &[SendAs],
     draft: &Draft,
     replace: Option<&str>,
-) -> postman_jmap::Result<()> {
+    release: Release,
+) -> postman_jmap::Result<Option<Scheduled>> {
     let mut draft = draft.clone();
     fill_attachments(accounts, cache, &mut draft).await?;
     let draft = &draft;
@@ -1209,12 +1242,48 @@ async fn send(
         rcpt_to: draft.recipients().map(|a| a.email.clone()).collect(),
     };
     let (drafts, sent) = (mailbox_by_role(cache, acc.scope(), "drafts")?, mailbox_by_role(cache, acc.scope(), "sent")?);
-    acc.client.send(raw_message(draft)?, &sender.identity.id, &envelope, &drafts, &sent).await?;
+    // Без FUTURERELEASE окна «Отменить» нет — письмо уходит сразу; «Отправить позже» — ошибка, а не отправка.
+    let release = match release {
+        Release::After(_) if send_later::max_delay(acc.client.max_delayed_send()) == 0 => Release::Now,
+        Release::At(_) if send_later::max_delay(acc.client.max_delayed_send()) == 0 => {
+            return Err(postman_jmap::Error::Protocol("the server does not support delayed sending".into()));
+        }
+        r => r,
+    };
+    let sub = acc.client.submit(raw_message(draft)?, &sender.identity.id, &envelope, &drafts, &sent, release).await?;
     if let Some(old) = replace {
         let (acc, id) = accounts.locate(old)?;
         acc.client.destroy_email(id).await?;
     }
-    Ok(())
+    Ok((sub.pending && release != Release::Now).then(|| Scheduled {
+        submission: acc.key(&sub.submission_id),
+        email: acc.key(&sub.email_id),
+        send_at: sub.send_at.unwrap_or_else(|| jiff::Timestamp::now().as_second()),
+    }))
+}
+
+/// Отменить отправку, которую держит сервер: письмо — обратно в «Черновики» аккаунта отправителя.
+async fn unsend(accounts: &Accounts, cache: &Cache, s: &Scheduled) -> Result<(), UnsendError> {
+    let (acc, submission) = accounts.locate(&s.submission)?;
+    let email = unscoped(&s.email).1;
+    let (drafts, sent) = (mailbox_by_role(cache, acc.scope(), "drafts")?, mailbox_by_role(cache, acc.scope(), "sent")?);
+    acc.client.unsend(submission, email, &drafts, &sent).await
+}
+
+/// Отложенные отправки своего аккаунта и общих ящиков, от которых можно отправлять → `Event::Scheduled`.
+async fn notify_scheduled(accounts: &Accounts, send_as: &[SendAs], notify: &impl Fn(Event)) {
+    let mut list = Vec::new();
+    let sending = std::iter::once(&accounts.own)
+        .chain(accounts.shared.iter().filter(|a| send_as.iter().any(|f| f.scope.as_deref() == a.scope())));
+    for acc in sending {
+        // Не прочиталось — списка этого аккаунта нет; письма всё равно уйдут в срок (их держит сервер).
+        let Ok(pending) = acc.client.pending_submissions().await else { continue };
+        list.extend(pending.into_iter().filter_map(|p| {
+            Some(Scheduled { send_at: p.send_at_unix()?, submission: acc.key(&p.id), email: acc.key(&p.email_id) })
+        }));
+    }
+    list.sort_by_key(|s| s.send_at);
+    notify(Event::Scheduled { list, max_delay: send_later::max_delay(accounts.own.client.max_delayed_send()) });
 }
 
 async fn respond_invite(
@@ -1240,7 +1309,7 @@ async fn respond_invite(
     let now = jiff::Timestamp::now().as_second();
     let draft = invite::reply_draft(inv, &me, status, in_reply_to, now)
         .ok_or_else(|| postman_jmap::Error::Protocol("the invitation has no organizer".into()))?;
-    send(accounts, cache, send_as, &draft, None).await?;
+    send(accounts, cache, send_as, &draft, None, Release::Now).await?;
     // Ответ ушёл — дальше только своя копия; её сбой не повод слать ответ повторно.
     let imported = invite::import(client, inv, &me.email, status).await.unwrap_or(false);
     Ok(Delivery::Mail { imported })
