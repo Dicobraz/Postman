@@ -15,7 +15,7 @@ pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
 pub use contacts::{AddressBook, ContactCard};
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
-pub use session::{Account, Session};
+pub use session::{Account, Session, SharedAccount};
 pub use sieve::{Activate, SaveError, SieveScript};
 pub use submission::{Envelope, Identity};
 pub use vacation::{Quota, VacationResponse};
@@ -82,6 +82,8 @@ pub struct Client {
     http: reqwest::Client,
     auth: Auth,
     session: Session,
+    /// Почта и отправка — в этом аккаунте, а не в основном (общий ящик, S4-06): [`Client::in_account`].
+    mail_account: Option<String>,
 }
 
 impl Client {
@@ -102,7 +104,7 @@ impl Client {
         if !session.capabilities.contains_key(MAIL) {
             return Err(Error::MissingCapability(MAIL));
         }
-        Ok(Self { http, auth, session })
+        Ok(Self { http, auth, session, mail_account: None })
     }
 
     pub(crate) fn http(&self) -> &reqwest::Client {
@@ -121,7 +123,16 @@ impl Client {
         self.session.capabilities.contains_key(capability)
     }
 
+    /// Тот же клиент (соединение, вход), но почта, ящики, отправка и Identity — в аккаунте `account`
+    /// (общий или делегированный ящик из [`Session::shared_accounts`]). Календарь и контакты — по-прежнему основные.
+    pub fn in_account(&self, account: &str) -> Client {
+        Client { mail_account: Some(account.to_owned()), ..self.clone() }
+    }
+
     pub fn account_for(&self, capability: &'static str) -> Result<&str> {
+        if let Some(acc) = self.mail_account.as_deref().filter(|_| capability == MAIL || capability == SUBMISSION) {
+            return Ok(acc);
+        }
         self.session
             .primary_accounts
             .get(capability)
@@ -190,4 +201,31 @@ pub fn take<T: serde::de::DeserializeOwned>(responses: &mut [Invocation], call_i
         .find(|r| r.2 == call_id)
         .ok_or_else(|| Error::Protocol(format!("нет ответа на {call_id}")))?;
     Ok(serde_json::from_value(r.1.take())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(primary: &str) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "capabilities": {}, "accounts": {},
+            "primaryAccounts": { MAIL: primary, SUBMISSION: primary, CALENDARS: primary },
+            "username": "u", "apiUrl": "/jmap/", "downloadUrl": "/d", "uploadUrl": "/u", "eventSourceUrl": "/e",
+            "state": "s"
+        }))
+        .unwrap()
+    }
+
+    /// Клиент общего ящика (S4-06): почта и отправка — в его аккаунте, календарь — в своём.
+    #[test]
+    fn mail_goes_to_the_chosen_account() {
+        let auth = Auth::Bearer("t".into());
+        let c = Client { http: reqwest::Client::new(), auth, session: session("e"), mail_account: None };
+        let shared = c.in_account("i");
+        assert_eq!(shared.mail_account().unwrap(), "i");
+        assert_eq!(shared.account_for(SUBMISSION).unwrap(), "i");
+        assert_eq!(shared.account_for(CALENDARS).unwrap(), "e");
+        assert_eq!(c.mail_account().unwrap(), "e");
+    }
 }

@@ -28,7 +28,40 @@ pub struct Account {
     pub account_capabilities: HashMap<String, Value>,
 }
 
+/// Почтовый аккаунт, кроме основного (S4-06): общий ящик группы или ящик, открытый другим (`mail:share`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedAccount {
+    pub id: String,
+    /// Имя аккаунта у сервера (Stalwart — адрес ящика).
+    pub name: String,
+    pub is_personal: bool,
+    /// Весь аккаунт только для чтения. Права на отдельные папки — `Mailbox.myRights`.
+    pub is_read_only: bool,
+    /// Аккаунт объявляет `submission`: отправка от его имени возможна, если в нём есть Identity.
+    pub can_submit: bool,
+}
+
 impl Session {
+    /// Почтовые аккаунты, кроме основного (`primaryAccounts` почты), по имени. Аккаунт без capability почты
+    /// (только календарь или файлы) — не ящик.
+    pub fn shared_accounts(&self) -> Vec<SharedAccount> {
+        let primary = self.primary_accounts.get(crate::MAIL);
+        let mut out: Vec<SharedAccount> = self
+            .accounts
+            .iter()
+            .filter(|(id, a)| Some(*id) != primary && a.account_capabilities.contains_key(crate::MAIL))
+            .map(|(id, a)| SharedAccount {
+                id: id.clone(),
+                name: a.name.clone(),
+                is_personal: a.is_personal,
+                is_read_only: a.is_read_only,
+                can_submit: a.account_capabilities.contains_key(crate::SUBMISSION),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
     /// URL сессии — на тот же адрес, по которому получена сессия: относительные дополняем, у абсолютных
     /// заменяем начало (схема, хост, порт). Сервер за прокси или туннелем объявляет свой внутренний адрес
     /// (Stalwart: `http://10.70.2.40:8080/jmap/`), а пароль и токен не должны уходить на другой хост.
@@ -54,7 +87,39 @@ fn rebase(u: &str, origin: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::rebase;
+    use super::{Session, SharedAccount, rebase};
+
+    /// Сессия user3 со стенда (S4-06): свой аккаунт, общий ящик группы и папка, открытая только для чтения;
+    /// аккаунт без почты — не ящик.
+    #[test]
+    fn shared_mail_accounts_are_found() {
+        let s: Session = serde_json::from_value(serde_json::json!({
+            "capabilities": {},
+            "accounts": {
+                "e": { "name": "user3@itt.test", "isPersonal": true, "isReadOnly": false,
+                       "accountCapabilities": { "urn:ietf:params:jmap:mail": {}, "urn:ietf:params:jmap:submission": {} } },
+                "j": { "name": "shared-ro@itt.test", "isPersonal": false,
+                       "accountCapabilities": { "urn:ietf:params:jmap:mail": {} } },
+                "i": { "name": "shared-sales@itt.test", "isPersonal": false, "isReadOnly": true,
+                       "accountCapabilities": { "urn:ietf:params:jmap:mail": {}, "urn:ietf:params:jmap:submission": {} } },
+                "k": { "name": "files", "isPersonal": false,
+                       "accountCapabilities": { "urn:ietf:params:jmap:filenode": {} } }
+            },
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "e" },
+            "username": "user3@itt.test",
+            "apiUrl": "/jmap/", "downloadUrl": "/d", "uploadUrl": "/u", "eventSourceUrl": "/e", "state": "s"
+        }))
+        .unwrap();
+        let shared = s.shared_accounts();
+        let acc = |id: &str, name: &str, read_only, submit| SharedAccount {
+            id: id.into(),
+            name: name.into(),
+            is_personal: false,
+            is_read_only: read_only,
+            can_submit: submit,
+        };
+        assert_eq!(shared, [acc("j", "shared-ro@itt.test", false, false), acc("i", "shared-sales@itt.test", true, true)]);
+    }
 
     #[test]
     fn urls_follow_the_connection_origin() {

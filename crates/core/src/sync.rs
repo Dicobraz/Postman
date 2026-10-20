@@ -1,13 +1,13 @@
 //! Фоновая синхронизация: свой поток с tokio, своё соединение с кэшем.
 //! UI шлёт команды, в ответ получает события и перечитывает кэш.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use std::sync::Arc;
 
-use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Rights, scoped, unscoped};
 use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
@@ -16,6 +16,7 @@ use crate::settings;
 use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
+use postman_jmap::{MailboxRights, SharedAccount};
 use postman_jmap::{ContactCard, Principal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 /// Канал команд синхронизации (UI держит отправителя).
@@ -191,6 +192,15 @@ impl std::fmt::Display for Status {
     }
 }
 
+/// Отправитель для окна письма: свой адрес или общий ящик (S4-06).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sender {
+    /// Общий ящик, из которого уходит письмо (id аккаунта, он же префикс ключей кэша); `None` — свой.
+    pub account: Option<String>,
+    pub address: Address,
+    pub signature: String,
+}
+
 pub enum Event {
     Status(Status),
     MailboxesChanged,
@@ -207,6 +217,8 @@ pub enum Event {
     BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
+    /// Адреса, от которых можно отправить письмо (S4-06): свои Identity и Identity общих ящиков.
+    Senders(Vec<Sender>),
     /// Личные контакты (имя, адрес) — для автодополнения.
     Contacts(Vec<(String, String)>),
     Sent { ticket: u64 },
@@ -274,18 +286,51 @@ pub fn spawn(
     tx
 }
 
+/// Где изменилась почта по событию push.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MailChange {
+    #[default]
+    None,
+    /// В этих аккаунтах (id сервера): свой и общие ящики (S4-06) сверяются по отдельности.
+    In(BTreeSet<String>),
+    /// Неизвестно где (событие не разобралось, связь восстановилась) — сверить все аккаунты.
+    All,
+}
+
+impl MailChange {
+    /// Сверить аккаунт `account`.
+    pub fn touches(&self, account: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::In(set) => set.contains(account),
+            Self::All => true,
+        }
+    }
+
+    fn or(self, o: Self) -> Self {
+        match (self, o) {
+            (Self::All, _) | (_, Self::All) => Self::All,
+            (Self::None, x) | (x, Self::None) => x,
+            (Self::In(mut a), Self::In(b)) => {
+                a.extend(b);
+                Self::In(a)
+            }
+        }
+    }
+}
+
 /// Какие данные изменились по событию push (`state`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changed {
-    pub mail: bool,
+    pub mail: MailChange,
     pub calendar: bool,
 }
 
 impl Changed {
-    const ALL: Self = Self { mail: true, calendar: true };
+    const ALL: Self = Self { mail: MailChange::All, calendar: true };
 
     fn or(self, o: Self) -> Self {
-        Self { mail: self.mail || o.mail, calendar: self.calendar || o.calendar }
+        Self { mail: self.mail.or(o.mail), calendar: self.calendar || o.calendar }
     }
 
     /// Разбор `StateChange` (RFC 8620 §7.1): `{"@type":"StateChange","changed":{"<аккаунт>":{"Email":"…",…}}}`.
@@ -293,17 +338,20 @@ impl Changed {
     pub fn of(data: &str) -> Self {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { return Self::ALL };
         let Some(accounts) = v.get("changed").and_then(|c| c.as_object()) else { return Self::ALL };
-        let mut out = Self::default();
-        for types in accounts.values().filter_map(|t| t.as_object()) {
+        let mut mail = BTreeSet::new();
+        let mut calendar = false;
+        for (account, types) in accounts.iter().filter_map(|(a, t)| Some((a, t.as_object()?))) {
             for kind in types.keys() {
                 match kind.as_str() {
-                    "Email" | "Mailbox" | "Thread" | "EmailDelivery" => out.mail = true,
-                    "CalendarEvent" | "Calendar" | "CalendarEventNotification" => out.calendar = true,
+                    "Email" | "Mailbox" | "Thread" | "EmailDelivery" => {
+                        mail.insert(account.clone());
+                    }
+                    "CalendarEvent" | "Calendar" | "CalendarEventNotification" => calendar = true,
                     _ => {}
                 }
             }
         }
-        out
+        Self { mail: if mail.is_empty() { MailChange::None } else { MailChange::In(mail) }, calendar }
     }
 }
 
@@ -344,6 +392,79 @@ fn report(e: postman_jmap::Error, stage: Stage, notify: &impl Fn(Event)) -> bool
     stop
 }
 
+/// Почтовый аккаунт синхронизации: свой или общий ящик (S4-06). Письма и папки общего — в кэше с префиксом
+/// аккаунта (`postman_cache::scoped`), команды интерфейса приходят с этими ключами.
+struct MailAccount {
+    /// id аккаунта на сервере.
+    id: String,
+    /// Префикс ключей кэша: `None` — свой аккаунт.
+    scope: Option<String>,
+    /// Почтовые методы — в этом аккаунте (`Client::in_account`).
+    client: Client,
+    /// Состояние `Email` — точка отсчёта `Email/changes`; `None` — первая загрузка ещё не удалась.
+    state: Option<String>,
+}
+
+impl MailAccount {
+    fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    fn key(&self, id: &str) -> String {
+        scoped(self.scope(), id)
+    }
+
+    fn state_key(&self) -> String {
+        self.key("Email")
+    }
+}
+
+/// Свой аккаунт и общие ящики.
+struct Accounts {
+    own: MailAccount,
+    shared: Vec<MailAccount>,
+}
+
+impl Accounts {
+    fn all_mut(&mut self) -> impl Iterator<Item = &mut MailAccount> {
+        std::iter::once(&mut self.own).chain(self.shared.iter_mut())
+    }
+
+    fn by_scope(&self, scope: Option<&str>) -> Option<&MailAccount> {
+        std::iter::once(&self.own).chain(&self.shared).find(|a| a.scope() == scope)
+    }
+
+    /// Аккаунт и id сервера по ключу кэша.
+    fn locate<'a>(&'a self, key: &'a str) -> postman_jmap::Result<(&'a MailAccount, &'a str)> {
+        let (scope, id) = unscoped(key);
+        self.by_scope(scope).map(|a| (a, id)).ok_or_else(|| postman_jmap::Error::Protocol(format!("no account for {key}")))
+    }
+}
+
+/// Отправитель для синхронизации: Identity и аккаунт, из которого уходит письмо.
+#[derive(Debug, Clone)]
+struct SendAs {
+    scope: Option<String>,
+    identity: Identity,
+}
+
+/// Отправители по порядку: свои Identity, затем общих ящиков. Адрес, который есть и у своего аккаунта, и у общего
+/// ящика (Stalwart заводит члену группы Identity с адресом группы), — из общего: копия ляжет в его «Отправленные»,
+/// где её видят все, кто работает с ящиком.
+fn senders(own: &[Identity], shared: &[(String, Vec<Identity>)]) -> Vec<SendAs> {
+    let theirs = |email: &str| shared.iter().any(|(_, l)| l.iter().any(|i| i.email.eq_ignore_ascii_case(email)));
+    let mut out: Vec<SendAs> =
+        own.iter().filter(|i| !theirs(&i.email)).map(|i| SendAs { scope: None, identity: i.clone() }).collect();
+    for (account, list) in shared {
+        out.extend(list.iter().map(|i| SendAs { scope: Some(account.clone()), identity: i.clone() }));
+    }
+    out
+}
+
+fn account_row(a: &SharedAccount) -> AccountRow {
+    AccountRow { id: a.id.clone(), name: a.name.clone(), is_personal: a.is_personal, read_only: a.is_read_only }
+}
+
 async fn run(
     account: Account,
     mut cache: Cache,
@@ -354,16 +475,57 @@ async fn run(
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
     let client = Client::connect(&account.url, account.auth).await.map_err(|e| SyncError::new(Stage::Connect, &e))?;
     notify(Event::Status(Status::SignedIn { user: client.session().username.clone() }));
+    let own_id = client.mail_account().map_err(|e| SyncError::new(Stage::Connect, &e))?.to_string();
 
+    // Общие и делегированные ящики (S4-06) — аккаунты сессии, кроме своего.
+    let shared = client.session().shared_accounts();
+    cache
+        .replace_accounts(&shared.iter().map(account_row).collect::<Vec<_>>())
+        .map_err(|e| SyncError::new(Stage::Load, &db_err(e)))?;
     let identities = client.identities().await.unwrap_or_default();
     if let Some(i) = identities.first() {
         notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
     }
+    let mut theirs = Vec::new();
+    for a in shared.iter().filter(|a| a.can_submit && !a.is_read_only) {
+        // Ящик открыт, но не мой (Stalwart: `forbidden`, «not an owner») — отправлять от него нельзя, это не ошибка.
+        if let Ok(list) = client.in_account(&a.id).identities().await {
+            theirs.push((a.id.clone(), list));
+        }
+    }
+    let send_as = senders(&identities, &theirs);
+    notify(Event::Senders(
+        send_as
+            .iter()
+            .map(|f| Sender {
+                account: f.scope.clone(),
+                address: Address::new(&f.identity.name, &f.identity.email),
+                signature: f.identity.text_signature.clone(),
+            })
+            .collect(),
+    ));
     // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
     load_people(&client, notify).await;
     settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
-    let mut email_state =
-        start_state(&client, &mut cache, &index, notify).await.map_err(|e| SyncError::new(Stage::Load, &e))?;
+
+    let mail = |id: &str, scope: Option<String>, client: Client| MailAccount { id: id.into(), scope, client, state: None };
+    let mut accounts = Accounts {
+        own: mail(&own_id, None, client.clone()),
+        shared: shared.iter().map(|a| mail(&a.id, Some(a.id.clone()), client.in_account(&a.id))).collect(),
+    };
+    accounts.own.state =
+        Some(start_state(&accounts.own, &mut cache, &index, notify).await.map_err(|e| SyncError::new(Stage::Load, &e))?);
+    for acc in &mut accounts.shared {
+        match start_state(acc, &mut cache, &index, notify).await {
+            Ok(s) => acc.state = Some(s),
+            // Общий ящик не загрузился — свой работает; повтор — со следующей сверкой.
+            Err(e) => {
+                if report(e, Stage::Load, notify) {
+                    return Ok(());
+                }
+            }
+        }
+    }
     notify(Event::Status(Status::Synced));
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
@@ -381,7 +543,7 @@ async fn run(
                 let Some(cmd) = cmd else { return Ok(()) };
                 // Догруженная страница — тоже в предзагрузку тел.
                 let more = matches!(cmd, Command::LoadMore { .. });
-                if let Err(e) = handle(&client, &mut cache, &index, &identities, cmd, notify).await
+                if let Err(e) = handle(&accounts, &mut cache, &index, &identities, &send_as, cmd, notify).await
                     && report(e, Stage::Command, notify)
                 {
                     return Ok(());
@@ -398,8 +560,10 @@ async fn run(
                 if changed.calendar {
                     calendar.poke(tokio::time::Instant::now(), CALENDAR_DEBOUNCE);
                 }
-                if changed.mail && apply_refresh(&client, &mut cache, &index, &mut email_state, &mut prefetch, notify).await {
-                    return Ok(());
+                for acc in accounts.all_mut().filter(|a| changed.mail.touches(&a.id)) {
+                    if apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await {
+                        return Ok(());
+                    }
                 }
             }
             () = calendar.wait() => {
@@ -408,8 +572,10 @@ async fn run(
                 }
             }
             _ = poll.tick() => {
-                if apply_refresh(&client, &mut cache, &index, &mut email_state, &mut prefetch, notify).await {
-                    return Ok(());
+                for acc in accounts.all_mut() {
+                    if apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await {
+                        return Ok(());
+                    }
                 }
                 // Предзагрузка прервалась ошибкой — остаток со следующего опроса. Полный обход кэша (а в большом
                 // ящике это десятки тысяч строк) — только тогда, а не на каждое событие push.
@@ -419,17 +585,9 @@ async fn run(
             }
             _ = std::future::ready(()), if !prefetch.is_empty() => {
                 let n = prefetch.len().min(PREFETCH_BATCH);
-                let ids: Vec<String> = prefetch.drain(..n).collect();
-                match client.email_bodies(&ids, PREFETCH_MAX_BYTES).await {
-                    Ok(bodies) => {
-                        let mut stored = Vec::new();
-                        for (id, b) in bodies {
-                            if cache.put_body(&id, &body_row(b)).is_ok() {
-                                stored.push(id);
-                            }
-                        }
-                        notify(Event::BodiesStored(stored));
-                    }
+                let keys: Vec<String> = prefetch.drain(..n).collect();
+                match prefetch_bodies(&accounts, &cache, &keys).await {
+                    Ok(stored) => notify(Event::BodiesStored(stored)),
                     Err(e) => {
                         // Не долбим сервер: остаток подберёт следующий опрос.
                         prefetch.clear();
@@ -444,25 +602,59 @@ async fn run(
     }
 }
 
-/// Сверка с сервером; `true` — сервер отклонил вход, синхронизацию остановить.
+/// Тела писем по ключам кэша — запросом на аккаунт; ключи аккаунтов, которых больше нет, пропускаются.
+async fn prefetch_bodies(accounts: &Accounts, cache: &Cache, keys: &[String]) -> postman_jmap::Result<Vec<String>> {
+    let mut by_account: BTreeMap<Option<&str>, Vec<String>> = BTreeMap::new();
+    for key in keys {
+        let (scope, id) = unscoped(key);
+        by_account.entry(scope).or_default().push(id.to_owned());
+    }
+    let mut stored = Vec::new();
+    for (scope, ids) in by_account {
+        let Some(acc) = accounts.by_scope(scope) else { continue };
+        for (id, b) in acc.client.email_bodies(&ids, PREFETCH_MAX_BYTES).await? {
+            let key = acc.key(&id);
+            if cache.put_body(&key, &body_row(b, acc.scope())).is_ok() {
+                stored.push(key);
+            }
+        }
+    }
+    Ok(stored)
+}
+
+/// Сверка аккаунта с сервером; `true` — сервер отклонил вход, синхронизацию остановить.
 async fn apply_refresh(
-    client: &Client,
+    acc: &mut MailAccount,
     cache: &mut Cache,
     index: &Index,
-    state: &mut String,
     prefetch: &mut VecDeque<String>,
     notify: &impl Fn(Event),
 ) -> bool {
-    match refresh(client, cache, index, state, notify).await {
+    // Первая загрузка общего ящика не удалась — снова целиком.
+    let Some(since) = acc.state.clone() else {
+        return match start_state(acc, cache, index, notify).await {
+            Ok(s) => {
+                acc.state = Some(s);
+                notify(Event::MailboxesChanged);
+                notify(Event::EmailsChanged);
+                false
+            }
+            Err(e) => report(e, Stage::Refresh, notify),
+        };
+    };
+    match refresh(acc, cache, index, &since, notify).await {
         Ok(Some((s, created))) => {
-            *state = s;
+            acc.state = Some(s);
             // Новые письма — в начало очереди предзагрузки.
             for id in created.into_iter().rev() {
                 prefetch.push_front(id);
             }
             notify(Event::MailboxesChanged);
             notify(Event::EmailsChanged);
-            settings::handle(client, settings::Request::Quota, &|r| notify(Event::Settings(r))).await;
+            // Квота — своего ящика (строка состояния); у общего — своя, её не показываем.
+            if acc.scope.is_none() {
+                settings::handle(&acc.client, settings::Request::Quota, &|r| notify(Event::Settings(r))).await;
+            }
             false
         }
         Ok(None) => false,
@@ -475,12 +667,13 @@ async fn push_loop(client: Client, wake: UnboundedSender<Changed>) {
     let mut backoff = 5;
     // Первое подключение — сразу после загрузки: календарь ещё не открывали, сверять только почту.
     let mut first = true;
+    let mail = || Changed { mail: MailChange::All, calendar: false };
     loop {
         match client.event_source(PUSH_PING).await {
             Ok(mut es) => {
                 backoff = 5;
                 // Сразу после подключения — сверка: изменения могли случиться, пока связи не было.
-                let missed = if first { Changed { mail: true, calendar: false } } else { Changed::ALL };
+                let missed = if first { mail() } else { Changed::ALL };
                 first = false;
                 if wake.send(missed).is_err() {
                     return;
@@ -494,7 +687,7 @@ async fn push_loop(client: Client, wake: UnboundedSender<Changed>) {
             }
             // Отказ во входе: сверка почты покажет его основному циклу, тот остановит синхронизацию.
             Err(e) if ErrorKind::of(&e) == ErrorKind::Auth => {
-                if wake.send(Changed { mail: true, calendar: false }).is_err() {
+                if wake.send(mail()).is_err() {
                     return;
                 }
             }
@@ -505,19 +698,26 @@ async fn push_loop(client: Client, wake: UnboundedSender<Changed>) {
     }
 }
 
-/// Состояние почты при запуске. Кэш уже синхронизирован (есть состояние `Email`) — папки и дельта с прошлого
-/// раза; сервер дельту не считает (`cannotCalculateChanges`) или кэш пуст — первые страницы папок.
+/// Папки аккаунта — в кэш (ключи с префиксом аккаунта).
+async fn load_mailboxes(acc: &MailAccount, cache: &Cache) -> postman_jmap::Result<Vec<Mailbox>> {
+    let (mailboxes, _) = acc.client.mailboxes().await?;
+    let rows: Vec<MailboxRow> = mailboxes.iter().map(|m| mailbox_row(m, acc.scope())).collect();
+    cache.replace_mailboxes(acc.scope(), &rows).map_err(db_err)?;
+    Ok(mailboxes)
+}
+
+/// Состояние почты аккаунта при запуске. Кэш уже синхронизирован (есть состояние `Email`) — папки и дельта с
+/// прошлого раза; сервер дельту не считает (`cannotCalculateChanges`) или кэш пуст — первые страницы папок.
 async fn start_state(
-    client: &Client,
+    acc: &MailAccount,
     cache: &mut Cache,
     index: &Index,
     notify: &impl Fn(Event),
 ) -> postman_jmap::Result<String> {
-    if let Some(since) = cache.state("Email").map_err(db_err)? {
-        let (mailboxes, _) = client.mailboxes().await?;
-        cache.replace_mailboxes(&mailboxes.iter().map(mailbox_row).collect::<Vec<_>>()).map_err(db_err)?;
+    if let Some(since) = cache.state(&acc.state_key()).map_err(db_err)? {
+        load_mailboxes(acc, cache).await?;
         notify(Event::MailboxesChanged);
-        match refresh(client, cache, index, &since, notify).await {
+        match refresh(acc, cache, index, &since, notify).await {
             Ok(changed) => {
                 notify(Event::MailboxesChanged);
                 notify(Event::EmailsChanged);
@@ -527,12 +727,16 @@ async fn start_state(
             Err(e) => return Err(e),
         }
     }
-    initial_load(client, cache, index, notify).await
+    initial_load(acc, cache, index, notify).await
 }
 
-async fn initial_load(client: &Client, cache: &mut Cache, index: &Index, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
-    let (mailboxes, _) = client.mailboxes().await?;
-    cache.replace_mailboxes(&mailboxes.iter().map(mailbox_row).collect::<Vec<_>>()).map_err(db_err)?;
+async fn initial_load(
+    acc: &MailAccount,
+    cache: &mut Cache,
+    index: &Index,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<String> {
+    let mailboxes = load_mailboxes(acc, cache).await?;
     notify(Event::MailboxesChanged);
 
     // Входящие первыми — их пользователь видит сразу.
@@ -541,33 +745,44 @@ async fn initial_load(client: &Client, cache: &mut Cache, index: &Index, notify:
     let mut state = String::new();
     for mb in order {
         notify(Event::Status(Status::Loading { mailbox: mb.name.clone() }));
-        let page = client.email_page(&mb.id, 0, INITIAL_PAGE).await?;
-        save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
+        let page = acc.client.email_page(&mb.id, 0, INITIAL_PAGE).await?;
+        save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
         state = page.state;
         notify(Event::EmailsChanged);
     }
-    cache.set_state("Email", &state).map_err(db_err)?;
+    // Ни одной папки (общий ящик без открытых мне папок) — состояние всё равно нужно для дельты.
+    if state.is_empty() {
+        state = acc.client.email_get(&[]).await?.1;
+    }
+    cache.set_state(&acc.state_key(), &state).map_err(db_err)?;
     Ok(state)
 }
 
-/// Дельта через `Email/changes`: `Some((новое состояние, новые письма))`, если что-то изменилось.
-async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<Option<(String, Vec<String>)>> {
+/// Дельта через `Email/changes`: `Some((новое состояние, ключи новых писем))`, если что-то изменилось.
+async fn refresh(
+    acc: &MailAccount,
+    cache: &mut Cache,
+    index: &Index,
+    since: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<Option<(String, Vec<String>)>> {
     let mut state = since.to_string();
     let mut created = Vec::new();
     loop {
-        let ch = client.changes("Email", &state, 500).await?;
+        let ch = acc.client.changes("Email", &state, 500).await?;
         if ch.new_state == state {
             return Ok(None);
         }
-        created.extend(ch.created.iter().cloned());
+        created.extend(ch.created.iter().map(|id| acc.key(id)));
         let ids: Vec<String> = ch.created.into_iter().chain(ch.updated).collect();
         if !ids.is_empty() {
-            let (emails, _) = client.email_get(&ids).await?;
-            save(cache, index, emails.iter().map(email_row).collect(), notify)?;
+            let (emails, _) = acc.client.email_get(&ids).await?;
+            save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
         }
-        cache.delete_emails(&ch.destroyed).map_err(db_err)?;
+        let destroyed: Vec<String> = ch.destroyed.iter().map(|id| acc.key(id)).collect();
+        cache.delete_emails(&destroyed).map_err(db_err)?;
         if let Some(i) = index {
-            let _ = i.delete(&ch.destroyed);
+            let _ = i.delete(&destroyed);
             let _ = i.commit();
         }
         state = ch.new_state;
@@ -575,45 +790,58 @@ async fn refresh(client: &Client, cache: &mut Cache, index: &Index, since: &str,
             break;
         }
     }
-    let (mailboxes, _) = client.mailboxes().await?;
-    cache.replace_mailboxes(&mailboxes.iter().map(mailbox_row).collect::<Vec<_>>()).map_err(db_err)?;
-    cache.set_state("Email", &state).map_err(db_err)?;
+    load_mailboxes(acc, cache).await?;
+    cache.set_state(&acc.state_key(), &state).map_err(db_err)?;
     Ok(Some((state, created)))
 }
 
 async fn handle(
-    client: &Client,
+    accounts: &Accounts,
     cache: &mut Cache,
     index: &Index,
     identities: &[Identity],
+    send_as: &[SendAs],
     cmd: Command,
     notify: &impl Fn(Event),
 ) -> postman_jmap::Result<()> {
+    let client = &accounts.own.client;
     match cmd {
-        Command::Body(id) => {
-            let row = body_row(client.email_body(&id).await?);
-            cache.put_body(&id, &row).map_err(db_err)?;
-            notify(Event::BodyReady(id));
+        Command::Body(key) => {
+            let (acc, id) = accounts.locate(&key)?;
+            let row = body_row(acc.client.email_body(id).await?, acc.scope());
+            cache.put_body(&key, &row).map_err(db_err)?;
+            notify(Event::BodyReady(key));
         }
-        Command::Keyword { id, keyword, on } => client.set_keyword(&id, keyword, on).await?,
-        Command::Move { id, from, to } => {
-            if let Err(e) = client.move_email(&id, &from, &to).await {
-                restore(client, cache, index, &id, notify).await;
+        Command::Keyword { id: key, keyword, on } => {
+            let (acc, id) = accounts.locate(&key)?;
+            acc.client.set_keyword(id, keyword, on).await?;
+        }
+        Command::Move { id: key, from, to } => {
+            let moved = match accounts.locate(&key) {
+                Ok((acc, id)) => acc.client.move_email(id, unscoped(&from).1, unscoped(&to).1).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = moved {
+                restore(accounts, cache, index, &key, notify).await;
                 return Err(e);
             }
         }
-        Command::Destroy(id) => {
-            if let Err(e) = client.destroy_email(&id).await {
-                restore(client, cache, index, &id, notify).await;
+        Command::Destroy(key) => {
+            let destroyed = match accounts.locate(&key) {
+                Ok((acc, id)) => acc.client.destroy_email(id).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = destroyed {
+                restore(accounts, cache, index, &key, notify).await;
                 return Err(e);
             }
             if let Some(i) = index {
-                let _ = i.delete(std::slice::from_ref(&id));
+                let _ = i.delete(std::slice::from_ref(&key));
                 let _ = i.commit();
             }
         }
         Command::Send { draft, replace, ticket } => {
-            let r = send(client, cache, identities, &draft, replace.as_deref()).await;
+            let r = send(accounts, cache, send_as, &draft, replace.as_deref()).await;
             notify(match r {
                 Ok(()) => Event::Sent { ticket },
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
@@ -621,19 +849,31 @@ async fn handle(
         }
         Command::LoadMore { mailbox } => {
             // Ответ — всегда: интерфейс ждёт его, прежде чем просить следующую страницу.
-            let added = load_more(client, cache, index, &mailbox, notify).await;
+            let added = match accounts.locate(&mailbox) {
+                Ok((acc, _)) => load_more(acc, cache, index, &mailbox, notify).await,
+                Err(e) => Err(e),
+            };
             notify(Event::LoadedMore { mailbox, added: *added.as_ref().unwrap_or(&0) });
             notify(Event::EmailsChanged);
             added?;
         }
         Command::Search { query, mailbox, ticket } => {
-            let page = client.search(&query, mailbox.as_deref(), SEARCH_LIMIT).await?;
-            save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
-            notify(Event::SearchResults { ticket, ids: page.ids, total: page.total });
+            // В папке — в её аккаунте; во всех папках — в своём (общие ящики ищутся по своему кэшу).
+            let (acc, mb) = match &mailbox {
+                Some(key) => {
+                    let (acc, id) = accounts.locate(key)?;
+                    (acc, Some(id))
+                }
+                None => (&accounts.own, None),
+            };
+            let page = acc.client.search(&query, mb, SEARCH_LIMIT).await?;
+            save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+            let ids = page.ids.iter().map(|id| acc.key(id)).collect();
+            notify(Event::SearchResults { ticket, ids, total: page.total });
         }
         Command::Blob { blob_id, name, mime } => {
-            let acc = client.mail_account()?.to_string();
-            match client.download(&acc, &blob_id, &name, &mime).await {
+            let (acc, id) = accounts.locate(&blob_id)?;
+            match acc.client.download(&acc.id, id, &name, &mime).await {
                 Ok(data) => {
                     cache.put_blob(&blob_id, &data).map_err(db_err)?;
                     notify(Event::BlobReady { blob_id, data: Arc::new(data) });
@@ -643,7 +883,7 @@ async fn handle(
         }
         Command::RespondInvite { invite, status, in_reply_to } => {
             let uid = invite.event.uid.clone();
-            notify(match respond_invite(client, cache, identities, &invite, status, in_reply_to).await {
+            notify(match respond_invite(accounts, cache, identities, send_as, &invite, status, in_reply_to).await {
                 Ok(delivery) => Event::InviteAnswered { uid, status, delivery },
                 Err(e) => Event::InviteFailed { uid, error: e.to_string() },
             });
@@ -698,7 +938,7 @@ async fn handle(
             load_cards(client, notify).await;
         }
         Command::SaveDraft { draft, replace, ticket } => {
-            let r = save_draft(client, cache, &draft, replace.as_deref()).await;
+            let r = save_draft(accounts, cache, send_as, &draft, replace.as_deref()).await;
             notify(match r {
                 Ok(id) => Event::DraftSaved { ticket, id },
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
@@ -708,27 +948,28 @@ async fn handle(
     Ok(())
 }
 
-/// Следующая страница ящика после самого старого письма в кэше; сколько писем пришло.
+/// Следующая страница папки (ключ `mailbox`) после самого старого письма в кэше; сколько писем пришло.
 async fn load_more(
-    client: &Client,
+    acc: &MailAccount,
     cache: &mut Cache,
     index: &Index,
     mailbox: &str,
     notify: &impl Fn(Event),
 ) -> postman_jmap::Result<usize> {
+    let mb = unscoped(mailbox).1;
     let page = match cache.oldest(mailbox).map_err(db_err)? {
-        Some(anchor) => client.email_page_after(mailbox, &anchor, PAGE).await,
-        None => client.email_page(mailbox, 0, PAGE).await,
+        Some(anchor) => acc.client.email_page_after(mb, unscoped(&anchor).1, PAGE).await,
+        None => acc.client.email_page(mb, 0, PAGE).await,
     };
     // Якорь мог исчезнуть на сервере (удалён) — тогда по позиции.
     let page = match page {
         Err(postman_jmap::Error::Method { kind, .. }) if kind == "anchorNotFound" => {
-            client.email_page(mailbox, cache.count(mailbox).map_err(db_err)? as u64, PAGE).await?
+            acc.client.email_page(mb, cache.count(mailbox).map_err(db_err)? as u64, PAGE).await?
         }
         p => p?,
     };
     let added = page.emails.len();
-    save(cache, index, page.emails.iter().map(email_row).collect(), notify)?;
+    save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
     Ok(added)
 }
 
@@ -761,9 +1002,12 @@ async fn load_cards(client: &Client, notify: &impl Fn(Event)) {
 }
 
 /// Сервер не выполнил перенос или удаление: письмо — в кэш таким, какое оно на сервере (UI уже поменял кэш сам).
-async fn restore(client: &Client, cache: &mut Cache, index: &Index, id: &str, notify: &impl Fn(Event)) {
-    let restored = match client.email_get(&[id.to_owned()]).await {
-        Ok((emails, _)) => save(cache, index, emails.iter().map(email_row).collect(), notify),
+async fn restore(accounts: &Accounts, cache: &mut Cache, index: &Index, key: &str, notify: &impl Fn(Event)) {
+    let restored = match accounts.locate(key) {
+        Ok((acc, id)) => match acc.client.email_get(&[id.to_owned()]).await {
+            Ok((emails, _)) => save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify),
+            Err(e) => Err(e),
+        },
         Err(e) => Err(e),
     };
     match restored {
@@ -774,13 +1018,14 @@ async fn restore(client: &Client, cache: &mut Cache, index: &Index, id: &str, no
     }
 }
 
-fn mailbox_by_role(cache: &Cache, role: &str) -> postman_jmap::Result<String> {
+/// id сервера папки с ролью `role` в аккаунте `scope`.
+fn mailbox_by_role(cache: &Cache, scope: Option<&str>, role: &str) -> postman_jmap::Result<String> {
     cache
         .mailboxes()
         .map_err(db_err)?
         .into_iter()
-        .find(|m| m.role.as_deref() == Some(role))
-        .map(|m| m.id)
+        .find(|m| m.role.as_deref() == Some(role) && postman_cache::account_of(&m.id) == scope)
+        .map(|m| unscoped(&m.id).1.to_owned())
         .ok_or_else(|| postman_jmap::Error::Protocol(format!("no mailbox with role {role}")))
 }
 
@@ -790,54 +1035,70 @@ fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
         .map_err(|e| postman_jmap::Error::Protocol(format!("building the message: {e}")))
 }
 
-/// Догрузить вложения оригинала (пересылка), у которых есть только blob_id.
-async fn fill_attachments(client: &Client, cache: &Cache, draft: &mut Draft) -> postman_jmap::Result<()> {
-    let acc = client.mail_account()?.to_string();
+/// Догрузить вложения оригинала (пересылка), у которых есть только blob_id (ключ кэша: оригинал мог быть в
+/// общем ящике, а уходит письмо из своего).
+async fn fill_attachments(accounts: &Accounts, cache: &Cache, draft: &mut Draft) -> postman_jmap::Result<()> {
     for a in draft.attachments.iter_mut().filter(|a| a.data.is_empty()) {
         let Some(blob) = a.blob_id.clone() else { continue };
         a.data = match cache.blob(&blob).map_err(db_err)? {
             Some(d) => d,
-            None => client.download(&acc, &blob, &a.name, &a.mime).await?,
+            None => {
+                let (acc, id) = accounts.locate(&blob)?;
+                acc.client.download(&acc.id, id, &a.name, &a.mime).await?
+            }
         };
     }
     Ok(())
 }
 
+/// Отправитель черновика: Identity с адресом «От» (свой аккаунт или общий ящик), иначе первая своя.
+fn sender_of<'a>(send_as: &'a [SendAs], draft: &Draft) -> postman_jmap::Result<&'a SendAs> {
+    send_as
+        .iter()
+        .find(|f| f.identity.email.eq_ignore_ascii_case(&draft.from.email))
+        .or_else(|| send_as.iter().find(|f| f.scope.is_none()))
+        .or(send_as.first())
+        .ok_or_else(|| postman_jmap::Error::Protocol("no Identity on the server to send from".into()))
+}
+
+/// Отправить из аккаунта отправителя: черновик — в его «Черновики», копия — в его «Отправленные».
 async fn send(
-    client: &Client,
+    accounts: &Accounts,
     cache: &Cache,
-    identities: &[Identity],
+    send_as: &[SendAs],
     draft: &Draft,
     replace: Option<&str>,
 ) -> postman_jmap::Result<()> {
     let mut draft = draft.clone();
-    fill_attachments(client, cache, &mut draft).await?;
+    fill_attachments(accounts, cache, &mut draft).await?;
     let draft = &draft;
-    let identity = identities
-        .iter()
-        .find(|i| i.email.eq_ignore_ascii_case(&draft.from.email))
-        .or(identities.first())
-        .ok_or_else(|| postman_jmap::Error::Protocol("no Identity on the server to send from".into()))?;
+    let sender = sender_of(send_as, draft)?;
+    let acc = accounts
+        .by_scope(sender.scope.as_deref())
+        .ok_or_else(|| postman_jmap::Error::Protocol("the sender's account is gone".into()))?;
     let envelope = Envelope {
-        mail_from: identity.email.clone(),
+        mail_from: sender.identity.email.clone(),
         rcpt_to: draft.recipients().map(|a| a.email.clone()).collect(),
     };
-    let (drafts, sent) = (mailbox_by_role(cache, "drafts")?, mailbox_by_role(cache, "sent")?);
-    client.send(raw_message(draft)?, &identity.id, &envelope, &drafts, &sent).await?;
+    let (drafts, sent) = (mailbox_by_role(cache, acc.scope(), "drafts")?, mailbox_by_role(cache, acc.scope(), "sent")?);
+    acc.client.send(raw_message(draft)?, &sender.identity.id, &envelope, &drafts, &sent).await?;
     if let Some(old) = replace {
-        client.destroy_email(old).await?;
+        let (acc, id) = accounts.locate(old)?;
+        acc.client.destroy_email(id).await?;
     }
     Ok(())
 }
 
 async fn respond_invite(
-    client: &Client,
+    accounts: &Accounts,
     cache: &Cache,
     identities: &[Identity],
+    send_as: &[SendAs],
     inv: &Invitation,
     status: Partstat,
     in_reply_to: Option<String>,
 ) -> postman_jmap::Result<Delivery> {
+    let client = &accounts.own.client;
     // Отвечаем от того адреса, на который пришло приглашение (их может быть несколько).
     let identity = identities
         .iter()
@@ -851,18 +1112,40 @@ async fn respond_invite(
     let now = jiff::Timestamp::now().as_second();
     let draft = invite::reply_draft(inv, &me, status, in_reply_to, now)
         .ok_or_else(|| postman_jmap::Error::Protocol("the invitation has no organizer".into()))?;
-    send(client, cache, identities, &draft, None).await?;
+    send(accounts, cache, send_as, &draft, None).await?;
     // Ответ ушёл — дальше только своя копия; её сбой не повод слать ответ повторно.
     let imported = invite::import(client, inv, &me.email, status).await.unwrap_or(false);
     Ok(Delivery::Mail { imported })
 }
 
-async fn save_draft(client: &Client, cache: &Cache, draft: &Draft, replace: Option<&str>) -> postman_jmap::Result<String> {
+/// Черновик — в «Черновики» аккаунта отправителя; id — ключ кэша.
+async fn save_draft(
+    accounts: &Accounts,
+    cache: &Cache,
+    send_as: &[SendAs],
+    draft: &Draft,
+    replace: Option<&str>,
+) -> postman_jmap::Result<String> {
     let mut draft = draft.clone();
-    fill_attachments(client, cache, &mut draft).await?;
+    fill_attachments(accounts, cache, &mut draft).await?;
     let draft = &draft;
-    let drafts = mailbox_by_role(cache, "drafts")?;
-    client.save_draft(raw_message(draft)?, &drafts, replace).await
+    // Нет Identity (сервер не дал) — черновик всё равно в свой аккаунт.
+    let scope = sender_of(send_as, draft).ok().and_then(|f| f.scope.clone());
+    let acc = accounts.by_scope(scope.as_deref()).unwrap_or(&accounts.own);
+    let drafts = mailbox_by_role(cache, acc.scope(), "drafts")?;
+    // Прежняя версия — в том же аккаунте; отправитель сменился — прежнюю убрать отдельно.
+    let (same, other): (Option<&str>, Option<&str>) = match replace {
+        Some(old) if postman_cache::account_of(old) == acc.scope() => (Some(unscoped(old).1), None),
+        Some(old) => (None, Some(old)),
+        None => (None, None),
+    };
+    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same).await?;
+    if let Some(old) = other
+        && let Ok((prev, old_id)) = accounts.locate(old)
+    {
+        prev.client.destroy_email(old_id).await?;
+    }
+    Ok(acc.key(&id))
 }
 
 /// Записать письма в кэш и в поисковый индекс. У писем с уже загруженным телом краткая
@@ -884,7 +1167,8 @@ fn db_err(e: postman_cache::Error) -> postman_jmap::Error {
     postman_jmap::Error::Protocol(format!("{CACHE_ERROR}{e}"))
 }
 
-fn body_row(b: EmailBody) -> BodyRow {
+/// Тело письма для кэша; id блобов вложений — ключи аккаунта `scope`.
+fn body_row(b: EmailBody, scope: Option<&str>) -> BodyRow {
     BodyRow {
         to: addresses(&b.to),
         cc: addresses(&b.cc),
@@ -898,7 +1182,7 @@ fn body_row(b: EmailBody) -> BodyRow {
             .iter()
             .filter_map(|p| {
                 Some(AttachmentRow {
-                    blob_id: p.blob_id.clone()?,
+                    blob_id: scoped(scope, p.blob_id.as_deref()?),
                     name: p.name.clone().unwrap_or_else(|| "вложение".into()),
                     mime: p.mime.clone(),
                     size: p.size,
@@ -916,24 +1200,38 @@ fn addresses(list: &[EmailAddress]) -> Vec<Addr> {
         .collect()
 }
 
-fn mailbox_row(m: &Mailbox) -> MailboxRow {
+fn rights(r: &MailboxRights) -> Rights {
+    Rights {
+        read: r.may_read_items,
+        add: r.may_add_items,
+        remove: r.may_remove_items,
+        seen: r.may_set_seen,
+        keywords: r.may_set_keywords,
+        submit: r.may_submit,
+    }
+}
+
+/// Папка для кэша; id и родитель — ключи аккаунта `scope`.
+fn mailbox_row(m: &Mailbox, scope: Option<&str>) -> MailboxRow {
     MailboxRow {
-        id: m.id.clone(),
-        parent_id: m.parent_id.clone(),
+        id: scoped(scope, &m.id),
+        parent_id: m.parent_id.as_deref().map(|p| scoped(scope, p)),
         name: m.name.clone(),
         role: m.role.clone(),
         sort_order: m.sort_order,
         total: m.total_emails,
         unread: m.unread_emails,
+        rights: rights(&m.my_rights),
     }
 }
 
-fn email_row(e: &EmailSummary) -> EmailRow {
+/// Письмо для кэша; id, цепочка и папки — ключи аккаунта `scope`.
+fn email_row(e: &EmailSummary, scope: Option<&str>) -> EmailRow {
     let from = e.from.as_ref().and_then(|f| f.first());
     EmailRow {
-        id: e.id.clone(),
-        thread_id: e.thread_id.clone(),
-        mailbox_ids: e.mailbox_ids.iter().filter(|(_, v)| **v).map(|(k, _)| k.clone()).collect(),
+        id: scoped(scope, &e.id),
+        thread_id: scoped(scope, &e.thread_id),
+        mailbox_ids: e.mailbox_ids.iter().filter(|(_, v)| **v).map(|(k, _)| scoped(scope, k)).collect(),
         received_at: utc_to_unix(&e.received_at).unwrap_or(0),
         subject: e.subject.clone().unwrap_or_default(),
         from_name: from.map(|a| a.display().to_string()).unwrap_or_default(),
@@ -953,15 +1251,70 @@ mod tests {
     #[test]
     fn push_tells_mail_from_calendar() {
         let mail = r#"{"@type":"StateChange","changed":{"a1":{"Email":"s1","Mailbox":"s2"}}}"#;
-        assert_eq!(Changed::of(mail), Changed { mail: true, calendar: false });
+        let only = |ids: &[&str]| MailChange::In(ids.iter().map(|s| s.to_string()).collect());
+        assert_eq!(Changed::of(mail), Changed { mail: only(&["a1"]), calendar: false });
         let cal = r#"{"@type":"StateChange","changed":{"a1":{"CalendarEvent":"s3"}}}"#;
-        assert_eq!(Changed::of(cal), Changed { mail: false, calendar: true });
+        assert_eq!(Changed::of(cal), Changed { mail: MailChange::None, calendar: true });
         let other = r#"{"@type":"StateChange","changed":{"a1":{"ContactCard":"s4"}}}"#;
         assert_eq!(Changed::of(other), Changed::default());
         // Не разобралось — сверить всё.
         assert_eq!(Changed::of("not json"), Changed::ALL);
         assert_eq!(Changed::of("{}"), Changed::ALL);
-        assert_eq!(Changed::of(mail).or(Changed::of(cal)), Changed::ALL);
+        assert_eq!(Changed::of(mail).or(Changed::of(cal)), Changed { mail: only(&["a1"]), calendar: true });
+    }
+
+    /// Общие ящики (S4-06): push называет аккаунты — сверяются только они.
+    #[test]
+    fn push_names_the_accounts_to_refresh() {
+        let both = r#"{"@type":"StateChange","changed":{"e":{"Email":"s1"},"i":{"Mailbox":"s2"},"j":{"Quota":"q"}}}"#;
+        let c = Changed::of(both);
+        assert!(c.mail.touches("e") && c.mail.touches("i") && !c.mail.touches("j"));
+        let shared = Changed::of(r#"{"@type":"StateChange","changed":{"i":{"EmailDelivery":"s"}}}"#);
+        assert!(shared.mail.touches("i") && !shared.mail.touches("e"));
+        assert!(!MailChange::None.touches("e") && MailChange::All.touches("e"));
+        assert_eq!(shared.clone().or(Changed::ALL).mail, MailChange::All);
+        let merged = shared.or(Changed::of(r#"{"@type":"StateChange","changed":{"e":{"Email":"s"}}}"#));
+        assert!(merged.mail.touches("e") && merged.mail.touches("i"));
+    }
+
+    fn identity(id: &str, email: &str) -> Identity {
+        Identity { id: id.into(), name: String::new(), email: email.into(), text_signature: String::new() }
+    }
+
+    /// Отправители (S4-06): свои — первыми; адрес общего ящика, который сервер дал и своему аккаунту, — из общего.
+    #[test]
+    fn shared_identity_wins_over_own_copy() {
+        let own = [identity("b", "user3@itt.test"), identity("c", "Shared-Sales@itt.test")];
+        let shared = [("i".to_string(), vec![identity("b", "shared-sales@itt.test")])];
+        let all = senders(&own, &shared);
+        let got: Vec<(Option<&str>, &str)> = all.iter().map(|f| (f.scope.as_deref(), f.identity.email.as_str())).collect();
+        assert_eq!(got, [(None, "user3@itt.test"), (Some("i"), "shared-sales@itt.test")]);
+        let draft = |from: &str| Draft { from: Address::new("", from), ..Default::default() };
+        assert_eq!(sender_of(&all, &draft("SHARED-sales@itt.test")).unwrap().scope.as_deref(), Some("i"));
+        // Адреса нет среди Identity — своя.
+        assert_eq!(sender_of(&all, &draft("x@itt.test")).unwrap().identity.id, "b");
+        assert!(sender_of(&[], &draft("x@itt.test")).is_err());
+    }
+
+    /// Ключи кэша общего ящика: письмо, папки, цепочка и вложения — с префиксом аккаунта.
+    #[test]
+    fn shared_rows_are_scoped() {
+        let e: EmailSummary = serde_json::from_value(serde_json::json!({
+            "id": "eaaaaab", "threadId": "b", "mailboxIds": { "a": true, "d": false },
+            "receivedAt": "2026-10-20T18:00:58Z", "subject": "Hi", "from": [{ "name": "S", "email": "s@x" }]
+        }))
+        .unwrap();
+        let row = email_row(&e, Some("i"));
+        assert_eq!((row.id.as_str(), row.thread_id.as_str(), row.mailbox_ids.as_slice()), ("i/eaaaaab", "i/b", &["i/a".to_string()][..]));
+        assert_eq!(email_row(&e, None).id, "eaaaaab");
+        let m: Mailbox = serde_json::from_value(serde_json::json!({
+            "id": "c", "name": "Sub", "parentId": "a", "role": null,
+            "myRights": { "mayReadItems": true, "mayAddItems": false, "mayRemoveItems": false, "maySetSeen": true, "maySetKeywords": false }
+        }))
+        .unwrap();
+        let mb = mailbox_row(&m, Some("j"));
+        assert_eq!((mb.id.as_str(), mb.parent_id.as_deref()), ("j/c", Some("j/a")));
+        assert!(mb.rights.seen && !mb.rights.remove && !mb.rights.keywords);
     }
 
     #[test]

@@ -110,7 +110,10 @@ pub(crate) enum Removal {
 }
 
 pub(crate) fn removal(from: &str, mailboxes: &[MailboxRow]) -> Removal {
-    match mailboxes.iter().find(|m| m.role.as_deref() == Some("trash")) {
+    // «Удалённые» того же аккаунта: письмо общего ящика (S4-06) остаётся в нём.
+    let account = postman_cache::account_of(from);
+    let trash = mailboxes.iter().find(|m| m.role.as_deref() == Some("trash") && postman_cache::account_of(&m.id) == account);
+    match trash {
         Some(t) if t.id != from => Removal::Move { from: from.to_owned(), to: t.id.clone() },
         _ => Removal::Purge,
     }
@@ -152,7 +155,8 @@ impl Mailer {
     /// об этом уже тост).
     fn respond_now(&mut self, mode: Mode, id: &str, cx: &mut Context<Self>) -> bool {
         let live = self.backend.is_live();
-        let identity = self.compose.me().cloned();
+        // Письмо общего ящика (S4-06) — ответ от его имени, если сервер дал его Identity; иначе от своего.
+        let identity = self.compose.sender_for(postman_cache::account_of(id)).or_else(|| self.compose.me().cloned());
         let reading = self.reading.read(cx);
         let Some(r) = reading.reading.as_ref().filter(|r| r.row.id == id) else { return false };
         let (Some(body), Some(doc)) = (&r.body, &r.doc) else { return false };
@@ -175,6 +179,10 @@ impl Mailer {
         let from =
             list.mailbox.clone().filter(|m| row.mailbox_ids.contains(m)).or_else(|| row.mailbox_ids.first().cloned());
         let Some(from) = from else { return };
+        // Папка общего ящика, открытая только для чтения (S4-06): удалять из неё нельзя.
+        if !crate::list::may(&list.rights, &row, |r| r.remove) {
+            return self.toast(Toast::Info, tr!("shared-read-only-delete"), cx);
+        }
         match removal(&from, &self.folders.read(cx).mailboxes) {
             Removal::Purge => self.list.update(cx, |l, cx| l.ask_purge(index, row, cx)),
             m @ Removal::Move { .. } => self.remove(row, index, m, cx),
@@ -346,13 +354,17 @@ mod tests {
             sort_order: 0,
             total: 0,
             unread: 0,
+            rights: postman_cache::Rights::ALL,
         };
-        let boxes = [mb("in", Some("inbox")), mb("del", Some("trash")), mb("arch", None)];
+        let boxes = [mb("in", Some("inbox")), mb("i/del", Some("trash")), mb("del", Some("trash")), mb("arch", None)];
         assert_eq!(removal("in", &boxes), Removal::Move { from: "in".into(), to: "del".into() });
         assert_eq!(removal("arch", &boxes), Removal::Move { from: "arch".into(), to: "del".into() });
         // Из «Удалённых» — насовсем (после подтверждения); нет такой папки — тоже.
         assert_eq!(removal("del", &boxes), Removal::Purge);
-        assert_eq!(removal("in", &boxes[..1]), Removal::Purge);
+        assert_eq!(removal("in", &boxes[..2]), Removal::Purge);
+        // Общий ящик (S4-06) — в свои «Удалённые», не в чужие.
+        assert_eq!(removal("i/in", &boxes), Removal::Move { from: "i/in".into(), to: "i/del".into() });
+        assert_eq!(removal("j/in", &boxes), Removal::Purge);
 
         // Кэш: в «Удалённые» — из папки ушло, следующее письмо на его месте; насовсем — и из «Удалённых».
         let cache = postman_cache::Cache::open_in_memory().unwrap();
