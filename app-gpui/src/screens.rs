@@ -268,8 +268,8 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             if !m.backend.is_live() {
                 m.set_vacation_state(Some(crate::settings::screen_sample()), cx);
                 // Строка состояния — с заполненностью ящика: 12 % из 2 ГБ.
-                let limit = 2 << 30;
-                m.set_quota(Some(postman_core::settings::Usage { used: limit * 12 / 100, limit }), cx);
+                let limit: u64 = 2 << 30;
+                m.set_quota(Some(postman_core::settings::Usage { used: limit / 8, limit }), cx);
             }
             m.open_vacation(window, cx);
         }

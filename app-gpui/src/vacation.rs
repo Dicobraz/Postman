@@ -275,7 +275,21 @@ impl VacationPanel {
     }
 }
 
-/// Флажок: «☑ текст», нажатие — переключить.
+/// Квадратик флажка: включён — залит акцентом с галочкой.
+pub(crate) fn checkbox(on: bool) -> Div {
+    div()
+        .size(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(if on { ACCENT } else { 0x8a8a8a }))
+        .when(on, |d| d.bg(rgb(ACCENT)).text_color(rgb(0xffffff)).text_size(px(11.)).child("✓"))
+}
+
+/// Флажок с подписью, нажатие — переключить.
 fn check(id: &'static str, on: bool, label: String, enabled: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -284,7 +298,7 @@ fn check(id: &'static str, on: bool, label: String, enabled: bool) -> Stateful<D
         .gap_2()
         .when(enabled, |d| d.cursor_pointer())
         .when(!enabled, |d| d.text_color(rgb(MUTED)))
-        .child(div().text_color(rgb(ACCENT)).child(if on { "☑" } else { "☐" }))
+        .child(checkbox(on))
         .child(label)
 }
 
