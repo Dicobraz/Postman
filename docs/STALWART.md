@@ -32,12 +32,14 @@ cargo test -p postman-core --test stand -- --ignored
 | `invitation_round_trip` | приглашение → у участника по uid → «принять» → у организатора accepted → удаление → отмена |
 | `free_busy_after_sharing` | `Calendar/set shareWith` → `Principal/getAvailability` у коллеги |
 | `contacts_are_read` | `ContactCard` → имя и адреса |
+| `contacts_are_edited_and_directory_is_listed` | S4-02, user3: `ContactCard/set` create (телефон, организация, должность) → update патчем (адрес добавлен, телефон убран `null`, имя и должность другие) → destroy; `Principal/query` без фильтра — user1…3 типа `individual` |
+| `contacts_through_sync` | S4-02, user3, через поток синхронизации: после входа `ContactsLoaded` и `DirectoryLoaded`; `SaveContact` (новая, затем правка) и `DeleteContact` → итог и свежий `ContactsLoaded` |
 | `calendar_through_sync` | S3-05, через поток синхронизации: `ShareFreeBusy` (user3 → user1), `CreateMeeting` с приглашением → у user3 по uid, `Events` → встреча в неделе, `Availability` → занятость user3 |
 | `rejected_password_stops_sync_with_auth_error` | S4-03: неверный пароль → `Error` рода `Auth` на шаге `Connect`, поток синхронизации закрывается без повторов |
 | `load_more_through_sync` | S4-03: `LoadMore` после первой страницы → `LoadedMore` с числом писем следующей страницы |
 | `calendar_change_arrives_by_push` | S4-03: событие календаря, созданное другим клиентом → push → один `CalendarChanged` (~1,5 с, задержка на пачку), письма не перечитываются |
 
-Последний прогон — 2026-10-20, напрямую по HTTPS: 11 из 11 (S4-03).
+Последний прогон — 2026-10-20, напрямую по HTTPS: 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
 ## Поведение сервера
 
@@ -62,6 +64,12 @@ cargo test -p postman-core --test stand -- --ignored
    шаринге «только занятость» — ответ на вопрос `docs/HANDOFF.md` §4 п. 3–4. Postman ходит по JMAP — не затронут.
 7. **Контакты:** сервер сам заполняет `name.full` по компонентам в их порядке (`isOrdered`), клиент показывает
    `full` — порядок «Фамилия Имя» задаётся при создании карточки.
+8. **Правка контактов:** `name` только с `full` (без компонентов) сервер хранит как есть — клиент создаёт и правит
+   карточку одним полем «Имя». Патч `ContactCard/set` по свойствам целиком (`emails`, `phones`, `organizations`,
+   `titles`); `null` убирает свойство. Клиент шлёт только изменённые свойства (`ContactCard::patch`).
+9. **Справочник:** `Principal/query` без фильтра отдаёт всех (сотрудники и `admin`);
+   `name` — логин (адрес), а не ФИО: имя из каталога организации появится, когда сервер возьмёт его из OIDC/LDAP
+   [проверить]. Группы и записи без адреса клиент не показывает (`postman_core::contacts::directory`).
 
 8. **Push по типам.** Событие `state` перечисляет изменившиеся типы по аккаунтам (`changed.<аккаунт>.<тип>`):
    почта — `Email`, `Mailbox`, `Thread`, `EmailDelivery`; календарь — `CalendarEvent` (и `Calendar`,
