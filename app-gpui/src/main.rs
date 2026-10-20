@@ -32,6 +32,7 @@ mod meeting;
 mod settings;
 mod vacation;
 mod contacts;
+mod rules;
 
 pub(crate) use mailer::{Mailer, Section};
 

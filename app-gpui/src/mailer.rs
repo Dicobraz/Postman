@@ -291,6 +291,7 @@ impl Render for Mailer {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
+            .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
             .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))

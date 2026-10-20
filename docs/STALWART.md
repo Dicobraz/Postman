@@ -40,6 +40,8 @@ cargo test -p postman-core --test stand -- --ignored
 | `calendar_change_arrives_by_push` | S4-03: событие календаря, созданное другим клиентом → push → один `CalendarChanged` (~1,5 с, задержка на пачку), письма не перечитываются |
 | `stand_settings::vacation_reply_round_trip` | S4-05: автоответ user2 включён (`settings::Request::SetVacation`) → письмо от user1 → автоответ у user1 → выключен, письма удалены |
 | `stand_settings::quota_is_read` | S4-05: `Quota/get` без ошибки (на стенде квот нет — пустой список) |
+| `stand_settings::rule_files_by_subject_with_vacation` | S4-07: папка Y (`Mailbox/set`), правило «тема содержит X → Y» (`SaveRules`), автоответ при правилах → письмо от user1 в Y у user2 и автоответ у user1 → правила, папка, письма убраны |
+| `stand_settings::invalid_script_is_rejected_by_validate` | S4-07: неверный скрипт — `SaveError::Invalid` с местом ошибки, скрипты сервера не изменились |
 
 Последний прогон — 2026-10-20, напрямую по HTTPS: 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
@@ -93,6 +95,16 @@ cargo test -p postman-core --test stand -- --ignored
    отправителю сервер, по RFC 5230, подавляет — тест берёт новую тему на каждый прогон [проверить срок подавления].
 15. **Квота** (RFC 9425): у пользователей стенда `Quota/get` — пустой список (ограничений нет), строка состояния без
    заполненности; ящик с квотой — [проверить] (на стенде не задана).
+10. **Правила — Sieve** (RFC 9661, S4-07). Скрипты — blob: загрузка, затем `SieveScript/validate` по `blobId`
+    (ошибка — `invalidScript` с местом: «… at line 4, column 1») и `SieveScript/set` (неверный скрипт —
+    `notCreated`/`invalidScript`); `blobId` записанного скрипта — свой, не загруженный. Активен один скрипт:
+    `onSuccessActivateScript` переключает, `onSuccessDeactivateScript` — ни одного; активный не удаляется.
+    `fileinto :mailboxid` требует ещё `require "mailbox"` (иначе «Undeclared capability 'mailbox'»). Адрес
+    `redirect` сервер не проверяет (пустой принят) — проверяет клиент. `include :personal :optional "vacation"`
+    принят, и автоответ из подключённого скрипта работает при активных правилах (тест). Postman пишет скрипт
+    `postman` (`crates/core/src/rules.rs`); при включённом автоответе и правилах — `include`, `isEnabled` сервера тогда
+    `false`, клиент считает автоответ включённым по своему скрипту. Другие скрипты — только просмотр; замена
+    активного — после «Заменить».
 
 16. **Ограничение входящих на получателя** (2026-10-20): после десятков писем одному адресу за короткое время
     Stalwart пишет в журнал `smtp.rate-limit-exceeded` и **молча** не доставляет следующие, в том числе приглашения
