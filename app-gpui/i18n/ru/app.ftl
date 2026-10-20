@@ -27,24 +27,6 @@ status-items = Элементов: { $n }
 status-notifications = 🔔 { $n }
 second-instance = Postman уже запущен — показано это окно.
 
-# Календарь.
-cal-work-week = Рабочая неделя
-cal-assistant = 👥 Помощник планирования (Ctrl+Shift+Q)
-cal-me = Я
-cal-day = { $d ->
-    [0] Пн
-    [1] Вт
-    [2] Ср
-    [3] Чт
-   *[4] Пт
-}
-cal-minutes = { $n } мин
-cal-free-for-all = Свободно у всех:
-cal-busy = занят
-cal-tentative = под вопросом
-cal-unavailable = нет на месте
-cal-off-hours = нерабочее время
-
 # Сбой запуска (журнал Windows и stderr).
 fatal-data-dir = каталог данных
 fatal-bench-mailbox = ящик для замера

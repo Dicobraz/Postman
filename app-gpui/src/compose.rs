@@ -417,7 +417,8 @@ pub(crate) type Book = Rc<RefCell<AddressBook>>;
 pub(crate) struct Composers {
     windows: Vec<WeakEntity<Composer>>,
     me: Option<(Address, String)>,
-    book: Book,
+    /// Общая с окном встречи (S3-05).
+    pub(crate) book: Book,
     book_started: bool,
 }
 
@@ -477,7 +478,7 @@ impl Mailer {
     }
 
     /// Книга адресов из хранилища — в фоне, один раз; окна видят её, как только она готова.
-    fn load_address_book(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_address_book(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.compose.book_started, true) {
             return;
         }

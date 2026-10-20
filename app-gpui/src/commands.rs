@@ -24,7 +24,12 @@ pub mod search {
 }
 
 pub mod calendar {
-    gpui_kit::actions!(calendar, [NewMeeting]);
+    gpui_kit::actions!(calendar, [NewMeeting, PrevWeek, NextWeek, Today]);
+}
+
+/// Окно встречи (S3-05).
+pub mod meeting {
+    gpui_kit::actions!(meeting, [Send, Close]);
 }
 
 /// Окно письма (S3-01).
@@ -40,6 +45,8 @@ const MAILER: Option<&str> = Some("Mailer");
 /// отправка, а не перевод строки), а при равной глубине побеждает привязка, заданная позже (`bind` — после
 /// `gpui_kit::init`).
 const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
+/// Окно встречи, как окно письма.
+const MEETING: Option<&str> = Some("Meeting || (Meeting > Input)");
 
 const fn cmd(id: &'static str, keys: &'static [&'static str], context: Option<&'static str>) -> Command {
     Command { id, keys, context }
@@ -69,11 +76,17 @@ pub const COMMANDS: &[Command] = &[
     cmd("search.focus", &["ctrl-e"], None),
     cmd("search.clear", &["escape"], None),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
+    // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — кнопкой.
+    cmd("calendar.prev_week", &["alt-up"], MAILER),
+    cmd("calendar.next_week", &["alt-down"], MAILER),
+    cmd("calendar.today", &[], MAILER),
     cmd("compose.send", &["ctrl-enter", "alt-s"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
     cmd("compose.attach", &[], COMPOSER),
     cmd("compose.preview", &["ctrl-shift-p"], COMPOSER),
     cmd("compose.close", &["escape"], COMPOSER),
+    cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
+    cmd("meeting.close", &["escape"], MEETING),
 ];
 
 /// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал
