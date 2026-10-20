@@ -43,7 +43,13 @@ impl Render for Folders {
                     .when(selected, |d| d.bg(rgb(0xcce4ff)))
                     .hover(|d| d.bg(rgb(0xe8f1fb)))
                     .cursor_pointer()
-                    .child(m.name.clone())
+                    .flex()
+                    .gap_2()
+                    .child(div().flex_1().truncate().child(m.name.clone()))
+                    // Непрочитанные — с сервера (`Mailbox.unreadEmails`), а не по загруженной части папки.
+                    .when(m.unread > 0, |d| {
+                        d.child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x0f6cbd)).child(m.unread.to_string()))
+                    })
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Open(id.clone())))),
             );
         }
@@ -57,7 +63,7 @@ impl Render for Folders {
                 .border_color(rgb(0xdddddd))
                 .child(nav("nav-mail", tr!("nav-mail"), self.section == Section::Mail, Section::Mail, cx))
                 .child(nav("nav-cal", tr!("nav-calendar"), self.section == Section::Calendar, Section::Calendar, cx))
-                .child(tr!("nav-contacts")),
+                .child(nav("nav-contacts", tr!("nav-contacts"), self.section == Section::Contacts, Section::Contacts, cx)),
         )
     }
 }

@@ -433,6 +433,11 @@ impl Composers {
             Event::Contacts(list) => {
                 self.book.borrow_mut().add_contacts(list.iter().map(|(n, e)| (n.as_str(), e.as_str())));
             }
+            // Сотрудники, переговорные и ресурсы (S4-02).
+            Event::DirectoryLoaded(people) => {
+                let items = people.iter().filter_map(|p| Some((p.name.as_str(), p.email.as_deref()?)));
+                self.book.borrow_mut().add_directory(items);
+            }
             _ => {}
         }
         self.windows.retain(|w| w.update(cx, |c, cx| c.on_sync(ev, cx)).is_ok());
@@ -489,7 +494,15 @@ impl Mailer {
         }
         let cache = self.cache.clone();
         let me = self.compose.me.as_ref().map(|(a, _)| a.email.clone()).unwrap_or_default();
-        let task = cx.background_spawn(async move { AddressBook::from_cache(&cache, &me) });
+        // Демо: контакты и справочник демо-набора (у живого ящика они придут с сервера).
+        let demo = !self.backend.is_live();
+        let task = cx.background_spawn(async move {
+            let mut book = AddressBook::from_cache(&cache, &me);
+            if demo {
+                crate::contacts::add_demo(&mut book);
+            }
+            book
+        });
         let book = self.compose.book.clone();
         cx.spawn(async move |_, _| {
             let mut built = task.await;
