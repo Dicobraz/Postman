@@ -42,8 +42,11 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_settings::quota_is_read` | S4-05: `Quota/get` без ошибки (на стенде квот нет — пустой список) |
 | `stand_settings::rule_files_by_subject_with_vacation` | S4-07: папка Y (`Mailbox/set`), правило «тема содержит X → Y» (`SaveRules`), автоответ при правилах → письмо от user1 в Y у user2 и автоответ у user1 → правила, папка, письма убраны |
 | `stand_settings::invalid_script_is_rejected_by_validate` | S4-07: неверный скрипт — `SaveError::Invalid` с местом ошибки, скрипты сервера не изменились |
+| `stand_shared::shared_inbox_is_synced_read_and_flagged` | S4-06, user3: ящик группы `shared-sales` в сессии и в кэше (ключи `<аккаунт>/<id>`); письмо на адрес группы → по push аккаунта группы в кэш (~1 с) → `Body` → `Keyword $flagged` на сервере в аккаунте группы → убрано |
+| `stand_shared::mail_is_sent_as_the_shared_mailbox` | S4-06: `Senders` — свой адрес первым, адрес группы — из её аккаунта; `Send` от имени группы → у получателя «От» группы, копия — в «Отправленных» группы, не в своих → убрано |
+| `stand_shared::read_only_share_has_rights_but_no_identity` | S4-06: папка `shared-ro`, открытая только для чтения: `myRights` без добавления, удаления и отправки; `Identity/get` — `forbidden` |
 
-Последний прогон — 2026-10-20, напрямую по HTTPS: 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
+Последний прогон — 2026-10-20, напрямую по HTTPS: `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
 ## Поведение сервера
 
@@ -111,6 +114,36 @@ cargo test -p postman-core --test stand -- --ignored
     (iTIP): у отправителя `CalendarEvent/set` успешен, у получателя ни события, ни письма. Тесты стенда, которые шлют
     user2 много писем (`stand`, `stand_settings`), лучше не гонять подряд; при сбое `invitation_round_trip` — смотреть
     журнал сервера. Для клиента: «приглашение отправлено» не значит «доставлено» [проверить порог на рабочем сервере].
+
+17. **Общий ящик группы** (S4-06). Группа (`x:Account/set` `@type: Group`; участник — `memberGroupIds` у пользователя)
+    даёт участнику в `session.accounts` аккаунт группы: `isPersonal: false`, `isReadOnly: false`, capabilities почты
+    и отправки; папки — свои (`Inbox`, `Sent Items`…), `myRights` — полные. Письмо на адрес группы ложится во
+    «Входящие» аккаунта группы (участникам не рассылается). id папок и писем — в пределах аккаунта и совпадают с id
+    своего ящика (`a`, `b`…): клиент хранит в кэше ключи `<аккаунт>/<id>` (`postman_cache::scoped`), свои — без префикса.
+18. **Папка, открытая другому** (`Mailbox/set` `shareWith: { <principal>: { mayReadItems, maySetSeen } }` у владельца):
+    у получателя в сессии — аккаунт владельца, в нём только эта папка; `isReadOnly` аккаунта — `false` и при шаринге
+    «только чтение», права — только в `myRights` папки. Stalwart ставит и `maySetKeywords: true`, хотя его не давали
+    [проверить: правило ACL или баг]; `mayAddItems`, `mayRemoveItems`, `maySubmit` — `false`. Клиент: папка без
+    добавления и удаления — «только чтение» (удалять нельзя, флаги — по своим правам), ветка, где так все папки, —
+    с подписью «только чтение».
+19. **Отправка от имени общего ящика.** В аккаунте группы `Identity/get` отдаёт Identity с адресом группы;
+    `EmailSubmission/set` в аккаунте группы с ней проходит: у получателя «От» — адрес группы, копия — в «Отправленных»
+    группы. Ещё Stalwart заводит участнику Identity с адресом группы в его собственном аккаунте (отправка оттуда тоже
+    проходит, но копия — в свои «Отправленные»); клиент для адреса группы берёт Identity её аккаунта
+    (`sync::senders`). Чужой ящик без группы (открыта папка) — `Identity/get` → `forbidden` («You are not an owner of
+    account …»): отправлять от его имени нельзя, в «От» его нет. «От имени» с заголовком `Sender` (делегирование через
+    право `submit` на папку) — [проверить].
+20. **Push по аккаунтам.** EventSource участника присылает и `changed.<аккаунт группы>`: письмо в ящик группы приходит
+    в кэш за ~1 с (тест). Для папки, открытой другим пользователем, — тоже по аккаунту владельца [проверить]. Клиент
+    сверяет только названные аккаунты (`sync::MailChange`), опрос раз в 2 минуты — все.
+
+## Общие ящики на стенде (S4-06)
+
+- `shared-sales@itt.test` — группа (`x:Account/set` от имени администратора), user3 — участник; пароля нет.
+- `shared-ro@itt.test` — пользователь (пароль — в файле владельца рядом с остальными); его «Входящие» открыты user3
+  только для чтения (`Mailbox/set` `shareWith` на principal user3).
+- Смотрит user3; тест — `cargo test -p postman-core --test stand_shared -- --ignored`, по одному письму на прогон и
+  адрес (п. 16).
 
 ## Большой ящик (S4-03)
 

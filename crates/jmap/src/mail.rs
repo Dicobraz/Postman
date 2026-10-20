@@ -20,6 +20,34 @@ pub struct Mailbox {
     pub total_emails: u32,
     #[serde(default)]
     pub unread_emails: u32,
+    /// Мои права на папку (RFC 8621 §2): в общем ящике часть действий может быть запрещена.
+    #[serde(default)]
+    pub my_rights: MailboxRights,
+}
+
+/// Права на папку; сервер не прислал — всё разрешено (своя папка).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MailboxRights {
+    pub may_read_items: bool,
+    pub may_add_items: bool,
+    pub may_remove_items: bool,
+    pub may_set_seen: bool,
+    pub may_set_keywords: bool,
+    pub may_submit: bool,
+}
+
+impl Default for MailboxRights {
+    fn default() -> Self {
+        Self {
+            may_read_items: true,
+            may_add_items: true,
+            may_remove_items: true,
+            may_set_seen: true,
+            may_set_keywords: true,
+            may_submit: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -371,6 +399,21 @@ mod tests {
         assert_eq!(utc_to_unix("2026-10-17T12:30:00Z"), Some(1_792_240_200));
         assert_eq!(utc_to_unix("2000-02-29T00:00:00Z"), Some(951_782_400));
         assert_eq!(utc_to_unix("мусор"), None);
+    }
+
+    #[test]
+    fn mailbox_rights_default_to_all() {
+        // Папка, открытая только для чтения (стенд, S4-06): прочие права — как прислал сервер.
+        let m: Mailbox = serde_json::from_value(json!({
+            "id": "a", "name": "Inbox", "parentId": null, "role": "inbox",
+            "myRights": { "mayReadItems": true, "mayAddItems": false, "mayRemoveItems": false, "maySetSeen": true,
+                          "maySetKeywords": true, "mayCreateChild": false, "maySubmit": false }
+        }))
+        .unwrap();
+        assert!(m.my_rights.may_read_items && m.my_rights.may_set_seen);
+        assert!(!m.my_rights.may_remove_items && !m.my_rights.may_add_items && !m.my_rights.may_submit);
+        let own: Mailbox = serde_json::from_value(json!({ "id": "b", "name": "x", "parentId": null, "role": null })).unwrap();
+        assert_eq!(own.my_rights, MailboxRights::default());
     }
 
     #[test]

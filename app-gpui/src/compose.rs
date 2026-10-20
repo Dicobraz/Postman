@@ -22,7 +22,7 @@ use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_compose::{Address, Attachment, Draft, parse_addresses};
 use postman_core::contacts::AddressBook;
-use postman_core::sync::{Command, Event};
+use postman_core::sync::{Command, Event, Sender};
 use postman_ir::Document;
 use postman_worker::{Client as Worker, Request};
 
@@ -192,6 +192,16 @@ impl Model {
         self.body = block;
         self.saved = self.snapshot();
         true
+    }
+
+    /// Отправитель («От»).
+    pub(crate) fn from(&self) -> &Address {
+        &self.base.from
+    }
+
+    /// Другой отправитель из списка «От» (свой адрес или общий ящик, S4-06). Текст письма не меняется.
+    pub(crate) fn set_from(&mut self, from: Address) {
+        self.base.from = from;
     }
 
     pub(crate) fn field(&self, f: Field) -> &str {
@@ -417,6 +427,8 @@ pub(crate) type Book = Rc<RefCell<AddressBook>>;
 pub(crate) struct Composers {
     windows: Vec<WeakEntity<Composer>>,
     me: Option<(Address, String)>,
+    /// Адреса, от которых можно отправить (S4-06): свои и общих ящиков.
+    senders: Vec<Sender>,
     /// Общая с окном встречи (S3-05).
     pub(crate) book: Book,
     book_started: bool,
@@ -430,6 +442,7 @@ impl Composers {
                 self.me = Some((address.clone(), signature.clone()));
                 self.book.borrow_mut().remove(&address.email);
             }
+            Event::Senders(list) => self.senders = list.clone(),
             Event::Contacts(list) => {
                 self.book.borrow_mut().add_contacts(list.iter().map(|(n, e)| (n.as_str(), e.as_str())));
             }
@@ -448,6 +461,15 @@ impl Composers {
         self.me.as_ref()
     }
 
+    /// Отправитель общего ящика `account` (ответ на письмо из него уходит от его имени), если сервер его дал.
+    pub(crate) fn sender_for(&self, account: Option<&str>) -> Option<(Address, String)> {
+        let account = account?;
+        self.senders
+            .iter()
+            .find(|s| s.account.as_deref() == Some(account))
+            .map(|s| (s.address.clone(), s.signature.clone()))
+    }
+
     /// Последнее открытое окно (снимки `--screens`).
     pub(crate) fn last(&self) -> Option<Entity<Composer>> {
         self.windows.iter().rev().find_map(WeakEntity::upgrade)
@@ -458,7 +480,9 @@ impl Mailer {
     /// Окно письма с черновиком (`mail.new` — пустой); основное окно продолжает работать.
     pub(crate) fn open_compose(&mut self, draft: Draft, cx: &mut Context<Self>) -> Option<Entity<Composer>> {
         self.load_address_book(cx);
+        let senders = if self.backend.is_live() { self.compose.senders.clone() } else { demo_senders() };
         let open = Open {
+            senders,
             me: self.compose.me.clone(),
             book: self.compose.book.clone(),
             worker: self.reading.read(cx).worker.clone(),
@@ -542,9 +566,21 @@ impl Mailer {
 
 // --- окно письма ---
 
+/// Демо: свой адрес и общий ящик отдела (`postman_demo::SHARED`) — выбор «От» виден и без сервера.
+fn demo_senders() -> Vec<Sender> {
+    let own = Sender { account: None, address: Address::new("", postman_demo::ME), signature: String::new() };
+    let shared = postman_demo::SHARED.iter().filter(|(_, _, read_only)| !read_only).map(|(id, email, _)| Sender {
+        account: Some((*id).to_owned()),
+        address: Address::new("", *email),
+        signature: String::new(),
+    });
+    std::iter::once(own).chain(shared).collect()
+}
+
 /// Что окну нужно от экрана при открытии.
 pub(crate) struct Open {
     me: Option<(Address, String)>,
+    senders: Vec<Sender>,
     book: Book,
     worker: Arc<Mutex<Worker>>,
     mailer: WeakEntity<Mailer>,
@@ -575,6 +611,8 @@ struct Screen {
 
 pub(crate) struct Composer {
     pub(crate) model: Model,
+    /// Выбор «От» (S4-06): показывается, когда адресов больше одного.
+    senders: Vec<Sender>,
     to: Entity<InputState>,
     cc: Entity<InputState>,
     bcc: Entity<InputState>,
@@ -601,7 +639,13 @@ pub(crate) struct Composer {
 impl Composer {
     fn new(draft: Draft, open: Open, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (from, signature) = open.me.map_or((None, String::new()), |(a, s)| (Some(a), s));
-        let model = Model::new(draft, from, &signature, Instant::now());
+        let mut model = Model::new(draft, from, &signature, Instant::now());
+        // Демо: Identity нет — «От» — первый адрес списка.
+        if model.from().email.is_empty()
+            && let Some(first) = open.senders.first()
+        {
+            model.set_from(first.address.clone());
+        }
         let mut line = |f: Field, placeholder: &str, cx: &mut Context<Self>| {
             let value = model.field(f).to_string();
             let placeholder = tr!(placeholder);
@@ -644,6 +688,7 @@ impl Composer {
         }
         Self {
             model,
+            senders: open.senders,
             to,
             cc,
             bcc,
@@ -802,6 +847,7 @@ impl Composer {
                 self.model.on_failed(*ticket, error.clone());
             }
             Event::Me { address, signature } => self.sync_inputs |= self.model.set_identity(address.clone(), signature),
+            Event::Senders(list) => self.senders = list.clone(),
             _ => return,
         }
         cx.notify();
@@ -930,6 +976,46 @@ impl Composer {
             }
             Status::Large(total) => (tr!("compose-large", size = size_text(*total)), true),
         })
+    }
+
+    /// «От»: свой адрес и общие ящики (S4-06) — по нажатию; один адрес — строки нет.
+    fn sender_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.senders.len() < 2 {
+            return None;
+        }
+        let current = self.model.from().email.to_lowercase();
+        let chips = self.senders.iter().enumerate().map(|(i, s)| {
+            let chosen = s.address.email.to_lowercase() == current;
+            let address = s.address.clone();
+            div()
+                .id(ElementId::NamedInteger("from".into(), i as u64))
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .cursor_pointer()
+                .border_1()
+                .border_color(rgb(if chosen { ACCENT } else { BORDER }))
+                .when(chosen, |d| d.bg(rgb(0xdbe9f7)))
+                .hover(|d| d.bg(rgb(0xececec)))
+                .child(match &s.account {
+                    Some(_) => tr!("shared-compose-from-shared", address = s.address.display()),
+                    None => s.address.display(),
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.model.set_from(address.clone());
+                    cx.notify();
+                }))
+        });
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!("shared-compose-from")))
+                .children(chips)
+                .into_any_element(),
+        )
     }
 
     fn address_row(&self, f: Field, label: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -1116,6 +1202,7 @@ impl Render for Composer {
             .py_2()
             .border_b_1()
             .border_color(rgb(BORDER))
+            .children(self.sender_row(cx))
             .child(self.address_row(Field::To, "compose-to", cx))
             .child(self.address_row(Field::Cc, "compose-cc", cx))
             .child(self.address_row(Field::Bcc, "compose-bcc", cx))

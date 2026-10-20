@@ -4,6 +4,10 @@
 //! чтения без сети и списка без держания ящика в памяти. Порядок писем в папке
 //! задаёт составной ключ `(папка, -дата, id)`: страница списка — чтение диапазона.
 //! Хранилище одноразовое: при смене формата оно пересоздаётся и заполняется синхронизацией.
+//!
+//! Несколько аккаунтов (S4-06): ключи основного аккаунта — id сервера как есть, ключи общего ящика — с префиксом
+//! аккаунта (`<аккаунт>/<id>`, [`scoped`]): id JMAP у разных аккаунтов совпадают (у Stalwart — `a`, `b`…). Префикс
+//! у id папок, писем, цепочек, блобов и состояний синхронизации; интерфейс работает с ключами, не разбирая их.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,6 +49,58 @@ from_err!(
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Разделитель аккаунта и id в ключах: id JMAP — только `A-Za-z0-9-_` (RFC 8620 §1.2), `/` в них не бывает.
+const SCOPE: char = '/';
+
+/// Ключ кэша для id сервера: основной аккаунт (`None`) — id как есть, общий — `<аккаунт>/<id>`.
+pub fn scoped(account: Option<&str>, id: &str) -> String {
+    match account {
+        Some(acc) => format!("{acc}{SCOPE}{id}"),
+        None => id.to_owned(),
+    }
+}
+
+/// Ключ кэша → (аккаунт, id сервера); основной аккаунт — `None`.
+pub fn unscoped(key: &str) -> (Option<&str>, &str) {
+    match key.split_once(SCOPE) {
+        Some((acc, id)) => (Some(acc), id),
+        None => (None, key),
+    }
+}
+
+/// Аккаунт ключа: `None` — основной.
+pub fn account_of(key: &str) -> Option<&str> {
+    unscoped(key).0
+}
+
+/// Права на папку (`Mailbox.myRights`): в общем ящике часть действий запрещена.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rights {
+    pub read: bool,
+    pub add: bool,
+    pub remove: bool,
+    pub seen: bool,
+    pub keywords: bool,
+    pub submit: bool,
+}
+
+impl Rights {
+    /// Своя папка: можно всё.
+    pub const ALL: Self = Self { read: true, add: true, remove: true, seen: true, keywords: true, submit: true };
+
+    /// Только чтение: письма не добавить, не перенести и не удалить. Флаги — по своим правам (Stalwart при
+    /// шаринге «только чтение» оставляет `maySetSeen` и `maySetKeywords`).
+    pub fn read_only(&self) -> bool {
+        !(self.add || self.remove)
+    }
+}
+
+impl Default for Rights {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailboxRow {
     pub id: String,
@@ -54,6 +110,18 @@ pub struct MailboxRow {
     pub sort_order: u32,
     pub total: u32,
     pub unread: u32,
+    pub rights: Rights,
+}
+
+/// Почтовый аккаунт, кроме основного: общий или делегированный ящик (S4-06).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountRow {
+    /// id аккаунта на сервере — он же префикс ключей ([`scoped`]).
+    pub id: String,
+    pub name: String,
+    pub is_personal: bool,
+    /// Весь аккаунт только для чтения (по сессии); права на папки — [`MailboxRow::rights`].
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,8 +173,8 @@ pub struct BodyRow {
 /// Blob'ы больше этого не кэшируются (их скачивают заново по требованию).
 pub const MAX_CACHED_BLOB: usize = 16 * 1024 * 1024;
 
-/// Меняется при любом изменении формата значений или ключей.
-const FORMAT_VERSION: u64 = 1;
+/// Меняется при любом изменении формата значений или ключей. 2 — права папок и аккаунты (S4-06).
+const FORMAT_VERSION: u64 = 2;
 
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const MAILBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("mailbox");
@@ -119,6 +187,8 @@ const BODY: TableDefinition<&str, &[u8]> = TableDefinition::new("body");
 const BLOB: TableDefinition<&str, &[u8]> = TableDefinition::new("blob");
 const TRUSTED: TableDefinition<&str, ()> = TableDefinition::new("trusted_sender");
 const STATE: TableDefinition<&str, &str> = TableDefinition::new("sync_state");
+/// Общие ящики: id аккаунта → [`AccountRow`].
+const ACCOUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("account");
 
 /// Страничный кэш redb: памяти важнее, чем лишнее чтение с SSD. Листание демо-ящика на 50 тыс. заполняло 16 МБ
 /// целиком (куча процесса +16 МБ, S4-08, `docs/MEMORY.md`); 4 МБ хватает внутренним страницам деревьев, листовые
@@ -194,18 +264,79 @@ impl Cache {
         tx.open_table(BLOB)?;
         tx.open_table(TRUSTED)?;
         tx.open_table(STATE)?;
+        tx.open_table(ACCOUNT)?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn replace_mailboxes(&self, rows: &[MailboxRow]) -> Result<()> {
+    /// Папки аккаунта (`None` — основного) целиком: прежние папки этого аккаунта заменяются, других — остаются.
+    /// Ключи в `rows` — уже с префиксом аккаунта.
+    pub fn replace_mailboxes(&self, account: Option<&str>, rows: &[MailboxRow]) -> Result<()> {
         let tx = self.db.begin_write()?;
         {
             let mut t = tx.open_table(MAILBOX)?;
-            t.retain(|_, _| false)?;
+            t.retain(|k, _| account_of(k) != account)?;
             for m in rows {
                 t.insert(m.id.as_str(), enc(m)?.as_slice())?;
             }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Общие ящики из сессии. Аккаунты, которых в сессии больше нет (доступ отозван), — вместе с их папками,
+    /// письмами и состояниями.
+    pub fn replace_accounts(&self, rows: &[AccountRow]) -> Result<()> {
+        let gone: Vec<String> =
+            self.accounts()?.into_iter().map(|a| a.id).filter(|id| !rows.iter().any(|r| &r.id == id)).collect();
+        for acc in &gone {
+            self.forget_account(acc)?;
+        }
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(ACCOUNT)?;
+            t.retain(|_, _| false)?;
+            for a in rows {
+                t.insert(a.id.as_str(), enc(a)?.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Общие ящики по имени.
+    pub fn accounts(&self) -> Result<Vec<AccountRow>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(ACCOUNT)?;
+        let mut out: Vec<AccountRow> = t.iter()?.map(|r| dec(r?.1.value())).collect::<Result<_>>()?;
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    /// Убрать из кэша всё общего ящика `account`: папки, письма (с телами), счётчики, состояния.
+    fn forget_account(&self, account: &str) -> Result<()> {
+        let prefix = scoped(Some(account), "");
+        let ids: Vec<String> = {
+            let tx = self.db.begin_read()?;
+            let email = tx.open_table(EMAIL)?;
+            let mut ids = Vec::new();
+            for r in email.range(prefix.as_str()..)? {
+                let key = r?.0.value().to_string();
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                ids.push(key);
+            }
+            ids
+        };
+        self.delete_emails(&ids)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mine = |k: &str| account_of(k) == Some(account);
+            tx.open_table(MAILBOX)?.retain(|k, _| !mine(k))?;
+            tx.open_table(COUNT)?.retain(|k, _| !mine(k))?;
+            tx.open_table(STATE)?.retain(|k, _| !mine(k))?;
+            tx.open_table(BLOB)?.retain(|k, _| !mine(k))?;
         }
         tx.commit()?;
         Ok(())
@@ -554,9 +685,10 @@ mod tests {
             sort_order: order,
             total: 0,
             unread: 0,
+            rights: Rights::ALL,
         };
-        c.replace_mailboxes(&[mb("b", 2), mb("a", 1)]).unwrap();
-        c.replace_mailboxes(&[mb("z", 2), mb("a", 1)]).unwrap();
+        c.replace_mailboxes(None, &[mb("b", 2), mb("a", 1)]).unwrap();
+        c.replace_mailboxes(None, &[mb("z", 2), mb("a", 1)]).unwrap();
         assert_eq!(c.mailboxes().unwrap().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "z"]);
         let mut e = email("a", 1, &["in"]);
         e.subject = "Отчёт за КВАРТАЛ".into();
@@ -566,6 +698,61 @@ mod tests {
         assert!(row.seen && row.flagged);
         assert_eq!(c.search("квартал", None, 10).unwrap(), ["a"]);
         assert!(c.search("квартал", Some("x"), 10).unwrap().is_empty());
+    }
+
+    /// Общие ящики (S4-06): id сервера у аккаунтов совпадают — ключи с префиксом не путаются; папки аккаунта
+    /// заменяются отдельно; аккаунт, которого больше нет в сессии, уходит из кэша целиком.
+    #[test]
+    fn shared_accounts_have_their_own_keys() {
+        assert_eq!(scoped(None, "a"), "a");
+        assert_eq!(scoped(Some("i"), "a"), "i/a");
+        assert_eq!(unscoped("i/a"), (Some("i"), "a"));
+        assert_eq!(unscoped("a"), (None, "a"));
+        assert_eq!(account_of("i/Email"), Some("i"));
+
+        let c = Cache::open_in_memory().unwrap();
+        let mb = |id: &str, rights| MailboxRow {
+            id: id.into(),
+            parent_id: None,
+            name: id.into(),
+            role: Some("inbox".into()),
+            sort_order: 0,
+            total: 0,
+            unread: 0,
+            rights,
+        };
+        let ro = Rights { read: true, add: false, remove: false, seen: false, keywords: false, submit: false };
+        assert!(ro.read_only() && !Rights::ALL.read_only());
+        c.replace_mailboxes(None, &[mb("a", Rights::ALL)]).unwrap();
+        c.replace_mailboxes(Some("i"), &[mb("i/a", Rights::ALL)]).unwrap();
+        c.replace_mailboxes(Some("j"), &[mb("j/a", ro)]).unwrap();
+        // Папки общего ящика заменяются, свои — остаются.
+        c.replace_mailboxes(Some("i"), &[mb("i/a", Rights::ALL), mb("i/b", Rights::ALL)]).unwrap();
+        let ids = |c: &Cache| c.mailboxes().unwrap().into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(&c), ["a", "i/a", "i/b", "j/a"]);
+        assert_eq!(c.mailboxes().unwrap()[3].rights, ro);
+
+        // Одинаковый id письма в двух аккаунтах — два письма.
+        c.upsert_emails(&[email("e1", 1, &["a"]), email("i/e1", 2, &["i/a"]), email("j/e1", 3, &["j/a"])]).unwrap();
+        assert_eq!((c.count("a").unwrap(), c.count("i/a").unwrap()), (1, 1));
+        assert_eq!(c.oldest("i/a").unwrap().as_deref(), Some("i/e1"));
+        c.put_body("i/e1", &BodyRow::default()).unwrap();
+        c.put_blob("i/B1", b"x").unwrap();
+        c.set_state(&scoped(Some("i"), "Email"), "s-i").unwrap();
+        c.set_state("Email", "s-own").unwrap();
+
+        let acc = |id: &str| AccountRow { id: id.into(), name: id.into(), is_personal: false, read_only: false };
+        c.replace_accounts(&[acc("j"), acc("i")]).unwrap();
+        assert_eq!(c.accounts().unwrap(), [acc("i"), acc("j")]);
+        // Доступ к «i» отозван: его папки, письма, тела, блобы и состояние — из кэша.
+        c.replace_accounts(&[acc("j")]).unwrap();
+        assert_eq!(ids(&c), ["a", "j/a"]);
+        assert!(c.rows_by_ids(&["i/e1".into()]).unwrap().is_empty());
+        assert_eq!((c.count("i/a").unwrap(), c.count("a").unwrap()), (0, 1));
+        assert!(c.body("i/e1").unwrap().is_none() && c.blob("i/B1").unwrap().is_none());
+        assert_eq!(c.state("i/Email").unwrap(), None);
+        assert_eq!(c.state("Email").unwrap().as_deref(), Some("s-own"));
+        assert_eq!(c.missing_bodies(10).unwrap(), ["j/e1", "e1"]);
     }
 
     #[test]
