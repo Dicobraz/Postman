@@ -13,6 +13,7 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_cache::{Cache, MailboxRow};
+use postman_core::categories;
 use postman_core::extract::Extractor;
 use postman_core::sync::{self, Account, Command, ErrorKind, Event, Index, Status, SyncError};
 
@@ -55,6 +56,10 @@ pub(crate) struct Live {
     pub(crate) reauth: Option<Settings>,
     /// Подписка на флаги списка уже есть (повторный вход не дублирует команды `Keyword`).
     flags_watched: bool,
+    /// Локальная копия таблиц категорий прочитана; до этого ответы сервера ждут в `labels_early` (иначе копия,
+    /// прочитанная позже, затёрла бы таблицу с сервера, а несохранённая правка — потерялась).
+    labels_local: bool,
+    labels_early: Vec<categories::Reply>,
 }
 
 impl Live {
@@ -345,6 +350,9 @@ impl Mailer {
     fn on_events(&mut self, events: &[Event], cx: &mut Context<Self>) {
         for ev in events {
             self.on_sync(ev, cx);
+            if let Event::Categories(reply) = ev {
+                self.on_categories(reply.clone(), cx);
+            }
         }
         let plan = plan(events);
         if plan.signed_in
@@ -480,11 +488,14 @@ impl Mailer {
         }
     }
 
-    /// Таблицы категорий учётной записи (S5-02) — из файла рядом с её кэшем, в фоне. Файла нет — по умолчанию
-    /// (список их уже показывает); файл не читается — тоже по умолчанию, причина — в журнал.
+    /// Таблицы категорий учётной записи (S5-02) — сначала локальная копия из файла рядом с кэшем (в фоне), затем
+    /// с сервера (`Event::Categories` при входе). Копии нет — по умолчанию (список их уже показывает); копия не
+    /// читается — тоже по умолчанию, причина — в журнал.
     fn load_labels(&mut self, cx: &mut Context<Self>) {
         use postman_core::labels::{LocalFile, Store as _};
         let Some(path) = self.live.path.clone() else { return };
+        self.live.labels_local = false;
+        self.live.labels_early.clear();
         let task = cx.background_spawn(async move { LocalFile::beside(&path).load() });
         cx.spawn(async move |this, cx| {
             let book = match task.await {
@@ -497,7 +508,69 @@ impl Mailer {
             let _ = this.update(cx, |m, cx| {
                 let book = book.unwrap_or_else(crate::labels::default_book);
                 m.list.update(cx, |l, cx| l.set_labels(book, cx));
+                m.live.labels_local = true;
+                for reply in std::mem::take(&mut m.live.labels_early) {
+                    m.on_categories(reply, cx);
+                }
             });
+        })
+        .detach();
+    }
+
+    /// Ответ сервера по таблице категорий (`postman_core::categories`): таблица — в список и в локальную копию.
+    /// Своя правка ещё не дошла до сервера — не заменяется, а уходит на сервер (сведётся с серверной).
+    fn on_categories(&mut self, reply: categories::Reply, cx: &mut Context<Self>) {
+        use categories::Reply;
+        if !self.live.labels_local {
+            self.live.labels_early.push(reply);
+            return;
+        }
+        let mut book = self.list.read(cx).labels.clone();
+        match reply {
+            Reply::Loaded { account, table } => {
+                if let Some(mine) = book.loaded(account.as_deref(), table, crate::labels::default_table) {
+                    let request = categories::Request::Save { account, table: mine };
+                    if !self.backend.send(Command::Categories(request)) {
+                        self.sync_stopped(cx);
+                    }
+                    return;
+                }
+            }
+            Reply::Saved { account, table } => book.saved(account.as_deref(), table),
+            Reply::Unsupported { account } => {
+                tracing::info!("categories: no FileNode for account {account:?}, local table only");
+                return;
+            }
+            Reply::Failed { account, error } => {
+                tracing::warn!("categories: account {account:?}: {error}");
+                return;
+            }
+            Reply::Purged { keyword, count, .. } => {
+                tracing::info!("categories: {keyword} removed from {count} messages");
+                self.list.update(cx, |l, cx| l.refresh(cx));
+                return;
+            }
+            Reply::PurgeFailed { error, .. } => {
+                tracing::warn!("categories: purge: {error}");
+                return;
+            }
+        }
+        if self.list.read(cx).labels == book {
+            return;
+        }
+        self.save_labels(&book, cx);
+        self.list.update(cx, |l, cx| l.set_labels(book, cx));
+    }
+
+    /// Локальная копия таблиц — в файл рядом с кэшем (в фоне).
+    fn save_labels(&self, book: &postman_core::labels::Book, cx: &mut Context<Self>) {
+        use postman_core::labels::{LocalFile, Store as _};
+        let Some(path) = self.live.path.clone() else { return };
+        let book = book.clone();
+        cx.background_spawn(async move {
+            if let Err(e) = LocalFile::beside(&path).save(&book) {
+                tracing::warn!("{e}");
+            }
         })
         .detach();
     }

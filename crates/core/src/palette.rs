@@ -1,11 +1,29 @@
-//! Палитра категорий и меток (S5-02, `docs/DESIGN.md` «Цвет»): цвета считаются из OKLCH, а не подбираются руками.
+//! Палитра категорий и меток (S5-02, `docs/DESIGN.md` «Цвет», решение владельца №5 в `docs/specs/S5.md`):
+//! «общие цвета» Fluent 2 (shared colors) — общеупотребимая палитра Microsoft 365, а не своя.
 //!
-//! Слот палитры — оттенок (угол OKLCH) или нейтральный серый; из него для темы получаются три цвета: точка и
-//! полоса (L 0,62 C 0,14), подложка метки (L 0,95) и текст метки того же оттенка (L 0,42). Тёмная тема — свои
-//! L и C («яркие цвета приглушены»). Цвет вне sRGB приводится уменьшением насыщенности при том же L и оттенке.
+//! У каждого цвета Fluent — ряд оттенков (`shade50…tint60`); роли берутся токенами Fluent UI v9
+//! `colorPalette<Цвет>…` для светлой и тёмной темы:
 //!
-//! В одном списке нет близких цветов: ΔE2000 между точками любых двух категорий и до занятых цветов (красный —
-//! безопасность, янтарный — сроки) не меньше [`MIN_DELTA_E`] в обеих темах ([`clash`], [`check`]).
+//! | Роль | Токен Fluent | Светлая | Тёмная |
+//! |---|---|---|---|
+//! | точка и полоса в строке письма | `Background3` (заливка) | `primary` | `primary` |
+//! | подложка метки | `Background2` | `tint40` | `shade30` |
+//! | текст метки | `Foreground2` | `shade30` | `tint40` |
+//! | обводка (выбор цвета в настройках) | `BorderActive` | `primary` | `tint30` |
+//!
+//! Полоса — заливка, как у бейджа Fluent с заливкой (`Background3`): в тёмной теме это тот же `primary`, приглушены
+//! крупные заливки — подложки меток (`shade30`), как в DESIGN.md.
+//!
+//! Красный — только безопасность, янтарный (`marigold`) — только сроки ([`Reserved`]). Категории берут только цвета,
+//! далёкие от них (ΔE2000 ≥ [`MIN_DELTA_E`], [`usable`]): красные (`darkRed`, `cranberry`, `pumpkin`, `magenta`)
+//! и янтарные (`peach`, `gold`, `brass`, `brown`) из выбора выпадают. В одной таблице категорий цвета тоже не близки
+//! ([`clash`], [`check`]).
+//!
+//! Значения — `@fluentui/tokens` 9.x (`src/global/colors.ts`, ряды `sharedColors`; роли —
+//! `src/alias/lightColorPalette.ts`, `darkColorPalette.ts`).
+//!
+//! Fluent UI: Copyright (c) Microsoft Corporation. Лицензия MIT
+//! (<https://github.com/microsoft/fluentui/blob/master/LICENSE>); значения цветов взяты оттуда с этим уведомлением.
 
 use std::sync::OnceLock;
 
@@ -33,51 +51,86 @@ pub struct Oklch {
     pub h: f64,
 }
 
-/// Три цвета слота в теме.
+/// Цвета роли в теме.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Swatch {
-    /// Точка у фильтра и полоса слева в строке письма.
+    /// Точка у фильтра и полоса слева в строке письма (`Background3`).
     pub dot: Rgb,
-    /// Текст метки.
+    /// Текст метки (`Foreground2`).
     pub text: Rgb,
-    /// Подложка метки.
+    /// Подложка метки (`Background2`).
     pub bg: Rgb,
+    /// Обводка выбранного (`BorderActive`).
+    pub border: Rgb,
 }
 
-/// Оттенок слота; `h: None` — нейтральный серый.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Hue {
-    /// Имя для журнала и настроек (не текст интерфейса).
+/// Общий цвет Fluent 2: имя и оттенки ряда, из которых собраны роли.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Color {
+    /// Имя Fluent (`blue`, `darkGreen`) — так цвет хранится в таблице категорий на сервере.
     pub key: &'static str,
-    pub h: Option<f64>,
+    pub shade30: Rgb,
+    pub primary: Rgb,
+    pub tint30: Rgb,
+    pub tint40: Rgb,
 }
 
-const fn hue(key: &'static str, h: f64) -> Hue {
-    Hue { key, h: Some(h) }
+const fn fluent(key: &'static str, shade30: Rgb, primary: Rgb, tint30: Rgb, tint40: Rgb) -> Color {
+    Color { key, shade30, primary, tint30, tint40 }
 }
 
-/// Слоты палитры. Номер слота хранится в таблице категорий — порядок не менять, новые — в конец.
-///
-/// При одних L и C на круге помещается немного различимых оттенков: синий, зелёный, фиолетовый, бирюзовый и серый
-/// по умолчанию плюс красный и янтарный (заняты) уже занимают его целиком — индиго, голубой и изумрудный доступны,
-/// только если убрать соседнюю категорию. Оттенки рядом с красным и янтарным (оранжевый, оливковый, малиновый)
-/// не берутся вовсе.
-pub const HUES: &[Hue] = &[
-    Hue { key: "neutral", h: None },
-    hue("blue", 255.0),
-    hue("green", 135.0),
-    hue("violet", 315.0),
-    hue("teal", 195.0),
-    hue("indigo", 285.0),
-    hue("sky", 225.0),
-    hue("emerald", 160.0),
+impl Color {
+    pub fn swatch(&self, theme: Theme) -> Swatch {
+        match theme {
+            Theme::Light => Swatch { dot: self.primary, text: self.shade30, bg: self.tint40, border: self.primary },
+            Theme::Dark => Swatch { dot: self.primary, text: self.tint40, bg: self.shade30, border: self.tint30 },
+        }
+    }
+}
+
+/// Общие цвета Fluent 2 в порядке Fluent (статусные `red`, `marigold`, `berry` и цвета персон).
+pub const PALETTE: &[Color] = &[
+    fluent("red", 0x751D1F, 0xD13438, 0xE37D80, 0xF1BBBC),
+    fluent("darkRed", 0x420610, 0x750B1C, 0xAC4F5E, 0xD69CA5),
+    fluent("cranberry", 0x6E0811, 0xC50F1F, 0xDC626D, 0xEEACB2),
+    fluent("pumpkin", 0x712D09, 0xCA5010, 0xDF8E64, 0xEFC4AD),
+    fluent("peach", 0x8F4E00, 0xFF8C00, 0xFFBA66, 0xFFDDB3),
+    fluent("marigold", 0x835B00, 0xEAA300, 0xF2C661, 0xF9E2AE),
+    fluent("gold", 0x6C5700, 0xC19C00, 0xDAC157, 0xECDFA5),
+    fluent("brass", 0x553E06, 0x986F0B, 0xC1A256, 0xE0CEA2),
+    fluent("brown", 0x50301A, 0x8E562E, 0xBB8F6F, 0xDDC3B0),
+    fluent("forest", 0x294903, 0x498205, 0x85B44C, 0xBDD99B),
+    fluent("seafoam", 0x00723B, 0x00CC6A, 0x5AE0A0, 0xA8F0CD),
+    fluent("darkGreen", 0x063B06, 0x0B6A0B, 0x4DA64D, 0x9AD29A),
+    fluent("lightTeal", 0x00666D, 0x00B7C3, 0x58D3DB, 0xA6E9ED),
+    fluent("teal", 0x02494C, 0x038387, 0x4CB4B7, 0x9BD9DB),
+    fluent("steel", 0x00333F, 0x005B70, 0x4496A9, 0x94C8D4),
+    fluent("blue", 0x004377, 0x0078D4, 0x5CAAE5, 0xA9D3F2),
+    fluent("royalBlue", 0x002C4E, 0x004E8C, 0x4A89BA, 0x9ABFDC),
+    fluent("cornflower", 0x2C3C85, 0x4F6BED, 0x93A4F4, 0xC8D1FA),
+    fluent("navy", 0x001665, 0x0027B4, 0x546FD2, 0xA3B2E8),
+    fluent("lavender", 0x3F3682, 0x7160E8, 0xA79CF1, 0xD2CCF8),
+    fluent("purple", 0x341A51, 0x5C2E91, 0x9470BD, 0xC6B1DE),
+    fluent("grape", 0x4C0D55, 0x881798, 0xB55FC1, 0xD9A7E0),
+    fluent("berry", 0x6D2064, 0xC239B3, 0xDA7ED0, 0xEDBBE7),
+    fluent("lilac", 0x63276D, 0xB146C2, 0xCF87DA, 0xE6BFED),
+    fluent("pink", 0x80215D, 0xE43BA6, 0xEF85C8, 0xF7C0E3),
+    fluent("magenta", 0x6B0043, 0xBF0077, 0xD957A8, 0xECA5D1),
+    fluent("plum", 0x43002B, 0x77004D, 0xAD4589, 0xD696C0),
+    fluent("beige", 0x444241, 0x7A7574, 0xAFABAA, 0xD7D4D4),
+    fluent("mink", 0x343231, 0x5D5A58, 0x9E9B99, 0xCECCCB),
+    fluent("platinum", 0x3B4447, 0x69797E, 0xA0ADB2, 0xCDD6D8),
+    fluent("anchor", 0x202427, 0x394146, 0x808A90, 0xBCC3C7),
 ];
 
-pub const NEUTRAL: u8 = 0;
-pub const BLUE: u8 = 1;
-pub const GREEN: u8 = 2;
-pub const VIOLET: u8 = 3;
-pub const TEAL: u8 = 4;
+/// Цвета категорий по умолчанию (DESIGN.md «Цвет»): синий, зелёный, фиолетовый, бирюзовый, серый — подобраны так,
+/// чтобы любые два и занятые цвета различались на ΔE ≥ 25.
+pub const BLUE: &str = "blue";
+pub const GREEN: &str = "darkGreen";
+pub const VIOLET: &str = "grape";
+pub const TEAL: &str = "lightTeal";
+/// Нейтральный серый: метки Thunderbird вне таблицы, служебные метки, неизвестный цвет.
+pub const NEUTRAL: &str = "mink";
 
 /// Занятые цвета: в категориях их и близких к ним не бывает.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,122 +144,93 @@ pub enum Reserved {
 impl Reserved {
     pub const ALL: [Reserved; 2] = [Reserved::Threat, Reserved::Deadline];
 
-    fn hue(self) -> f64 {
+    /// Цвет Fluent, которым занят.
+    pub fn key(self) -> &'static str {
         match self {
-            Reserved::Threat => 25.0,
-            Reserved::Deadline => 80.0,
+            Reserved::Threat => "red",
+            Reserved::Deadline => "marigold",
         }
     }
 }
 
-/// Светлота и насыщенность роли.
-#[derive(Clone, Copy)]
-struct Tone {
-    l: f64,
-    c: f64,
+/// Цвет по имени Fluent (регистр как у Fluent: `darkGreen`).
+pub fn color(key: &str) -> Option<&'static Color> {
+    PALETTE.iter().find(|c| c.key == key)
 }
 
-#[derive(Clone, Copy)]
-struct Tones {
-    dot: Tone,
-    text: Tone,
-    bg: Tone,
+fn neutral() -> &'static Color {
+    // NEUTRAL — из PALETTE (тест `defaults_are_in_the_palette`); запасной — последний цвет.
+    color(NEUTRAL).unwrap_or(&PALETTE[PALETTE.len() - 1])
 }
 
-const fn tones(dot: (f64, f64), text: (f64, f64), bg: (f64, f64)) -> Tones {
-    Tones { dot: Tone { l: dot.0, c: dot.1 }, text: Tone { l: text.0, c: text.1 }, bg: Tone { l: bg.0, c: bg.1 } }
+/// Имя цвета для отрисовки: неизвестное (таблица из новой версии, правка руками) — нейтральный.
+pub fn resolve(key: &str) -> &'static str {
+    color(key).map_or(NEUTRAL, |c| c.key)
 }
 
-/// Цветные слоты: светлая тема — по DESIGN.md; тёмная — точки светлее и спокойнее, текст светлый, подложка тёмная.
-const COLOR: [Tones; 2] =
-    [tones((0.62, 0.14), (0.42, 0.10), (0.95, 0.035)), tones((0.68, 0.13), (0.85, 0.07), (0.33, 0.05))];
-/// Нейтральный серый: точка светлее (светлая тема) или темнее (тёмная) цветных — иначе он ближе ΔE 25 к ним.
-const GRAY: [Tones; 2] = [tones((0.78, 0.0), (0.38, 0.0), (0.96, 0.0)), tones((0.52, 0.0), (0.80, 0.0), (0.35, 0.0))];
-
-fn theme_index(t: Theme) -> usize {
-    match t {
-        Theme::Light => 0,
-        Theme::Dark => 1,
-    }
-}
-
-fn make(h: Option<f64>, t: Theme) -> Swatch {
-    let i = theme_index(t);
-    let (set, h) = match h {
-        Some(h) => (COLOR[i], h),
-        None => (GRAY[i], 0.0),
-    };
-    let one = |tone: Tone| oklch_to_rgb(Oklch { l: tone.l, c: tone.c, h });
-    Swatch { dot: one(set.dot), text: one(set.text), bg: one(set.bg) }
-}
-
-struct Table {
-    slots: Vec<[Swatch; 2]>,
-    reserved: [[Swatch; 2]; 2],
-}
-
-/// Цвета считаются один раз на процесс.
-fn table() -> &'static Table {
-    static T: OnceLock<Table> = OnceLock::new();
-    T.get_or_init(|| Table {
-        slots: HUES.iter().map(|h| Theme::ALL.map(|t| make(h.h, t))).collect(),
-        reserved: Reserved::ALL.map(|r| Theme::ALL.map(|t| make(Some(r.hue()), t))),
-    })
-}
-
-/// Цвета слота в теме; неизвестный слот (таблица из новой версии) — нейтральный.
-pub fn swatch(slot: u8, theme: Theme) -> Swatch {
-    let t = table();
-    let row = t.slots.get(usize::from(slot)).unwrap_or(&t.slots[0]);
-    row[theme_index(theme)]
+/// Цвета роли в теме; неизвестный цвет — нейтральный.
+pub fn swatch(key: &str, theme: Theme) -> Swatch {
+    color(key).unwrap_or_else(neutral).swatch(theme)
 }
 
 /// Цвета занятого цвета (угроза, срок) в теме.
 pub fn reserved(r: Reserved, theme: Theme) -> Swatch {
-    let i = match r {
-        Reserved::Threat => 0,
-        Reserved::Deadline => 1,
-    };
-    table().reserved[i][theme_index(theme)]
+    swatch(r.key(), theme)
 }
 
 /// С чем цвет слишком близок.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Clash {
-    Slot(u8),
+    /// С цветом другой категории.
+    Color(&'static str),
+    /// С занятым цветом (или это он сам).
     Reserved(Reserved),
+    /// Такого цвета в палитре нет.
+    Unknown,
 }
 
-/// Можно ли взять слот `slot` в список, где уже заняты `used`: первое, к чему он ближе [`MIN_DELTA_E`] в какой-либо
-/// теме, и разница; `None` — можно. Сам `slot` в `used` не считается.
-pub fn clash(slot: u8, used: &[u8]) -> Option<(Clash, f64)> {
-    for theme in Theme::ALL {
-        let dot = swatch(slot, theme).dot;
-        for r in Reserved::ALL {
-            let d = delta_e(dot, reserved(r, theme).dot);
-            if d < MIN_DELTA_E {
-                return Some((Clash::Reserved(r), d));
-            }
-        }
-        for &other in used.iter().filter(|&&u| u != slot) {
-            let d = delta_e(dot, swatch(other, theme).dot);
-            if d < MIN_DELTA_E {
-                return Some((Clash::Slot(other), d));
-            }
-        }
+/// Наименьшая ΔE точек двух цветов по темам.
+fn distance(a: &Color, b: &Color) -> f64 {
+    Theme::ALL.iter().map(|&t| delta_e(a.swatch(t).dot, b.swatch(t).dot)).fold(f64::INFINITY, f64::min)
+}
+
+/// Ближайший занятый цвет, если он ближе [`MIN_DELTA_E`].
+fn near_reserved(c: &Color) -> Option<(Reserved, f64)> {
+    Reserved::ALL
+        .iter()
+        .filter_map(|&r| color(r.key()).map(|rc| (r, distance(c, rc))))
+        .filter(|&(_, d)| d < MIN_DELTA_E)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Цвета, которые можно дать категории: далёкие от красного и янтарного в обеих темах (порядок Fluent).
+pub fn usable() -> &'static [&'static str] {
+    static U: OnceLock<Vec<&'static str>> = OnceLock::new();
+    U.get_or_init(|| PALETTE.iter().filter(|c| near_reserved(c).is_none()).map(|c| c.key).collect())
+}
+
+/// Можно ли дать категории цвет `key`, когда у других категорий таблицы цвета `others`: первое, к чему он ближе
+/// [`MIN_DELTA_E`] в какой-либо теме, и разница; `None` — можно. Тот же цвет в `others` — разница 0.
+pub fn clash<S: AsRef<str>>(key: &str, others: &[S]) -> Option<(Clash, f64)> {
+    let Some(c) = color(key) else { return Some((Clash::Unknown, 0.0)) };
+    if let Some((r, d)) = near_reserved(c) {
+        return Some((Clash::Reserved(r), d));
     }
-    None
+    others
+        .iter()
+        .filter_map(|o| color(o.as_ref()))
+        .map(|o| (o, distance(c, o)))
+        .filter(|&(_, d)| d < MIN_DELTA_E)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(o, d)| (Clash::Color(o.key), d))
 }
 
-/// Весь список: у одного слота — одна категория, любые два и занятые цвета различимы.
-pub fn check(slots: &[u8]) -> Result<(), (u8, Clash, f64)> {
-    for (i, &a) in slots.iter().enumerate() {
-        if slots[..i].contains(&a) {
-            return Err((a, Clash::Slot(a), 0.0));
-        }
-        // Занятые цвета — и для первого слота (`used` пуст).
-        if let Some((c, d)) = clash(a, &slots[..i]) {
-            return Err((a, c, d));
+/// Весь список: любые два цвета и занятые цвета различимы. Ошибка — первый цвет, который ближе [`MIN_DELTA_E`]
+/// к одному из предыдущих (или к занятому).
+pub fn check<S: AsRef<str>>(keys: &[S]) -> Result<(), (String, Clash, f64)> {
+    for (i, k) in keys.iter().enumerate() {
+        if let Some((c, d)) = clash(k.as_ref(), &keys[..i]) {
+            return Err((k.as_ref().to_owned(), c, d));
         }
     }
     Ok(())
@@ -363,7 +387,7 @@ mod tests {
 
     #[test]
     fn oklch_round_trips_through_srgb() {
-        for rgb in [0x4687D8, 0x5F983A, 0xA569BF, 0x009F99, 0xB7B7B7, 0x000000, 0xFFFFFF] {
+        for rgb in [0x0078D4, 0x0B6A0B, 0x881798, 0x00B7C3, 0x5D5A58, 0x000000, 0xFFFFFF] {
             assert_eq!(oklch_to_rgb(rgb_to_oklch(rgb)), rgb, "{rgb:06X}");
         }
         // Белый и чёрный — L 1 и 0 без насыщенности.
@@ -371,25 +395,54 @@ mod tests {
         assert!((w.l - 1.0).abs() < 1e-3 && w.c < 1e-3);
     }
 
-    /// Точки — L 0,62 C 0,14 (DESIGN.md); бирюзовый в sRGB не помещается — насыщенность меньше, L и оттенок те же.
+    /// Все 31 общий цвет Fluent 2, имена без повторов; роли — токены Fluent (светлая и тёмная тема).
     #[test]
-    fn dots_follow_the_design_tones() {
-        for slot in [BLUE, GREEN, VIOLET] {
-            let o = rgb_to_oklch(swatch(slot, Theme::Light).dot);
-            assert!((o.l - 0.62).abs() < 0.01 && (o.c - 0.14).abs() < 0.01, "{slot}: {o:?}");
+    fn palette_is_fluent_shared_colors() {
+        assert_eq!(PALETTE.len(), 31);
+        for (i, c) in PALETTE.iter().enumerate() {
+            assert!(PALETTE[..i].iter().all(|o| o.key != c.key), "{} дважды", c.key);
         }
-        let teal = rgb_to_oklch(swatch(TEAL, Theme::Light).dot);
-        assert!((teal.l - 0.62).abs() < 0.01 && teal.c < 0.14 && (teal.h - 195.0).abs() < 2.0, "{teal:?}");
-        let s = swatch(BLUE, Theme::Light);
-        let (bg, text) = (rgb_to_oklch(s.bg), rgb_to_oklch(s.text));
-        assert!((bg.l - 0.95).abs() < 0.01 && (text.l - 0.42).abs() < 0.01, "{bg:?} {text:?}");
-        // Цвета вычислены, но совпадают с макетом владельца с точностью до единиц ΔE.
-        assert!(delta_e(swatch(BLUE, Theme::Light).dot, 0x4687D8) < 1.0);
-        assert!(delta_e(swatch(VIOLET, Theme::Light).dot, 0xA569BF) < 1.0);
-        let gray = rgb_to_oklch(swatch(NEUTRAL, Theme::Light).dot);
-        assert!(gray.c < 1e-3);
-        // Неизвестный слот — нейтральный.
-        assert_eq!(swatch(200, Theme::Dark), swatch(NEUTRAL, Theme::Dark));
+        let blue = swatch(BLUE, Theme::Light);
+        assert_eq!(blue, Swatch { dot: 0x0078D4, text: 0x004377, bg: 0xA9D3F2, border: 0x0078D4 });
+        let dark = swatch(BLUE, Theme::Dark);
+        assert_eq!(dark, Swatch { dot: 0x0078D4, text: 0xA9D3F2, bg: 0x004377, border: 0x5CAAE5 });
+        // Неизвестный цвет — нейтральный.
+        assert_eq!(swatch("chartreuse", Theme::Dark), swatch(NEUTRAL, Theme::Dark));
+        assert_eq!(resolve("chartreuse"), NEUTRAL);
+        assert_eq!(resolve("teal"), "teal");
+        assert_eq!(reserved(Reserved::Threat, Theme::Light).dot, 0xD13438);
+        assert_eq!(reserved(Reserved::Deadline, Theme::Light).dot, 0xEAA300);
+    }
+
+    #[test]
+    fn defaults_are_in_the_palette() {
+        for key in [BLUE, GREEN, VIOLET, TEAL, NEUTRAL] {
+            assert!(color(key).is_some() && usable().contains(&key), "{key}");
+        }
+    }
+
+    /// Выбор цвета категории: занятые красный и янтарный и близкие к ним выпадают, остальные дальше ΔE 25 от
+    /// обоих в обеих темах.
+    #[test]
+    fn usable_colors_are_far_from_reserved() {
+        let usable = usable();
+        assert_eq!(usable.len(), 21, "{usable:?}");
+        for gone in ["red", "darkRed", "cranberry", "pumpkin", "magenta", "marigold", "peach", "gold", "brass", "brown"]
+        {
+            assert!(!usable.contains(&gone), "{gone}");
+        }
+        for key in usable {
+            for r in Reserved::ALL {
+                for theme in Theme::ALL {
+                    let d = delta_e(swatch(key, theme).dot, reserved(r, theme).dot);
+                    assert!(d >= MIN_DELTA_E, "{key} — {r:?} {theme:?}: ΔE {d:.1}");
+                }
+            }
+        }
+        assert!(matches!(clash("red", &[] as &[&str]), Some((Clash::Reserved(Reserved::Threat), _))));
+        assert!(matches!(clash("gold", &[] as &[&str]), Some((Clash::Reserved(Reserved::Deadline), _))));
+        assert!(matches!(clash("pumpkin", &[] as &[&str]), Some((Clash::Reserved(Reserved::Threat), _))));
+        assert_eq!(clash("chartreuse", &[] as &[&str]), Some((Clash::Unknown, 0.0)));
     }
 
     /// Категории по умолчанию (DESIGN.md: синий, зелёный, фиолетовый, бирюзовый, серый) различимы между собой и
@@ -410,40 +463,38 @@ mod tests {
         }
     }
 
-    /// Запрет близких цветов: к пяти категориям по умолчанию близкие оттенки не добавить, повтор — тоже.
+    /// Запрет близких цветов: к пяти категориям по умолчанию близкий цвет не добавить, повтор — тоже.
     #[test]
     fn close_colors_are_rejected() {
         let used = [BLUE, GREEN, VIOLET, TEAL, NEUTRAL];
-        // Индиго между синим и фиолетовым, изумрудный между зелёным и бирюзовым, голубой — у синего.
-        assert!(matches!(clash(5, &used), Some((Clash::Slot(BLUE | VIOLET), _))));
-        assert!(matches!(clash(7, &used), Some((Clash::Slot(GREEN | TEAL), _))));
-        assert!(matches!(clash(6, &used), Some((Clash::Slot(BLUE | TEAL | NEUTRAL), _))));
-        // Без синего голубой можно.
-        assert_eq!(clash(6, &[GREEN, VIOLET, NEUTRAL]), None);
+        // Голубой рядом с синим, лес рядом с зелёным, сирень рядом с виноградом, платина — с серым и синим.
+        assert!(matches!(clash("royalBlue", &used), Some((Clash::Color(BLUE), _))));
+        assert!(matches!(clash("forest", &used), Some((Clash::Color(GREEN), _))));
+        assert!(matches!(clash("lilac", &used), Some((Clash::Color(VIOLET), _))));
+        assert!(clash("platinum", &used).is_some());
+        assert!(matches!(clash(BLUE, &[BLUE]), Some((Clash::Color(BLUE), d)) if d == 0.0));
+        // Без синего — можно.
+        assert_eq!(clash("royalBlue", &[GREEN]), None);
         assert!(check(&[BLUE, BLUE]).is_err());
-        assert!(check(&[BLUE, 5]).is_err());
-        // Любой слот палитры в одиночку не близок к красному и янтарному.
-        for s in 0..HUES.len() as u8 {
-            assert_eq!(clash(s, &[]), None, "{}", HUES[usize::from(s)].key);
-        }
-        // Оранжевый (не в палитре) — близок к занятым.
-        let orange = oklch_to_rgb(Oklch { l: 0.62, c: 0.14, h: 50.0 });
-        assert!(Reserved::ALL.iter().any(|&r| delta_e(orange, reserved(r, Theme::Light).dot) < MIN_DELTA_E));
+        assert!(check(&[BLUE, "steel"]).is_err());
+        // Хотя бы одну шестую категорию к пяти по умолчанию добавить можно.
+        let sixth: Vec<&str> = usable().iter().copied().filter(|k| clash(k, &used).is_none()).collect();
+        assert!(!sixth.is_empty(), "шестой цвет не добавить");
     }
 
-    /// Текст метки читается на её подложке (контраст WCAG ≥ 4,5) в обеих темах.
+    /// Текст метки читается на её подложке (контраст WCAG ≥ 4,5) в обеих темах — у всех цветов палитры.
     #[test]
     fn chip_text_is_readable() {
         let lum = |rgb: Rgb| {
             let [r, g, b] = linear(rgb);
             0.2126 * r + 0.7152 * g + 0.0722 * b
         };
-        for slot in 0..HUES.len() as u8 {
+        for c in PALETTE {
             for theme in Theme::ALL {
-                let s = swatch(slot, theme);
+                let s = c.swatch(theme);
                 let (a, b) = (lum(s.text), lum(s.bg));
                 let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-                assert!(ratio >= 4.5, "{slot} {theme:?}: {ratio:.2}");
+                assert!(ratio >= 4.5, "{} {theme:?}: {ratio:.2}", c.key);
             }
         }
     }

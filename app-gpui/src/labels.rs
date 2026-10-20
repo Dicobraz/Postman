@@ -1,5 +1,6 @@
 //! Метки и категории в интерфейсе (S5-02): таблица категорий по умолчанию, имена встроенных меток, полоса и метки
-//! строки письма. Ключевые слова и таблицы — `postman_core::labels`, цвета — `postman_core::palette`.
+//! строки письма. Ключевые слова и таблицы — `postman_core::labels`, таблица на сервере — `postman_core::categories`,
+//! цвета (общие цвета Fluent 2) — `postman_core::palette`.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -13,7 +14,12 @@ pub(crate) const THEME: Theme = Theme::Light;
 
 /// Таблица категорий по умолчанию (DESIGN.md) с именами на языке интерфейса — пока у учётной записи нет своей.
 pub(crate) fn default_book() -> Book {
-    Book::own(Categories::defaults(default_name))
+    Book::own(default_table())
+}
+
+/// Таблица по умолчанию одного аккаунта (на сервере файла ещё нет).
+pub(crate) fn default_table() -> Categories {
+    Categories::defaults(default_name)
 }
 
 fn default_name(id: &str) -> String {
@@ -44,7 +50,8 @@ pub(crate) fn label_name(l: &Label) -> String {
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct RowLabels {
     pub(crate) stripe: Option<palette::Rgb>,
-    pub(crate) chips: Vec<(String, u8)>,
+    /// Имя и цвет (имя цвета Fluent).
+    pub(crate) chips: Vec<(String, &'static str)>,
 }
 
 pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
@@ -59,8 +66,8 @@ pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
 }
 
 /// Метка в строке отправителя: подложка и текст цвета категории; длинное имя обрезается.
-pub(crate) fn chip(name: String, slot: u8) -> Div {
-    let s = palette::swatch(slot, THEME);
+pub(crate) fn chip(name: String, color: &str) -> Div {
+    let s = palette::swatch(color, THEME);
     div()
         .flex_none()
         .max_w(px(96.))
