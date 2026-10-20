@@ -1,11 +1,13 @@
 //! Спайк UI на gpui (gpui-kit): тот же экран, что и в egui-версии, и тот же `--bench`.
 //! Ядро (хранилище, IR, воркер-песочница, демо-ящик) — общее; здесь только интерфейс.
 //!
-//!   postman-gpui [--demo N] [--bench]
+//!   postman-gpui [--demo N] [--bench] [--screens <каталог>]
 
 mod calendar;
 mod commands;
 mod ir_view;
+mod screens;
+mod sys;
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -497,6 +499,8 @@ struct Mailer {
     /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
     last_key: String,
     bench: Option<Bench>,
+    /// `--screens`: снимки экранов без человека (S2-05).
+    screens: Option<screens::Driver>,
     section: Section,
     cal: calendar::CalendarView,
     _subscriptions: Vec<Subscription>,
@@ -557,6 +561,7 @@ impl Mailer {
             sandbox: "",
             last_key: String::new(),
             bench,
+            screens: None,
             section: Section::Mail,
             cal: calendar::CalendarView::demo(),
             _subscriptions: subscriptions,
@@ -701,6 +706,7 @@ impl Render for Mailer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = Instant::now();
         self.drive_bench(window, cx);
+        screens::drive(self, window, cx);
         let status = format!("Элементов: {}", self.list.read(cx).count);
         let root = div()
             .key_context("Mailer")
@@ -814,11 +820,16 @@ fn main() {
     let bench = args.iter().any(|a| a == "--bench");
     // `--keep`: оставить рабочую копию данных бенча (для разбора).
     let keep = args.iter().any(|a| a == "--keep");
+    let screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
+        screens::Driver::new(d.into()).unwrap_or_else(|e| fatal("каталог снимков", e))
+    });
     let dir = data_dir();
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("каталог данных", e));
     // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
     let prepared = Instant::now();
-    let path = if bench {
+    let path = if bench || screens.is_some() {
+        // Снимки — на небольшой свежей копии: письма в первой строке те же от прогона к прогону.
+        let n = if screens.is_some() { 2000 } else { n };
         let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("ящик для замера", e));
         if !keep {
             bench::remove_on_finish(path.clone());
@@ -841,7 +852,7 @@ fn main() {
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             let bench = bench.then(|| Bench::new(start));
             let cache = cache.clone();
-            cx.new(|cx| Mailer::new(cache, bench, window, cx))
+            cx.new(|cx| Mailer { screens, ..Mailer::new(cache, bench, window, cx) })
         });
         if let Err(e) = opened {
             fatal("окно", e);

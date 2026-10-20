@@ -15,6 +15,18 @@ gpui-kit = "0.7"
 jiff = "0.2"
 postman-core.workspace = true
 pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "3106838be4bd94edefb43a27342eea6c5e4a7ed2" }
+# Снимки экранов (`--screens`, S2-05): дескриптор окна и запись PNG.
+raw-window-handle = "0.6"
+png = "0.17"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_UI_WindowsAndMessaging",
+]
 
 [lints]
 workspace = true

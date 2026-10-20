@@ -6214,12 +6214,15 @@ dependencies = [
  "gpui-kit",
  "jiff",
  "pets-commands",
+ "png 0.17.16",
  "postman-cache",
  "postman-calendar",
  "postman-core",
  "postman-demo",
  "postman-ir",
  "postman-worker",
+ "raw-window-handle",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

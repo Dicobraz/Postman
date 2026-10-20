@@ -68,6 +68,17 @@ POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный
 Windows: тестам песочницы нужен один раз на каталог сборки (из `cargo metadata`, учитывает `CARGO_TARGET_DIR`):
 `icacls (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q`.
 
+### Снимки экранов
+
+```
+cargo run --release -p postman-gpui -- --screens <каталог>
+```
+
+Агенты проверяют интерфейс снимками, а не нажатиями в окне: демо-ящик (свежая копия на 2000 писем, удаляется
+в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `search`, `calendar`, `assistant`;
+на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
+stderr и код 1. Только Windows.
+
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
 данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
 `pets/scripts/stand/clean.ps1 -Repos . -Testdata` (без `-Apply` только показывает).
