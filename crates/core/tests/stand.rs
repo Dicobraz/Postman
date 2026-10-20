@@ -333,3 +333,109 @@ async fn contacts_are_read() {
         .await
         .unwrap();
 }
+
+/// Календарь на сервере (S3-05) через поток синхронизации, как в приложении: user3 открывает user1 свою
+/// занятость и занят в 14:00 → user1 командой `CreateMeeting` приглашает user3 на 16:00 → у user3 событие по uid →
+/// `Events` отдаёт встречу в неделе user1 → `Availability` показывает занятость user3. Затем всё удаляется.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn calendar_through_sync() {
+    use postman_core::schedule::{self, Meeting};
+    use postman_core::sync::{self, Account, Command, Event as SyncEvent};
+
+    let (a, c) = (user(1).await, user(3).await);
+    let tz = "Europe/Moscow";
+    let busy_start = start_in(10);
+    let meeting_start = busy_start.date().at(16, 0, 0, 0);
+    let stamp = stamp();
+
+    // user3: открыть занятость user1 и занять 14:00–15:00.
+    schedule::share_free_busy(&c.client, &a.email).await.unwrap();
+    let busy = Meeting {
+        uid: format!("postman-s305-busy-{stamp}@itt.test"),
+        title: "Postman: занят".into(),
+        location: String::new(),
+        description: String::new(),
+        start: busy_start,
+        time_zone: tz.into(),
+        duration_secs: 3600,
+        attendees: Vec::new(),
+    };
+    let identities3 = c.client.identities().await.unwrap();
+    let busy_id = schedule::create(&c.client, &identities3, &busy).await.unwrap();
+
+    // user1 — поток синхронизации приложения.
+    let account = Account {
+        url: env("POSTMAN_STAND_URL"),
+        auth: Auth::Basic { user: a.email.clone(), password: env("POSTMAN_STAND_PASSWORD1") },
+    };
+    let cache = postman_cache::Cache::open_in_memory().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let commands = sync::spawn(account, cache, None, tx, || {});
+    let wait = |what: &str, pick: &dyn Fn(&SyncEvent) -> bool| -> SyncEvent {
+        let start = Instant::now();
+        loop {
+            let left = DELIVERY.checked_sub(start.elapsed()).unwrap_or_else(|| panic!("не дождались: {what}"));
+            match rx.recv_timeout(left) {
+                Ok(SyncEvent::Error(e)) => panic!("синхронизация: {e}"),
+                Ok(ev) if pick(&ev) => return ev,
+                Ok(_) => {}
+                Err(e) => panic!("не дождались: {what} ({e})"),
+            }
+        }
+    };
+    let uid = format!("postman-s305-{stamp}@itt.test");
+    let meeting = Meeting {
+        uid: uid.clone(),
+        title: "Postman: встреча S3-05".into(),
+        location: "Переговорная 1".into(),
+        description: String::new(),
+        start: meeting_start,
+        time_zone: tz.into(),
+        duration_secs: 1800,
+        attendees: vec![("User 3".into(), c.email.clone())],
+    };
+    assert!(commands.send(Command::CreateMeeting { meeting: Box::new(meeting), ticket: 1 }).is_ok());
+    match wait("MeetingCreated", &|e| matches!(e, SyncEvent::MeetingCreated { .. } | SyncEvent::MeetingFailed { .. })) {
+        SyncEvent::MeetingCreated { ticket, uid: got } => assert_eq!((ticket, got.as_str()), (1, uid.as_str())),
+        SyncEvent::MeetingFailed { error, .. } => panic!("встреча не создана: {error}"),
+        _ => unreachable!(),
+    }
+    eventually("приглашение у user3", || async { c.client.event_by_uid(&uid).await.ok().flatten() }).await;
+
+    let zoned = |d: jiff::civil::DateTime| d.to_zoned(jiff::tz::TimeZone::get(tz).unwrap()).unwrap().timestamp().as_second();
+    let (from, to) = (zoned(busy_start.date().at(0, 0, 0, 0)), zoned(busy_start.date().at(23, 59, 0, 0)));
+    assert!(commands.send(Command::Events { from, to }).is_ok());
+    let SyncEvent::EventsLoaded { events, .. } = wait("EventsLoaded", &|e| matches!(e, SyncEvent::EventsLoaded { .. })) else {
+        unreachable!()
+    };
+    let mine = events.iter().find(|e| e.uid == uid).expect("встреча в неделе user1");
+    assert_eq!((mine.span.start, mine.span.len()), (zoned(meeting_start), 1800));
+    assert!(mine.participants.iter().any(|p| p.email.eq_ignore_ascii_case(&c.email)));
+
+    assert!(commands.send(Command::Availability { ticket: 2, emails: vec![c.email.clone()], from, to }).is_ok());
+    let SyncEvent::Availability { me, people, error, .. } = wait("Availability", &|e| matches!(e, SyncEvent::Availability { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(error, None);
+    assert!(me.iter().any(|b| b.span.start == zoned(meeting_start)), "моя занятость без встречи: {me:?}");
+    let theirs = people[0].1.as_ref().expect("занятость user3 после шаринга");
+    assert!(theirs.iter().any(|b| b.span.start == zoned(busy_start)), "нет занятости user3 в 14:00: {theirs:?}");
+    drop(commands);
+
+    // Уборка: встреча с отменой, копия у user3, занятость user3.
+    let my = a.client.event_by_uid(&uid).await.unwrap().expect("встреча у user1");
+    a.client.destroy_event(my["id"].as_str().unwrap(), true).await.unwrap();
+    eventually("отмена у user3", || async {
+        match c.client.event_by_uid(&uid).await.ok()? {
+            None => Some(()),
+            Some(e) => (e["status"].as_str() == Some("cancelled")).then_some(()),
+        }
+    })
+    .await;
+    if let Some(e) = c.client.event_by_uid(&uid).await.unwrap() {
+        c.client.destroy_event(e["id"].as_str().unwrap(), false).await.unwrap();
+    }
+    c.client.destroy_event(&busy_id, false).await.unwrap();
+}

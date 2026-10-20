@@ -54,7 +54,9 @@ pub(crate) struct Mailer {
     /// `--screens`: снимки экранов без человека (S2-05).
     pub(crate) screens: Option<screens::Driver>,
     pub(crate) section: Section,
-    pub(crate) cal: calendar::CalendarView,
+    /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
+    pub(crate) cal: Entity<calendar::CalendarView>,
+    pub(crate) meetings: crate::meeting::Meetings,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -83,7 +85,9 @@ impl Mailer {
         let reading = cx.new(|_| ReadingPane::new(cache.clone()));
         let bar = cx.new(|_| CommandBar { search: search.clone() });
         let toasts = cx.new(|_| Toasts::new());
+        let cal = cx.new(|cx| calendar::CalendarView::new(window, cx));
         let subscriptions = vec![
+            cx.subscribe(&cal, |this, _, action: &calendar::CalendarAction, cx| this.on_calendar(action, cx)),
             on_search,
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
@@ -134,7 +138,8 @@ impl Mailer {
             bench,
             screens: None,
             section: Section::Mail,
-            cal: calendar::CalendarView::demo(),
+            cal,
+            meetings: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -158,6 +163,9 @@ impl Mailer {
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
         self.compose.on_sync(ev, cx);
+        self.cal.update(cx, |c, cx| c.on_sync(ev, cx));
+        let created = self.meetings.on_sync(ev, cx);
+        self.meetings_created(created, cx);
     }
 
     /// Действию нужен сервер, а его нет (демо): сказать тостом.
@@ -197,6 +205,9 @@ impl Mailer {
     }
 
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Calendar && self.section != section {
+            self.cal.update(cx, |c, cx| c.refresh(cx));
+        }
         self.section = section;
         self.folders.update(cx, |f, cx| {
             f.section = section;
@@ -239,9 +250,11 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
             .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {
-                this.cal.assistant = !this.cal.assistant;
-                this.set_section(Section::Calendar, cx);
+                this.open_meeting(None, cx);
             }))
+            .on_action(cx.listener(|this, _: &commands::calendar::PrevWeek, _, cx| this.calendar_week(Some(-1), cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::NextWeek, _, cx| this.calendar_week(Some(1), cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::Today, _, cx| this.calendar_week(None, cx)))
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
@@ -282,7 +295,9 @@ impl Render for Mailer {
                         d.child(self.list.clone().cached(StyleRefinement::default().w(px(380.)).h_full().flex_none()))
                             .child(self.reading.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
                     })
-                    .when(self.section == Section::Calendar, |d| d.child(calendar::render(self, cx))),
+                    .when(self.section == Section::Calendar, |d| {
+                        d.child(self.cal.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
+                    }),
             )
             .child(
                 div()

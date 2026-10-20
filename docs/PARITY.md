@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 24 из 25 (96 %).
+Сделано: 29 из 30 (96 %).
 
 | Функция | Команда | Хоткей | Статус |
 |---|---|---|---|
@@ -29,7 +29,12 @@
 | Поиск | `search.focus` | `ctrl-e` | есть |
 | Сбросить поиск | `search.clear` | `escape` | есть |
 | Новая встреча (помощник планирования) | `calendar.new_meeting` | `ctrl-shift-q` | есть |
+| Предыдущая неделя | `calendar.prev_week` | `alt-up` | есть |
+| Следующая неделя | `calendar.next_week` | `alt-down` | есть |
+| Сегодня в календаре | `calendar.today` |  | есть |
 | Отправить письмо | `compose.send` | `ctrl-enter`, `alt-s` | есть |
 | Вложить файл | `compose.attach` |  | есть |
 | Предпросмотр письма | `compose.preview` | `ctrl-shift-p` | есть |
 | Закрыть окно письма | `compose.close` | `escape` | есть |
+| Отправить приглашения | `meeting.send` | `ctrl-enter`, `alt-s` | есть |
+| Закрыть окно встречи | `meeting.close` | `escape` | есть |

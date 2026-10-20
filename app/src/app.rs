@@ -498,6 +498,13 @@ impl App {
                         self.ensure_invite();
                     }
                 }
+                // Календарь на сервере (S3-05) — только в gpui-версии.
+                sync::Event::EventsLoaded { .. }
+                | sync::Event::Availability { .. }
+                | sync::Event::MeetingCreated { .. }
+                | sync::Event::MeetingFailed { .. }
+                | sync::Event::FreeBusyShared { .. }
+                | sync::Event::CalendarFailed(_) => {}
             }
         }
         while let Ok(done) = self.renderer.rx.try_recv() {

@@ -27,24 +27,6 @@ status-items = Items: { $n }
 status-notifications = 🔔 { $n }
 second-instance = Postman is already running — this window is shown.
 
-# Calendar.
-cal-work-week = Work week
-cal-assistant = 👥 Scheduling Assistant (Ctrl+Shift+Q)
-cal-me = Me
-cal-day = { $d ->
-    [0] Mon
-    [1] Tue
-    [2] Wed
-    [3] Thu
-   *[4] Fri
-}
-cal-minutes = { $n } min
-cal-free-for-all = Free for everyone:
-cal-busy = busy
-cal-tentative = tentative
-cal-unavailable = away
-cal-off-hours = off hours
-
 # Startup failure (Windows event log and stderr).
 fatal-data-dir = data directory
 fatal-bench-mailbox = bench mailbox

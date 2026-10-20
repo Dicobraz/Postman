@@ -8,7 +8,9 @@
 //! Сообщения — по-английски: это диагностика для агентов, не текст интерфейса.
 //!
 //! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list`,
-//! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации; без `POSTMAN_URL` — строка входа (`signin`).
+//! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
+//! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05);
+//! без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,15 +43,19 @@ enum Scene {
     Calendar,
     /// Календарь с помощником планирования.
     Assistant,
+    /// Календарь с подробностями события сбоку (S3-05).
+    Event,
     /// Строка входа (нет учётной записи).
     SignIn,
     /// Окно письма с заполненными полями (своё окно: снимается его HWND).
     Compose,
     /// Ответ на письмо: окно письма с цитатой (S3-02).
     Reply,
+    /// Окно новой встречи с помощником планирования (своё окно, S3-05).
+    Meeting,
 }
 
-const SCENES: [Scene; 9] = [
+const SCENES: [Scene; 11] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -57,12 +63,15 @@ const SCENES: [Scene; 9] = [
     Scene::Search,
     Scene::Calendar,
     Scene::Assistant,
+    Scene::Event,
     Scene::Compose,
     Scene::Reply,
+    Scene::Meeting,
 ];
 
-/// Живой ящик: запрос для поиска заранее не известен, календарь — пока демо (S3-05); ответ — на первое письмо.
-const LIVE_SCENES: [Scene; 3] = [Scene::List, Scene::Letter, Scene::Reply];
+/// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
+/// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
+const LIVE_SCENES: [Scene; 6] = [Scene::List, Scene::Letter, Scene::Reply, Scene::Calendar, Scene::Event, Scene::Meeting];
 const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
 /// Первая синхронизация живого ящика дольше сцены демо.
 const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -77,9 +86,11 @@ impl Scene {
             Scene::Search => "search",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
+            Scene::Event => "event",
             Scene::SignIn => "signin",
             Scene::Compose => "compose",
             Scene::Reply => "reply",
+            Scene::Meeting => "meeting",
         }
     }
 }
@@ -195,16 +206,32 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Как `search::Clear`: календарь снимается без следов поиска в папках.
             m.search.update(cx, |s, cx| s.set_value("", window, cx));
             m.run_search("", cx);
-            m.cal.assistant = false;
+            m.cal.update(cx, |c, cx| {
+                c.assistant = false;
+                cx.notify();
+            });
             m.set_section(Section::Calendar, cx);
         }
         Scene::Assistant => {
-            m.cal.assistant = true;
+            m.cal.update(cx, |c, cx| {
+                c.assistant = true;
+                cx.notify();
+            });
+            m.set_section(Section::Calendar, cx);
+        }
+        Scene::Event => {
+            m.cal.update(cx, |c, cx| {
+                c.assistant = false;
+                c.select_busiest(cx);
+            });
             m.set_section(Section::Calendar, cx);
         }
         Scene::SignIn => m.set_section(Section::Mail, cx),
         Scene::Compose => {
-            m.cal.assistant = false;
+            m.cal.update(cx, |c, cx| {
+                c.assistant = false;
+                c.close_details(cx);
+            });
             m.set_section(Section::Mail, cx);
             // Окно — после кадра основного: не открывать его посреди отрисовки.
             let mailer = cx.entity();
@@ -223,6 +250,12 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Как `mail.reply`: окно — когда тело разобрано (ответ ждёт его сам), и не посреди отрисовки.
             let mailer = cx.entity();
             cx.defer(move |cx| mailer.update(cx, |m, cx| m.respond(postman_compose::Mode::Reply, cx)));
+        }
+        Scene::Meeting => {
+            // Окно письма прошлой сцены остаётся: снимается своё окно.
+            m.set_section(Section::Calendar, cx);
+            let mailer = cx.entity();
+            cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_meeting_screen(cx)));
         }
     }
     Ok(())
@@ -260,8 +293,18 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             target.is_some() && reading.is_some_and(|r| Some(r.row.id.as_str()) == target && shown(r))
         }
         Scene::Search => list.search_ids.is_some() && rows_loaded,
-        Scene::Calendar => m.section == Section::Calendar && !m.cal.assistant,
-        Scene::Assistant => m.section == Section::Calendar && m.cal.assistant,
+        Scene::Calendar => {
+            let c = m.cal.read(cx);
+            // Живой ящик: неделя пришла с сервера.
+            let loaded = c.loaded || m.screens.as_ref().is_some_and(|d| !d.live);
+            m.section == Section::Calendar && !c.assistant && loaded
+        }
+        Scene::Assistant => m.section == Section::Calendar && m.cal.read(cx).assistant,
+        Scene::Event => {
+            // Живая неделя может быть пустой: тогда снимок — без подробностей.
+            let c = m.cal.read(cx);
+            m.section == Section::Calendar && (c.selected() || c.is_empty())
+        }
         Scene::SignIn => m.live.signin.is_some(),
         Scene::Compose => compose_hwnd(m, cx).is_some(),
         Scene::Reply => {
@@ -270,6 +313,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let reply = m.compose.last().is_some_and(|c| Some(c.entity_id()) != before);
             reply && compose_hwnd(m, cx).is_some()
         }
+        Scene::Meeting => meeting_hwnd(m, cx).is_some(),
     }
 }
 
@@ -293,6 +337,7 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     let path = d.dir.join(format!("{}.png", scene.name()));
     let hwnd = match scene {
         Scene::Compose | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
+        Scene::Meeting => meeting_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no meeting window")),
         _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
     };
     let task = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) });
@@ -318,6 +363,11 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
 /// Окно письма открыто и нарисовано: его дескриптор.
 fn compose_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
     m.compose.last().and_then(|c| c.read(cx).screen_hwnd())
+}
+
+/// Окно встречи открыто, нарисовано, занятость получена: его дескриптор.
+fn meeting_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
+    m.meetings.last().and_then(|w| w.read(cx).screen_hwnd())
 }
 
 fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), String> {

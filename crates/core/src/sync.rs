@@ -8,10 +8,11 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
-use postman_calendar::{Invitation, Partstat};
+use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
 use crate::invite::{self, Delivery};
+use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -70,6 +71,14 @@ pub enum Command {
     Blob { blob_id: String, name: String, mime: String },
     /// Ответить на приглашение из письма; `in_reply_to` — Message-ID письма с приглашением.
     RespondInvite { invite: Box<Invitation>, status: Partstat, in_reply_to: Option<String> },
+    /// События календаря в `[from, to)` (Unix-секунды), повторения разворачивает сервер → `EventsLoaded`.
+    Events { from: i64, to: i64 },
+    /// Занятость адресов и моя в `[from, to)` → `Availability`.
+    Availability { ticket: u64, emails: Vec<String>, from: i64, to: i64 },
+    /// Создать встречу и разослать приглашения → `MeetingCreated` или `MeetingFailed`.
+    CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
+    /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
+    ShareFreeBusy { email: String },
 }
 
 pub enum Event {
@@ -93,6 +102,16 @@ pub enum Event {
     ComposeFailed { ticket: u64, error: String },
     InviteAnswered { uid: String, status: Partstat, delivery: Delivery },
     InviteFailed { uid: String, error: String },
+    /// События календаря в `[from, to)` — без отменённых, по времени начала.
+    EventsLoaded { from: i64, to: i64, events: Vec<postman_calendar::Event> },
+    /// Занятость для помощника: моя и по адресам; `None` — нет данных (календарь не открыт мне, сотрудник
+    /// не найден): это не «свободен». `error` — запрос не удался целиком.
+    Availability { ticket: u64, me: Vec<Busy>, people: Vec<(String, Option<Vec<Busy>>)>, error: Option<String> },
+    MeetingCreated { ticket: u64, uid: String },
+    MeetingFailed { ticket: u64, error: String },
+    FreeBusyShared { email: String },
+    /// Ошибка календаря (неделя, открытие занятости) — тостом.
+    CalendarFailed(String),
     Error(String),
 }
 
@@ -374,6 +393,35 @@ async fn handle(
             notify(match respond_invite(client, cache, identities, &invite, status, in_reply_to).await {
                 Ok(delivery) => Event::InviteAnswered { uid, status, delivery },
                 Err(e) => Event::InviteFailed { uid, error: e.to_string() },
+            });
+        }
+        Command::Events { from, to } => {
+            notify(match schedule::week(client, from, to).await {
+                Ok(events) => Event::EventsLoaded { from, to, events },
+                Err(e) => Event::CalendarFailed(e.to_string()),
+            });
+        }
+        Command::Availability { ticket, emails, from, to } => {
+            notify(match schedule::availability(client, &emails, from, to).await {
+                Ok((me, people)) => Event::Availability { ticket, me, people, error: None },
+                Err(e) => Event::Availability {
+                    ticket,
+                    me: Vec::new(),
+                    people: emails.into_iter().map(|e| (e, None)).collect(),
+                    error: Some(e.to_string()),
+                },
+            });
+        }
+        Command::CreateMeeting { meeting, ticket } => {
+            notify(match schedule::create(client, identities, &meeting).await {
+                Ok(_) => Event::MeetingCreated { ticket, uid: meeting.uid.clone() },
+                Err(e) => Event::MeetingFailed { ticket, error: e.to_string() },
+            });
+        }
+        Command::ShareFreeBusy { email } => {
+            notify(match schedule::share_free_busy(client, &email).await {
+                Ok(()) => Event::FreeBusyShared { email },
+                Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
         Command::SaveDraft { draft, replace, ticket } => {

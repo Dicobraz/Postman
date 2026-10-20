@@ -205,6 +205,14 @@ impl Mailer {
             r.live = true;
             r.me = None;
         });
+        // Календарь — с сервера (S3-05); раздел уже открыт — неделя сразу.
+        let calendar_open = self.section == crate::Section::Calendar;
+        self.cal.update(cx, |c, cx| {
+            c.go_live(cx);
+            if calendar_open {
+                c.refresh(cx);
+            }
+        });
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));

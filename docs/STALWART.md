@@ -32,8 +32,9 @@ cargo test -p postman-core --test stand -- --ignored
 | `invitation_round_trip` | приглашение → у участника по uid → «принять» → у организатора accepted → удаление → отмена |
 | `free_busy_after_sharing` | `Calendar/set shareWith` → `Principal/getAvailability` у коллеги |
 | `contacts_are_read` | `ContactCard` → имя и адреса |
+| `calendar_through_sync` | S3-05, через поток синхронизации: `ShareFreeBusy` (user3 → user1), `CreateMeeting` с приглашением → у user3 по uid, `Events` → встреча в неделе, `Availability` → занятость user3 |
 
-Последний прогон — 2026-10-20: 6 из 6 и через туннель, и напрямую по HTTPS.
+Последний прогон — 2026-10-20: 6 из 6 и через туннель, и напрямую по HTTPS; `calendar_through_sync` (user1, user3) — 2026-10-20, отдельно.
 
 ## Поведение сервера
 

@@ -24,6 +24,7 @@ mod live;
 mod signin;
 mod compose;
 mod actions;
+mod meeting;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -46,12 +47,14 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/compose.ftl")),
     ("ru", include_str!("../i18n/ru/account.ftl")),
     ("ru", include_str!("../i18n/ru/actions.ftl")),
+    ("ru", include_str!("../i18n/ru/calendar.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
     ("en", include_str!("../i18n/en/compose.ftl")),
     ("en", include_str!("../i18n/en/account.ftl")),
     ("en", include_str!("../i18n/en/actions.ftl")),
+    ("en", include_str!("../i18n/en/calendar.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
