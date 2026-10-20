@@ -11,6 +11,7 @@ mod sys;
 mod list;
 mod folders;
 mod reading;
+mod backend;
 mod bar;
 mod mailer;
 

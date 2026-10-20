@@ -42,6 +42,10 @@ impl ReadingPane {
         cx.notify();
     }
 
+    /// Событие синхронизации (тело, блоб, ответ на приглашение) — S3-03 берёт свои.
+    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
+    pub(crate) fn on_sync(&mut self, _ev: &postman_core::sync::Event, _cx: &mut Context<Self>) {}
+
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.reading = None;
         cx.notify();

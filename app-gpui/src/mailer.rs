@@ -13,6 +13,7 @@ use postman_core::bench::{self, Bench, Step};
 use postman_worker::{Client as Worker, Level};
 
 use crate::*;
+use crate::backend::Backend;
 use crate::bar::*;
 use crate::commands::{mail, search, view};
 use crate::folders::*;
@@ -38,6 +39,9 @@ pub(crate) struct Mailer {
     pub(crate) bar: Entity<CommandBar>,
     pub(crate) search: Entity<InputState>,
     pub(crate) toasts: Entity<Toasts>,
+    /// Сервер или демо (S3-04 подключает живой ящик).
+    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
+    pub(crate) backend: Backend,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
     pub(crate) sandbox: Option<Level>,
     /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
@@ -113,6 +117,7 @@ impl Mailer {
             bar,
             search,
             toasts,
+            backend: Backend::Demo,
             sandbox: None,
             last_key: String::new(),
             bench,
@@ -135,6 +140,18 @@ impl Mailer {
             }
             cx.notify();
         })
+    }
+
+    /// Событие синхронизации: каждая часть берёт своё (`on_sync`). Поток событий подключает S3-04.
+    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
+    pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
+        self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
+    }
+
+    /// Действию нужен сервер, а его нет (демо): сказать тостом.
+    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
+    pub(crate) fn needs_server(&mut self, cx: &mut Context<Self>) {
+        self.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("needs-server"), cx));
     }
 
     pub(crate) fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {

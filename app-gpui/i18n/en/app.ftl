@@ -52,3 +52,4 @@ fatal-screens-dir = screenshots directory
 fatal-demo-mailbox = demo mailbox
 fatal-store = store
 fatal-window = window
+needs-server = This needs a server account: not available in demo mode.

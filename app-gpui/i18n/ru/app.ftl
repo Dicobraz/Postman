@@ -52,3 +52,4 @@ fatal-screens-dir = каталог снимков
 fatal-demo-mailbox = демо-ящик
 fatal-store = хранилище
 fatal-window = окно
+needs-server = Нужна учётная запись на сервере: в демо-режиме это недоступно.
