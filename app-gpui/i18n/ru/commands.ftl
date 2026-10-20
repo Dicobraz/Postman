@@ -1,0 +1,22 @@
+# Названия команд: ключ — `cmd-` + id команды (`mail.reply_all` → `cmd-mail-reply-all`), см. pets-commands.
+cmd-mail-next = Следующее письмо
+cmd-mail-prev = Предыдущее письмо
+cmd-mail-first = Первое письмо
+cmd-mail-last = Последнее письмо
+cmd-mail-page-down = Страница вниз
+cmd-mail-page-up = Страница вверх
+cmd-mail-mark-read = Отметить как прочитанное
+cmd-mail-mark-unread = Отметить как непрочитанное
+cmd-mail-toggle-flag = Флаг
+cmd-mail-new = Создать письмо
+cmd-mail-reply = Ответить
+cmd-mail-reply-all = Ответить всем
+cmd-mail-forward = Переслать
+cmd-mail-delete = Удалить
+cmd-view-mail = Почта
+cmd-view-calendar = Календарь
+cmd-view-contacts = Контакты
+cmd-search-focus = Поиск
+cmd-search-clear = Сбросить поиск
+cmd-calendar-new-meeting = Новая встреча (помощник планирования)
+cmd-view-notifications = Уведомления

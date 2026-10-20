@@ -104,10 +104,10 @@ mod tests {
         }
     }
 
-    /// `ru.ftl` и `en.ftl`: у каждой команды есть название, лишних ключей `cmd-…` нет.
+    /// `i18n/{ru,en}/commands.ftl`: у каждой команды есть название, лишних ключей `cmd-…` нет.
     #[test]
     fn every_command_has_a_name_in_both_languages() {
-        for (lang, ftl) in [("ru", super::parity::RU_FTL), ("en", include_str!("../i18n/en.ftl"))] {
+        for (lang, ftl) in [("ru", super::parity::RU_FTL), ("en", include_str!("../i18n/en/commands.ftl"))] {
             let names = super::parity::ftl_names(ftl);
             for c in COMMANDS {
                 assert!(names.iter().any(|(k, _)| *k == c.name_key()), "{lang}.ftl: нет {}", c.name_key());
@@ -124,7 +124,16 @@ mod tests {
     fn parity_doc_is_current() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/PARITY.md");
         let old = std::fs::read_to_string(&path).unwrap_or_default();
-        let (doc, done) = super::parity::document(include_str!("main.rs"));
+        // Обработчики `on_action` — в любом модуле экрана: читаем все исходники интерфейса.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = String::new();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "commands.rs") {
+                sources += &std::fs::read_to_string(&path).unwrap();
+            }
+        }
+        let (doc, done) = super::parity::document(&sources);
         if let Some(was) = super::parity::done_count(&old) {
             assert!(done >= was, "сделанных функций стало меньше: было {was}, стало {done}");
         }
@@ -152,7 +161,7 @@ mod tests {
 mod parity {
     use super::COMMANDS;
 
-    pub const RU_FTL: &str = include_str!("../i18n/ru.ftl");
+    pub const RU_FTL: &str = include_str!("../i18n/ru/commands.ftl");
 
     /// Пары `ключ = значение` из `.ftl` (только простые сообщения в одну строку).
     pub fn ftl_names(ftl: &str) -> Vec<(&str, &str)> {

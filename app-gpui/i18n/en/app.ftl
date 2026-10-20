@@ -1,26 +1,3 @@
-# Command names: key is `cmd-` + command id (`mail.reply_all` → `cmd-mail-reply-all`), see pets-commands.
-cmd-mail-next = Next message
-cmd-mail-prev = Previous message
-cmd-mail-first = First message
-cmd-mail-last = Last message
-cmd-mail-page-down = Page down
-cmd-mail-page-up = Page up
-cmd-mail-mark-read = Mark as read
-cmd-mail-mark-unread = Mark as unread
-cmd-mail-toggle-flag = Flag
-cmd-mail-new = New message
-cmd-mail-reply = Reply
-cmd-mail-reply-all = Reply all
-cmd-mail-forward = Forward
-cmd-mail-delete = Delete
-cmd-view-mail = Mail
-cmd-view-calendar = Calendar
-cmd-view-contacts = Contacts
-cmd-search-focus = Search
-cmd-search-clear = Clear search
-cmd-calendar-new-meeting = New meeting (scheduling assistant)
-cmd-view-notifications = Notifications
-
 # Mail screen.
 search-placeholder = Search (Ctrl+E), Enter to search, Esc to clear
 search-nothing = Nothing found: “{ $query }”
@@ -75,3 +52,4 @@ fatal-screens-dir = screenshots directory
 fatal-demo-mailbox = demo mailbox
 fatal-store = store
 fatal-window = window
+needs-server = This needs a server account: not available in demo mode.
