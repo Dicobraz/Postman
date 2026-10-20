@@ -9,7 +9,8 @@
 //!
 //! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list`,
 //! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
-//! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05);
+//! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
+//! `vacation` — после автоответа с сервера (S4-05);
 //! без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
@@ -53,9 +54,11 @@ enum Scene {
     Reply,
     /// Окно новой встречи с помощником планирования (своё окно, S3-05).
     Meeting,
+    /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
+    Vacation,
 }
 
-const SCENES: [Scene; 11] = [
+const SCENES: [Scene; 12] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -67,11 +70,13 @@ const SCENES: [Scene; 11] = [
     Scene::Compose,
     Scene::Reply,
     Scene::Meeting,
+    Scene::Vacation,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
 /// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
-const LIVE_SCENES: [Scene; 6] = [Scene::List, Scene::Letter, Scene::Reply, Scene::Calendar, Scene::Event, Scene::Meeting];
+const LIVE_SCENES: [Scene; 7] =
+    [Scene::List, Scene::Letter, Scene::Reply, Scene::Calendar, Scene::Event, Scene::Meeting, Scene::Vacation];
 const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
 /// Первая синхронизация живого ящика дольше сцены демо.
 const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -91,6 +96,7 @@ impl Scene {
             Scene::Compose => "compose",
             Scene::Reply => "reply",
             Scene::Meeting => "meeting",
+            Scene::Vacation => "vacation",
         }
     }
 }
@@ -257,6 +263,16 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let mailer = cx.entity();
             cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_meeting_screen(cx)));
         }
+        Scene::Vacation => {
+            m.set_section(Section::Mail, cx);
+            if !m.backend.is_live() {
+                m.set_vacation_state(Some(crate::settings::screen_sample()), cx);
+                // Строка состояния — с заполненностью ящика: 12 % из 2 ГБ.
+                let limit = 2 << 30;
+                m.set_quota(Some(postman_core::settings::Usage { used: limit * 12 / 100, limit }), cx);
+            }
+            m.open_vacation(window, cx);
+        }
     }
     Ok(())
 }
@@ -314,6 +330,12 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             reply && compose_hwnd(m, cx).is_some()
         }
         Scene::Meeting => meeting_hwnd(m, cx).is_some(),
+        Scene::Vacation => {
+            // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
+            let live = m.screens.as_ref().is_some_and(|d| d.live);
+            let state = if live { m.settings.vacation.is_some() } else { m.settings.bar.is_some() };
+            matches!(m.settings.panel, Some(crate::settings::Panel::Vacation(_))) && state
+        }
     }
 }
 

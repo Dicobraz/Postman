@@ -498,8 +498,9 @@ impl App {
                         self.ensure_invite();
                     }
                 }
-                // Календарь на сервере (S3-05) — только в gpui-версии.
-                sync::Event::EventsLoaded { .. }
+                // Календарь на сервере (S3-05), настройки ящика (S4-05) — только в gpui-версии.
+                sync::Event::Settings(_)
+                | sync::Event::EventsLoaded { .. }
                 | sync::Event::Availability { .. }
                 | sync::Event::MeetingCreated { .. }
                 | sync::Event::MeetingFailed { .. }

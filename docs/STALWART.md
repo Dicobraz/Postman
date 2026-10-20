@@ -33,6 +33,8 @@ cargo test -p postman-core --test stand -- --ignored
 | `free_busy_after_sharing` | `Calendar/set shareWith` → `Principal/getAvailability` у коллеги |
 | `contacts_are_read` | `ContactCard` → имя и адреса |
 | `calendar_through_sync` | S3-05, через поток синхронизации: `ShareFreeBusy` (user3 → user1), `CreateMeeting` с приглашением → у user3 по uid, `Events` → встреча в неделе, `Availability` → занятость user3 |
+| `stand_settings::vacation_reply_round_trip` | S4-05: автоответ user2 включён (`settings::Request::SetVacation`) → письмо от user1 → автоответ у user1 → выключен, письма удалены |
+| `stand_settings::quota_is_read` | S4-05: `Quota/get` без ошибки (на стенде квот нет — пустой список) |
 
 Последний прогон — 2026-10-20: 6 из 6 и через туннель, и напрямую по HTTPS; `calendar_through_sync` (user1, user3) — 2026-10-20, отдельно.
 
@@ -59,6 +61,14 @@ cargo test -p postman-core --test stand -- --ignored
    шаринге «только занятость» — ответ на вопрос `docs/HANDOFF.md` §4 п. 3–4. Postman ходит по JMAP — не затронут.
 7. **Контакты:** сервер сам заполняет `name.full` по компонентам в их порядке (`isOrdered`), клиент показывает
    `full` — порядок «Фамилия Имя» задаётся при создании карточки.
+8. **Автоответ — Sieve-скрипт `vacation`** (S4-05). `VacationResponse/set` пишет скрипт `vacation` (даты —
+   `currentdate` в UTC, текст — MIME base64) и с `isEnabled: true` делает его активным, а прежний активный скрипт
+   (правила) — неактивным: активен всегда один скрипт. `isEnabled: false` снимает только `vacation`, другой
+   активный скрипт не трогает; тема и текст без `isEnabled` активность не меняют. `isEnabled` в ответе
+   `VacationResponse/get` — «скрипт `vacation` активен». Автоответ приходит за секунды. Повтор тому же
+   отправителю сервер, по RFC 5230, подавляет — тест берёт новую тему на каждый прогон [проверить срок подавления].
+9. **Квота** (RFC 9425): у пользователей стенда `Quota/get` — пустой список (ограничений нет), строка состояния без
+   заполненности; ящик с квотой — [проверить] (на стенде не задана).
 
 ## Не проверено
 

@@ -12,6 +12,7 @@ use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
 use crate::invite::{self, Delivery};
+use crate::settings;
 use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
@@ -79,6 +80,8 @@ pub enum Command {
     CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
     /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
     ShareFreeBusy { email: String },
+    /// Настройки ящика на сервере: автоответ, квота (`settings.rs`) → `Event::Settings`.
+    Settings(settings::Request),
 }
 
 pub enum Event {
@@ -113,6 +116,8 @@ pub enum Event {
     /// Ошибка календаря (неделя, открытие занятости) — тостом.
     CalendarFailed(String),
     Error(String),
+    /// Ответ по настройкам ящика (`settings.rs`).
+    Settings(settings::Reply),
 }
 
 /// Поисковый индекс (если открылся); пишут в него и синхронизация, и UI.
@@ -172,6 +177,7 @@ async fn run(
         let pairs = cards.into_iter().flat_map(|c| c.emails.into_iter().map(move |e| (c.name.clone(), e))).collect();
         notify(Event::Contacts(pairs));
     }
+    settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
     let mut email_state = initial_load(&client, &mut cache, &index, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
@@ -237,6 +243,7 @@ async fn apply_refresh(
             }
             notify(Event::MailboxesChanged);
             notify(Event::EmailsChanged);
+            settings::handle(client, settings::Request::Quota, &|r| notify(Event::Settings(r))).await;
         }
         Ok(None) => {}
         Err(e) => notify(Event::Error(e.to_string())),
@@ -424,6 +431,7 @@ async fn handle(
                 Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
+        Command::Settings(request) => settings::handle(client, request, &|r| notify(Event::Settings(r))).await,
         Command::SaveDraft { draft, replace, ticket } => {
             let r = save_draft(client, cache, &draft, replace.as_deref()).await;
             notify(match r {

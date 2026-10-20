@@ -31,6 +31,11 @@ pub mod meeting {
     gpui_kit::actions!(meeting, [Send, Close]);
 }
 
+/// Настройки ящика на сервере (S4-05): в Outlook — меню «Файл», клавиши нет.
+pub mod settings {
+    gpui_kit::actions!(settings, [Vacation]);
+}
+
 /// Окно письма (S3-01).
 pub mod compose {
     gpui_kit::actions!(compose, [Send, Attach, Preview, Close]);
@@ -86,6 +91,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.close", &["escape"], COMPOSER),
     cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Outlook: «Файл → Автоматические ответы», без клавиши.
+    cmd("settings.vacation", &[], None),
 ];
 
 /// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал
