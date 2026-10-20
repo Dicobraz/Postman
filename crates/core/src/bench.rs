@@ -1,6 +1,9 @@
-//! `--bench`: один сценарий для обоих интерфейсов (egui и gpui), чтобы сравнение было честным.
+//! `--bench`: один сценарий замера для всех машин и версий, чтобы сравнение было честным.
 //! Прогрев → листание с открытием письма каждый кадр → листание списка без открытия → ресайз окна → простой.
 //! Итог — одна строка key=value в stdout, затем процесс завершается.
+//!
+//! Живой ящик (`--bench --live`, S4-03): сценарий начинается после первой синхронизации; в итоге ещё
+//! `first_sync_ms` (запуск → `Status::Synced`) и `list_ms` (запуск → первый кадр со строками в списке).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -87,6 +90,10 @@ pub struct Bench {
     private_peak: usize,
     scroll_frames: usize,
     list_frames: usize,
+    /// Живой ящик: ждать первой синхронизации ([`Bench::synced`]).
+    live: bool,
+    synced_at: Option<Duration>,
+    list_at: Option<Duration>,
 }
 
 /// Число кадров фазы из переменной окружения или по умолчанию.
@@ -110,7 +117,20 @@ impl Bench {
             private_peak: 0,
             scroll_frames: frames("POSTMAN_BENCH_SCROLL_FRAMES", SCROLL_FRAMES),
             list_frames: frames("POSTMAN_BENCH_LIST_FRAMES", LIST_FRAMES),
+            live: false,
+            synced_at: None,
+            list_at: None,
         }
+    }
+
+    /// Замер живого ящика: сценарий — после [`Bench::synced`].
+    pub fn live(start: Instant) -> Self {
+        Self { live: true, ..Self::new(start) }
+    }
+
+    /// Первая синхронизация закончилась.
+    pub fn synced(&mut self) {
+        self.synced_at.get_or_insert(self.start.elapsed());
     }
 
     /// Вызывается в начале каждого кадра; `rows` — сколько писем в списке.
@@ -119,6 +139,14 @@ impl Bench {
         self.first_frame.get_or_insert(now - self.start);
         let dt = self.last.map(|l| (now - l).as_secs_f32() * 1000.0);
         self.last = Some(now);
+        if self.live {
+            if rows > 0 {
+                self.list_at.get_or_insert(now - self.start);
+            }
+            if self.synced_at.is_none() {
+                return Step::Wait;
+            }
+        }
         self.frame += 1;
         if self.frame.is_multiple_of(20) {
             self.sample_memory();
@@ -171,8 +199,14 @@ impl Bench {
         self.sample_memory();
         let r = stats(&mut self.resize);
         let c = stats(&mut self.ui_cpu);
+        let ms = |d: Option<Duration>| d.unwrap_or_default().as_secs_f32() * 1000.0;
+        let live = if self.live {
+            format!("live=1 first_sync_ms={:.0} list_ms={:.0} ", ms(self.synced_at), ms(self.list_at))
+        } else {
+            String::new()
+        };
         format!(
-            "rows={rows} exe_mb={:.1} first_frame_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
+            "{live}rows={rows} exe_mb={:.1} first_frame_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
              ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_peak_mb={:.0} private_peak_mb={:.0}",
             exe_mb(),
             self.first_frame.unwrap_or_default().as_secs_f32() * 1000.0,
@@ -192,15 +226,17 @@ impl Bench {
 /// Рабочая копия данных бенча — удалить при завершении (H-01).
 static WORK_COPY: OnceLock<PathBuf> = OnceLock::new();
 
-/// Удалить файл данных бенча, когда замер закончится (флаг `--keep` у приложения — не вызывать).
+/// Удалить данные бенча (файл или каталог), когда замер закончится (флаг `--keep` у приложения — не вызывать).
 pub fn remove_on_finish(path: PathBuf) {
     let _ = WORK_COPY.set(path);
 }
 
 /// Удалить рабочую копию, отмеченную `remove_on_finish` (если отмечена), — перед выходом из процесса.
+/// Каталог — как получится: открытые отображённые в память файлы (индекс поиска) Windows удалить не даст,
+/// их уберёт следующий прогон.
 pub fn remove_work_copy() {
     if let Some(p) = WORK_COPY.get() {
-        let _ = std::fs::remove_file(p);
+        let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
     }
 }
 

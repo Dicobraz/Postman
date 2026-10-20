@@ -1,7 +1,7 @@
 # Postman
 
 Корпоративный клиент почта + календарь + контакты под **Stalwart** по **JMAP**.
-Чистый Rust, GPU-рендер (wgpu → DX12/Vulkan), раскладка и хоткеи classic Outlook.
+Чистый Rust, интерфейс на gpui (DirectX 11), раскладка и хоткеи classic Outlook. Только Windows 10/11 x64.
 Правила для Claude Code — [CLAUDE.md](CLAUDE.md). План — [docs/PLAN.md](docs/PLAN.md). Исходное ТЗ и решения — [docs/HANDOFF.md](docs/HANDOFF.md). Учётные записи, файлы и связь с системой учёта — [docs/IDENTITY.md](docs/IDENTITY.md). Сравнение egui и gpui — [docs/UI-SPIKE.md](docs/UI-SPIKE.md).
 
 ## Структура
@@ -15,40 +15,58 @@
 | `crates/search` | Полнотекстовый индекс (tantivy): словоформы (Snowball ru+en), опечатки (Левенштейн 1–2), префикс по мере набора, неверная раскладка, ё=е, свежие выше. 50 тыс. писем: 1–4 мс на запрос. |
 | `crates/calendar` | Календарь без UI: события JSCalendar → UTC (часовые пояса, длительности ISO 8601), сборка нового события с участниками, раскладка пересечений дня по колонкам, слияние занятости, сетка и поиск общего свободного времени для «Помощника планирования». Приглашения из писем (iMIP): .ics разбирается в песочнице, карточка «Принять / Под вопросом / Отклонить»; ответ — через календарь сервера, если событие там есть по UID, иначе письмом METHOD:REPLY с импортом в свой календарь. |
 | `crates/worker` | Процесс `postman-worker`: HTML/текст → IR в песочнице. Linux: seccomp-bpf + Landlock + rlimits (+ namespaces, если разрешены). Windows: AppContainer, Job Object, mitigation policies (win32k off, только Microsoft-DLL, без динамического кода и дочерних процессов). |
-| `crates/core` | Слой без UI для обоих интерфейсов: синхронизация (push, предзагрузка, отправка), поисковая индексация, извлечение текста, разбор писем через воркер, файлы вложений, адресная книга для автодополнения (частота, свежесть, транслит, раскладка). |
-| `app` | egui/eframe (wgpu): папки, список, область чтения, хоткеи, фоновая синхронизация. |
+| `crates/core` | Слой без UI: синхронизация (push, предзагрузка, отправка), поисковая индексация, извлечение текста, разбор писем через воркер, файлы вложений, адресная книга для автодополнения (частота, свежесть, транслит, раскладка). |
+| `app-gpui` | Интерфейс на gpui (`postman.exe`): почта, окно письма, календарь, «Помощник планирования», вход, тосты. |
 
 ## Запуск
 
 ```sh
-cargo build --release --workspace                         # postman + postman-worker (должны лежать рядом)
-cargo run --release -p postman -- --demo 50000          # синтетический ящик, без сервера
-POSTMAN_URL=https://mail.example.com POSTMAN_USER=u POSTMAN_PASSWORD=p cargo run --release -p postman
+cargo build --release --workspace                         # postman.exe + postman-worker.exe (должны лежать рядом)
+cargo run --release -p postman-gpui -- --demo 50000     # синтетический ящик, без сервера
+POSTMAN_URL=https://mail.example.com POSTMAN_USER=u POSTMAN_PASSWORD=p cargo run --release -p postman-gpui
 # или POSTMAN_TOKEN=… (Bearer) вместо USER/PASSWORD
 cargo test --workspace
 ```
 
-## GPU
+## Поставка
 
-Рендер только на аппаратном адаптере (программные WARP/llvmpipe/lavapipe отвергаются; `POSTMAN_GPU_SOFTWARE=1` — для CI).
-API: `--gpu dx12|vulkan|gl` или `POSTMAN_GPU`. По умолчанию DX12 на Windows, GL на Linux; **Vulkan — только явно**
-(на Intel даёт чёрный кадр при ресайзе). При нескольких картах выбирается встроенная. Адаптер виден в статус-строке.
+Архив `Postman-<версия>-windows-x64.zip` — артефакт CI (Actions → запуск → Artifacts): `postman.exe`,
+`postman-worker.exe`, `README.txt`, `install.ps1`. Локально — `scripts/windows/package.ps1` после
+`cargo build --release --workspace` (в `dist/`). Установка — `install.ps1` без прав администратора, инструкция
+пользователя — `scripts/windows/README.txt`. Версия exe — из `version` в `Cargo.toml`; значок —
+`app-gpui/res/postman.ico` (`scripts/windows/make-icon.ps1`), манифест — `app-gpui/res/postman.manifest`.
+
+### Подпись (решение владельца 1)
+
+Шаг «Подпись exe» в CI подписывает `postman.exe` и `postman-worker.exe` (`signtool`, SHA-256, метка времени),
+если в репозитории заданы секреты (Settings → Secrets and variables → Actions):
+
+- `WINDOWS_CERT_PFX_BASE64` — сертификат подписи кода с закрытым ключом (.pfx) в base64:
+  `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx")) | Set-Content cert.b64`, затем
+  `gh secret set WINDOWS_CERT_PFX_BASE64 < cert.b64` (и удалить `cert.b64`);
+- `WINDOWS_CERT_PASSWORD` — пароль .pfx: `gh secret set WINDOWS_CERT_PASSWORD`;
+- по желанию переменная `WINDOWS_TIMESTAMP_URL` — сервер меток времени (по умолчанию `http://timestamp.digicert.com`;
+  для внутреннего CA — его сервер, если есть).
+
+Без секретов шаг пропускается с уведомлением, архив — неподписанный (SmartScreen предупреждает при запуске из
+распакованного архива; `install.ps1` снимает отметку «из Интернета»). Сертификат на токене (EV, HSM) так не
+подключить — нужен отдельный подписывающий агент; решаем, когда будет сертификат.
 
 ## Замеры
 
-`postman --demo --bench [--gpu …]` — прогрев, 400 кадров листания с открытием писем, 120 кадров ресайза, без vsync;
+`postman --demo --bench` — прогрев, 400 кадров листания с открытием писем, 120 кадров ресайза;
 печатает одну строку: `exe_mb`, `first_frame_ms`, `scroll_p50/p99/max`, `resize_p50/p99/max` (мс на кадр),
 `scroll_cpu_pct` и `scroll_ui_thread_cpu_pct`, то же для листания списка без открытия писем (`list_*`), `ui_cpu_p50/p99`, `rss_peak_mb`, `private_peak_mb`, затем простой:
 `idle_cpu_pct`, `idle_rss_mb`, `idle_private_mb` (private bytes на Windows). `POSTMAN_BENCH_SCROLL_FRAMES=N`,
 `POSTMAN_BENCH_LIST_FRAMES=N` — длиннее фазы, например для профилировщика. Бенч работает на свежей копии ящика
-(`bench.redb` из шаблона `bench-template-<n>.redb`). Это общий сценарий для сравнения бэкендов, машин и UI-фреймворков.
+(`bench.redb` из шаблона `bench-template-<n>.redb`). Это общий сценарий для сравнения машин и версий.
 
 Кэш: `%LOCALAPPDATA%\Postman\` (Windows), `$XDG_DATA_HOME/Postman` (Linux).
 
 ## Хоткеи
 
 Ctrl+1/2/3 — почта/календарь/контакты · Ctrl+E — поиск · Ctrl+N/R/Shift+R/F — создать/ответить/всем/переслать ·
-Ctrl+Q/U — прочитано/не прочитано · в окне письма: Ctrl+Enter или Alt+S — отправить, Ctrl+S — черновик, Ctrl+Shift+B — «Скрытая», Ctrl+Shift+P — просмотр, Esc — закрыть · · Insert — флаг · Del — в «Удалённые» · ↑↓ / j k, Home/End, PgUp/PgDn — навигация.
+Ctrl+Q/U — прочитано/не прочитано · в окне письма: Ctrl+Enter или Alt+S — отправить, Ctrl+Shift+P — просмотр, Esc — закрыть · Insert — флаг · Del — в «Удалённые» · ↑↓ / j k, Home/End, PgUp/PgDn — навигация.
 
 ## Статус (неделя 1, спайк)
 

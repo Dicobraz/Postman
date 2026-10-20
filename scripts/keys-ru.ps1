@@ -1,8 +1,8 @@
-# S1-01: hotkeys in the Russian layout. Starts postman-gpui with POSTMAN_KEYLOG=1, switches its window
+# S1-01: hotkeys in the Russian layout. Starts postman.exe with POSTMAN_KEYLOG=1, switches its window
 # to the given layout, presses keys and prints what the app received ("key <keystroke> (<char>) -> <action>").
 # Keys are sent only while the Postman window is in the foreground; otherwise the script stops.
 # The keystroke log is written to %TEMP%\postman-keys-<pid>.txt and removed afterwards (-Keep leaves it).
-# Usage: powershell -File scripts\keys-ru.ps1 [-Exe <path to postman-gpui.exe>] [-Layout 00000419] [-Keep]
+# Usage: powershell -File scripts\keys-ru.ps1 [-Exe <path to postman.exe>] [-Layout 00000419] [-Keep]
 param(
   [string]$Exe = "",
   [string]$Layout = "00000419",
@@ -13,7 +13,7 @@ function Release-Exe([string]$name) {
   $meta = cargo metadata --format-version 1 --no-deps --manifest-path "$PSScriptRoot\..\Cargo.toml" | ConvertFrom-Json
   Join-Path $meta.target_directory "release\$name"
 }
-if (-not $Exe) { $Exe = Release-Exe "postman-gpui.exe" }
+if (-not $Exe) { $Exe = Release-Exe "postman.exe" }
 
 Add-Type -TypeDefinition @"
 using System;

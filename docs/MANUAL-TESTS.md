@@ -7,7 +7,7 @@
 **Порядок.** PR мержится после зелёного CI; ручная проверка — после мержа, по одной сборке со всеми
 непроверенными разделами.
 
-**Сборка.** `C:\Users\a.antropov\Documents\Claude\2026 FileNav\Postman\target\release\postman-gpui.exe`
+**Сборка.** `C:\Users\a.antropov\Documents\Claude\2026 FileNav\Postman\target\release\postman.exe`
 (`cargo build --release -p postman-gpui`). Демо-ящик — `%LOCALAPPDATA%\Postman\demo.redb`.
 
 ## Статус разделов
@@ -34,7 +34,7 @@
 
 ## 2. Снимки экранов (S2-05)
 
-`postman-gpui.exe --screens <каталог>` — пять PNG без участия человека.
+`postman.exe --screens <каталог>` — пять PNG без участия человека.
 
 1. Запустить с каталогом, например `%TEMP%\postman-screens`. Ожидание: окно появляется и само закрывается,
    в каталоге `list.png`, `letter.png`, `search.png`, `calendar.png`, `assistant.png`; код выхода 0.
@@ -58,7 +58,7 @@
 
 ## 5. Журнал Windows (S2-06)
 
-1. `postman-gpui.exe --demo abc --screens Z:\нет\такого` (недоступный каталог). Ожидание: выход с кодом 1.
+1. `postman.exe --demo abc --screens Z:\нет\такого` (недоступный каталог). Ожидание: выход с кодом 1.
 2. «Просмотр событий» → «Журналы Windows» → «Приложение», источник `Postman`, код 1000. Ожидание: ошибка
    с текстом о сбое запуска (Windows допишет, что описание события не найдено, — источник регистрирует установщик).
    Из PowerShell (фильтр `ProviderName` для незарегистрированного источника не работает):
@@ -79,7 +79,7 @@
 
 ## 7. Окно письма (S3-01)
 
-Демо: `postman-gpui.exe --demo 2000`.
+Демо: `postman.exe --demo 2000`.
 
 1. Ctrl+N. Ожидание: окно «Новое сообщение», курсор в «Кому»; основное окно листается (j/k).
 2. В «Кому» 2+ буквы имени из демо-ящика. Ожидание: подсказки; ↓/↑ — выбор, Enter или щелчок — «Имя <адрес>; ».

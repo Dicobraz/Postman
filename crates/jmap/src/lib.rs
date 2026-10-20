@@ -11,7 +11,7 @@ mod submission;
 mod vacation;
 
 pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
-pub use contacts::ContactCard;
+pub use contacts::{AddressBook, ContactCard};
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};

@@ -5,7 +5,7 @@
 //! в простое процессор не занят, кадры — только когда что-то изменилось. Проснувшись, задача забирает все
 //! накопившиеся события разом: каждая часть экрана получает своё (`Mailer::on_sync`), общее — здесь (`plan`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +14,7 @@ use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_cache::{Cache, MailboxRow};
 use postman_core::extract::Extractor;
-use postman_core::sync::{self, Account, Command, Event, Index};
+use postman_core::sync::{self, Account, Command, ErrorKind, Event, Index, Status, SyncError};
 
 use crate::Mailer;
 use crate::account::{self, Settings};
@@ -42,10 +42,19 @@ pub(crate) struct Live {
     extractor: Option<Extractor>,
     search: Option<LiveSearch>,
     next_ticket: u64,
-    /// Последняя показанная ошибка: та же ошибка подряд (сервер недоступен при каждом опросе) — без нового тоста.
+    /// Последняя показанная ошибка (её род): тот же род подряд (сервер недоступен при каждом опросе) — без нового
+    /// тоста, пока сервер снова не ответит.
     last_error: Option<String>,
     /// Пришло первое `EmailsChanged` (снимки `--screens --live` ждут его).
     pub(crate) synced: bool,
+    /// Адрес и логин учётной записи, с которой идёт синхронизация: для строки входа после отказа сервера.
+    account: Option<Settings>,
+    /// Файл кэша этой учётной записи: повторный вход в неё же — на открытом кэше (второй раз redb его не откроет).
+    path: Option<PathBuf>,
+    /// Сервер отклонил вход: показать строку входа на следующем кадре (ей нужно окно).
+    pub(crate) reauth: Option<Settings>,
+    /// Подписка на флаги списка уже есть (повторный вход не дублирует команды `Keyword`).
+    flags_watched: bool,
 }
 
 impl Live {
@@ -71,8 +80,16 @@ pub(crate) struct Plan {
     pub(crate) folders: bool,
     pub(crate) list: bool,
     /// Последний статус пачки.
-    pub(crate) status: Option<String>,
-    pub(crate) errors: Vec<String>,
+    pub(crate) status: Option<Status>,
+    pub(crate) errors: Vec<SyncError>,
+    /// Сервер отклонил вход (401): синхронизация остановилась, нужна строка входа.
+    pub(crate) auth: bool,
+    /// Первая загрузка закончилась (`Status::Synced`).
+    pub(crate) synced: bool,
+    /// Календарь на сервере изменился (push) — перечитать открытую неделю.
+    pub(crate) calendar: bool,
+    /// Догрузка папок: (папка, сколько писем пришло).
+    pub(crate) more: Vec<(String, usize)>,
     pub(crate) results: Vec<(u64, Vec<String>)>,
     /// Тела, пришедшие по запросу (`BodyReady`).
     pub(crate) bodies: Vec<String>,
@@ -89,8 +106,16 @@ pub(crate) fn plan(events: &[Event]) -> Plan {
                 p.folders = true;
             }
             Event::EmailsChanged => p.list = true,
-            Event::Status(s) => p.status = Some(s.clone()),
-            Event::Error(e) => p.errors.push(e.clone()),
+            Event::Status(s) => {
+                p.synced |= *s == Status::Synced;
+                p.status = Some(s.clone());
+            }
+            Event::Error(e) => {
+                p.auth |= e.kind == ErrorKind::Auth;
+                p.errors.push(e.clone());
+            }
+            Event::CalendarChanged => p.calendar = true,
+            Event::LoadedMore { mailbox, added } => p.more.push((mailbox.clone(), *added)),
             Event::SearchResults { ticket, ids, .. } => p.results.push((*ticket, ids.clone())),
             Event::BodyReady(id) => {
                 p.bodies.push(id.clone());
@@ -110,16 +135,42 @@ pub(crate) fn merge(local: &[String], server: &[String]) -> Vec<String> {
     local.iter().chain(server).filter(|id| seen.insert(id.as_str())).cloned().collect()
 }
 
-/// Ошибки для тостов: повтор последней подряд не показывается.
-pub(crate) fn fresh_errors(last: &mut Option<String>, errors: Vec<String>) -> Vec<String> {
+/// Ошибки для тостов: тот же род ошибки подряд не показывается (сервер недоступен — один тост, а не на каждый
+/// опрос); отказ во входе — не тостом, а строкой входа.
+pub(crate) fn fresh_errors(last: &mut Option<String>, errors: Vec<SyncError>) -> Vec<SyncError> {
     errors
         .into_iter()
+        .filter(|e| e.kind != ErrorKind::Auth)
         .filter(|e| {
-            let fresh = last.as_deref() != Some(e.as_str());
-            *last = Some(e.clone());
+            let key = format!("{:?}", e.kind);
+            let fresh = last.as_deref() != Some(key.as_str());
+            *last = Some(key);
             fresh
         })
         .collect()
+}
+
+/// Текст состояния синхронизации.
+pub(crate) fn status_text(s: &Status) -> String {
+    match s {
+        Status::Connecting { url } => tr!("sync-connecting", url = url.clone()),
+        Status::SignedIn { user } => tr!("sync-signed-in", user = user.clone()),
+        Status::Loading { mailbox } => tr!("sync-loading", mailbox = mailbox.clone()),
+        Status::Synced => tr!("sync-synced"),
+    }
+}
+
+/// Текст ошибки синхронизации: наш текст по роду, текст сервера — только подробностью.
+pub(crate) fn error_text(e: &SyncError) -> String {
+    let what = match e.kind {
+        ErrorKind::Auth => tr!("sync-error-auth"),
+        ErrorKind::Network => tr!("sync-error-network"),
+        ErrorKind::Server => tr!("sync-error-server"),
+        ErrorKind::Protocol => tr!("sync-error-protocol"),
+        ErrorKind::Storage => tr!("sync-error-storage"),
+        ErrorKind::Internal => tr!("sync-error-internal"),
+    };
+    tr!("sync-error", what = what, detail = e.detail.clone())
 }
 
 /// Входящие, иначе первая папка.
@@ -138,6 +189,24 @@ pub(crate) fn open_store(path: &Path) -> Result<(Cache, Index), postman_cache::E
         }
     };
     Ok((cache, index))
+}
+
+/// `--bench --live`: кэш и индекс живого ящика — в каталоге данных бенча (H-01), рабочий кэш учётной записи не
+/// трогается. Без `warm` — с чистого листа (замер первой синхронизации); без `keep` — удаляется в конце.
+/// Подготовка не входит во время запуска (`start`).
+pub(crate) fn bench_store(warm: bool, keep: bool, start: &mut std::time::Instant) -> Result<(Cache, Index), String> {
+    let prepared = std::time::Instant::now();
+    let dir = postman_demo::testdata_dir().join("live-bench");
+    if !warm && dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !keep {
+        postman_core::bench::remove_on_finish(dir.clone());
+    }
+    let opened = open_store(&dir.join("cache.redb")).map_err(|e| e.to_string())?;
+    *start += prepared.elapsed();
+    Ok(opened)
 }
 
 /// Поиск по своим данным (в фоне): индекс, пока он пуст (строится) — кэш.
@@ -194,7 +263,9 @@ impl Mailer {
             let _ = wake.unbounded_send(());
         };
         tracing::info!("sync start: {}", account.url);
-        self.live.status = tr!("account-connecting", url = account.url.clone());
+        self.live.status = status_text(&Status::Connecting { url: account.url.clone() });
+        self.live.account = Some(Settings::of(&account));
+        self.live.path = Some(account::cache_path(&crate::data_dir(), &account));
         let commands = sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint);
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
         let _ = wake_tx.unbounded_send(());
@@ -213,6 +284,8 @@ impl Mailer {
                 c.refresh(cx);
             }
         });
+        // Контакты и справочник — с сервера (S4-02): поток синхронизации присылает их после входа.
+        self.contacts.update(cx, |c, cx| c.go_live(cx));
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));
@@ -220,13 +293,16 @@ impl Mailer {
             build_index(i, self.cache.clone(), x);
         }
         self.live.index = index;
-        // Флаги, изменённые пользователем, — на сервер (в кэше они уже записаны).
-        self._subscriptions.push(cx.subscribe(&self.list, |this, _, f: &Flagged, cx| {
-            let sent = this.backend.send(Command::Keyword { id: f.id.clone(), keyword: f.keyword, on: f.on });
-            if !sent {
-                this.sync_stopped(cx);
-            }
-        }));
+        // Флаги, изменённые пользователем, — на сервер (в кэше они уже записаны). Подписка одна на экран.
+        if !self.live.flags_watched {
+            self.live.flags_watched = true;
+            self._subscriptions.push(cx.subscribe(&self.list, |this, _, f: &Flagged, cx| {
+                let sent = this.backend.send(Command::Keyword { id: f.id.clone(), keyword: f.keyword, on: f.on });
+                if !sent {
+                    this.sync_stopped(cx);
+                }
+            }));
+        }
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             // Поток синхронизации закончился — отправитель пробуждений закрыт, задача завершается.
@@ -262,11 +338,28 @@ impl Mailer {
             self.remember(account, cx);
         }
         if let Some(s) = plan.status {
-            self.live.status = s;
+            self.live.status = status_text(&s);
             cx.notify();
         }
+        if plan.synced
+            && let Some(b) = &mut self.bench
+        {
+            b.synced();
+        }
         if !plan.errors.is_empty() {
-            self.sync_errors(plan.errors, cx);
+            self.sync_errors(plan.errors, plan.auth, cx);
+        }
+        for (mailbox, added) in plan.more {
+            self.list.update(cx, |l, cx| {
+                if l.mailbox.as_deref() == Some(mailbox.as_str()) {
+                    l.more.loaded(added);
+                    cx.notify();
+                }
+            });
+        }
+        // Неделя открыта — перечитать; раздел закрыт — перечитается при входе в него (`set_section`).
+        if plan.calendar && self.section == crate::Section::Calendar {
+            self.cal.update(cx, |c, cx| c.refresh(cx));
         }
         if plan.folders {
             // Сервер снова отвечает: следующая ошибка — новым тостом.
@@ -293,7 +386,7 @@ impl Mailer {
         }
     }
 
-    fn sync_errors(&mut self, errors: Vec<String>, cx: &mut Context<Self>) {
+    fn sync_errors(&mut self, errors: Vec<SyncError>, auth: bool, cx: &mut Context<Self>) {
         for e in &errors {
             tracing::warn!("sync: {e}");
         }
@@ -302,14 +395,64 @@ impl Mailer {
             self.backend = Backend::Demo;
             self.live.status.clear();
             if let (Some(panel), Some(e)) = (&self.live.signin, errors.last()) {
-                panel.update(cx, |p, cx| p.failed(e, cx));
+                let text = error_text(e);
+                panel.update(cx, |p, cx| p.failed(&text, cx));
             }
             cx.notify();
             return;
         }
+        // Сохранённый вход отклонён (пароль сменили, сессию отозвали): синхронизация остановилась сама —
+        // строка входа с адресом и логином, новый пароль заменит прежний в диспетчере (`remember`).
+        if auth && self.live.signin.is_none() {
+            self.live.status.clear();
+            self.live.reauth = Some(self.live.account.clone().unwrap_or_default());
+            cx.notify();
+        }
         for e in fresh_errors(&mut self.live.last_error, errors) {
-            let text = tr!("account-sync-error", error = e);
+            let text = tr!("account-sync-error", error = error_text(&e));
             self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
+        }
+    }
+
+    /// Строка входа после отказа сервера: поля — прежней учётной записи, причина — сразу под ними.
+    pub(crate) fn show_reauth(&mut self, prefill: Settings, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!("sign-in rejected by the server: asking for the password again");
+        self.set_section(crate::Section::Mail, cx);
+        self.show_signin(Some(prefill), window, cx);
+        if let Some(panel) = &self.live.signin {
+            panel.update(cx, |p, cx| p.rejected(tr!("sync-reauth"), cx));
+        }
+    }
+
+    /// Список дошёл до конца загруженного: следующая страница папки с сервера. Демо — догружать нечего.
+    pub(crate) fn load_more(&mut self, mailbox: String, cx: &mut Context<Self>) {
+        if !self.backend.is_live() {
+            return;
+        }
+        if !self.backend.send(Command::LoadMore { mailbox }) {
+            self.list.update(cx, |l, _| l.more.loaded(0));
+            self.sync_stopped(cx);
+        }
+    }
+
+    /// Число писем открытой папки на сервере — списку (догрузка); демо — без догрузки.
+    pub(crate) fn sync_total(&mut self, cx: &mut Context<Self>) {
+        let live = self.backend.is_live();
+        let mailboxes = &self.folders.read(cx).mailboxes;
+        let current = self.list.read(cx).mailbox.clone();
+        let total = current
+            .and_then(|id| mailboxes.iter().find(|b| b.id == id))
+            .map(|b| b.total as usize)
+            .filter(|_| live);
+        self.list.update(cx, |l, _| l.more.set_total(total));
+    }
+
+    /// «Элементов: N» в строке состояния; папка загружена не вся — «N из M» (M — на сервере).
+    pub(crate) fn items_status(&self, cx: &App) -> String {
+        let list = self.list.read(cx);
+        match list.more.total.filter(|&t| t > list.count && list.search_ids.is_none()) {
+            Some(total) => tr!("status-items-of", n = list.count, total = total),
+            None => tr!("status-items", n = list.count),
         }
     }
 
@@ -358,6 +501,8 @@ impl Mailer {
                 if let Some(id) = open {
                     m.open_mailbox(id, cx);
                 }
+                m.sync_total(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -477,6 +622,13 @@ impl Mailer {
     /// «Войти»: открыть кэш этой учётной записи (в фоне), затем экран на нём и синхронизацию.
     fn sign_in(&mut self, account: Account, window: &mut Window, cx: &mut Context<Self>) {
         let path = account::cache_path(&crate::data_dir(), &account);
+        // Снова вход в ту же учётную запись (сервер отклонил пароль): кэш и экран уже её.
+        if self.live.path.as_ref() == Some(&path) {
+            let index = self.live.index.clone();
+            self.live.last_error = None;
+            self.start_sync(account, index, true, cx);
+            return;
+        }
         let task = cx.background_spawn(async move { open_store(&path) });
         cx.spawn_in(window, async move |this, cx| {
             let opened = task.await;
@@ -516,25 +668,36 @@ impl Mailer {
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{Event, MailboxRow, Plan, fresh_errors, inbox, merge, plan};
+    use super::{ErrorKind, Event, MailboxRow, Plan, Status, SyncError, fresh_errors, inbox, merge, plan};
+    use postman_core::sync::Stage;
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    fn err(kind: ErrorKind, detail: &str) -> SyncError {
+        SyncError { kind, stage: Stage::Refresh, detail: detail.into() }
+    }
+
+    fn connecting() -> Event {
+        Event::Status(Status::Connecting { url: "https://mail".into() })
+    }
+
     #[test]
     fn events_become_a_plan() {
         let events = vec![
-            Event::Status("connecting".into()),
+            connecting(),
             Event::MailboxesChanged,
             Event::EmailsChanged,
             Event::EmailsChanged,
             Event::BodyReady("a".into()),
             Event::BodiesStored(ids(&["b", "c"])),
             Event::SearchResults { ticket: 7, ids: ids(&["x"]), total: 1 },
-            Event::Error("offline".into()),
-            Event::Status("synced".into()),
+            Event::Error(err(ErrorKind::Network, "offline")),
+            Event::Status(Status::Synced),
             Event::Sent { ticket: 1 },
+            Event::LoadedMore { mailbox: "in".into(), added: 500 },
+            Event::CalendarChanged,
         ];
         let p = plan(&events);
         assert_eq!(
@@ -543,8 +706,12 @@ mod tests {
                 signed_in: true,
                 folders: true,
                 list: true,
-                status: Some("synced".into()),
-                errors: ids(&["offline"]),
+                status: Some(Status::Synced),
+                errors: vec![err(ErrorKind::Network, "offline")],
+                auth: false,
+                synced: true,
+                calendar: true,
+                more: vec![("in".into(), 500)],
                 results: vec![(7, ids(&["x"]))],
                 bodies: ids(&["a"]),
                 index: ids(&["a", "b", "c"]),
@@ -552,7 +719,8 @@ mod tests {
         );
         assert_eq!(plan(&[Event::Contacts(Vec::new())]), Plan::default());
         // Ошибка до первого ответа сервера — вход не подтверждён.
-        assert!(!plan(&[Event::Status("connecting".into()), Event::Error("401".into())]).signed_in);
+        let rejected = plan(&[connecting(), Event::Error(err(ErrorKind::Auth, "401"))]);
+        assert!(!rejected.signed_in && rejected.auth);
     }
 
     #[test]
@@ -565,9 +733,14 @@ mod tests {
     #[test]
     fn same_error_is_not_repeated() {
         let mut last = None;
-        assert_eq!(fresh_errors(&mut last, ids(&["offline", "offline"])), ids(&["offline"]));
-        assert_eq!(fresh_errors(&mut last, ids(&["offline"])), Vec::<String>::new());
-        assert_eq!(fresh_errors(&mut last, ids(&["401", "offline"])), ids(&["401", "offline"]));
+        let net = |d: &str| err(ErrorKind::Network, d);
+        // Сервер недоступен при каждом опросе (подробности разные) — один тост.
+        assert_eq!(fresh_errors(&mut last, vec![net("timeout"), net("connect")]), vec![net("timeout")]);
+        assert_eq!(fresh_errors(&mut last, vec![net("timeout")]), vec![]);
+        let server = err(ErrorKind::Server, "500");
+        assert_eq!(fresh_errors(&mut last, vec![server.clone(), net("timeout")]), vec![server, net("timeout")]);
+        // Отказ во входе — строкой входа, не тостом.
+        assert_eq!(fresh_errors(&mut last, vec![err(ErrorKind::Auth, "401")]), vec![]);
     }
 
     #[test]

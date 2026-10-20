@@ -70,6 +70,13 @@ impl SignIn {
         cx.emit(Submit(Account { url, auth: Auth::Basic { user, password } }));
     }
 
+    /// Сервер отклонил сохранённый вход: причина под полями, адрес и логин уже подставлены.
+    pub(crate) fn rejected(&mut self, text: String, cx: &mut Context<Self>) {
+        self.busy = false;
+        self.error = Some(text);
+        cx.notify();
+    }
+
     /// Вход не удался: показать причину, поля остаются для новой попытки.
     pub(crate) fn failed(&mut self, error: &str, cx: &mut Context<Self>) {
         self.busy = false;

@@ -11,7 +11,6 @@ signin-busy = Подключение…
 signin-demo = Без сервера — запуск с --demo.
 signin-fill = Заполните адрес сервера, логин и пароль.
 signin-failed = Вход не выполнен: { $error }
-account-connecting = Подключение к { $url }…
 account-sync-error = Синхронизация: { $error }
 account-sync-stopped = Нет связи с сервером: синхронизация остановлена, работа — с локальной копией.
 account-remember-failed = Вход выполнен, но пароль не сохранён: { $error }

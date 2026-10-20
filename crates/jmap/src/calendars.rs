@@ -116,10 +116,12 @@ impl Client {
 
     /// Событие по UID (приглашение, пришедшее письмом, могло уже лечь в календарь сервером).
     /// У приглашённого своё id события — искать только так (фильтр `uid` черновика; Stalwart — да).
+    /// Фильтр `uid` у Stalwart — по подстроке: берём несколько и сверяем uid целиком (иначе первым может прийти
+    /// другое событие с похожим uid).
     pub async fn event_by_uid(&self, uid: &str) -> Result<Option<Value>> {
         let acc = self.calendar_account()?;
         let calls = [
-            inv("CalendarEvent/query", json!({ "accountId": acc, "filter": { "uid": uid }, "limit": 1 }), "q"),
+            inv("CalendarEvent/query", json!({ "accountId": acc, "filter": { "uid": uid }, "limit": 50 }), "q"),
             inv(
                 "CalendarEvent/get",
                 json!({
@@ -177,6 +179,22 @@ impl Client {
         let acc = self.account_for(PRINCIPALS)?;
         let calls = [
             inv("Principal/query", json!({ "accountId": acc, "filter": { "text": text }, "limit": limit }), "q"),
+            inv(
+                "Principal/get",
+                json!({ "accountId": acc, "#ids": { "resultOf": "q", "name": "Principal/query", "path": "/ids" } }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let g: GetResponse<Principal> = take(&mut r, "g")?;
+        Ok(g.list)
+    }
+
+    /// Справочник: все сотрудники, переговорные и ресурсы (`Principal/query` без фильтра), не больше `limit`.
+    pub async fn directory(&self, limit: u64) -> Result<Vec<Principal>> {
+        let acc = self.account_for(PRINCIPALS)?;
+        let calls = [
+            inv("Principal/query", json!({ "accountId": acc, "limit": limit }), "q"),
             inv(
                 "Principal/get",
                 json!({ "accountId": acc, "#ids": { "resultOf": "q", "name": "Principal/query", "path": "/ids" } }),

@@ -8,8 +8,8 @@ Windows. Приложение семейства «Pets»: общий архит
 ## С чего начинать сессию
 
 1. `docs/specs/S0-decisions.md` — решения владельца, приоритетнее всех остальных документов.
-2. `docs/PLAN.md` — текущая фаза и пункт. Сейчас: **фаза 2, перенос экранов** (сессия S3, `docs/specs/S3.md`);
-   фазы 0 и 1 закрыты (`docs/specs/S1.md`, `S2.md`).
+2. `docs/PLAN.md` — текущая фаза и пункт. Сейчас: **фаза 3, сервер и стабилизация** (сессия S4, `docs/specs/S4.md`);
+   фазы 0–2 закрыты (`docs/specs/S1.md`, `S2.md`, `S3.md`).
 3. `docs/UI-SPIKE.md` — почему gpui, замеры, риски. `docs/adr/` — принятые отступления.
 4. `docs/HANDOFF.md` — исходное ТЗ: MVP, дизайн, бюджеты (§2c), безопасность рендера писем, вехи.
 5. Остальное читать по необходимости. Экономить токены: пояснения — по сути.
@@ -24,7 +24,7 @@ Windows. Приложение семейства «Pets»: общий архит
   с зависимостями и приёмкой). Соответствие сессий фазам плана — в `S0-decisions.md`. Мерж — владелец.
 - Коммиты на русском, суть в первой строке. Перед PR: `cargo clippy --workspace --all-targets -- -D warnings`
   и `cargo test --workspace`. CI (`.github/workflows/ci.yml`, только Windows) собирает и выкладывает
-  архив `postman-windows-x64` в Actions.
+  архив `Postman-<версия>-windows-x64.zip` в Actions (`scripts/windows/package.ps1`; подпись — если задан секрет).
 - «Не падать»: вне тестов нет `unwrap`/`expect`/`panic!` (clippy `deny` на всю рабочую область); ошибка — `Result`,
   отравленный мьютекс — `PoisonError::into_inner`, сбой старта — `fatal` (сообщение и выход).
 - Платформа: Windows — основа, другие ОС — по запросу. Код вне платформенных модулей не завязываем на Windows,
@@ -38,7 +38,7 @@ Windows. Приложение семейства «Pets»: общий архит
 | L0 | `ir` | HTML → безопасный IR, без I/O |
 | L1 | `jmap`, `cache` (redb), `compose`, `calendar`, `search` (tantivy), `worker` | без UI-зависимостей |
 | L2 | `core` (синхронизация, рендер через воркер, адресная книга, приглашения, замеры) | без UI-зависимостей |
-| L3 | `app-gpui` — основной UI; `app` (egui) — запасной, новое не добавлять | только здесь gpui/egui, winit, rfd (диалоги) |
+| L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe` | только здесь gpui, winit, rfd (диалоги) |
 | — | `demo` — синтетический ящик для демо и тестов | без UI; от него зависит только L3 |
 
 Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу.
@@ -48,7 +48,6 @@ Windows. Приложение семейства «Pets»: общий архит
   Linux (dev): seccomp + Landlock. Чужие данные в UI-процессе не разбираются никогда.
 - Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — в репозитории `pets`
   (`crates/pets-gpui-windows`), подключён `[patch]` на ревизию; правки — там, затем поднять `rev` здесь.
-  `third_party/xattr` — для Linux.
   Патчи gpui держим минимальными, предлагаем upstream (Zed, longbridge), на новые версии переносим.
 - Действия пользователя — команды из реестра (`app-gpui/src/commands.rs`, модель `pets-commands`): id `область.действие`
   → действие gpui `область::Действие` и хоткеи; новая клавиша или действие — только через таблицу команд;
@@ -66,12 +65,16 @@ Windows. Приложение семейства «Pets»: общий архит
 ## Запуск
 
 ```
-cargo run --release -p postman-gpui -- --demo 50000     # основной UI
-cargo run --release -p postman -- --demo                # egui, запасной
+cargo run --release -p postman-gpui -- --demo 50000     # демо-ящик; exe — target\release\postman.exe
 ... --bench                                             # замер: строка key=value в stdout
 POSTMAN_URL=… POSTMAN_USER=… POSTMAN_PASSWORD=…         # реальный сервер (или POSTMAN_TOKEN)
 cargo run --release -p postman-gpui                     # без окружения: сохранённый вход или строка входа; --sign-out — забыть
 ```
+
+Release-сборка — без консоли (`windows_subsystem`): `--bench`, `--screens`, `--help` пишут в консоль родителя
+или в перенаправление (`> файл`, канал). Git Bash и `.cmd` ждут выхода сами; в интерактивном cmd — `start /wait`,
+в PowerShell — `| Out-Default`. Ресурсы exe (значок, версия, манифест) — `app-gpui/build.rs`, нужен rc.exe из Windows SDK.
+Архив и установка — `scripts/windows/` (`package.ps1`, `install.ps1`, `README.txt`).
 
 Windows: тестам песочницы нужен один раз на каталог сборки (из `cargo metadata`, учитывает `CARGO_TARGET_DIR`):
 `icacls (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T /Q`.
@@ -83,11 +86,11 @@ cargo run --release -p postman-gpui -- --screens <каталог>
 ```
 
 Агенты проверяют интерфейс снимками, а не нажатиями в окне: демо-ящик (свежая копия на 2000 писем, удаляется
-в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite`, `search`, `calendar`, `assistant`, `event`, `compose`, `reply`, `meeting` (окна письма и встречи — свои окна), `vacation` (автоответ);
+в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite`, `search`, `calendar`, `assistant`, `event`, `contacts`, `contact-edit`, `compose`, `reply`, `meeting` (окна письма и встречи — свои окна), `vacation` (автоответ);
 на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
 stderr и код 1. Только Windows.
 `--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list`, `letter` и `reply` после первой синхронизации,
-`calendar` — неделя с сервера, `vacation` — автоответ с сервера;
+`calendar` — неделя с сервера, `contacts` — контакты и справочник с сервера, `vacation` — автоответ с сервера;
 без учётной записи в окружении — `signin` (строка входа).
 
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
@@ -103,6 +106,5 @@ stderr и код 1. Только Windows.
 
 - Не разбирать письма, вложения и приглашения вне воркера; не ослаблять песочницу без диагностики и ADR.
 - Не писать секреты (пароли, токены) на диск.
-- Не добавлять функции в egui-версию `app`.
 - Не делать модальных окон: подтверждения — одной строкой в самом окне, уведомления — тостами.
 - Не упоминать внутренние системы компании по имени: репозиторий публичный.
