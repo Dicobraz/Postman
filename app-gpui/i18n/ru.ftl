@@ -71,6 +71,7 @@ cal-off-hours = нерабочее время
 # Сбой запуска (журнал Windows и stderr).
 fatal-data-dir = каталог данных
 fatal-bench-mailbox = ящик для замера
+fatal-screens-dir = каталог снимков
 fatal-demo-mailbox = демо-ящик
 fatal-store = хранилище
 fatal-window = окно

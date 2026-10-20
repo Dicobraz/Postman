@@ -71,6 +71,7 @@ cal-off-hours = off hours
 # Startup failure (Windows event log and stderr).
 fatal-data-dir = data directory
 fatal-bench-mailbox = bench mailbox
+fatal-screens-dir = screenshots directory
 fatal-demo-mailbox = demo mailbox
 fatal-store = store
 fatal-window = window

@@ -20,6 +20,18 @@ pets-shell = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece
 pets-ui = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
 futures = "0.3"
 tracing = "0.1"
+# Снимки экранов (`--screens`, S2-05): дескриптор окна и запись PNG.
+raw-window-handle = "0.6"
+png = "0.17"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_UI_WindowsAndMessaging",
+]
 
 [lints]
 workspace = true
