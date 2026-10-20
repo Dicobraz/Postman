@@ -14,6 +14,7 @@ mod reading;
 mod backend;
 mod bar;
 mod mailer;
+mod compose;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -32,8 +33,10 @@ use postman_core::bench::{self, Bench};
 pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/app.ftl")),
     ("ru", include_str!("../i18n/ru/commands.ftl")),
+    ("ru", include_str!("../i18n/ru/compose.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
+    ("en", include_str!("../i18n/en/compose.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

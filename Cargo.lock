@@ -6317,6 +6317,7 @@ dependencies = [
  "png 0.17.16",
  "postman-cache",
  "postman-calendar",
+ "postman-compose",
  "postman-core",
  "postman-demo",
  "postman-ir",
