@@ -1,12 +1,13 @@
 //! JMAP for Calendars (draft-ietf-jmap-calendars) и Principals (RFC 9670).
 //! События возвращаются как JSON (JSCalendar) — разбор в `postman-calendar`.
-//! Имена методов и аргументов — по черновику; поведение Stalwart [проверить на стенде].
+//! Имена методов и аргументов — по черновику; поведение Stalwart проверено на стенде (`docs/STALWART.md`,
+//! `crates/core/tests/stand.rs`).
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::mail::{GetResponse, inv, set_error};
-use crate::{CALENDARS, CORE, Client, Error, PRINCIPALS, Result, take};
+use crate::{CALENDARS, CORE, Client, Error, PRINCIPALS, PRINCIPALS_AVAILABILITY, Result, take};
 
 const USING: &[&str] = &[CORE, CALENDARS, PRINCIPALS];
 
@@ -114,7 +115,7 @@ impl Client {
     }
 
     /// Событие по UID (приглашение, пришедшее письмом, могло уже лечь в календарь сервером).
-    /// Фильтр `uid` — из черновика JMAP Calendars [проверить на Stalwart].
+    /// У приглашённого своё id события — искать только так (фильтр `uid` черновика; Stalwart — да).
     pub async fn event_by_uid(&self, uid: &str) -> Result<Option<Value>> {
         let acc = self.calendar_account()?;
         let calls = [
@@ -143,6 +144,27 @@ impl Client {
         set_error(&v, "notUpdated", id, "CalendarEvent/set")
     }
 
+    /// Удалить событие; `send` — организатор рассылает отмену (CANCEL), участник — отказ.
+    pub async fn destroy_event(&self, id: &str, send: bool) -> Result<()> {
+        let acc = self.calendar_account()?;
+        let args = json!({ "accountId": acc, "destroy": [id], "sendSchedulingMessages": send });
+        let mut r = self.call(USING, &[inv("CalendarEvent/set", args, "s")]).await?;
+        let v: Value = take(&mut r, "s")?;
+        set_error(&v, "notDestroyed", id, "CalendarEvent/set")
+    }
+
+    /// Открыть календарь сотруднику (`principal_id`): только занятость или ещё и события.
+    /// Без этого `Principal/getAvailability` у него — пустой список без ошибки (Stalwart).
+    pub async fn share_calendar(&self, calendar_id: &str, principal_id: &str, items: bool) -> Result<()> {
+        let acc = self.calendar_account()?;
+        let mut patch = Map::new();
+        patch.insert(format!("shareWith/{principal_id}"), json!({ "mayReadFreeBusy": true, "mayReadItems": items }));
+        let args = json!({ "accountId": acc, "update": { calendar_id: patch } });
+        let mut r = self.call(USING, &[inv("Calendar/set", args, "s")]).await?;
+        let v: Value = take(&mut r, "s")?;
+        set_error(&v, "notUpdated", calendar_id, "Calendar/set")
+    }
+
     /// Ответ на приглашение: accepted | tentative | declined.
     pub async fn reply(&self, event_id: &str, participant_id: &str, status: &str) -> Result<()> {
         let mut patch = Map::new();
@@ -166,11 +188,29 @@ impl Client {
         Ok(g.list)
     }
 
-    /// Занятость сотрудника в интервале — без подробностей событий.
+    /// Сотрудник по адресу (фильтр `email`).
+    pub async fn principal_by_email(&self, email: &str) -> Result<Option<Principal>> {
+        let acc = self.account_for(PRINCIPALS)?;
+        let calls = [
+            inv("Principal/query", json!({ "accountId": acc, "filter": { "email": email }, "limit": 5 }), "q"),
+            inv(
+                "Principal/get",
+                json!({ "accountId": acc, "#ids": { "resultOf": "q", "name": "Principal/query", "path": "/ids" } }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let g: GetResponse<Principal> = take(&mut r, "g")?;
+        Ok(g.list.into_iter().find(|p| p.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(email))))
+    }
+
+    /// Занятость сотрудника в интервале — без подробностей событий. Пусто, если календарь не открыт
+    /// (`share_calendar`): ошибки сервер не даёт.
     pub async fn availability(&self, principal_id: &str, utc_start: &str, utc_end: &str) -> Result<Vec<BusyPeriod>> {
         let acc = self.account_for(PRINCIPALS)?;
         let args = json!({ "accountId": acc, "id": principal_id, "utcStart": utc_start, "utcEnd": utc_end, "showDetails": false });
-        let mut r = self.call(USING, &[inv("Principal/getAvailability", args, "a")]).await?;
+        let using = [CORE, CALENDARS, PRINCIPALS, PRINCIPALS_AVAILABILITY];
+        let mut r = self.call(&using, &[inv("Principal/getAvailability", args, "a")]).await?;
         let a: AvailabilityResponse = take(&mut r, "a")?;
         Ok(a.list)
     }

@@ -11,7 +11,7 @@
   - Thundermail (сервис Mozilla/Thunderbird) построен на Stalwart (репо thunderbird/mailstrom) — Thunderbird будут вылизывать под этот сервер. [факт]
 - Клиенты:
   - Mac/iOS — штатные Apple Mail/Calendar/Contacts по IMAP/CalDAV/CardDAV, не трогаем. [решение]
-    - Известная проблема: Apple Calendar не показывает «Доступность» на Stalwart — похоже на capability-advertisement на стороне сервера (форум Stalwart). [факт] [проверить]
+    - Известная проблема: Apple Calendar не показывает «Доступность» на Stalwart — причина: CalDAV free-busy в Stalwart v0.16.27 требует сразу `mayReadFreeBusy` и `mayReadItems` (баг сервера), см. `docs/STALWART.md`. [факт, стенд 2026-10-20]
   - Основной десктоп — **Thunderbird ESR** (IMAP/CalDAV/CardDAV/LDAP, RFC 6638 free/busy умеет). [решение]
   - **Этот проект**: собственный «good enough» клиент под Windows (Linux — бонус), JMAP-only, без конкуренции с миром, внутреннее использование. [решение]
 - Отвергнуто (и почему):
@@ -107,11 +107,12 @@
   платформенных модулей остаётся кроссплатформенным, чтобы их можно было вернуть.
 - **Отвергнуто:** Tauri/Electron-оболочка — противоречит принципам 1, 2, 4.
 
-## 4. Что выяснить до старта [проверить]
-1. Stalwart: какие JMAP capabilities объявляет текущая версия (`urn:ietf:params:jmap:calendars`, `:contacts`, `:principals`, `:websocket`, `:blob`), есть ли availability/free-busy в JMAP, как шлются scheduling-сообщения (`CalendarEvent/set` + sendSchedulingMessages?).
-2. Состояние крейтов `jmap-client`/`calcard` под Calendars/Contacts (возможно, придётся дописывать типы).
-3. Apple Calendar «Доступность» на Stalwart — воспроизвести, найти причину (нужно для Mac-пользователей, не для клиента).
-4. Thunderbird free/busy против Stalwart — воспроизвести (это референс-поведение).
+## 4. Что выяснить до старта
+Ответы по стенду (2026-10-20) — `docs/STALWART.md`; открыт только п. 5.
+1. Stalwart: какие JMAP capabilities объявляет текущая версия (`urn:ietf:params:jmap:calendars`, `:contacts`, `:principals`, `:websocket`, `:blob`), есть ли availability/free-busy в JMAP, как шлются scheduling-сообщения (`CalendarEvent/set` + sendSchedulingMessages?). — Да: все объявлены, availability есть (`Principal/getAvailability`, после шаринга), рассылка — `sendSchedulingMessages: true` с `organizerCalendarAddress`/`calendarAddress`.
+2. Состояние крейтов `jmap-client`/`calcard` под Calendars/Contacts (возможно, придётся дописывать типы). — Не нужны: свой тонкий клиент `postman-jmap`.
+3. Apple Calendar «Доступность» на Stalwart — воспроизвести, найти причину (нужно для Mac-пользователей, не для клиента). — Причина найдена (§2, `docs/STALWART.md` п. 6).
+4. Thunderbird free/busy против Stalwart — воспроизвести (это референс-поведение). — Та же причина: CalDAV free-busy требует оба права.
 5. Дата выхода Stalwart 1.0 и изменения схемы — чтобы не писать кэш под уходящий формат.
 
 ## 5. Тестовый контур
