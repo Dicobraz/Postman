@@ -14,7 +14,12 @@ postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"
 postman-core.workspace = true
-pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "3106838be4bd94edefb43a27342eea6c5e4a7ed2" }
+pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
+pets-i18n = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
+pets-shell = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
+pets-ui = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
+futures = "0.3"
+tracing = "0.1"
 
 [lints]
 workspace = true
