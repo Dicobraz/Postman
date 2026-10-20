@@ -62,6 +62,8 @@ pub(crate) struct Mailer {
     pub(crate) settings: crate::settings::ServerSettings,
     /// Контакты и справочник — своя кэшируемая view (S4-02).
     pub(crate) contacts: Entity<crate::contacts::ContactsView>,
+    /// «Отправить позже» и окно «Отменить» отправки (S5-06, `send_later.rs`).
+    pub(crate) send_later: crate::send_later::SendLater,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -133,6 +135,7 @@ impl Mailer {
                 ReadingEvent::Toast(level, text) => this.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx)),
                 ReadingEvent::NeedsServer => this.needs_server(cx),
                 ReadingEvent::Open(row) => this.open_letter(row.clone(), cx),
+                ReadingEvent::Unsend(s) => this.unsend_scheduled(s.clone(), cx),
                 ReadingEvent::Sync(req) => {
                     if !this.backend.send(req.command()) {
                         this.needs_server(cx);
@@ -167,6 +170,7 @@ impl Mailer {
             meetings: Default::default(),
             settings: Default::default(),
             contacts,
+            send_later: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -189,7 +193,8 @@ impl Mailer {
     /// поиск) — `live.rs`.
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
-        self.compose.on_sync(ev, cx);
+        let sent = self.compose.on_sync(ev, cx);
+        self.on_send_sync(ev, sent, cx);
         self.cal.update(cx, |c, cx| c.on_sync(ev, cx));
         self.contacts.update(cx, |c, cx| c.on_sync(ev, cx));
         let created = self.meetings.on_sync(ev, cx);
@@ -401,6 +406,8 @@ impl Render for Mailer {
                     )
                     .child("gpui"),
             )
+            // Окно «Отменить» отправки — внизу, над строкой состояния.
+            .children(self.undo_card(cx))
             // Тосты — поверх всего, последним ребёнком.
             .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {

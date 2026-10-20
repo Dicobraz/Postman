@@ -50,9 +50,12 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_labels::categories_are_set_queried_and_cleared` | S5-02, user3: письмо создаётся во «Входящих» (`Email/set create`, без SMTP) → категории патчем `keywords/<слово>` (в том числе слово с `~` и `/`) → `hasKeyword` в папке и во всех папках, `notKeyword`, счётчики `limit: 0` → снятие одной категории не трогает другие → неизвестный id — `notUpdated` (`notFound`) → письмо удалено |
 | `stand_labels::categories_through_sync` | S5-02, user3, через поток синхронизации: кэш поменян, `SetKeywords` доводит метку до сервера, `Query` → `SearchResults`, `Counts` → `Counts`; снятие — и в кэше, и на сервере |
 | `stand_labels::category_table_fits_in_a_file_node` | S5-02: таблица категорий (JSON) — blob → `FileNode/set create` → `FileNode/get` и чтение blob → `destroy` |
+| `stand_send_later::held_submission_is_canceled_and_not_delivered` | S5-06: user1 → user3 с `HOLDFOR` 30 → `pending`, `sendAt` через 30 с, в списке ждущих → `canceled` → письмо в «Черновиках» с `$draft`, повторная отмена — `cannotUnsend` → после срока у user3 ничего → убрано |
+| `stand_send_later::held_submission_is_delivered_after_the_delay` | S5-06: `HOLDUNTIL` через 20 с → `sendAt` тот же; через 8 с у user3 ничего, затем письмо приходит, `receivedAt` ≥ `sendAt`; отмена после выпуска — `cannotUnsend` → убрано |
+| `stand_send_later::send_later_through_sync` | S5-06, через поток синхронизации: `Scheduled` при входе (`max_delay` 7 дней) → `Send` с `Release::At` (+2 мин) → `Sent` со сроком → `Scheduled` с ним → `Unsend` → `Unsent`, в `Scheduled` его нет → убрано |
 | `stand_threads::reply_chain_is_one_thread_with_new_text_only` | S5-05: user1 → user3 → user1 цепочкой ответов (In-Reply-To, цитата Postman) → у user3 `Command::Thread` (`Thread/get` + `Email/get`) — одна беседа из трёх писем, своё — из «Отправленных», по времени; «только новый текст» — в каждом письме только его строки → письма убраны |
 
-Последний прогон — 2026-10-20, напрямую по HTTPS: `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
+Последний прогон — 2026-10-20, напрямую по HTTPS: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
 ## Поведение сервера
 
@@ -157,6 +160,29 @@ cargo test -p postman-core --test stand -- --ignored
     `FileNode/set create` с `blobId` загруженного blob, `parentId: null` — файл в корне; `FileNode/get` отдаёт свой
     `blobId` (не загруженный), имя, тип, права; `destroy` удаляет. Кандидат на таблицу категорий на сервере
     (`docs/specs/S5.md`, решение №4). Виден ли файл в «Файлах» (WebDAV) пользователя — [проверить].
+25. **Отложенная отправка — FUTURERELEASE** (S5-06, тест `stand_send_later`). У аккаунта в `submission`:
+    `maxDelayedSend: 2592000` (30 дней), `submissionExtensions`: `FUTURERELEASE`, `SIZE`, `DSN`, `DELIVERYBY`,
+    `MT-PRIORITY` (`MIXER`), `REQUIRETLS`. Срок задают параметры `envelope.mailFrom.parameters`: `HOLDFOR` (секунды) или
+    `HOLDUNTIL` (UTC, `2026-10-21T06:00:00Z`). Свой `sendAt` в `EmailSubmission/set create` сервер не принимает
+    (`notCreated`, `invalidProperties` `["sendAt"]`: по RFC 8621 он ставится сервером). В ответе `created` —
+    `sendAt` (срок выпуска) и `undoStatus: pending`, `deliveryStatus` — `queued`, «250 2.1.5 Queued».
+26. **Предел задержки — 7 дней, а не объявленные 30.** `HOLDFOR` 700000 → `notCreated` `forbiddenMailFrom`
+    «501 5.5.4 Requested hold time exceeds maximum of 604800 seconds», 604800 — принят. `HOLDUNTIL` в прошлом →
+    `forbiddenMailFrom` «501 5.5.4 HOLDUNTIL must be a date and time in the future». Клиент берёт меньшее из
+    `maxDelayedSend` и 7 дней (`send_later::max_delay`) и проверяет срок до отправки.
+27. **Отмена — `undoStatus: canceled`** (`EmailSubmission/set update`): `updated`, письмо не доставляется (у получателя
+    после срока ничего нет). Повторная отмена и отмена после выпуска — `notUpdated` `cannotUnsend` «The requested
+    message is no longer in the queue». После выпуска — `undoStatus: final`, но `deliveryStatus.delivered` остаётся
+    `unknown` (доставка на том же сервере). `EmailSubmission/query` с `filter.undoStatus: pending` отдаёт ждущие
+    отправки — по нему клиент строит список «Отправится …» после перезапуска. Выпуск — через 0–4 с после срока по
+    часам сервера (часы стенда на 1–2 с впереди рабочей машины: сверять `receivedAt` с `sendAt`, а не с часами
+    клиента). Переживает ли ждущая отправка перезапуск сервера — [проверить].
+28. **`onSuccessUpdateEmail` — при создании отправки, и отложенной тоже:** письмо сразу в «Отправленных», без `$draft`,
+    и после отмены остаётся там же. Поэтому клиент после отмены сам возвращает его в «Черновики» (`$draft`), а
+    запланированное показывает в «Отправленных» с меткой «⏱ срок»: держать его в «Черновиках» нельзя — после выпуска
+    сервер его не перенесёт. Папки «Исходящие» у Stalwart по умолчанию нет. Клиент (S5-06): обычная отправка —
+    `HOLDFOR` 13 с (окно «Отменить» 10 с + запас 3 с на ответ сервера), «Отправить позже» — `HOLDUNTIL`; письмо держит
+    сервер, поэтому выход из Postman в окне «Отменить» ничего не теряет — письмо уйдёт в срок.
 
 ## Общие ящики на стенде (S4-06)
 

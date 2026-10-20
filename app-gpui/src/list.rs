@@ -93,6 +93,8 @@ pub(crate) struct MailList {
     pub(crate) rights: HashMap<String, Rights>,
     /// Таблицы категорий по аккаунтам (S5-02): имена и цвета меток строк, клавиши 1–9.
     pub(crate) labels: Book,
+    /// Письма, которые сервер держит до срока (S5-06): ключ → Unix-время отправки; метка «⏱ ср 09:00».
+    pub(crate) scheduled: HashMap<String, i64>,
 }
 
 /// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
@@ -244,7 +246,14 @@ impl MailList {
             more: More::default(),
             rights: HashMap::new(),
             labels: crate::labels::default_book(),
+            scheduled: HashMap::new(),
         }
+    }
+
+    /// Отложенные отправки с сервера (`Event::Scheduled`).
+    pub(crate) fn set_scheduled(&mut self, scheduled: HashMap<String, i64>, cx: &mut Context<Self>) {
+        self.scheduled = scheduled;
+        cx.notify();
     }
 
     /// Таблицы категорий учётной записи (прочитаны из файла): строки — с их именами и цветами.
@@ -600,7 +609,13 @@ impl Render for MailList {
                     range
                         .map(|i| match this.row(i).cloned() {
                             Some(r) => {
-                                let labels = crate::labels::row_labels(&this.labels, &r);
+                                let mut labels = crate::labels::row_labels(&this.labels, &r);
+                                // Ждёт отправки — первой меткой, нейтральной (DESIGN.md: служебные — серые).
+                                let now = jiff::Timestamp::now().as_second();
+                                if let Some(&at) = this.scheduled.get(&r.id).filter(|&&at| at > now) {
+                                    let text = tr!("send-scheduled-row", time = crate::send_later::short(at));
+                                    labels.chips.insert(0, (text, postman_core::palette::NEUTRAL));
+                                }
                                 list_row(i, &r, labels, this.selected == Some(i), cx)
                             }
                             None => empty_row(i),

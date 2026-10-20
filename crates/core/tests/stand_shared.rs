@@ -209,9 +209,10 @@ async fn mail_is_sent_as_the_shared_mailbox() {
         markdown: "От имени общего ящика.".into(),
         ..Default::default()
     };
-    assert!(commands.send(Command::Send { draft: Box::new(draft), replace: None, ticket: 7 }).is_ok());
+    let release = sync::Release::Now;
+    assert!(commands.send(Command::Send { draft: Box::new(draft), replace: None, ticket: 7, release }).is_ok());
     wait_for(&rx, "отправлено", |e| match e {
-        Event::Sent { ticket: 7 } => Some(()),
+        Event::Sent { ticket: 7, .. } => Some(()),
         Event::ComposeFailed { ticket: 7, error } => panic!("отправка от имени {GROUP}: {error}"),
         _ => None,
     });

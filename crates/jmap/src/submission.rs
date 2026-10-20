@@ -1,6 +1,10 @@
 //! Отправка (RFC 8621 §7): письмо собирается на клиенте целиком, загружается
 //! blob'ом, импортируется в «Черновики» и отправляется через EmailSubmission;
 //! после успеха сервер сам переносит его в «Отправленные».
+//!
+//! Отложенная отправка (S5-06) — расширение SMTP FUTURERELEASE (RFC 4865) через параметры `mailFrom` конверта
+//! (`HOLDFOR`/`HOLDUNTIL`): `sendAt` у EmailSubmission сервер ставит сам, клиенту его задавать нельзя (RFC 8621 §7).
+//! Пока письмо ждёт (`undoStatus: pending`), отправку отменяет `undoStatus: canceled` (`docs/STALWART.md`).
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -24,6 +28,66 @@ pub struct Identity {
 pub struct Envelope {
     pub mail_from: String,
     pub rcpt_to: Vec<String>,
+}
+
+/// Когда сервер выпускает письмо (FUTURERELEASE, RFC 4865).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// Сразу.
+    Now,
+    /// Через столько секунд после создания отправки (`HOLDFOR`): окно «Отменить» (S5-06).
+    After(u32),
+    /// В момент (Unix-секунды, `HOLDUNTIL`): «Отправить позже».
+    At(i64),
+}
+
+impl Release {
+    /// Параметры `mailFrom` конверта.
+    fn parameters(self) -> Option<Value> {
+        match self {
+            Release::Now => None,
+            Release::After(s) => Some(json!({ "HOLDFOR": s.to_string() })),
+            Release::At(t) => Some(json!({ "HOLDUNTIL": unix_to_utc(t) })),
+        }
+    }
+}
+
+/// Итог `EmailSubmission/set create`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    /// Письмо (оно уже в «Отправленных»: сервер переносит его при создании отправки, и отложенной тоже).
+    pub email_id: String,
+    pub submission_id: String,
+    /// Когда сервер выпустит письмо (Unix-секунды; `sendAt` сервера).
+    pub send_at: Option<i64>,
+    /// `undoStatus: pending` — отправку ещё можно отменить.
+    pub pending: bool,
+}
+
+/// Отправка, которую сервер ещё держит (`undoStatus: pending`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingSubmission {
+    pub id: String,
+    pub email_id: String,
+    /// UTCDate сервера; [`PendingSubmission::send_at_unix`].
+    #[serde(default)]
+    pub send_at: String,
+}
+
+impl PendingSubmission {
+    pub fn send_at_unix(&self) -> Option<i64> {
+        crate::utc_to_unix(&self.send_at)
+    }
+}
+
+/// Отмена не удалась: письмо уже ушло (`cannotUnsend`) или другая ошибка.
+#[derive(Debug, thiserror::Error)]
+pub enum UnsendError {
+    #[error("the message has already been released")]
+    TooLate,
+    #[error(transparent)]
+    Jmap(#[from] Error),
 }
 
 #[derive(Deserialize)]
@@ -70,9 +134,27 @@ impl Client {
 
     /// Отправить собранное письмо. Возвращает id письма (оно окажется в `sent`).
     pub async fn send(&self, raw: Vec<u8>, identity: &str, envelope: &Envelope, drafts: &str, sent: &str) -> Result<String> {
+        Ok(self.submit(raw, identity, envelope, drafts, sent, Release::Now).await?.email_id)
+    }
+
+    /// Отправить собранное письмо с задержкой `release` (FUTURERELEASE). Письмо сразу переносится в `sent` — и
+    /// при отложенной отправке: `onSuccessUpdateEmail` сервер применяет при создании отправки, а не при выпуске.
+    pub async fn submit(
+        &self,
+        raw: Vec<u8>,
+        identity: &str,
+        envelope: &Envelope,
+        drafts: &str,
+        sent: &str,
+        release: Release,
+    ) -> Result<Submitted> {
         let acc = self.mail_account()?.to_string();
         let blob = self.upload(&acc, raw, "message/rfc822").await?;
         let rcpt: Vec<Value> = envelope.rcpt_to.iter().map(|e| json!({ "email": e })).collect();
+        let mut mail_from = json!({ "email": envelope.mail_from });
+        if let Some(p) = release.parameters() {
+            mail_from["parameters"] = p;
+        }
         let mut on_success = Map::new();
         on_success.insert(format!("mailboxIds/{drafts}"), Value::Null);
         on_success.insert(format!("mailboxIds/{sent}"), Value::Bool(true));
@@ -86,7 +168,7 @@ impl Client {
                     "create": { "sub": {
                         "identityId": identity,
                         "emailId": "#draft",
-                        "envelope": { "mailFrom": { "email": envelope.mail_from }, "rcptTo": rcpt },
+                        "envelope": { "mailFrom": mail_from, "rcptTo": rcpt },
                     }},
                     "onSuccessUpdateEmail": { "#sub": on_success },
                 }),
@@ -94,11 +176,102 @@ impl Client {
             ),
         ];
         let mut r = self.call(&[CORE, MAIL, SUBMISSION], &calls).await?;
-        let id = imported_id(&mut r)?;
+        let email_id = imported_id(&mut r)?;
         let v: Value = take(&mut r, "s")?;
         set_error(&v, "notCreated", "sub", "EmailSubmission/set")?;
-        Ok(id)
+        let created = &v["created"]["sub"];
+        let submission_id = created["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Protocol("EmailSubmission/set не вернул id".into()))?;
+        Ok(Submitted {
+            email_id,
+            submission_id,
+            send_at: created["sendAt"].as_str().and_then(crate::utc_to_unix),
+            pending: created["undoStatus"].as_str() == Some("pending"),
+        })
     }
+
+    /// Максимальная задержка отправки, которую объявил сервер (`maxDelayedSend`, секунды); 0 — FUTURERELEASE нет.
+    pub fn max_delayed_send(&self) -> u64 {
+        let Ok(acc) = self.account_for(SUBMISSION) else { return 0 };
+        self.session()
+            .accounts
+            .get(acc)
+            .and_then(|a| a.account_capabilities.get(SUBMISSION))
+            .and_then(|c| c.get("maxDelayedSend"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    /// Отправки, которые сервер ещё держит (`undoStatus: pending`): «Отправить позже» и окно «Отменить».
+    pub async fn pending_submissions(&self) -> Result<Vec<PendingSubmission>> {
+        let acc = self.account_for(SUBMISSION)?.to_string();
+        let calls = [
+            inv("EmailSubmission/query", json!({ "accountId": acc, "filter": { "undoStatus": "pending" } }), "q"),
+            inv(
+                "EmailSubmission/get",
+                json!({
+                    "accountId": acc,
+                    "#ids": { "resultOf": "q", "name": "EmailSubmission/query", "path": "/ids" },
+                    "properties": ["emailId", "sendAt", "undoStatus"],
+                }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(&[CORE, MAIL, SUBMISSION], &calls).await?;
+        let g: GetResponse<PendingSubmission> = take(&mut r, "g")?;
+        Ok(g.list)
+    }
+
+    /// Отменить отложенную отправку и вернуть письмо из `sent` в `drafts` черновиком. Письмо уже ушло —
+    /// [`UnsendError::TooLate`], письмо не трогается.
+    pub async fn unsend(
+        &self,
+        submission: &str,
+        email: &str,
+        drafts: &str,
+        sent: &str,
+    ) -> std::result::Result<(), UnsendError> {
+        let acc = self.account_for(SUBMISSION)?.to_string();
+        let cancel = inv(
+            "EmailSubmission/set",
+            json!({ "accountId": acc, "update": { submission: { "undoStatus": "canceled" } } }),
+            "c",
+        );
+        let mut r = self.call(&[CORE, MAIL, SUBMISSION], &[cancel]).await?;
+        let v: Value = take(&mut r, "c")?;
+        if v["notUpdated"][submission]["type"].as_str() == Some("cannotUnsend") {
+            return Err(UnsendError::TooLate);
+        }
+        set_error(&v, "notUpdated", submission, "EmailSubmission/set")?;
+        // Отменено — письмо снова черновик. Отдельным запросом: в одном с отменой он прошёл бы и при её отказе.
+        let mut patch = Map::new();
+        patch.insert(format!("mailboxIds/{sent}"), Value::Null);
+        patch.insert(format!("mailboxIds/{drafts}"), Value::Bool(true));
+        patch.insert("keywords/$draft".into(), Value::Bool(true));
+        let update = inv("Email/set", json!({ "accountId": acc, "update": { email: patch } }), "e");
+        let mut r = self.call(USING, &[update]).await?;
+        let v: Value = take(&mut r, "e")?;
+        set_error(&v, "notUpdated", email, "Email/set")?;
+        Ok(())
+    }
+}
+
+/// Unix-секунды → JMAP UTCDate (`2026-10-21T06:00:00Z`); обратное к [`crate::utc_to_unix`].
+pub fn unix_to_utc(t: i64) -> String {
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    // Дата по дням от эпохи — Howard Hinnant (civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 fn import_call(acc: &str, blob: &str, drafts: &str) -> crate::Invocation {
@@ -123,4 +296,26 @@ fn imported_id(r: &mut [crate::Invocation]) -> Result<String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| Error::Protocol("Email/import не вернул id".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Release, unix_to_utc};
+    use crate::utc_to_unix;
+    use serde_json::json;
+
+    #[test]
+    fn utc_round_trip() {
+        for t in [0, 951_782_400, 1_792_240_200, 1_792_476_000, 4_102_444_799] {
+            assert_eq!(utc_to_unix(&unix_to_utc(t)), Some(t), "{t}");
+        }
+        assert_eq!(unix_to_utc(1_792_240_200), "2026-10-17T12:30:00Z");
+    }
+
+    #[test]
+    fn release_becomes_envelope_parameters() {
+        assert_eq!(Release::Now.parameters(), None);
+        assert_eq!(Release::After(13).parameters(), Some(json!({ "HOLDFOR": "13" })));
+        assert_eq!(Release::At(1_792_240_200).parameters(), Some(json!({ "HOLDUNTIL": "2026-10-17T12:30:00Z" })));
+    }
 }

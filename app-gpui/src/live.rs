@@ -735,7 +735,7 @@ mod tests {
             Event::SearchResults { ticket: 7, ids: ids(&["x"]), total: 1 },
             Event::Error(err(ErrorKind::Network, "offline")),
             Event::Status(Status::Synced),
-            Event::Sent { ticket: 1 },
+            Event::Sent { ticket: 1, scheduled: None },
             Event::LoadedMore { mailbox: "in".into(), added: 500 },
             Event::CalendarChanged,
         ];
