@@ -1,10 +1,14 @@
-//! Спайк UI на gpui (gpui-kit): тот же экран, что и в egui-версии, и тот же `--bench`.
-//! Ядро (хранилище, IR, воркер-песочница, демо-ящик) — общее; здесь только интерфейс.
+//! Postman (`postman.exe`): интерфейс на gpui (gpui-kit). Ядро (хранилище, IR, воркер-песочница, демо-ящик) —
+//! в крейтах ниже; здесь только интерфейс.
 //!
-//!   postman-gpui [--demo N] [--bench] [--screens <каталог> [--live]] [--sign-out] [--lang ru|en|auto]
+//!   postman [--demo N] [--bench] [--screens <каталог> [--live]] [--sign-out] [--lang ru|en|auto] [--help] [--version]
 //!
 //! Без `--demo` — живой ящик: `POSTMAN_URL` + `POSTMAN_USER`/`POSTMAN_PASSWORD` (или `POSTMAN_TOKEN`), иначе
 //! сохранённый вход, иначе строка входа в окне. `--sign-out` — забыть сохранённый вход.
+//! Release-сборка — без консоли; вывод `--bench`, `--screens`, `--help` — в консоль родителя или в перенаправление.
+
+// Release: без окна консоли (S4-01). Отладочная сборка — с консолью, журнал виден сразу.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod calendar;
 mod commands;
@@ -102,9 +106,38 @@ fn listen_second_instance(listener: pets_shell::Listener, (window, mailer): (Any
     .detach();
 }
 
+/// `--help`: консольный вывод — по-английски, как журнал.
+const USAGE: &str = "Postman - mail, calendar and contacts for Stalwart (JMAP)
+
+Usage: postman [options]
+  --demo [N]            demo mailbox with N messages (default 50000), no server
+  --lang ru|en|auto     interface language (default: from Windows)
+  --sign-out            forget the saved sign-in
+  --bench               measure and exit: one key=value line on stdout
+  --screens <dir> [--live] [--keep]
+                        save screenshots (PNG) and exit: one 'screen <name> <path> <w>x<h>' line per file
+  --help, --version     this text, the version
+
+Live mailbox: POSTMAN_URL and POSTMAN_USER/POSTMAN_PASSWORD (or POSTMAN_TOKEN); otherwise the saved sign-in.
+Log: POSTMAN_LOG (e.g. debug); errors also go to the Windows Application log.
+cmd waits for postman.exe only with 'start /wait'; PowerShell - with '| Out-Default'; Git Bash and .cmd files wait.
+";
+
 fn main() {
     let mut start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Release без консоли: вывод этих режимов — в консоль родителя (если поток не перенаправлен).
+    if args.iter().any(|a| ["--bench", "--screens", "--help", "-h", "--version"].contains(&a.as_str())) {
+        sys::attach_parent_console();
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return;
+    }
+    if args.iter().any(|a| a == "--version") {
+        println!("postman {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let bench = args.iter().any(|a| a == "--bench");
     let demo = args.iter().any(|a| a == "--demo");

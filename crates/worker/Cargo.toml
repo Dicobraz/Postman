@@ -30,6 +30,10 @@ features = [
     "Win32_System_WindowsProgramming",
 ]
 
+# Версия exe (build.rs, rc.exe из Windows SDK).
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 tempfile = "3"
 

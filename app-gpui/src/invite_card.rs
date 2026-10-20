@@ -82,7 +82,7 @@ pub(crate) fn choose(mine: Partstat, sending: bool, pressed: Partstat) -> Option
     (!sending && mine != pressed).then_some(pressed)
 }
 
-/// Ключ хранилища для запомненного ответа (общий с egui-версией).
+/// Ключ хранилища для запомненного ответа.
 pub(crate) fn state_key(uid: &str) -> String {
     format!("invite:{uid}")
 }

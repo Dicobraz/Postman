@@ -362,7 +362,7 @@ impl Render for Mailer {
     }
 }
 
-// --- замер: общий сценарий из postman_core::bench, тот же, что в egui-версии ---
+// --- замер: общий сценарий из postman_core::bench ---
 
 impl Mailer {
     pub(crate) fn drive_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {

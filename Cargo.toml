@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "app", "app-gpui"]
+members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "app-gpui"]
 
 [workspace.package]
 edition = "2024"
@@ -27,7 +27,6 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# gpui 0.2.2 тянет xattr 0.2.3, несовместимый со свежим libc (нет ENOATTR на Linux).
 # «Не падать» (S2-03): вне тестов нет unwrap/expect/panic!; в тестах разрешены (clippy.toml).
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -35,7 +34,6 @@ expect_used = "deny"
 panic = "deny"
 
 [patch.crates-io]
-xattr = { path = "third_party/xattr" }
 # Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — общий для приложений Pets:
 # github.com/Dicobraz/pets, crates/pets-gpui-windows.
 gpui-pre-windows = { git = "https://github.com/Dicobraz/pets", rev = "d79c3ad2b8a44ece7ed9e323b8245d1ef0a3885a" }
