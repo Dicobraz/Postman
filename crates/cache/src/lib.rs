@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -271,6 +271,9 @@ fn index_keywords(by: &mut ByKeyword, count: &mut KeywordCount, row: &EmailRow, 
     }
     Ok(())
 }
+/// (цепочка, дата, id) → () — письма беседы по времени, из всех папок (S5-05). Таблица новее формата 2: в кэше без
+/// неё она строится из писем при открытии ([`Cache::init`]), без пересоздания кэша.
+const BY_THREAD: TableDefinition<(&str, i64, &str), ()> = TableDefinition::new("by_thread");
 
 /// Страничный кэш redb: памяти важнее, чем лишнее чтение с SSD. Листание демо-ящика на 50 тыс. заполняло 16 МБ
 /// целиком (куча процесса +16 МБ, S4-08, `docs/MEMORY.md`); 4 МБ хватает внутренним страницам деревьев, листовые
@@ -336,6 +339,7 @@ impl Cache {
 
     fn init(&self) -> Result<()> {
         let tx = self.db.begin_write()?;
+        let threads_indexed = tx.list_tables()?.any(|t| t.name() == BY_THREAD.name());
         tx.open_table(META)?.insert("version", FORMAT_VERSION)?;
         // Создаём все таблицы, чтобы чтение не спотыкалось об их отсутствие.
         tx.open_table(MAILBOX)?;
@@ -349,6 +353,14 @@ impl Cache {
         tx.open_table(ACCOUNT)?;
         tx.open_table(BY_KEYWORD)?;
         tx.open_table(KEYWORD_COUNT)?;
+        if !threads_indexed {
+            let email = tx.open_table(EMAIL)?;
+            let mut by = tx.open_table(BY_THREAD)?;
+            for r in email.iter()? {
+                let e: EmailRow = dec(r?.1.value())?;
+                by.insert((e.thread_id.as_str(), e.received_at, e.id.as_str()), ())?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -442,6 +454,7 @@ impl Cache {
             let mut count = tx.open_table(COUNT)?;
             let mut by_kw = tx.open_table(BY_KEYWORD)?;
             let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
+            let mut threads = tx.open_table(BY_THREAD)?;
             for e in rows {
                 let old: Option<EmailRow> = email.get(e.id.as_str())?.map(|v| dec(v.value())).transpose()?;
                 if let Some(old) = &old {
@@ -451,7 +464,9 @@ impl Cache {
                         }
                     }
                     index_keywords(&mut by_kw, &mut kw_count, old, false)?;
+                    threads.remove((old.thread_id.as_str(), old.received_at, old.id.as_str()))?;
                 }
+                threads.insert((e.thread_id.as_str(), e.received_at, e.id.as_str()), ())?;
                 for mb in &e.mailbox_ids {
                     if by.insert((mb.as_str(), -e.received_at, e.id.as_str()), ())?.is_none() {
                         add(&mut count, mb, 1)?;
@@ -509,9 +524,11 @@ impl Cache {
             let mut body = tx.open_table(BODY)?;
             let mut by_kw = tx.open_table(BY_KEYWORD)?;
             let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
+            let mut threads = tx.open_table(BY_THREAD)?;
             for id in ids {
                 let old: Option<EmailRow> = email.remove(id.as_str())?.map(|v| dec(v.value())).transpose()?;
                 let Some(old) = old else { continue };
+                threads.remove((old.thread_id.as_str(), old.received_at, id.as_str()))?;
                 for mb in &old.mailbox_ids {
                     if by.remove((mb.as_str(), -old.received_at, id.as_str()))?.is_some() {
                         add(&mut count, mb, -1)?;
@@ -543,6 +560,28 @@ impl Cache {
             }
         }
         Ok(out)
+    }
+
+    /// Письма беседы (ключ цепочки, `EmailRow::thread_id`) из всех папок, старые первыми.
+    pub fn thread(&self, thread_id: &str) -> Result<Vec<EmailRow>> {
+        let tx = self.db.begin_read()?;
+        let by = tx.open_table(BY_THREAD)?;
+        let email = tx.open_table(EMAIL)?;
+        let mut out = Vec::new();
+        for k in by.range((thread_id, i64::MIN, "")..=(thread_id, i64::MAX, MAX_ID))? {
+            let (k, _) = k?;
+            if let Some(v) = email.get(k.value().2)? {
+                out.push(dec(v.value())?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Сколько писем в беседе (для переключателя «Беседа (N)»).
+    pub fn thread_len(&self, thread_id: &str) -> Result<usize> {
+        let tx = self.db.begin_read()?;
+        let by = tx.open_table(BY_THREAD)?;
+        Ok(by.range((thread_id, i64::MIN, "")..=(thread_id, i64::MAX, MAX_ID))?.count())
     }
 
     /// Строки по id в заданном порядке (результаты поиска); отсутствующие пропускаются.
@@ -988,6 +1027,47 @@ mod tests {
         r.set_keyword("pm.cat.a", false);
         r.set_keyword("pm.cat.zz", false);
         assert_eq!(r.keywords, ["pm.cat.b"]);
+    }
+
+    /// Индекс бесед (S5-05): письма цепочки из всех папок по времени; перенос, смена даты и удаление его держат;
+    /// цепочки аккаунтов не смешиваются; кэш без индекса строит его при открытии.
+    #[test]
+    fn thread_index() {
+        let in_thread = |id: &str, thread: &str, at, mbs: &[&str]| EmailRow { thread_id: thread.into(), ..email(id, at, mbs) };
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_emails(&[
+            in_thread("r2", "t1", 20, &["in"]),
+            in_thread("s1", "t1", 10, &["sent"]),
+            in_thread("x", "t2", 15, &["in"]),
+            in_thread("i/r3", "i/t1", 5, &["i/in"]),
+        ])
+        .unwrap();
+        let thread = |c: &Cache, t: &str| ids(c.thread(t).unwrap());
+        assert_eq!(thread(&c, "t1"), ["s1", "r2"]);
+        assert_eq!((c.thread_len("t1").unwrap(), c.thread_len("i/t1").unwrap(), c.thread_len("zz").unwrap()), (2, 1, 0));
+        // Новое письмо в середину, повторная запись с другой датой — без дублей.
+        c.upsert_emails(&[in_thread("r3", "t1", 15, &["in"]), in_thread("r2", "t1", 30, &["in"])]).unwrap();
+        assert_eq!(thread(&c, "t1"), ["s1", "r3", "r2"]);
+        assert!(c.move_email("r3", "in", "trash").unwrap());
+        assert_eq!(thread(&c, "t1"), ["s1", "r3", "r2"]);
+        c.delete_emails(&["s1".into()]).unwrap();
+        assert_eq!(thread(&c, "t1"), ["r3", "r2"]);
+
+        // Кэш формата 2 без таблицы бесед: индекс строится при открытии.
+        let dir = tempfile::Builder::new().prefix("postman-cache-").tempdir().unwrap();
+        let path = dir.path().join("c.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(META).unwrap().insert("version", FORMAT_VERSION).unwrap();
+            let mut t = tx.open_table(EMAIL).unwrap();
+            for e in [in_thread("a", "t", 2, &["in"]), in_thread("b", "t", 1, &["sent"])] {
+                t.insert(e.id.as_str(), enc(&e).unwrap().as_slice()).unwrap();
+            }
+            drop(t);
+            tx.commit().unwrap();
+        }
+        assert_eq!(thread(&Cache::open(&path).unwrap(), "t"), ["b", "a"]);
     }
 
     #[test]

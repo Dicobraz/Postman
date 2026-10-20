@@ -298,6 +298,7 @@ mod tests {
                 Block::Table(vec![vec![vec![image("c")]]]),
             ],
             remote_images_blocked: 0,
+            history: None,
         };
         assert_eq!(cids(&doc), ["a", "b", "c"]);
     }

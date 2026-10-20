@@ -132,6 +132,7 @@ impl Mailer {
                 ReadingEvent::Error(text) => this.toasts.update(cx, |t, cx| t.push(Toast::Error, text.clone(), cx)),
                 ReadingEvent::Toast(level, text) => this.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx)),
                 ReadingEvent::NeedsServer => this.needs_server(cx),
+                ReadingEvent::Open(row) => this.open_letter(row.clone(), cx),
                 ReadingEvent::Sync(req) => {
                     if !this.backend.send(req.command()) {
                         this.needs_server(cx);
@@ -292,6 +293,10 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
             .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
             .on_action(cx.listener(|this, a: &mail::Categorize, _, cx| this.list.update(cx, |l, cx| l.toggle_category(a.key, cx))))
+            .on_action(cx.listener(|this, _: &commands::thread::Next, _, cx| this.thread_step(1, cx)))
+            .on_action(cx.listener(|this, _: &commands::thread::Prev, _, cx| this.thread_step(-1, cx)))
+            .on_action(cx.listener(|this, _: &commands::thread::Toggle, _, cx| this.reading.update(cx, |r, cx| r.toggle_feed(cx))))
+            .on_action(cx.listener(|this, _: &commands::thread::Quotes, _, cx| this.reading.update(cx, |r, cx| r.toggle_quotes(cx))))
             .on_action(cx.listener(|this, _: &mail::New, _, cx| {
                 this.open_compose(Default::default(), cx);
             }))

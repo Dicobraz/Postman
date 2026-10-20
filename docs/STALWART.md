@@ -48,6 +48,7 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_labels::categories_are_set_queried_and_cleared` | S5-02, user3: письмо создаётся во «Входящих» (`Email/set create`, без SMTP) → категории патчем `keywords/<слово>` (в том числе слово с `~` и `/`) → `hasKeyword` в папке и во всех папках, `notKeyword`, счётчики `limit: 0` → снятие одной категории не трогает другие → неизвестный id — `notUpdated` (`notFound`) → письмо удалено |
 | `stand_labels::categories_through_sync` | S5-02, user3, через поток синхронизации: кэш поменян, `SetKeywords` доводит метку до сервера, `Query` → `SearchResults`, `Counts` → `Counts`; снятие — и в кэше, и на сервере |
 | `stand_labels::category_table_fits_in_a_file_node` | S5-02: таблица категорий (JSON) — blob → `FileNode/set create` → `FileNode/get` и чтение blob → `destroy` |
+| `stand_threads::reply_chain_is_one_thread_with_new_text_only` | S5-05: user1 → user3 → user1 цепочкой ответов (In-Reply-To, цитата Postman) → у user3 `Command::Thread` (`Thread/get` + `Email/get`) — одна беседа из трёх писем, своё — из «Отправленных», по времени; «только новый текст» — в каждом письме только его строки → письма убраны |
 
 Последний прогон — 2026-10-20, напрямую по HTTPS: `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
@@ -139,13 +140,18 @@ cargo test -p postman-core --test stand -- --ignored
 20. **Push по аккаунтам.** EventSource участника присылает и `changed.<аккаунт группы>`: письмо в ящик группы приходит
     в кэш за ~1 с (тест). Для папки, открытой другим пользователем, — тоже по аккаунту владельца [проверить]. Клиент
     сверяет только названные аккаунты (`sync::MailChange`), опрос раз в 2 минуты — все.
+21. **Беседы** (S5-05, тест `stand_threads`). Ответ с `In-Reply-To`/`References` и темой «RE: …» Stalwart кладёт в ту же
+    цепочку, что и исходное письмо, у обоих пользователей (`threadId` — свой в каждом аккаунте), вместе с копией в
+    «Отправленных». `Thread/get` отдаёт `emailIds` из всех папок; `Email/get` со ссылкой
+    `#ids: /list/*/emailIds` — одним запросом. `receivedAt` — с точностью до секунды: письма одной секунды идут в
+    порядке id. Поиск `Email/query` `text: "RE: …"` не находит ничего — искать без «RE:» и сверять тему на клиенте.
 
-21. **Ключевые слова** (S5-02). Stalwart возвращает их как прислали (клиент шлёт нижний регистр — RFC 8621; что сервер
+22. **Ключевые слова** (S5-02). Stalwart возвращает их как прислали (клиент шлёт нижний регистр — RFC 8621; что сервер
     делает с заглавными — [проверить]), `~` и `/` в слове принимает (путь патча — JSON Pointer с `~0`/`~1`). Патч `keywords/<слово>` меняет одно слово,
     остальные (`$seen`, чужие) остаются. `Email/query` с `hasKeyword`/`notKeyword` — и с `inMailbox`, и без него;
     `limit: 0` с `calculateTotal` даёт число без id — счётчики «N из M» одним запросом (до `maxCallsInRequest` = 16
     вызовов; `maxObjectsInSet` = 500). Неизвестный id в `Email/set update` — `notUpdated` с `notFound`, не ошибка запроса.
-22. **FileNode** (`urn:ietf:params:jmap:filenode`, черновик IETF): есть у своего аккаунта и у аккаунтов общих ящиков.
+23. **FileNode** (`urn:ietf:params:jmap:filenode`, черновик IETF): есть у своего аккаунта и у аккаунтов общих ящиков.
     `FileNode/set create` с `blobId` загруженного blob, `parentId: null` — файл в корне; `FileNode/get` отдаёт свой
     `blobId` (не загруженный), имя, тип, права; `destroy` удаляет. Кандидат на таблицу категорий на сервере
     (`docs/specs/S5.md`, решение №4). Виден ли файл в «Файлах» (WebDAV) пользователя — [проверить].
