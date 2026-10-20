@@ -31,14 +31,25 @@ pub mod meeting {
     gpui_kit::actions!(meeting, [Send, Close]);
 }
 
+/// Настройки ящика на сервере (S4-05, S4-07): в Outlook — меню «Файл», клавиши нет.
+pub mod settings {
+    gpui_kit::actions!(settings, [Vacation, Rules]);
+}
+
 /// Окно письма (S3-01).
 pub mod compose {
     gpui_kit::actions!(compose, [Send, Attach, Preview, Close]);
 }
 
-/// Экран почты вне полей ввода: клавиши без модификаторов в поиске — текст и курсор.
-const LIST: Option<&str> = Some("Mailer && !Input");
-/// Весь экран почты, включая поле поиска.
+/// Раздел «Почта» вне полей ввода: клавиши без модификаторов в поиске — текст и курсор. Контекст раздела
+/// (`MailView`, `CalendarView`, `ContactsView`, `SettingsView`) ставит корень экрана: в календаре, контактах и
+/// настройках клавиши писем молчат.
+const LIST: Option<&str> = Some("MailView && !Input");
+/// Раздел «Почта», включая поле поиска.
+const MAIL: Option<&str> = Some("MailView");
+/// Раздел «Календарь».
+const CALENDAR: Option<&str> = Some("CalendarView");
+/// Весь экран почты (любой раздел), включая поле поиска.
 const MAILER: Option<&str> = Some("Mailer");
 /// Окно письма, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
 /// отправка, а не перевод строки), а при равной глубине побеждает привязка, заданная позже (`bind` — после
@@ -59,13 +70,13 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.last", &["end"], LIST),
     cmd("mail.page_down", &["pagedown"], LIST),
     cmd("mail.page_up", &["pageup"], LIST),
-    cmd("mail.mark_read", &["ctrl-q"], MAILER),
-    cmd("mail.mark_unread", &["ctrl-u"], MAILER),
+    cmd("mail.mark_read", &["ctrl-q"], MAIL),
+    cmd("mail.mark_unread", &["ctrl-u"], MAIL),
     cmd("mail.toggle_flag", &["insert"], LIST),
     cmd("mail.new", &["ctrl-n"], MAILER),
-    cmd("mail.reply", &["ctrl-r"], MAILER),
-    cmd("mail.reply_all", &["ctrl-shift-r"], MAILER),
-    cmd("mail.forward", &["ctrl-f"], MAILER),
+    cmd("mail.reply", &["ctrl-r"], MAIL),
+    cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
+    cmd("mail.forward", &["ctrl-f"], MAIL),
     cmd("mail.delete", &["delete"], LIST),
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
@@ -76,9 +87,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("search.clear", &["escape"], None),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
     // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — кнопкой.
-    cmd("calendar.prev_week", &["alt-up"], MAILER),
-    cmd("calendar.next_week", &["alt-down"], MAILER),
-    cmd("calendar.today", &[], MAILER),
+    cmd("calendar.prev_week", &["alt-up"], CALENDAR),
+    cmd("calendar.next_week", &["alt-down"], CALENDAR),
+    cmd("calendar.today", &[], CALENDAR),
     cmd("compose.send", &["ctrl-enter", "alt-s"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
     cmd("compose.attach", &[], COMPOSER),
@@ -86,6 +97,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.close", &["escape"], COMPOSER),
     cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Outlook: «Файл → Автоматические ответы», без клавиши.
+    cmd("settings.vacation", &[], None),
+    // Outlook: «Файл → Правила и оповещения», без клавиши.
+    cmd("settings.rules", &[], None),
 ];
 
 /// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал
@@ -170,6 +185,18 @@ mod tests {
                 old.replace("\r\n", "\n") == doc,
                 "docs/PARITY.md устарел: POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity"
             );
+        }
+    }
+
+    /// Клавиши писем действуют только в разделе «Почта»: в календаре и контактах Delete, j/k, Ctrl+R не трогают
+    /// скрытый список писем. Создать письмо (Ctrl+N) — из любого раздела.
+    #[test]
+    fn mail_keys_are_scoped_to_the_mail_view() {
+        for c in COMMANDS.iter().filter(|c| c.area() == "mail" && c.id != "mail.new" && !c.keys.is_empty()) {
+            assert!(c.context.is_some_and(|ctx| ctx.contains("MailView")), "{}: клавиши вне раздела «Почта»", c.id);
+        }
+        for c in COMMANDS.iter().filter(|c| c.id.starts_with("calendar.") && c.id != "calendar.new_meeting") {
+            assert!(c.context.is_some_and(|ctx| ctx.contains("CalendarView")), "{}: клавиши вне календаря", c.id);
         }
     }
 

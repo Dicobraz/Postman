@@ -29,3 +29,5 @@ cmd-calendar-next-week = Next week
 cmd-calendar-today = Go to today
 cmd-meeting-send = Send invitations
 cmd-meeting-close = Close the meeting window
+cmd-settings-vacation = Automatic replies
+cmd-settings-rules = Rules
