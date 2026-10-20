@@ -1,0 +1,77 @@
+//! Таблица клавиш инструкции пользователя (`docs/USER-GUIDE.md`, S4-04) — из реестра команд, как `docs/PARITY.md`.
+//! Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui user_guide`.
+
+// Модуль только для тестов (`#[cfg(test)] mod keys_doc` в `main.rs`); метка ниже — граница для теста сырых строк.
+#[cfg(test)]
+use crate::commands::COMMANDS;
+
+const BEGIN: &str = "<!-- keys:begin -->";
+const END: &str = "<!-- keys:end -->";
+
+/// `ctrl-shift-r` → `Ctrl+Shift+R`, `pagedown` → `PgDn`.
+fn human(keys: &str) -> String {
+    keys.split('-')
+        .map(|k| match k {
+            "ctrl" => "Ctrl".to_string(),
+            "shift" => "Shift".to_string(),
+            "alt" => "Alt".to_string(),
+            "escape" => "Esc".to_string(),
+            "enter" => "Enter".to_string(),
+            "delete" => "Delete".to_string(),
+            "insert" => "Insert".to_string(),
+            "home" => "Home".to_string(),
+            "end" => "End".to_string(),
+            "pagedown" => "PgDn".to_string(),
+            "pageup" => "PgUp".to_string(),
+            "up" => "↑".to_string(),
+            "down" => "↓".to_string(),
+            k => k.to_uppercase(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Где действует: по контексту команды.
+fn place(context: Option<&str>) -> &'static str {
+    match context {
+        Some(c) if c.contains("Composer") => "окно письма",
+        Some(c) if c.contains("Meeting") => "окно встречи",
+        Some(c) if c.contains("CalendarView") => "календарь",
+        Some(c) if c.contains("MailView") => "почта",
+        Some(c) if c.contains("Mailer") => "главное окно",
+        _ => "везде",
+    }
+}
+
+fn table() -> String {
+    let names = crate::commands::parity::ftl_names(crate::commands::parity::RU_FTL);
+    let mut s = String::from("| Действие | Клавиши | Где |\n|---|---|---|\n");
+    for c in COMMANDS.iter().filter(|c| !c.keys.is_empty()) {
+        let key = c.name_key();
+        let name = names.iter().find(|(k, _)| *k == key).map_or(key.as_str(), |(_, v)| v);
+        let keys: Vec<String> = c.keys.iter().map(|k| human(k)).collect();
+        s.push_str(&format!("| {name} | {} | {} |\n", keys.join(", "), place(c.context)));
+    }
+    s
+}
+
+#[test]
+fn user_guide_keys_are_current() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/USER-GUIDE.md");
+    let old = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+    let (head, rest) = old.split_once(BEGIN).expect("метка keys:begin");
+    let (_, tail) = rest.split_once(END).expect("метка keys:end");
+    let doc = format!("{head}{BEGIN}\n{}{END}{tail}", table());
+    if std::env::var_os("POSTMAN_UPDATE_DOCS").is_some() {
+        std::fs::write(&path, &doc).unwrap();
+    } else {
+        assert!(old == doc, "docs/USER-GUIDE.md устарел: POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui user_guide");
+    }
+}
+
+#[test]
+fn keys_read_like_windows() {
+    assert_eq!(human("ctrl-shift-r"), "Ctrl+Shift+R");
+    assert_eq!(human("alt-down"), "Alt+↓");
+    assert_eq!(human("j"), "J");
+}
