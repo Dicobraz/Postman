@@ -244,6 +244,37 @@ impl Cache {
         Ok(())
     }
 
+    /// Перенести письмо из ящика `from` в `to` (удаление в «Удалённые» — до ответа сервера, чтобы список
+    /// изменился сразу). `false` — письма нет или оно не в `from`.
+    pub fn move_email(&self, id: &str, from: &str, to: &str) -> Result<bool> {
+        let tx = self.db.begin_write()?;
+        let moved = {
+            let mut email = tx.open_table(EMAIL)?;
+            let mut by = tx.open_table(BY_MAILBOX)?;
+            let mut count = tx.open_table(COUNT)?;
+            let row: Option<EmailRow> = email.get(id)?.map(|v| dec(v.value())).transpose()?;
+            match row {
+                Some(mut row) if row.mailbox_ids.iter().any(|m| m == from) => {
+                    row.mailbox_ids.retain(|m| m != from);
+                    if by.remove((from, -row.received_at, id))?.is_some() {
+                        add(&mut count, from, -1)?;
+                    }
+                    if !row.mailbox_ids.iter().any(|m| m == to) {
+                        row.mailbox_ids.push(to.to_owned());
+                        if by.insert((to, -row.received_at, id), ())?.is_none() {
+                            add(&mut count, to, 1)?;
+                        }
+                    }
+                    email.insert(id, enc(&row)?.as_slice())?;
+                    true
+                }
+                _ => false,
+            }
+        };
+        tx.commit()?;
+        Ok(moved)
+    }
+
     pub fn delete_emails(&self, ids: &[String]) -> Result<()> {
         let tx = self.db.begin_write()?;
         {
@@ -492,6 +523,22 @@ mod tests {
         c.delete_emails(&["c".into()]).unwrap();
         assert_eq!(c.count("x").unwrap(), 0);
         assert_eq!(c.all_rows(0, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn move_to_trash() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_emails(&[email("a", 1, &["in", "label"]), email("b", 2, &["in"])]).unwrap();
+        assert!(c.move_email("a", "in", "trash").unwrap());
+        assert_eq!(ids(c.page("in", 0, 10).unwrap()), ["b"]);
+        assert_eq!(ids(c.page("trash", 0, 10).unwrap()), ["a"]);
+        assert_eq!((c.count("in").unwrap(), c.count("trash").unwrap(), c.count("label").unwrap()), (1, 1, 1));
+        let row = c.rows_by_ids(&["a".into()]).unwrap().remove(0);
+        assert_eq!(row.mailbox_ids, ["label", "trash"]);
+        // Не в этом ящике или нет такого письма — ничего не меняется.
+        assert!(!c.move_email("a", "in", "trash").unwrap());
+        assert!(!c.move_email("zz", "in", "trash").unwrap());
+        assert_eq!(c.count("trash").unwrap(), 1);
     }
 
     #[test]

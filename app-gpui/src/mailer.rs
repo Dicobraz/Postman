@@ -44,6 +44,8 @@ pub(crate) struct Mailer {
     pub(crate) live: crate::live::Live,
     /// Окна письма (S3-01).
     pub(crate) compose: crate::compose::Composers,
+    /// Ответ, пересылка, удаление (S3-02).
+    pub(crate) actions: crate::actions::Actions,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
     pub(crate) sandbox: Option<Level>,
     /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
@@ -85,6 +87,7 @@ impl Mailer {
             on_search,
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
+            crate::actions::watch_list(&list, cx),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
                 FolderEvent::Section(s) => this.set_section(*s, cx),
@@ -125,6 +128,7 @@ impl Mailer {
             backend: Backend::Demo,
             live: Default::default(),
             compose: Default::default(),
+            actions: Default::default(),
             sandbox: None,
             last_key: String::new(),
             bench,
@@ -217,7 +221,7 @@ impl Render for Mailer {
         screens::drive(self, window, cx);
         let status = tr!("status-items", n = self.list.read(cx).count);
         let unread = self.toasts.read(cx).unread();
-        let root = div()
+        let root = crate::actions::handlers(div(), cx)
             .key_context("Mailer")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &mail::Next, _, cx| this.step(|_| 1, cx)))
@@ -248,6 +252,10 @@ impl Render for Mailer {
                 // Esc сначала закрывает историю уведомлений.
                 if this.toasts.read(cx).is_history_open() {
                     this.toasts.update(cx, |t, cx| t.toggle_history(cx));
+                    return;
+                }
+                // …затем строку «Удалить навсегда?».
+                if this.cancel_purge(cx) {
                     return;
                 }
                 this.search.update(cx, |s, cx| s.set_value("", window, cx));

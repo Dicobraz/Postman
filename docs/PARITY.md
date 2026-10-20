@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 20 из 25 (80 %).
+Сделано: 24 из 25 (96 %).
 
 | Функция | Команда | Хоткей | Статус |
 |---|---|---|---|
@@ -18,10 +18,10 @@
 | Отметить как непрочитанное | `mail.mark_unread` | `ctrl-u` | есть |
 | Флаг | `mail.toggle_flag` | `insert` | есть |
 | Создать письмо | `mail.new` | `ctrl-n` | есть |
-| Ответить | `mail.reply` | `ctrl-r` | нет |
-| Ответить всем | `mail.reply_all` | `ctrl-shift-r` | нет |
-| Переслать | `mail.forward` | `ctrl-f` | нет |
-| Удалить | `mail.delete` | `delete` | нет |
+| Ответить | `mail.reply` | `ctrl-r` | есть |
+| Ответить всем | `mail.reply_all` | `ctrl-shift-r` | есть |
+| Переслать | `mail.forward` | `ctrl-f` | есть |
+| Удалить | `mail.delete` | `delete` | есть |
 | Почта | `view.mail` | `ctrl-1` | есть |
 | Календарь | `view.calendar` | `ctrl-2` | есть |
 | Контакты | `view.contacts` | `ctrl-3` | нет |

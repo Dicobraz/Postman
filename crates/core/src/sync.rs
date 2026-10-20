@@ -55,7 +55,10 @@ impl Account {
 pub enum Command {
     Body(String),
     Keyword { id: String, keyword: &'static str, on: bool },
+    /// Перенести письмо (удаление в «Удалённые»). UI уже перенёс его в кэше; сбой — письмо с сервера заново.
     Move { id: String, from: String, to: String },
+    /// Удалить письмо насовсем (из «Удалённых»). UI уже убрал его из кэша; сбой — письмо с сервера заново.
+    Destroy(String),
     /// `replace` — id прежней версии черновика на сервере.
     Send { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
     SaveDraft { draft: Box<Draft>, replace: Option<String>, ticket: u64 },
@@ -312,7 +315,22 @@ async fn handle(
             notify(Event::BodyReady(id));
         }
         Command::Keyword { id, keyword, on } => client.set_keyword(&id, keyword, on).await?,
-        Command::Move { id, from, to } => client.move_email(&id, &from, &to).await?,
+        Command::Move { id, from, to } => {
+            if let Err(e) = client.move_email(&id, &from, &to).await {
+                restore(client, cache, index, &id, notify).await;
+                return Err(e);
+            }
+        }
+        Command::Destroy(id) => {
+            if let Err(e) = client.destroy_email(&id).await {
+                restore(client, cache, index, &id, notify).await;
+                return Err(e);
+            }
+            if let Some(i) = index {
+                let _ = i.delete(std::slice::from_ref(&id));
+                let _ = i.commit();
+            }
+        }
         Command::Send { draft, replace, ticket } => {
             let r = send(client, cache, identities, &draft, replace.as_deref()).await;
             notify(match r {
@@ -367,6 +385,18 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// Сервер не выполнил перенос или удаление: письмо — в кэш таким, какое оно на сервере (UI уже поменял кэш сам).
+async fn restore(client: &Client, cache: &mut Cache, index: &Index, id: &str, notify: &impl Fn(Event)) {
+    let restored = match client.email_get(&[id.to_owned()]).await {
+        Ok((emails, _)) => save(cache, index, emails.iter().map(email_row).collect(), notify),
+        Err(e) => Err(e),
+    };
+    match restored {
+        Ok(()) => notify(Event::EmailsChanged),
+        Err(e) => notify(Event::Error(format!("письмо не восстановлено: {e}"))),
+    }
 }
 
 fn mailbox_by_role(cache: &Cache, role: &str) -> postman_jmap::Result<String> {

@@ -1,10 +1,25 @@
-//! Строка команд: кнопки действий и поле поиска.
+//! Строка команд: кнопки действий и поле поиска. Кнопка — та же команда реестра, что и хоткей (S3-02).
 
 use gpui_kit::*;
 use gpui_kit::component::input::{Input, InputState};
 use pets_i18n::tr;
 
+use crate::commands::mail;
+
 // --- строка команд ---
+
+/// Действие кнопки (новое на каждое нажатие).
+type MakeAction = fn() -> Box<dyn Action>;
+
+/// Кнопки строки команд: текст и действие команды.
+const BUTTONS: [(&str, MakeAction); 6] = [
+    ("bar-new", || Box::new(mail::New)),
+    ("bar-reply", || Box::new(mail::Reply)),
+    ("bar-reply-all", || Box::new(mail::ReplyAll)),
+    ("bar-forward", || Box::new(mail::Forward)),
+    ("bar-delete", || Box::new(mail::Delete)),
+    ("bar-flag", || Box::new(mail::ToggleFlag)),
+];
 
 /// Высота строки команд: кэшированное view не измеряется по содержимому, размер задаётся явно.
 pub(crate) const BAR_HEIGHT: f32 = 40.0;
@@ -23,8 +38,18 @@ impl Render for CommandBar {
             .px_2()
             .border_b_1()
             .border_color(rgb(0xdddddd))
-            .children(["bar-new", "bar-reply", "bar-reply-all", "bar-forward", "bar-delete", "bar-flag"].map(|key| {
-                div().px_2().py_0p5().rounded_md().bg(rgb(0xececec)).child(tr!(key))
+            .children(BUTTONS.map(|(key, action)| {
+                div()
+                    .id(key)
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(rgb(0xececec))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(0xe0e0e0)))
+                    .child(tr!(key))
+                    // Действие уходит в фокус окна (экран почты), как от клавиши.
+                    .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
             }))
             .child(div().flex_1())
             .child(div().w(px(320.)).child(Input::new(&self.search)))
