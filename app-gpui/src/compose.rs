@@ -40,10 +40,6 @@ const SUGGESTIONS: usize = 6;
 const SUGGEST_FROM: usize = 2;
 
 const LABEL_W: f32 = 64.0;
-const ERROR: u32 = 0xc42b1c;
-const ACCENT: u32 = 0x0f6cbd;
-const MUTED: u32 = 0x666666;
-const BORDER: u32 = 0xdddddd;
 
 // --- модель окна (без gpui) ---
 
@@ -542,7 +538,10 @@ impl Mailer {
             window_min_size: Some(size(px(520.), px(380.))),
             ..Default::default()
         };
-        match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Composer::new(draft, open, window, cx))) {
+        match gpui_kit::open_window(options, cx, |window, cx| {
+            crate::roles::observe_window(window);
+            cx.new(|cx| Composer::new(draft, open, window, cx))
+        }) {
             Ok((_, composer)) => {
                 self.compose.windows.retain(|w| w.upgrade().is_some());
                 self.compose.windows.push(composer.downgrade());
@@ -1135,6 +1134,7 @@ impl Composer {
 
     /// «От»: свой адрес и общие ящики (S4-06) — по нажатию; один адрес — строки нет.
     fn sender_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
         if self.senders.len() < 2 {
             return None;
         }
@@ -1149,9 +1149,9 @@ impl Composer {
                 .rounded_md()
                 .cursor_pointer()
                 .border_1()
-                .border_color(rgb(if chosen { ACCENT } else { BORDER }))
-                .when(chosen, |d| d.bg(rgb(0xdbe9f7)))
-                .hover(|d| d.bg(rgb(0xececec)))
+                .border_color(if chosen { l.accent() } else { l.border() })
+                .when(chosen, |d| d.bg(l.picked()))
+                .hover(|d| d.bg(l.fill()))
                 .child(match &s.account {
                     Some(_) => tr!("shared-compose-from-shared", address = s.address.display()),
                     None => s.address.display(),
@@ -1167,26 +1167,27 @@ impl Composer {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!("shared-compose-from")))
+                .child(div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("shared-compose-from")))
                 .children(chips)
                 .into_any_element(),
         )
     }
 
     fn address_row(&self, f: Field, label: &str, cx: &mut Context<Self>) -> AnyElement {
+        let l = crate::roles::look(cx);
         let Some(state) = self.input(f) else { return div().into_any_element() };
         let bad = self.model.bad(f);
         let label = div()
             .w(px(LABEL_W))
             .flex_none()
-            .text_color(rgb(if bad.is_empty() { MUTED } else { ERROR }))
+            .text_color(if bad.is_empty() { l.pm(crate::roles::Pm::LabelAccent) } else { l.error() })
             .child(tr!(label));
         let field = div()
             .flex_1()
             .min_w_0()
             .rounded_md()
             .border_1()
-            .border_color(if bad.is_empty() { rgba(0) } else { rgb(ERROR) })
+            .border_color(if bad.is_empty() { l.none() } else { l.error() })
             .child(Input::new(state))
             .capture_action(cx.listener(move |this, _: &MoveDown, _, cx| {
                 if this.move_suggestion(f, 1, cx) {
@@ -1217,7 +1218,7 @@ impl Composer {
                 div()
                     .pl(px(LABEL_W + 8.))
                     .text_size(px(12.))
-                    .text_color(rgb(ERROR))
+                    .text_color(l.error())
                     .child(tr!("compose-bad-addresses", list = bad.join(", "))),
             );
         }
@@ -1229,8 +1230,8 @@ impl Composer {
                     .py_0p5()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(i == self.suggest.selected, |d| d.bg(rgb(0xdbe9f7)))
-                    .hover(|d| d.bg(rgb(0xececec)))
+                    .when(i == self.suggest.selected, |d| d.bg(l.picked()))
+                    .hover(|d| d.bg(l.fill()))
                     .child(s.clone())
                     .on_click(cx.listener(move |this, _, window, cx| this.accept(f, i, window, cx)))
             });
@@ -1241,9 +1242,9 @@ impl Composer {
                     .flex()
                     .flex_col()
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(l.border())
                     .rounded_md()
-                    .bg(rgb(0xffffff))
+                    .bg(l.panel())
                     .children(items),
             );
         }
@@ -1254,6 +1255,7 @@ impl Composer {
 impl Composer {
     /// «Отправить» и рядом «▾» — меню «Отправить позже» (если сервер умеет отложенную отправку).
     fn send_group(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+        let l = crate::roles::look(cx);
         let send = button("send", tr!("compose-send"), true)
             .when(busy, |d| d.opacity(0.5))
             .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx)));
@@ -1264,13 +1266,14 @@ impl Composer {
         let caret = button("send-later", "▾".into(), true)
             .px_2()
             .when(busy, |d| d.opacity(0.5))
-            .when(self.later.menu, |d| d.bg(rgb(0x115ea3)))
+            .when(self.later.menu, |d| d.bg(l.accent_hover()))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_later_menu(cx)));
         group.child(caret).when(self.later.menu, |d| d.child(deferred(self.later_menu(cx)).with_priority(1))).into_any_element()
     }
 
     /// Меню под кнопкой: завтра утром и днём, понедельник, выбор даты; справа — когда уйдёт письмо.
     fn later_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let now = jiff::Zoned::now();
         let item = |id: ElementId, label: String, hint: String| {
             div()
@@ -1281,9 +1284,9 @@ impl Composer {
                 .px_3()
                 .py_1p5()
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(0xececec)))
+                .hover(|d| d.bg(l.fill()))
                 .child(div().flex_1().child(label))
-                .child(div().text_color(rgb(MUTED)).child(hint))
+                .child(div().text_color(l.text2()).child(hint))
         };
         let mut menu = div()
             .id("later-menu")
@@ -1295,12 +1298,12 @@ impl Composer {
             .flex()
             .flex_col()
             .py_1()
-            .bg(rgb(0xffffff))
+            .bg(l.panel())
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .rounded_md()
             .shadow_lg()
-            .child(div().px_3().py_1().text_xs().text_color(rgb(MUTED)).child(tr!("send-later-menu")));
+            .child(div().px_3().py_1().text_xs().text_color(l.text2()).child(tr!("send-later-menu")));
         for (i, choice) in Choice::ALL.into_iter().enumerate() {
             let hint = choice.at(&now).map(|at| crate::send_later::menu_hint(choice, &at)).unwrap_or_default();
             let id = ElementId::NamedInteger("later-choice".into(), i as u64);
@@ -1309,7 +1312,7 @@ impl Composer {
                     .on_click(cx.listener(move |this, _, window, cx| this.send_at_choice(choice, window, cx))),
             );
         }
-        menu.child(div().h_px().my_1().bg(rgb(BORDER))).child(
+        menu.child(div().h_px().my_1().bg(l.border())).child(
             item("later-pick".into(), tr!("send-later-pick"), String::new())
                 .on_click(cx.listener(|this, _, window, cx| this.pick_later(window, cx))),
         )
@@ -1317,10 +1320,11 @@ impl Composer {
 
     /// Строка «Выбрать дату и время» в окне (без модального окна).
     fn later_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
         if !self.later.picking {
             return None;
         }
-        let label = |text: String| div().flex_none().text_color(rgb(MUTED)).child(text);
+        let label = |text: String| div().flex_none().text_color(l.text2()).child(text);
         let error = self.later.error.map(|e| crate::send_later::reject_text(e, self.later.max_delay));
         let row = div()
             .flex()
@@ -1329,10 +1333,10 @@ impl Composer {
             .gap_2()
             .px_3()
             .py_1p5()
-            .bg(rgb(0xf3f8fd))
+            .bg(l.hover())
             .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(div().flex_none().text_color(rgb(ACCENT)).child(tr!("send-later-menu")))
+            .border_color(l.border())
+            .child(div().flex_none().text_color(l.accent_text()).child(tr!("send-later-menu")))
             .child(label(tr!("send-later-date")))
             .child(div().w(px(120.)).child(Input::new(&self.later.date)))
             .child(label(tr!("send-later-time")))
@@ -1344,25 +1348,27 @@ impl Composer {
             .child(button("later-cancel", tr!("send-later-cancel"), false).on_click(cx.listener(|this, _, _, cx| {
                 this.close_later(cx);
             })))
-            .children(error.map(|e| div().text_color(rgb(ERROR)).child(e)));
+            .children(error.map(|e| div().text_color(l.error()).child(e)));
         Some(row.into_any_element())
     }
 }
 
 fn button(id: &'static str, text: String, primary: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .px_3()
         .py_1()
         .rounded_md()
         .cursor_pointer()
-        .when(primary, |d| d.bg(rgb(ACCENT)).text_color(rgb(0xffffff)).hover(|d| d.bg(rgb(0x115ea3))))
-        .when(!primary, |d| d.bg(rgb(0xececec)).hover(|d| d.bg(rgb(0xe0e0e0))))
+        .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
+        .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
         .child(text)
 }
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         if self.close {
             window.remove_window();
         }
@@ -1401,7 +1407,7 @@ impl Render for Composer {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .child(self.send_group(busy, cx))
             .child(
                 button("attach", tr!("compose-attach"), false)
@@ -1409,7 +1415,7 @@ impl Render for Composer {
             )
             .child(
                 button("preview", tr!("compose-preview"), false)
-                    .when(previewing, |d| d.bg(rgb(0xdbe9f7)))
+                    .when(previewing, |d| d.bg(l.picked()))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))),
             );
 
@@ -1426,7 +1432,7 @@ impl Render for Composer {
                     .px_2()
                     .py_0p5()
                     .rounded_md()
-                    .bg(rgb(0xf0f0f0))
+                    .bg(l.fill())
                     .child(format!("📎 {}{size}", postman_core::files::safe_name(&a.name)))
                     .child(
                         div()
@@ -1434,8 +1440,8 @@ impl Render for Composer {
                             .px_1()
                             .rounded_md()
                             .cursor_pointer()
-                            .text_color(rgb(MUTED))
-                            .hover(|d| d.bg(rgb(0xe0e0e0)).text_color(rgb(ERROR)))
+                            .text_color(l.text2())
+                            .hover(|d| d.bg(l.pressed()).text_color(l.error()))
                             .child("✕")
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(i, cx))),
                     )
@@ -1450,7 +1456,7 @@ impl Render for Composer {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .children(self.sender_row(cx))
             .child(self.address_row(Field::To, "compose-to", cx))
             .child(self.address_row(Field::Cc, "compose-cc", cx))
@@ -1460,7 +1466,7 @@ impl Render for Composer {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!("compose-subject")))
+                    .child(div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("compose-subject")))
                     .child(div().flex_1().min_w_0().child(Input::new(&self.subject))),
             )
             .when(!attachments.is_empty(), |d| {
@@ -1471,7 +1477,7 @@ impl Render for Composer {
                         .items_center()
                         .gap_2()
                         .child(
-                            div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!("compose-attachments")),
+                            div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("compose-attachments")),
                         )
                         .children(attachments),
                 )
@@ -1482,7 +1488,7 @@ impl Render for Composer {
                 div().flex_1().min_h_0().p_2().child(Textarea::new(&self.body).h(relative(1.))).into_any_element()
             }
             Preview::Rendering => {
-                div().flex_1().p_3().text_color(rgb(MUTED)).child(tr!("compose-preview-rendering")).into_any_element()
+                div().flex_1().p_3().text_color(l.text2()).child(tr!("compose-preview-rendering")).into_any_element()
             }
             Preview::Shown(doc) => div()
                 .id("preview")
@@ -1504,9 +1510,9 @@ impl Render for Composer {
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                .bg(rgb(0xfff4ce))
+                .bg(l.warning_bg())
                 .border_t_1()
-                .border_color(rgb(BORDER))
+                .border_color(l.border())
                 .child(tr!("compose-confirm-close"))
                 .child(
                     button("close-save", tr!("compose-confirm-yes"), true)
@@ -1527,8 +1533,8 @@ impl Render for Composer {
                 .px_3()
                 .py_1()
                 .border_t_1()
-                .border_color(rgb(BORDER))
-                .text_color(rgb(if error { ERROR } else { MUTED }))
+                .border_color(l.border())
+                .text_color(if error { l.error() } else { l.text2() })
                 .child(text)
         });
 
@@ -1540,12 +1546,15 @@ impl Render for Composer {
             .on_action(cx.listener(|this, _: &compose::Preview, window, cx| this.toggle_preview(window, cx)))
             .on_action(cx.listener(|this, _: &compose::Close, window, cx| this.escape(window, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
-            .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(rgb(0xe8f1fb)))
+            .drag_over::<ExternalPaths>({
+                let hover = l.hover();
+                move |s, _, _, _| s.bg(hover)
+            })
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xfafafa))
-            .text_color(rgb(0x222222))
+            .bg(l.base())
+            .text_color(l.text())
             .text_size(px(13.))
             .child(toolbar)
             .children(self.later_picker(cx))

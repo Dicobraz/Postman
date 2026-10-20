@@ -33,6 +33,11 @@ pub mod view {
     gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
 }
 
+/// Вкладки в заголовке окна (S5-01): следующая, предыдущая, закрыть.
+pub mod tab {
+    gpui_kit::actions!(tab, [Next, Prev, Close]);
+}
+
 pub mod search {
     gpui_kit::actions!(search, [Focus, Clear]);
 }
@@ -104,6 +109,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),
+    // Вкладки окна (S5-01): как в браузере и новом Outlook; «Почта» не закрывается.
+    cmd("tab.next", &["ctrl-tab"], MAILER),
+    cmd("tab.prev", &["ctrl-shift-tab"], MAILER),
+    cmd("tab.close", &["ctrl-w"], MAILER),
     // Не Outlook: история тостов (значок 🔔 в строке состояния).
     cmd("view.notifications", &[], None),
     cmd("search.focus", &["ctrl-e"], None),

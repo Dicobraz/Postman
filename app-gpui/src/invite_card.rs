@@ -132,20 +132,22 @@ pub(crate) fn when(start: i64, end: i64, all_day: bool, tz: &TimeZone) -> String
 }
 
 fn row(label: String, value: impl IntoElement) -> Div {
+    let l = crate::roles::now();
     div()
         .flex()
         .gap_2()
-        .child(div().w(px(96.)).flex_none().text_color(rgb(0x666666)).child(label))
+        .child(div().w(px(96.)).flex_none().text_color(l.text2()).child(label))
         .child(div().flex_1().min_w_0().child(value))
 }
 
 /// Карточка; кнопки ответа зовут [`ReadingPane::answer_invite`].
 pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane>) -> AnyElement {
+    let l = crate::roles::look(cx);
     let frame =
-        div().flex().flex_col().gap_1().p_3().rounded_md().bg(rgb(0xe8f1fb)).border_1().border_color(rgb(0xc7dcf3));
+        div().flex().flex_col().gap_1().p_3().rounded_md().bg(l.picked()).border_1().border_color(l.c(pets_ui::theme::Role::StrokeCard));
     let inv = match &card.state {
         State::Loading { .. } => {
-            return frame.text_color(rgb(0x666666)).child(tr!("reading-invite-loading")).into_any_element();
+            return frame.text_color(l.text2()).child(tr!("reading-invite-loading")).into_any_element();
         }
         State::Failed(e) => {
             return frame.child(tr!("reading-invite-failed-parse", error = e.as_str())).into_any_element();
@@ -156,7 +158,7 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
     let cancelled = inv.method == "CANCEL";
     let title = div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(e.title.clone());
     let mut col = frame
-        .child(div().text_color(rgb(0x0f6cbd)).child(tr!("reading-invite-head", method = inv.method.as_str())))
+        .child(div().text_color(l.accent_text()).child(tr!("reading-invite-head", method = inv.method.as_str())))
         .child(if cancelled { title.line_through() } else { title })
         .child(row(tr!("reading-invite-when"), when(e.span.start, e.span.end, e.all_day, &TimeZone::system())));
     if !e.location.is_empty() {
@@ -176,7 +178,7 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
         Reply::NotRequest => return col.into_any_element(),
         Reply::NotInvited => {
             return col
-                .child(div().text_color(rgb(0x666666)).child(tr!("reading-invite-not-invited")))
+                .child(div().text_color(l.text2()).child(tr!("reading-invite-not-invited")))
                 .into_any_element();
         }
         Reply::Can(s) => s,
@@ -195,11 +197,11 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
             .py_1()
             .rounded_md()
             .border_1()
-            .border_color(if selected { rgb(0x0f6cbd) } else { rgb(0xc7c7c7) })
-            .bg(if selected { rgb(0x0f6cbd) } else { rgb(0xffffff) })
-            .text_color(if selected { rgb(0xffffff) } else { rgb(0x222222) })
+            .border_color(if selected { l.accent() } else { l.stroke() })
+            .bg(if selected { l.accent() } else { l.panel() })
+            .text_color(if selected { l.on_accent() } else { l.text() })
             .when(sending, |d| d.opacity(0.6))
-            .when(!sending, |d| d.cursor_pointer().hover(|d| d.border_color(rgb(0x0f6cbd))))
+            .when(!sending, |d| d.cursor_pointer().hover(|d| d.border_color(l.accent())))
             .child(tr!(key))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(s) = choose(mine, sending, s) {
@@ -215,7 +217,7 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
         String::new()
     };
     col.child(
-        div().flex().items_center().gap_2().pt_1().children(buttons).child(div().text_color(rgb(0x666666)).child(note)),
+        div().flex().items_center().gap_2().pt_1().children(buttons).child(div().text_color(l.text2()).child(note)),
     )
     .into_any_element()
 }

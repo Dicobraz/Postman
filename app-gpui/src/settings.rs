@@ -68,7 +68,10 @@ fn quota_text(u: Usage) -> String {
 impl Mailer {
     /// `settings.vacation`: панель «Автоматические ответы» (повторно — та же панель).
     pub(crate) fn open_vacation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Панель — во вкладке (S5-01): повторно — та же вкладка.
+        self.tabs.open(crate::tabs::TabKind::Settings);
         if matches!(self.settings.panel, Some(Panel::Vacation(_))) {
+            cx.notify();
             return;
         }
         let live = self.backend.is_live();
@@ -92,7 +95,9 @@ impl Mailer {
 
     /// `settings.rules`: панель «Правила»; живой ящик — правила с сервера заново.
     pub(crate) fn open_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.open(crate::tabs::TabKind::Settings);
         if matches!(self.settings.panel, Some(Panel::Rules(_))) {
+            cx.notify();
             return;
         }
         let live = self.backend.is_live();
@@ -118,6 +123,7 @@ impl Mailer {
     /// Закрыть панель настроек; `false` — её не было (Esc идёт дальше).
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let open = self.settings.panel.take().is_some();
+        self.tabs.close_kind(crate::tabs::TabKind::Settings);
         if open {
             // Клавиши — снова экрану почты.
             window.focus(&self.focus, cx);

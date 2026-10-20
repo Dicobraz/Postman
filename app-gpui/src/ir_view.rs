@@ -10,6 +10,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
 use postman_ir::{Align, Block, Document, Inline, Marks};
+use pets_ui::theme::Role;
+
+use crate::roles::{Look, Pm, look};
 
 /// Картинки письма по `cid:`, кадры для gpui.
 pub type Images = HashMap<String, Arc<RenderImage>>;
@@ -46,9 +49,10 @@ pub fn cids(doc: &Document) -> Vec<String> {
 }
 
 fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
+    let l = &*look(cx);
     match b {
         Block::Paragraph { align, content } => {
-            let d = div().child(paragraph(content, key, images));
+            let d = div().child(paragraph(content, key, images, l));
             match align {
                 Align::Center => d.text_center(),
                 Align::End => d.text_right(),
@@ -63,7 +67,7 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
                 3 => 17.,
                 _ => 15.,
             };
-            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images)).into_any_element()
+            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images, l)).into_any_element()
         }
         Block::Quote(inner) => div()
             .flex()
@@ -71,8 +75,8 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
             .gap_2()
             .pl_3()
             .border_l_2()
-            .border_color(rgb(0xbbbbbb))
-            .text_color(rgb(0x555555))
+            .border_color(l.c(Role::StrokeStrong))
+            .text_color(l.text2())
             .children(blocks(inner, key, images, cx))
             .into_any_element(),
         Block::List { ordered, items } => div()
@@ -88,17 +92,17 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
                     .child(div().flex().flex_col().flex_1().children(blocks(item, &format!("{key}.{n}"), images, cx)))
             }))
             .into_any_element(),
-        Block::Code(code) => div().p_2().bg(rgb(0xf0f0f0)).font_family("monospace").child(code.clone()).into_any_element(),
-        Block::Rule => div().h(px(1.)).bg(rgb(0xdddddd)).into_any_element(),
+        Block::Code(code) => div().p_2().rounded_md().bg(l.fill()).font_family("Cascadia Mono").child(code.clone()).into_any_element(),
+        Block::Rule => div().h(px(1.)).bg(l.border()).into_any_element(),
         Block::Table(rows) => div()
             .flex()
             .flex_col()
             .children(rows.iter().enumerate().map(|(r, row)| {
                 div()
                     .flex()
-                    .when(r % 2 == 1, |d| d.bg(rgb(0xf3f3f3)))
+                    .when(r % 2 == 1, |d| d.bg(l.fill_passive()))
                     .children(row.iter().enumerate().map(|(c, cell)| {
-                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images))
+                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images, l))
                     }))
             }))
             .into_any_element(),
@@ -106,13 +110,19 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
 }
 
 /// Инлайны → (текст, выделения, ссылки).
-fn flatten(items: &[Inline], text: &mut String, hl: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>, links: &mut Vec<(std::ops::Range<usize>, String, bool)>) {
+fn flatten(
+    items: &[Inline],
+    text: &mut String,
+    hl: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    links: &mut Vec<(std::ops::Range<usize>, String, bool)>,
+    l: &Look,
+) {
     for i in items {
         match i {
             Inline::Text { text: t, marks } => {
                 let start = text.len();
                 text.push_str(t);
-                if let Some(s) = style(*marks) {
+                if let Some(s) = style(*marks, l) {
                     hl.push((start..text.len(), s));
                 }
             }
@@ -120,21 +130,21 @@ fn flatten(items: &[Inline], text: &mut String, hl: &mut Vec<(std::ops::Range<us
             Inline::Image { alt, .. } => {
                 let start = text.len();
                 text.push_str(&if alt.is_empty() { tr!("reading-image") } else { tr!("reading-image-alt", alt = alt.as_str()) });
-                hl.push((start..text.len(), HighlightStyle { color: Some(rgb(0x888888).into()), ..Default::default() }));
+                hl.push((start..text.len(), HighlightStyle { color: Some(l.text2()), ..Default::default() }));
             }
             Inline::Link { href, suspicious, content, .. } => {
                 if *suspicious {
                     let s = text.len();
                     text.push('⚠');
-                    hl.push((s..text.len(), HighlightStyle { color: Some(rgb(0xcc2222).into()), ..Default::default() }));
+                    hl.push((s..text.len(), HighlightStyle { color: Some(l.pm(Pm::ThreatFg)), ..Default::default() }));
                 }
                 let start = text.len();
-                flatten(content, text, hl, links);
+                flatten(content, text, hl, links, l);
                 let range = start..text.len();
                 hl.push((
                     range.clone(),
                     HighlightStyle {
-                        color: Some(rgb(0x1a6fd1).into()),
+                        color: Some(l.accent_text()),
                         underline: Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }),
                         ..Default::default()
                     },
@@ -145,7 +155,7 @@ fn flatten(items: &[Inline], text: &mut String, hl: &mut Vec<(std::ops::Range<us
     }
 }
 
-fn style(m: Marks) -> Option<HighlightStyle> {
+fn style(m: Marks, l: &Look) -> Option<HighlightStyle> {
     if m == Marks::default() {
         return None;
     }
@@ -154,7 +164,7 @@ fn style(m: Marks) -> Option<HighlightStyle> {
         font_style: m.italic.then_some(FontStyle::Italic),
         underline: m.underline.then_some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }),
         strikethrough: m.strike.then_some(StrikethroughStyle { thickness: px(1.), color: None }),
-        background_color: m.code.then(|| rgb(0xeeeeee).into()),
+        background_color: m.code.then(|| l.fill()),
         ..Default::default()
     })
 }
@@ -191,17 +201,17 @@ fn pieces<'a>(items: &'a [Inline], shown: impl Fn(&str) -> bool) -> Vec<Piece<'a
     out
 }
 
-fn paragraph(items: &[Inline], key: &str, images: &Images) -> AnyElement {
+fn paragraph(items: &[Inline], key: &str, images: &Images, l: &Look) -> AnyElement {
     let parts = pieces(items, |cid| images.contains_key(cid));
     if !parts.iter().any(|p| matches!(p, Piece::Image(_))) {
-        return text(items, key);
+        return text(items, key, l);
     }
     div()
         .flex()
         .flex_col()
         .gap_1()
         .children(parts.into_iter().enumerate().map(|(n, p)| match p {
-            Piece::Text(t) => text(t, &format!("{key}.{n}")),
+            Piece::Text(t) => text(t, &format!("{key}.{n}"), l),
             Piece::Image(cid) => match images.get(cid) {
                 Some(image) => picture(image),
                 None => div().into_any_element(),
@@ -221,9 +231,9 @@ fn picture(image: &Arc<RenderImage>) -> AnyElement {
         .into_any_element()
 }
 
-fn text(items: &[Inline], key: &str) -> AnyElement {
+fn text(items: &[Inline], key: &str, l: &Look) -> AnyElement {
     let (mut text, mut hl, mut links) = (String::new(), Vec::new(), Vec::new());
-    flatten(items, &mut text, &mut hl, &mut links);
+    flatten(items, &mut text, &mut hl, &mut links, l);
     let styled = StyledText::new(text).with_highlights(normalize(hl));
     if links.is_empty() {
         return styled.into_any_element();

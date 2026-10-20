@@ -26,12 +26,6 @@ const CELL_PX: f32 = 26.;
 const NAME_W: f32 = 170.;
 const DETAILS_W: f32 = 300.;
 const DAYS: usize = 5;
-pub(crate) const BORDER: u32 = 0xdddddd;
-pub(crate) const MUTED: u32 = 0x666666;
-pub(crate) const ERROR: u32 = 0xc42b1c;
-pub(crate) const ACCENT: u32 = 0x0f6cbd;
-pub(crate) const PICKED: u32 = 0xcce4ff;
-pub(crate) const BUTTON: u32 = 0xececec;
 
 /// Короткое имя дня недели: 0 — понедельник.
 pub(crate) fn day_name(d: usize) -> String {
@@ -285,6 +279,7 @@ impl CalendarView {
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let last = add_days(self.monday, DAYS as i64 - 1);
         let range = tr!(
             "cal-week-range",
@@ -298,7 +293,7 @@ impl CalendarView {
             .px_3()
             .py_1()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-work-week")))
             .child(
                 button("prev-week", tr!("cal-prev-week"), false)
@@ -310,7 +305,7 @@ impl CalendarView {
                     .on_click(cx.listener(|this, _, _, cx| this.shift(1, cx))),
             )
             .child(range)
-            .when(self.pending.is_some(), |d| d.child(div().text_color(rgb(MUTED)).child(tr!("cal-loading"))))
+            .when(self.pending.is_some(), |d| d.child(div().text_color(l.text2()).child(tr!("cal-loading"))))
             .child(div().flex_1())
             .child(
                 button("new-meeting", tr!("cal-new-meeting"), true)
@@ -327,6 +322,7 @@ impl CalendarView {
     }
 
     fn week_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let height = HOURS as f32 * HOUR_PX;
         let tz = &self.tz;
         let times = div().w(px(48.)).flex_none().relative().h(px(height)).children((0..HOURS).map(|h| {
@@ -335,7 +331,7 @@ impl CalendarView {
                 .top(px(h as f32 * HOUR_PX))
                 .right(px(6.))
                 .text_xs()
-                .text_color(rgb(0x888888))
+                .text_color(l.text2())
                 .child(format!("{:02}:00", FIRST_HOUR + h))
         }));
         let mut all_day_row = Vec::new();
@@ -354,7 +350,7 @@ impl CalendarView {
             ));
             let placed = layout_day(&timed.iter().map(|&i| self.events[i].span).collect::<Vec<_>>());
             let lines = (0..HOURS)
-                .map(|h| div().absolute().top(px(h as f32 * HOUR_PX)).left_0().right_0().h(px(1.)).bg(rgb(BUTTON)));
+                .map(|h| div().absolute().top(px(h as f32 * HOUR_PX)).left_0().right_0().h(px(1.)).bg(l.fill()));
             let blocks: Vec<AnyElement> = placed
                 .into_iter()
                 .map(|p| {
@@ -374,7 +370,7 @@ impl CalendarView {
                                 .size_full()
                                 // Короткое событие — одна строка темы: время не влезает.
                                 .when(h >= 34., |d| {
-                                    d.child(div().truncate().text_color(rgb(0x555555)).child(format!(
+                                    d.child(div().truncate().text_color(l.text2()).child(format!(
                                         "{}–{} {}",
                                         hm(e.span.start, tz),
                                         hm(e.span.end, tz),
@@ -391,18 +387,18 @@ impl CalendarView {
                     .flex_1()
                     .min_w_0()
                     .border_l_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(l.border())
                     .child(div().relative().h(px(height)).children(lines).children(blocks)),
             );
         }
         let today = jiff::Zoned::now().with_time_zone(tz.clone()).date();
-        let header = div().flex().pl(px(48.)).border_b_1().border_color(rgb(BORDER)).children((0..DAYS).map(|d| {
+        let header = div().flex().pl(px(48.)).border_b_1().border_color(l.border()).children((0..DAYS).map(|d| {
             let date = add_days(self.monday, d as i64);
             div()
                 .flex_1()
                 .py_1()
                 .text_center()
-                .when(date == today, |d| d.text_color(rgb(ACCENT)).font_weight(FontWeight::SEMIBOLD))
+                .when(date == today, |d| d.text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD))
                 .child(format!("{} {}", day_name(d), date.strftime("%d.%m")))
         }));
         let has_all_day = self.events.iter().any(|e| e.all_day);
@@ -415,7 +411,7 @@ impl CalendarView {
             .min_h_0()
             .child(header)
             .when(has_all_day, |d| {
-                d.child(div().flex().pl(px(48.)).py_0p5().border_b_1().border_color(rgb(BORDER)).children(all_day_row))
+                d.child(div().flex().pl(px(48.)).py_0p5().border_b_1().border_color(l.border()).children(all_day_row))
             })
             .child(div().id("week-scroll").flex().flex_1().overflow_y_scroll().child(times).children(columns))
     }
@@ -446,6 +442,7 @@ impl CalendarView {
     }
 
     fn details(&self, e: &Event, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let tz = &self.tz;
         let when = if e.all_day {
             format!("{}, {}", day_label(e.span.start, tz), tr!("cal-all-day"))
@@ -456,7 +453,7 @@ impl CalendarView {
             div()
                 .flex()
                 .flex_col()
-                .child(div().text_xs().text_color(rgb(MUTED)).child(tr!(label)))
+                .child(div().text_xs().text_color(l.text2()).child(tr!(label)))
                 .child(div().child(value))
         };
         let organizer = e.organizer().map(|o| person(&o.name, &o.email));
@@ -471,7 +468,7 @@ impl CalendarView {
                     div()
                         .flex_none()
                         .text_xs()
-                        .text_color(rgb(status_color(p.status)))
+                        .text_color(status_color(p.status, &l))
                         .child(format!("{}{optional}", status_text(p.status))),
                 )
         });
@@ -486,8 +483,8 @@ impl CalendarView {
             .gap_2()
             .p_3()
             .border_l_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(0xffffff))
+            .border_color(l.border())
+            .bg(l.panel())
             .child(
                 div()
                     .flex()
@@ -509,25 +506,26 @@ impl CalendarView {
                     ))),
             )
             .child(field("cal-details-when", when))
-            .when(e.recurring, |d| d.child(div().text_xs().text_color(rgb(MUTED)).child(tr!("cal-details-recurring"))))
+            .when(e.recurring, |d| d.child(div().text_xs().text_color(l.text2()).child(tr!("cal-details-recurring"))))
             .when(!e.location.is_empty(), |d| d.child(field("cal-details-where", e.location.clone())))
             .when_some(organizer, |d, o| d.child(field("cal-details-organizer", o)))
             .when(e.participants.iter().any(|p| !p.owner), |d| {
-                d.child(div().text_xs().text_color(rgb(MUTED)).child(tr!("cal-details-participants"))).children(people)
+                d.child(div().text_xs().text_color(l.text2()).child(tr!("cal-details-participants"))).children(people)
             })
             .when(!e.description.trim().is_empty(), |d| {
                 d.child(
                     div()
                         .pt_1()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(0x444444))
+                        .border_color(l.border())
+                        .text_color(l.text2())
                         .child(e.description.clone()),
                 )
             })
     }
 
     fn assistant(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let date = add_days(self.monday, self.day as i64);
         let start = day_start(date, &self.tz);
         let range = Span::new(start + FIRST_HOUR * 3600, start + (FIRST_HOUR + HOURS) * 3600);
@@ -567,8 +565,8 @@ impl CalendarView {
             .gap_4()
             .p_3()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(0xffffff))
+            .border_color(l.border())
+            .bg(l.panel())
             .child(
                 div()
                     .flex()
@@ -581,6 +579,7 @@ impl CalendarView {
     }
 
     fn share_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         div()
             .flex()
             .flex_col()
@@ -588,8 +587,8 @@ impl CalendarView {
             .px_3()
             .py_2()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(0xf7f7f7))
+            .border_color(l.border())
+            .bg(l.base())
             .child(
                 div()
                     .flex()
@@ -602,10 +601,10 @@ impl CalendarView {
                             .on_click(cx.listener(|this, _, window, cx| this.submit_share(window, cx))),
                     )
                     .when_some(self.share_status.clone(), |d, (text, error)| {
-                        d.child(div().text_color(rgb(if error { ERROR } else { MUTED })).child(text))
+                        d.child(div().text_color(if error { l.error() } else { l.text2() }).child(text))
                     }),
             )
-            .child(div().text_xs().text_color(rgb(MUTED)).child(tr!("cal-share-note")))
+            .child(div().text_xs().text_color(l.text2()).child(tr!("cal-share-note")))
     }
 }
 
@@ -676,59 +675,63 @@ fn status_text(s: Partstat) -> String {
     })
 }
 
-fn status_color(s: Partstat) -> u32 {
+fn status_color(s: Partstat, l: &crate::roles::Look) -> Hsla {
     match s {
-        Partstat::Accepted => 0x1a7f37,
-        Partstat::Declined => ERROR,
-        Partstat::Tentative => 0x9a6700,
-        _ => MUTED,
+        Partstat::Accepted => l.success(),
+        Partstat::Declined => l.error(),
+        Partstat::Tentative => l.warning(),
+        _ => l.text2(),
     }
 }
 
 /// Блок события: полоса слева, тема; «под вопросом» — светлее, выбранное — рамкой.
 fn event_chip(id: impl Into<ElementId>, e: &Event, selected: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     let tentative = e.status == EventStatus::Tentative;
     div()
         .id(id)
         .overflow_hidden()
         .rounded_sm()
         .border_l_4()
-        .border_color(rgb(0x2f6db5))
-        .when(selected, |d| d.border_1().border_l_4().border_color(rgb(0x1b4f8a)))
-        .bg(if tentative { rgb(0xeef4fb) } else { rgb(0xd6e6f9) })
+        .border_color(l.pm(crate::roles::Pm::EventBorder))
+        .when(selected, |d| d.border_1().border_l_4().border_color(l.pm(crate::roles::Pm::EventBorderSelected)))
+        .bg(if tentative { l.pm(crate::roles::Pm::EventBgTentative) } else { l.pm(crate::roles::Pm::EventBg) })
         .px_1()
         .text_xs()
         .line_height(px(15.))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(0xc4dbf5)))
+        .hover(|d| d.bg(l.pm(crate::roles::Pm::EventBg)))
         .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(e.title.clone()))
 }
 
 pub(crate) fn button(id: &'static str, text: String, primary: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .px_2()
         .py_0p5()
         .rounded_md()
         .cursor_pointer()
-        .when(primary, |d| d.bg(rgb(ACCENT)).text_color(rgb(0xffffff)).hover(|d| d.bg(rgb(0x115ea3))))
-        .when(!primary, |d| d.bg(rgb(BUTTON)).hover(|d| d.bg(rgb(0xe0e0e0))))
+        .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
+        .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
         .child(text)
 }
 
 /// Переключатель (день, длительность): выбранный подсвечен.
 pub(crate) fn button_small(id: impl Into<ElementId>, text: String, picked: bool) -> Stateful<Div> {
-    div().id(id).px_2().rounded_md().cursor_pointer().bg(if picked { rgb(PICKED) } else { rgb(BUTTON) }).child(text)
+    let l = crate::roles::now();
+    div().id(id).px_2().rounded_md().cursor_pointer().bg(if picked { l.picked() } else { l.fill() }).child(text)
 }
 
 pub(crate) fn slot_button(n: usize, text: String, picked: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(("slot", n))
         .px_2()
         .rounded_md()
         .cursor_pointer()
-        .bg(if picked { rgb(0xd5f0dc) } else { rgb(0xf3f3f3) })
-        .hover(|d| d.bg(rgb(0xe6f4ea)))
+        .bg(if picked { l.success_bg() } else { l.fill_passive() })
+        .hover(|d| d.bg(l.success_bg()))
         .child(text)
 }
 
@@ -740,13 +743,14 @@ pub(crate) fn busy_grid(
     hours: &WorkHours,
     picked: Option<Span>,
 ) -> Div {
+    let l = crate::roles::now();
     let busy: Vec<Option<Vec<Busy>>> = people.iter().map(|(_, b)| b.clone()).collect();
     let cells = grid(&busy, range, STEP, hours);
     let picked_cells = picked.filter(|s| s.overlaps(&range)).map(|s| {
         ((s.start - range.start).max(0) / STEP) as usize..((s.end - range.start + STEP - 1) / STEP).max(0) as usize
     });
     let time_row = div().flex().pl(px(NAME_W)).children((0..HOURS).map(|h| {
-        div().w(px(CELL_PX * 2.)).text_xs().text_color(rgb(0x888888)).child(format!("{:02}", FIRST_HOUR + h))
+        div().w(px(CELL_PX * 2.)).text_xs().text_color(l.text2()).child(format!("{:02}", FIRST_HOUR + h))
     }));
     let rows = people.iter().zip(cells).map(|((name, busy), row)| {
         let label = div()
@@ -758,7 +762,7 @@ pub(crate) fn busy_grid(
             .child(div().min_w_0().truncate().child(name.clone()));
         let label = match busy {
             Some(_) => label,
-            None => label.child(div().flex_none().text_xs().text_color(rgb(MUTED)).child(tr!("cal-no-data"))),
+            None => label.child(div().flex_none().text_xs().text_color(l.text2()).child(tr!("cal-no-data"))),
         };
         div().flex().items_center().h(px(22.)).child(label).children(row.into_iter().enumerate().map(|(i, c)| {
             let on = picked_cells.as_ref().is_some_and(|r| r.contains(&i));
@@ -766,9 +770,9 @@ pub(crate) fn busy_grid(
                 .w(px(CELL_PX))
                 .h_full()
                 .border_r_1()
-                .border_color(if i % 2 == 1 { rgb(0xcccccc) } else { rgb(0xeeeeee) })
-                .bg(cell_color(c))
-                .when(on, |d| d.border_t_2().border_b_2().border_color(rgb(0x1a8c3a)))
+                .border_color(if i % 2 == 1 { l.stroke() } else { l.border() })
+                .bg(cell_color(c, &l))
+                .when(on, |d| d.border_t_2().border_b_2().border_color(l.success()))
         }))
     });
     let legend = div().flex().flex_wrap().gap_3().text_xs().children(
@@ -779,26 +783,26 @@ pub(crate) fn busy_grid(
             (Cell::OffHours, "cal-off-hours"),
             (Cell::Unknown, "cal-no-data"),
         ]
-        .map(|(c, l)| {
+        .map(|(c, key)| {
             div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(div().w(px(12.)).h(px(12.)).border_1().border_color(rgb(0xcccccc)).bg(cell_color(c)))
-                .child(tr!(l))
+                .child(div().w(px(12.)).h(px(12.)).border_1().border_color(l.stroke()).bg(cell_color(c, &l)))
+                .child(tr!(key))
         }),
     );
     div().flex().flex_col().gap_1().child(time_row).children(rows).child(legend)
 }
 
-fn cell_color(c: Cell) -> Rgba {
+fn cell_color(c: Cell, l: &crate::roles::Look) -> Hsla {
     match c {
-        Cell::Free => rgb(0xffffff),
-        Cell::OffHours => rgb(0xf0f0f0),
-        Cell::Tentative => rgb(0x9cc3ee),
-        Cell::Busy => rgb(0x2f6db5),
-        Cell::Unavailable => rgb(0x7b3fa0),
-        Cell::Unknown => rgb(0xc8c8c8),
+        Cell::Free => l.panel(),
+        Cell::OffHours => l.pm(crate::roles::Pm::FbOff),
+        Cell::Tentative => l.pm(crate::roles::Pm::FbTentative),
+        Cell::Busy => l.pm(crate::roles::Pm::FbBusy),
+        Cell::Unavailable => l.pm(crate::roles::Pm::FbOof),
+        Cell::Unknown => l.pm(crate::roles::Pm::FbUnknown),
     }
 }
 

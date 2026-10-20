@@ -24,6 +24,7 @@ use postman_worker::{Client as Worker, Level, Request, Rgba};
 use crate::attachments::{self, FileAct};
 use crate::invite_card::{self, Card, State};
 use crate::ir_view::{self, Images};
+use crate::roles::look;
 use crate::*;
 
 /// Наибольшая сторона картинки в области чтения.
@@ -137,6 +138,7 @@ impl ReadingPane {
         let now = jiff::Timestamp::now().as_second();
         let s = self.scheduled.iter().find(|s| &s.email == id && s.send_at > now)?.clone();
         let text = tr!("send-scheduled-bar", when = crate::send_later::when(s.send_at));
+        let l = look(cx);
         let bar = div()
             .flex()
             .items_center()
@@ -144,7 +146,7 @@ impl ReadingPane {
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(0xeef4fb))
+            .bg(l.picked())
             .child(div().flex_1().child(text))
             .child(
                 div()
@@ -153,9 +155,9 @@ impl ReadingPane {
                     .py_0p5()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(0xdddddd))
+                    .border_color(l.stroke())
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(0xececec)))
+                    .hover(|d| d.bg(l.hover()))
                     .child(tr!("send-scheduled-cancel"))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::Unsend(s.clone())))),
             );
@@ -529,6 +531,7 @@ impl ReadingPane {
         if items.is_empty() {
             return None;
         }
+        let l = look(cx);
         let chips = items.into_iter().enumerate().map(|(n, item)| {
             let pending = self.pending_files.iter().any(|(p, _)| p.blob_id == item.row.blob_id);
             let link = |id: &'static str, label: String, act: FileAct, row: AttachmentRow| {
@@ -536,9 +539,9 @@ impl ReadingPane {
                     .id((id, n))
                     .px_1()
                     .rounded_sm()
-                    .text_color(rgb(0x0f6cbd))
+                    .text_color(l.accent_text())
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(0xe8f1fb)))
+                    .hover(|d| d.bg(l.hover()))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| this.file_action(row.clone(), act, cx)))
             };
@@ -550,18 +553,18 @@ impl ReadingPane {
                 .py_1()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(0xdddddd))
-                .bg(rgb(0xffffff))
+                .border_color(l.stroke())
+                .bg(l.panel())
                 .child(attachments::icon(item.kind))
                 .child(item.name.clone())
-                .child(div().text_color(rgb(0x888888)).child(attachments::size_text(item.row.size)));
+                .child(div().text_color(l.text2()).child(attachments::size_text(item.row.size)));
             if pending {
-                chip = chip.child(div().text_color(rgb(0x888888)).child(tr!("reading-att-loading")));
+                chip = chip.child(div().text_color(l.text2()).child(tr!("reading-att-loading")));
             } else {
                 if item.can_open {
                     chip = chip.child(link("att-open", tr!("reading-att-open"), FileAct::Open, item.row.clone()));
                 } else {
-                    chip = chip.child(div().text_color(rgb(0xb4441c)).child(tr!("reading-att-only-save")));
+                    chip = chip.child(div().text_color(l.warning()).child(tr!("reading-att-only-save")));
                 }
                 chip = chip.child(link("att-save", tr!("reading-att-save"), FileAct::SaveAs, item.row));
             }
@@ -591,26 +594,67 @@ impl Render for ReadingPane {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        let l = look(cx);
         let Some(r) = &self.reading else {
-            return div().flex().size_full().items_center().justify_center().text_color(rgb(0x888888)).child(tr!("reading-empty")).into_any_element();
+            return div()
+                .flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .text_color(l.text2())
+                .child(tr!("reading-empty"))
+                .into_any_element();
         };
-        let from = format!("{} <{}>", r.row.from_name, r.row.from_addr);
+        let name = if r.row.from_name.is_empty() { r.row.from_addr.clone() } else { r.row.from_name.clone() };
         let to = r
             .body
             .as_ref()
-            .map(|b| b.to.iter().map(|a| format!("{} <{}>", a.name, a.email)).collect::<Vec<_>>().join(", "))
+            .map(|b| b.to.iter().map(|a| if a.name.is_empty() { a.email.clone() } else { a.name.clone() }).collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
+        let neutral = l.cat(postman_core::palette::NEUTRAL);
+        let avatar = div()
+            .size(px(40.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(neutral.bg)
+            .text_color(neutral.text)
+            .child(crate::list::initials(&name));
+        // Шапка (макет главного окна): тема, затем аватар, отправитель с адресом, «Кому: … · дата».
         let header = div()
             .flex()
             .flex_col()
-            .gap_1()
-            .pb_2()
+            .gap(px(12.))
+            .pb(px(12.))
             .border_b_1()
-            .border_color(rgb(0xdddddd))
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(r.row.subject.clone()))
-            .child(field(tr!("reading-from"), from))
-            .child(field(tr!("reading-to"), to))
-            .child(field(tr!("reading-date"), format_date(r.row.received_at)));
+            .border_color(l.border())
+            .child(div().text_size(l.px(pets_ui::theme::Metric::TypeSubtitle)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child(r.row.subject.clone()))
+            .child(
+                div().flex().items_center().gap(px(12.)).child(avatar).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .items_baseline()
+                                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(name))
+                                .child(div().min_w_0().truncate().text_color(l.text2()).child(format!("<{}>", r.row.from_addr))),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(l.px(pets_ui::theme::Metric::TypeCaption))
+                                .text_color(l.text2())
+                                .child(tr!("frame-reading-to", to = to, date = format_date(r.row.received_at))),
+                        ),
+                ),
+            );
         let bar = self.feed_bar(cx);
         let scheduled = self.scheduled_bar(cx);
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
@@ -620,8 +664,9 @@ impl Render for ReadingPane {
                 .flex()
                 .flex_col()
                 .size_full()
-                .p_3()
-                .gap_2()
+                .px(px(24.))
+                .py(px(20.))
+                .gap(px(12.))
                 .overflow_y_scroll()
                 .child(header)
                 .children(scheduled)
@@ -632,7 +677,7 @@ impl Render for ReadingPane {
         let strip = self.attachment_strip(r, cx);
         let card = r.invite.as_ref().map(|c| invite_card::render(c, self.me.as_deref(), cx));
         let body: AnyElement = match &r.doc {
-            None => div().text_color(rgb(0x888888)).child("…").into_any_element(),
+            None => div().text_color(l.text2()).child("…").into_any_element(),
             Some(doc) => {
                 let mut col = div().flex().flex_col().gap_2();
                 if doc.remote_images_blocked > 0 {
@@ -640,7 +685,8 @@ impl Render for ReadingPane {
                         div()
                             .px_2()
                             .py_1()
-                            .bg(rgb(0xfde6dc))
+                            .rounded_md()
+                            .bg(l.warning_bg())
                             .child(tr!("reading-remote-blocked", n = doc.remote_images_blocked)),
                     );
                 }
@@ -652,8 +698,9 @@ impl Render for ReadingPane {
             .flex()
             .flex_col()
             .size_full()
-            .p_3()
-            .gap_2()
+            .px(px(24.))
+            .py(px(20.))
+            .gap(px(12.))
             .overflow_y_scroll()
             .child(header)
             .children(scheduled)
@@ -671,10 +718,6 @@ pub(crate) fn sandbox_label(level: Level) -> String {
         Level::Partial => tr!("sandbox-partial"),
         Level::None => tr!("sandbox-none"),
     }
-}
-
-pub(crate) fn field(label: String, value: String) -> impl IntoElement {
-    div().flex().gap_2().child(div().w(px(48.)).text_color(rgb(0x888888)).child(label)).child(value)
 }
 
 #[cfg(test)]

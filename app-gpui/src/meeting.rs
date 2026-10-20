@@ -25,7 +25,7 @@ use postman_core::sync::{Command, Event};
 use postman_demo::calendar as demo;
 
 use crate::calendar::{
-    BORDER, ERROR, FIRST_HOUR, HOURS, MUTED, add_days, busy_grid, button, button_small, common_slots, day_name,
+    FIRST_HOUR, HOURS, add_days, busy_grid, button, button_small, common_slots, day_name,
     day_start, monday_of, slot_button, slot_label,
 };
 use crate::commands::meeting;
@@ -337,7 +337,10 @@ impl Mailer {
             window_min_size: Some(size(px(720.), px(480.))),
             ..Default::default()
         };
-        match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| MeetingWindow::new(model, open, window, cx)))
+        match gpui_kit::open_window(options, cx, |window, cx| {
+            crate::roles::observe_window(window);
+            cx.new(|cx| MeetingWindow::new(model, open, window, cx))
+        })
         {
             Ok((_, w)) => {
                 self.meetings.windows.retain(|w| w.upgrade().is_some());
@@ -721,17 +724,19 @@ impl MeetingWindow {
     }
 
     fn label(text: String) -> Div {
-        div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(text)
+        let l = crate::roles::now();
+        div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(text)
     }
 
     fn attendees_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let bad = self.model.bad_addresses();
         let field = div()
             .flex_1()
             .min_w_0()
             .rounded_md()
             .border_1()
-            .border_color(if bad.is_empty() { rgba(0) } else { rgb(ERROR) })
+            .border_color(if bad.is_empty() { l.none() } else { l.error() })
             .child(Input::new(&self.attendees))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
                 if this.move_suggestion(1, cx) {
@@ -755,7 +760,7 @@ impl MeetingWindow {
                     cx.stop_propagation();
                 }
             }));
-        let label = Self::label(tr!("meeting-attendees")).when(!bad.is_empty(), |d| d.text_color(rgb(ERROR)));
+        let label = Self::label(tr!("meeting-attendees")).when(!bad.is_empty(), |d| d.text_color(l.error()));
         let mut col =
             div().flex().flex_col().gap_0p5().child(div().flex().items_center().gap_2().child(label).child(field));
         if self.suggesting() {
@@ -766,8 +771,8 @@ impl MeetingWindow {
                     .py_0p5()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(i == self.selected, |d| d.bg(rgb(0xdbe9f7)))
-                    .hover(|d| d.bg(rgb(0xececec)))
+                    .when(i == self.selected, |d| d.bg(l.picked()))
+                    .hover(|d| d.bg(l.fill()))
                     .child(s.clone())
                     .on_click(cx.listener(move |this, _, window, cx| this.accept(i, window, cx)))
             });
@@ -778,9 +783,9 @@ impl MeetingWindow {
                     .flex()
                     .flex_col()
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(l.border())
                     .rounded_md()
-                    .bg(rgb(0xffffff))
+                    .bg(l.panel())
                     .children(items),
             );
         }
@@ -788,6 +793,7 @@ impl MeetingWindow {
     }
 
     fn assistant(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let today = self.today();
         let monday = self.monday();
         let date = parse_date(&self.model.date, today).unwrap_or(monday);
@@ -813,7 +819,7 @@ impl MeetingWindow {
             .w(px(220.))
             .flex_none()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-free-for-all")))
-            .when(slots.is_empty(), |d| d.child(div().text_color(rgb(MUTED)).child(tr!("cal-no-slots"))))
+            .when(slots.is_empty(), |d| d.child(div().text_color(l.text2()).child(tr!("cal-no-slots"))))
             .children(slots.into_iter().enumerate().map(|(n, s)| {
                 slot_button(n, slot_label(s, &self.tz), picked == Some(s))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_slot(s, cx)))
@@ -835,7 +841,7 @@ impl MeetingWindow {
             .gap_2()
             .px_3()
             .py_2()
-            .bg(rgb(0xffffff))
+            .bg(l.panel())
             .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("meeting-assistant")))
             .child(day_tabs)
             .child(
@@ -846,13 +852,14 @@ impl MeetingWindow {
                     .child(suggestions),
             )
             .when_some(note, |d, (text, error)| {
-                d.child(div().text_xs().text_color(rgb(if error { ERROR } else { MUTED })).child(text))
+                d.child(div().text_xs().text_color(if error { l.error() } else { l.text2() }).child(text))
             })
     }
 }
 
 impl Render for MeetingWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         if self.close {
             window.remove_window();
         }
@@ -901,7 +908,7 @@ impl Render for MeetingWindow {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .child(row(tr!("meeting-subject"), &self.title))
             .child(row(tr!("meeting-location"), &self.location))
             .child(
@@ -911,9 +918,9 @@ impl Render for MeetingWindow {
                     .gap_2()
                     .child(Self::label(tr!("meeting-date")))
                     .child(div().w(px(130.)).child(Input::new(&self.date)))
-                    .child(div().text_color(rgb(MUTED)).child(tr!("meeting-start")))
+                    .child(div().text_color(l.text2()).child(tr!("meeting-start")))
                     .child(div().w(px(80.)).child(Input::new(&self.start)))
-                    .child(div().text_color(rgb(MUTED)).child(tr!("meeting-duration")))
+                    .child(div().text_color(l.text2()).child(tr!("meeting-duration")))
                     .child(durations),
             )
             .child(self.attendees_row(cx));
@@ -922,8 +929,8 @@ impl Render for MeetingWindow {
                 .px_3()
                 .py_1()
                 .border_t_1()
-                .border_color(rgb(BORDER))
-                .text_color(rgb(if error { ERROR } else { MUTED }))
+                .border_color(l.border())
+                .text_color(if error { l.error() } else { l.text2() })
                 .child(text)
         });
         div()
@@ -934,11 +941,11 @@ impl Render for MeetingWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xfafafa))
-            .text_color(rgb(0x222222))
+            .bg(l.base())
+            .text_color(l.text())
             .text_size(px(13.))
             .child(
-                div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(rgb(BORDER)).child(
+                div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(l.border()).child(
                     button("send", tr!("meeting-send"), true)
                         .when(busy, |d| d.opacity(0.5))
                         .on_click(cx.listener(|this, _, _, cx| this.send(cx))),

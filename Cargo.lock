@@ -2911,7 +2911,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
-source = "git+https://github.com/Dicobraz/pets?rev=a5368366be01137ba26220763c28ebc3266dad04#a5368366be01137ba26220763c28ebc3266dad04"
+source = "git+https://github.com/Dicobraz/pets?rev=2119581bbebaae4215aa914b53a38a5fba77f363#2119581bbebaae4215aa914b53a38a5fba77f363"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -5073,7 +5073,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pets-commands"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=a5368366be01137ba26220763c28ebc3266dad04#a5368366be01137ba26220763c28ebc3266dad04"
+source = "git+https://github.com/Dicobraz/pets?rev=2119581bbebaae4215aa914b53a38a5fba77f363#2119581bbebaae4215aa914b53a38a5fba77f363"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -5081,7 +5081,7 @@ dependencies = [
 [[package]]
 name = "pets-i18n"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=a5368366be01137ba26220763c28ebc3266dad04#a5368366be01137ba26220763c28ebc3266dad04"
+source = "git+https://github.com/Dicobraz/pets?rev=2119581bbebaae4215aa914b53a38a5fba77f363#2119581bbebaae4215aa914b53a38a5fba77f363"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -5094,7 +5094,7 @@ dependencies = [
 [[package]]
 name = "pets-shell"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=a5368366be01137ba26220763c28ebc3266dad04#a5368366be01137ba26220763c28ebc3266dad04"
+source = "git+https://github.com/Dicobraz/pets?rev=2119581bbebaae4215aa914b53a38a5fba77f363#2119581bbebaae4215aa914b53a38a5fba77f363"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -5105,10 +5105,15 @@ dependencies = [
 [[package]]
 name = "pets-ui"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=a5368366be01137ba26220763c28ebc3266dad04#a5368366be01137ba26220763c28ebc3266dad04"
+source = "git+https://github.com/Dicobraz/pets?rev=2119581bbebaae4215aa914b53a38a5fba77f363#2119581bbebaae4215aa914b53a38a5fba77f363"
 dependencies = [
+ "futures",
  "gpui-kit",
  "pets-i18n",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

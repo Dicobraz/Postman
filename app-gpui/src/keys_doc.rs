@@ -17,6 +17,7 @@ fn human(keys: &str) -> String {
             "alt" => "Alt".to_string(),
             "escape" => "Esc".to_string(),
             "enter" => "Enter".to_string(),
+            "tab" => "Tab".to_string(),
             "delete" => "Delete".to_string(),
             "insert" => "Insert".to_string(),
             "home" => "Home".to_string(),

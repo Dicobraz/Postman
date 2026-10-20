@@ -1,5 +1,4 @@
 # Mailbox settings on the server: automatic replies, mailbox usage (S4-05), rules (S4-07).
-bar-vacation = Auto replies
 vacation-title = Automatic replies
 vacation-hint = The server sends the out-of-office reply, even when Postman is closed.
 vacation-demo = Demo: automatic replies live on the server — an account is required.
@@ -36,7 +35,6 @@ settings-quota = Mailbox: { $percent }% of { $unit ->
 settings-quota-warn = Mailbox is { $percent }% full: delete unneeded mail, or new mail will stop arriving.
 vacation-foreign-warning = The server has an active filter “{ $name }” not created in Postman: turning automatic replies on will turn it off.
 # Mail rules (S4-07).
-bar-rules = Rules
 rules-title = Rules
 rules-hint = The server runs the rules when mail is delivered, even when Postman is closed. Changes are saved at once.
 rules-demo = Demo: rules live on the server — an account is required.

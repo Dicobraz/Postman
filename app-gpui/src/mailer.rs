@@ -64,12 +64,16 @@ pub(crate) struct Mailer {
     pub(crate) contacts: Entity<crate::contacts::ContactsView>,
     /// «Отправить позже» и окно «Отменить» отправки (S5-06, `send_later.rs`).
     pub(crate) send_later: crate::send_later::SendLater,
+    /// Вкладки в заголовке окна (S5-01).
+    pub(crate) tabs: crate::tabs::Tabs,
+    /// Меню «…» командной строки.
+    pub(crate) more: crate::chrome::MoreMenu,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
 impl Mailer {
     pub(crate) fn new(cache: Cache, bench: Option<Bench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("search-placeholder")));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("frame-search")));
         let keylog = std::env::var_os("POSTMAN_KEYLOG").is_some();
         let on_search = cx.subscribe_in(&search, window, move |this: &mut Self, state, ev: &InputEvent, _window, cx| match ev {
             InputEvent::PressEnter { .. } => {
@@ -92,7 +96,7 @@ impl Mailer {
         });
         let folders = cx.new(|_| Folders::new(mailboxes, accounts, inbox));
         let reading = cx.new(|_| ReadingPane::new(cache.clone()));
-        let bar = cx.new(|_| CommandBar { search: search.clone() });
+        let bar = cx.new(|_| CommandBar::new(search.clone()));
         let toasts = cx.new(|_| Toasts::new());
         let cal = cx.new(|cx| calendar::CalendarView::new(window, cx));
         let contacts = cx.new(|cx| crate::contacts::ContactsView::new(window, cx));
@@ -100,6 +104,16 @@ impl Mailer {
             cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
             cx.subscribe(&cal, |this, _, action: &calendar::CalendarAction, cx| this.on_calendar(action, cx)),
             on_search,
+            cx.subscribe(&bar, |this, bar, ev: &BarEvent, cx| match ev {
+                BarEvent::More => this.toggle_more(cx),
+                BarEvent::Scope => {
+                    // Охват сменился посреди поиска — искать заново.
+                    let q = bar.read(cx).search.read(cx).value().to_string();
+                    if !q.trim().is_empty() {
+                        this.run_search(&q, cx);
+                    }
+                }
+            }),
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
             cx.subscribe(&list, |this, _, NeedMore(mailbox), cx| this.load_more(mailbox.clone(), cx)),
@@ -114,13 +128,9 @@ impl Mailer {
                 this.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
             }),
             crate::actions::watch_list(&list, cx),
-            cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
-                FolderEvent::Open(id) => {
-                    // Папка или раздел вместо панели настроек — как уход из «Файл» в Outlook.
-                    this.settings.panel = None;
-                    this.open_mailbox(id.clone(), cx)
-                }
-                FolderEvent::Section(s) => this.set_section(*s, cx),
+            cx.subscribe(&folders, |this, _, FolderEvent::Open(id), cx| {
+                this.tabs.activate_kind(crate::tabs::TabKind::Mail);
+                this.open_mailbox(id.clone(), cx)
             }),
             cx.subscribe(&reading, |this, _, ev: &ReadingEvent, cx| match ev {
                 ReadingEvent::Sandbox(level) => {
@@ -171,6 +181,8 @@ impl Mailer {
             settings: Default::default(),
             contacts,
             send_later: Default::default(),
+            tabs: Default::default(),
+            more: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -224,7 +236,7 @@ impl Mailer {
             return self.run_live_search(q, cx);
         }
         let q = q.trim();
-        let mailbox = self.list.read(cx).mailbox.clone();
+        let mailbox = self.search_mailbox(cx);
         let ids = (!q.is_empty()).then(|| self.cache.search(q, mailbox.as_deref(), 1000).unwrap_or_default());
         let results = ids.as_ref().map(Vec::len);
         if results == Some(0) {
@@ -239,8 +251,17 @@ impl Mailer {
         self.reading.update(cx, |r, cx| r.clear(cx));
     }
 
+    /// Папка поиска по охвату командной строки: «Текущая папка» — открытая, «Везде» — все (`None`).
+    pub(crate) fn search_mailbox(&self, cx: &App) -> Option<String> {
+        match self.bar.read(cx).scope {
+            crate::bar::Scope::All => None,
+            crate::bar::Scope::Folder => self.list.read(cx).mailbox.clone(),
+        }
+    }
+
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
-        self.settings.panel = None;
+        // Модуль рейла — во вкладке «Почта» (вкладка настроек остаётся открытой).
+        self.tabs.activate_kind(crate::tabs::TabKind::Mail);
         if section == Section::Calendar && self.section != section {
             self.cal.update(cx, |c, cx| c.refresh(cx));
         }
@@ -248,10 +269,6 @@ impl Mailer {
             self.contacts.update(cx, |c, cx| c.refresh(cx));
         }
         self.section = section;
-        self.folders.update(cx, |f, cx| {
-            f.section = section;
-            cx.notify();
-        });
         cx.notify();
     }
 
@@ -273,10 +290,10 @@ impl Render for Mailer {
         }
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
-        let status = self.items_status(cx);
-        let unread = self.toasts.read(cx).unread();
-        // Панель настроек — на месте содержимого раздела.
-        let settings = self.settings.panel.as_ref().map(|p| p.view());
+        let l = crate::roles::look(cx);
+        // Вкладка настроек — панель на месте модуля.
+        let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
+        let settings = self.settings.panel.as_ref().filter(|_| settings_tab).map(|p| p.view());
         let free = settings.is_none();
         // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» без открытых настроек (`commands.rs`).
         let context = match self.section {
@@ -322,6 +339,12 @@ impl Render for Mailer {
             }))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Next, _, cx| this.step_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Prev, _, cx| this.step_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Close, window, cx| {
+                let id = this.tabs.active().id;
+                this.close_tab(id, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))
@@ -329,6 +352,10 @@ impl Render for Mailer {
                 // Esc сначала закрывает историю уведомлений.
                 if this.toasts.read(cx).is_history_open() {
                     this.toasts.update(cx, |t, cx| t.toggle_history(cx));
+                    return;
+                }
+                // …затем меню «…».
+                if this.close_more(cx) {
                     return;
                 }
                 // …затем строку «Удалить навсегда?».
@@ -351,61 +378,17 @@ impl Render for Mailer {
             .relative()
             .flex()
             .flex_col()
-            .bg(rgb(0xfafafa))
-            .text_color(rgb(0x222222))
+            .bg(l.base())
+            .text_color(l.text())
             .text_size(px(13.))
+            .child(self.titlebar(&l, window, cx))
             .child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
             .when_some(self.settings.bar.clone(), |d, bar| {
                 d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.folders.clone().cached(StyleRefinement::default().w(px(200.)).h_full().flex_none()))
-                    // Нет учётной записи — строка входа на месте списка писем.
-                    .when_some(settings, |d, p| d.child(p.cached(StyleRefinement::default().flex_1().min_w_0().h_full())))
-                    .when_some(self.live.signin.clone().filter(|_| free && self.section == Section::Mail), |d, s| d.child(s))
-                    .when(free && self.section == Section::Mail && self.live.signin.is_none(), |d| {
-                        d.child(self.list.clone().cached(StyleRefinement::default().w(px(380.)).h_full().flex_none()))
-                            .child(self.reading.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
-                    })
-                    .when(free && self.section == Section::Calendar, |d| {
-                        d.child(self.cal.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
-                    })
-                    .when(self.section == Section::Contacts, |d| {
-                        d.child(self.contacts.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .px_2()
-                    .py_0p5()
-                    .border_t_1()
-                    .border_color(rgb(0xdddddd))
-                    .text_color(rgb(0x888888))
-                    .child(status)
-                    .child(self.live.status.clone())
-                    .child(self.settings.quota_text())
-                    .child(div().flex_1())
-                    .child(self.last_key.clone())
-                    .child(self.sandbox.map(sandbox_label).unwrap_or_default())
-                    .child(
-                        div()
-                            .id("notifications")
-                            .px_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(0xececec)))
-                            .when(unread > 0, |d| d.text_color(rgb(0x0f6cbd)))
-                            .child(tr!("status-notifications", n = unread))
-                            .on_click(cx.listener(|this, _, _, cx| this.toasts.update(cx, |t, cx| t.toggle_history(cx)))),
-                    )
-                    .child("gpui"),
-            )
+            .child(self.body(&l, settings, free))
+            .child(self.status_bar(&l, cx))
+            .children(self.more_menu(&l, cx))
             // Окно «Отменить» отправки — внизу, над строкой состояния.
             .children(self.undo_card(cx))
             // Тосты — поверх всего, последним ребёнком.
@@ -414,6 +397,53 @@ impl Render for Mailer {
             b.ui_time(started.elapsed());
         }
         root
+    }
+}
+
+// --- раскладка (DESIGN «Главное окно»): рейл | папки | список | чтение ---
+
+/// Ширина панели папок и карточки списка (макет главного окна).
+const W_FOLDERS: f32 = 236.0;
+const W_LIST: f32 = 452.0;
+
+/// Карточка на фоне каркаса: скругление сверху, рамка без нижней стороны.
+fn card(l: &crate::roles::Look) -> Div {
+    div()
+        .h_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(l.panel())
+        .rounded_t(l.px(pets_ui::theme::Metric::RadiusOverlay))
+        .border_1()
+        .border_b_0()
+        .border_color(l.c(pets_ui::theme::Role::StrokeCard))
+}
+
+impl Mailer {
+    fn body(&self, l: &crate::roles::Look, settings: Option<AnyView>, free: bool) -> Div {
+        let full = || StyleRefinement::default().size_full();
+        let mail = free && self.section == Section::Mail;
+        let mut body = div().flex().flex_1().min_h_0().pr(px(8.)).child(self.rail(l));
+        if let Some(p) = settings {
+            return body.child(card(l).flex_1().child(p.cached(full())));
+        }
+        if mail {
+            body = body.child(self.folders.clone().cached(StyleRefinement::default().w(px(W_FOLDERS)).h_full().flex_none()));
+            // Нет учётной записи — строка входа на месте списка писем.
+            if let Some(s) = self.live.signin.clone() {
+                return body.child(card(l).flex_1().child(s));
+            }
+            return body
+                .child(card(l).w(px(W_LIST)).flex_none().mr(px(8.)).child(self.list.clone().cached(full())))
+                .child(card(l).flex_1().child(self.reading.clone().cached(full())));
+        }
+        match self.section {
+            Section::Calendar => body.child(card(l).flex_1().child(self.cal.clone().cached(full()))),
+            Section::Contacts => body.child(card(l).flex_1().child(self.contacts.clone().cached(full()))),
+            Section::Mail => body,
+        }
     }
 }
 
