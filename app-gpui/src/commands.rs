@@ -193,7 +193,7 @@ mod tests {
 
 /// Чек-лист соответствия Outlook (S2-04): `docs/PARITY.md` из реестра команд.
 #[cfg(test)]
-mod parity {
+pub(crate) mod parity {
     use super::COMMANDS;
 
     pub const RU_FTL: &str = include_str!("../i18n/ru/commands.ftl");
