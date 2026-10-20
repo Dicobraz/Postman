@@ -13,6 +13,9 @@ const SENDERS: &[(&str, &str)] = &[
     ("Бухгалтерия", "buh@corp.example"),
 ];
 
+/// Владелец демо-ящика: участник демо-приглашений и календаря.
+pub const ME: &str = "me@corp.example";
+
 const SUBJECTS: &[&str] = &[
     "Отчёт за квартал",
     "Re: Совещание по проекту",

@@ -11,6 +11,8 @@ mod sys;
 mod list;
 mod folders;
 mod reading;
+mod attachments;
+mod invite_card;
 mod backend;
 mod bar;
 mod mailer;
@@ -32,8 +34,10 @@ use postman_core::bench::{self, Bench};
 pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/app.ftl")),
     ("ru", include_str!("../i18n/ru/commands.ftl")),
+    ("ru", include_str!("../i18n/ru/reading.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
+    ("en", include_str!("../i18n/en/reading.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

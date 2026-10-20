@@ -6309,6 +6309,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gpui-kit",
+ "image",
  "jiff",
  "pets-commands",
  "pets-i18n",
@@ -6322,6 +6323,7 @@ dependencies = [
  "postman-ir",
  "postman-worker",
  "raw-window-handle",
+ "serde_json",
  "tracing",
  "windows-sys 0.61.2",
 ]
