@@ -6,10 +6,15 @@
 
 ## Запуск проверок
 
-Туннель к стенду — скрипт владельца (`stalwart-tunnel.ps1`), JMAP — `http://localhost:18080`. Затем:
+Доступ (с 2026-10-20): из офисной сети напрямую — только HTTPS 443 (`https://<адрес стенда>`), порт 8080 закрыт;
+через туннель владельца (`stalwart-tunnel.ps1`) — `http://localhost:18080`. У стенда сертификат по умолчанию
+(rcgen, `CN=rcgen self signed cert`, SAN только `localhost`): ни IP, ни `mail.itt.test` он не покрывает, в доверенные
+его не добавить. Поэтому напрямую — с `POSTMAN_INSECURE_TLS=1` (проверка сертификата выключена, в журнале
+предупреждение; только стенд). Нужный выход — сертификат сервера на его имя от внутреннего CA (задача стенда).
+Прокси: если задан `HTTPS_PROXY`, в `NO_PROXY` нужен `10.0.0.0/8`, иначе reqwest пойдёт к стенду через прокси.
 
 ```
-POSTMAN_STAND_URL=http://localhost:18080
+POSTMAN_STAND_URL=https://<адрес стенда> POSTMAN_INSECURE_TLS=1   # или http://localhost:18080 через туннель
 POSTMAN_STAND_USER1=user1@itt.test POSTMAN_STAND_PASSWORD1=…
 POSTMAN_STAND_USER2=user2@itt.test POSTMAN_STAND_PASSWORD2=…
 POSTMAN_STAND_USER3=user3@itt.test POSTMAN_STAND_PASSWORD3=…
@@ -29,11 +34,11 @@ cargo test -p postman-core --test stand -- --ignored
 | `contacts_are_read` | `ContactCard` → имя и адреса |
 | `calendar_through_sync` | S3-05, через поток синхронизации: `ShareFreeBusy` (user3 → user1), `CreateMeeting` с приглашением → у user3 по uid, `Events` → встреча в неделе, `Availability` → занятость user3 |
 
-Последний прогон — 2026-10-20: 6 из 6; `calendar_through_sync` (user1, user3) — 2026-10-20, отдельно.
+Последний прогон — 2026-10-20: 6 из 6 и через туннель, и напрямую по HTTPS; `calendar_through_sync` (user1, user3) — 2026-10-20, отдельно.
 
 ## Поведение сервера
 
-1. **Адреса в сессии — внутренние.** `apiUrl`, `downloadUrl`, `uploadUrl`, `eventSourceUrl` абсолютные, на адрес
+1. **Адреса в сессии — внутренние** (даже при входе по HTTPS 443 сессия объявляет `http://…:8080`). `apiUrl`, `downloadUrl`, `uploadUrl`, `eventSourceUrl` абсолютные, на адрес
    из настроек сервера (за туннелем или прокси недоступен). Клиент переносит их на адрес подключения
    (`Session::resolve_urls`): заодно пароль и токен не уходят на другой хост.
 2. **Capabilities v0.16.27:** core, mail, submission, vacationresponse, calendars (+parse), contacts (+parse),

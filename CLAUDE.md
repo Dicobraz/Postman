@@ -93,7 +93,8 @@ stderr и код 1. Только Windows.
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
 данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
 `pets/scripts/stand/clean.ps1 -Repos . -Testdata` (без `-Apply` только показывает).
-Стенд Stalwart: `cargo test -p postman-core --test stand -- --ignored` с `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1..3`,
+Стенд Stalwart: `cargo test -p postman-core --test stand -- --ignored` с `POSTMAN_STAND_URL` (напрямую по HTTPS — ещё
+`POSTMAN_INSECURE_TLS=1`, самоподписанный сертификат стенда), `POSTMAN_STAND_USER1..3`,
 `POSTMAN_STAND_PASSWORD1..3` в окружении (туннель и пароли — у владельца, `docs/STALWART.md`).
 Диагностика песочницы (только отладочная сборка):
 `cargo test -p postman-worker --test windows_probe -- --ignored --nocapture`.
