@@ -6309,6 +6309,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gpui-kit",
+ "image",
  "jiff",
  "pets-commands",
  "pets-i18n",
@@ -6317,6 +6318,7 @@ dependencies = [
  "png 0.17.16",
  "postman-cache",
  "postman-calendar",
+ "postman-compose",
  "postman-core",
  "postman-demo",
  "postman-ir",

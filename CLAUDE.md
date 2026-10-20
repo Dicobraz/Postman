@@ -83,7 +83,7 @@ cargo run --release -p postman-gpui -- --screens <каталог>
 ```
 
 Агенты проверяют интерфейс снимками, а не нажатиями в окне: демо-ящик (свежая копия на 2000 писем, удаляется
-в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `search`, `calendar`, `assistant`;
+в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite`, `search`, `calendar`, `assistant`, `compose` (окно письма — своё окно);
 на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
 stderr и код 1. Только Windows.
 `--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list` и `letter` после первой синхронизации;

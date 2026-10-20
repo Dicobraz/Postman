@@ -200,6 +200,11 @@ impl Mailer {
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
         self.backend = Backend::Live { commands };
+        // Область чтения: блобы и ответы на приглашения — через сервер; мой адрес придёт `Event::Me`.
+        self.reading.update(cx, |r, _| {
+            r.live = true;
+            r.me = None;
+        });
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));

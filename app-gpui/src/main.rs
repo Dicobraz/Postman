@@ -14,12 +14,15 @@ mod sys;
 mod list;
 mod folders;
 mod reading;
+mod attachments;
+mod invite_card;
 mod backend;
 mod bar;
 mod mailer;
 mod account;
 mod live;
 mod signin;
+mod compose;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -38,9 +41,13 @@ use postman_core::bench::{self, Bench};
 pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/app.ftl")),
     ("ru", include_str!("../i18n/ru/commands.ftl")),
+    ("ru", include_str!("../i18n/ru/reading.ftl")),
+    ("ru", include_str!("../i18n/ru/compose.ftl")),
     ("ru", include_str!("../i18n/ru/account.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
+    ("en", include_str!("../i18n/en/reading.ftl")),
+    ("en", include_str!("../i18n/en/compose.ftl")),
     ("en", include_str!("../i18n/en/account.ftl")),
 ];
 

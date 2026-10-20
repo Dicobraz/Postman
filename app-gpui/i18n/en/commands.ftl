@@ -20,3 +20,7 @@ cmd-search-focus = Search
 cmd-search-clear = Clear search
 cmd-calendar-new-meeting = New meeting (scheduling assistant)
 cmd-view-notifications = Notifications
+cmd-compose-send = Send message
+cmd-compose-attach = Attach file
+cmd-compose-preview = Preview message
+cmd-compose-close = Close message window

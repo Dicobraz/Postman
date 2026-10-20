@@ -31,6 +31,10 @@ enum Scene {
     List,
     /// Первое письмо выбрано, тело разобрано воркером.
     Letter,
+    /// Письмо с вложениями и картинкой `cid:` в тексте (S3-03).
+    Attachments,
+    /// Письмо с приглашением: карточка встречи (S3-03).
+    Invite,
     /// Результаты поиска.
     Search,
     /// Раздел «Календарь».
@@ -39,9 +43,21 @@ enum Scene {
     Assistant,
     /// Строка входа (нет учётной записи).
     SignIn,
+    /// Окно письма с заполненными полями (своё окно: снимается его HWND).
+    Compose,
 }
 
-const SCENES: [Scene; 5] = [Scene::List, Scene::Letter, Scene::Search, Scene::Calendar, Scene::Assistant];
+const SCENES: [Scene; 8] = [
+    Scene::List,
+    Scene::Letter,
+    Scene::Attachments,
+    Scene::Invite,
+    Scene::Search,
+    Scene::Calendar,
+    Scene::Assistant,
+    Scene::Compose,
+];
+
 /// Живой ящик: запрос для поиска заранее не известен, календарь — пока демо (S3-05).
 const LIVE_SCENES: [Scene; 2] = [Scene::List, Scene::Letter];
 const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
@@ -53,10 +69,13 @@ impl Scene {
         match self {
             Scene::List => "list",
             Scene::Letter => "letter",
+            Scene::Attachments => "attachments",
+            Scene::Invite => "invite",
             Scene::Search => "search",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::SignIn => "signin",
+            Scene::Compose => "compose",
         }
     }
 }
@@ -137,6 +156,9 @@ pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
     }
     // Кадры — по запросу (патч gpui): без запроса в простое ничего не рисуется.
     window.request_animation_frame();
+    // Следующий кадр — целиком, без кэша частей: `ready` читает часть (`m.reading`) раньше её отрисовки, gpui не
+    // засчитывает части её же сущность, и `notify` части теряется — снимок показал бы прошлое письмо.
+    window.on_next_frame(|window, _| window.refresh());
 }
 
 fn set_phase(m: &mut Mailer, phase: Phase) {
@@ -150,6 +172,12 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
         Scene::Letter => m.list.update(cx, |l, cx| l.select(0, cx)),
+        Scene::Attachments | Scene::Invite => {
+            let Some(i) = demo_row(m.list.read(cx), scene) else {
+                return Err("no such message in the first rows of the demo inbox".into());
+            };
+            m.list.update(cx, |l, cx| l.select(i, cx));
+        }
         Scene::Search => {
             m.search.update(cx, |s, cx| s.set_value(SEARCH_QUERY, window, cx));
             m.run_search(SEARCH_QUERY, cx);
@@ -169,6 +197,13 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.set_section(Section::Calendar, cx);
         }
         Scene::SignIn => m.set_section(Section::Mail, cx),
+        Scene::Compose => {
+            m.cal.assistant = false;
+            m.set_section(Section::Mail, cx);
+            // Окно — после кадра основного: не открывать его посреди отрисовки.
+            let mailer = cx.entity();
+            cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_compose_screen(cx)));
+        }
     }
     Ok(())
 }
@@ -196,11 +231,33 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 && first.is_some()
                 && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == first)
         }
+        Scene::Attachments | Scene::Invite => {
+            let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
+            let shown = |r: &crate::reading::Reading| match scene {
+                Scene::Attachments => r.doc.is_some() && !r.images.is_empty(),
+                _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some()),
+            };
+            target.is_some() && reading.is_some_and(|r| Some(r.row.id.as_str()) == target && shown(r))
+        }
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => m.section == Section::Calendar && !m.cal.assistant,
         Scene::Assistant => m.section == Section::Calendar && m.cal.assistant,
         Scene::SignIn => m.live.signin.is_some(),
+        Scene::Compose => compose_hwnd(m, cx).is_some(),
     }
+}
+
+/// Первое прочитанное письмо демо-ящика для сцены: с картинкой `cid:` (и без приглашения) или с приглашением.
+fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
+    let (offset, rows) = &list.rows;
+    let wanted = |a: &[postman_cache::AttachmentRow]| {
+        let invite = a.iter().any(crate::attachments::is_invite);
+        match scene {
+            Scene::Invite => invite,
+            _ => !invite && a.iter().any(|a| a.cid.is_some()),
+        }
+    };
+    rows.iter().position(|r| wanted(&postman_demo::body(&r.id).attachments)).map(|p| p + offset)
 }
 
 /// PrintWindow — в фоновом потоке: он шлёт сообщения окну, и в потоке окна это повторный вход в оконную
@@ -208,7 +265,10 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
 fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) {
     let Some(d) = &m.screens else { return };
     let path = d.dir.join(format!("{}.png", scene.name()));
-    let hwnd = sys::window_id(window).unwrap_or_else(|e| fail(scene, &e));
+    let hwnd = match scene {
+        Scene::Compose => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
+        _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
+    };
     let task = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) });
     cx.spawn(async move |this, cx| {
         let result = task.await;
@@ -227,6 +287,11 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
         });
     })
     .detach();
+}
+
+/// Окно письма открыто и нарисовано: его дескриптор.
+fn compose_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
+    m.compose.last().and_then(|c| c.read(cx).screen_hwnd())
 }
 
 fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), String> {
