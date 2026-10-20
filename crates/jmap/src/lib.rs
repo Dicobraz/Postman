@@ -4,6 +4,7 @@
 
 mod calendars;
 mod contacts;
+mod files;
 mod mail;
 mod push;
 mod session;
@@ -13,6 +14,7 @@ mod vacation;
 
 pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
 pub use contacts::{AddressBook, ContactCard};
+pub use files::{FILENODE, FileNode, Written};
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session, SharedAccount};
