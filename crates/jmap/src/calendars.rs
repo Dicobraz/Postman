@@ -116,10 +116,12 @@ impl Client {
 
     /// Событие по UID (приглашение, пришедшее письмом, могло уже лечь в календарь сервером).
     /// У приглашённого своё id события — искать только так (фильтр `uid` черновика; Stalwart — да).
+    /// Фильтр `uid` у Stalwart — по подстроке: берём несколько и сверяем uid целиком (иначе первым может прийти
+    /// другое событие с похожим uid).
     pub async fn event_by_uid(&self, uid: &str) -> Result<Option<Value>> {
         let acc = self.calendar_account()?;
         let calls = [
-            inv("CalendarEvent/query", json!({ "accountId": acc, "filter": { "uid": uid }, "limit": 1 }), "q"),
+            inv("CalendarEvent/query", json!({ "accountId": acc, "filter": { "uid": uid }, "limit": 50 }), "q"),
             inv(
                 "CalendarEvent/get",
                 json!({

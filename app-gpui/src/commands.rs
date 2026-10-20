@@ -31,13 +31,19 @@ pub mod meeting {
     gpui_kit::actions!(meeting, [Send, Close]);
 }
 
+/// Настройки ящика на сервере (S4-05, S4-07): в Outlook — меню «Файл», клавиши нет.
+pub mod settings {
+    gpui_kit::actions!(settings, [Vacation, Rules]);
+}
+
 /// Окно письма (S3-01).
 pub mod compose {
     gpui_kit::actions!(compose, [Send, Attach, Preview, Close]);
 }
 
 /// Раздел «Почта» вне полей ввода: клавиши без модификаторов в поиске — текст и курсор. Контекст раздела
-/// (`MailView`, `CalendarView`, `ContactsView`) ставит корень экрана: в календаре и контактах клавиши писем молчат.
+/// (`MailView`, `CalendarView`, `ContactsView`, `SettingsView`) ставит корень экрана: в календаре, контактах и
+/// настройках клавиши писем молчат.
 const LIST: Option<&str> = Some("MailView && !Input");
 /// Раздел «Почта», включая поле поиска.
 const MAIL: Option<&str> = Some("MailView");
@@ -91,6 +97,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.close", &["escape"], COMPOSER),
     cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Outlook: «Файл → Автоматические ответы», без клавиши.
+    cmd("settings.vacation", &[], None),
+    // Outlook: «Файл → Правила и оповещения», без клавиши.
+    cmd("settings.rules", &[], None),
 ];
 
 /// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал

@@ -4,7 +4,7 @@ use gpui_kit::*;
 use gpui_kit::component::input::{Input, InputState};
 use pets_i18n::tr;
 
-use crate::commands::mail;
+use crate::commands::{mail, settings};
 
 // --- строка команд ---
 
@@ -20,6 +20,10 @@ const BUTTONS: [(&str, MakeAction); 6] = [
     ("bar-delete", || Box::new(mail::Delete)),
     ("bar-flag", || Box::new(mail::ToggleFlag)),
 ];
+
+/// Настройки ящика (в Outlook — меню «Файл»): справа, у поиска.
+const SETTINGS: [(&str, MakeAction); 2] =
+    [("bar-vacation", || Box::new(settings::Vacation)), ("bar-rules", || Box::new(settings::Rules))];
 
 /// Высота строки команд: кэшированное view не измеряется по содержимому, размер задаётся явно.
 pub(crate) const BAR_HEIGHT: f32 = 40.0;
@@ -38,20 +42,23 @@ impl Render for CommandBar {
             .px_2()
             .border_b_1()
             .border_color(rgb(0xdddddd))
-            .children(BUTTONS.map(|(key, action)| {
-                div()
-                    .id(key)
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .bg(rgb(0xececec))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(0xe0e0e0)))
-                    .child(tr!(key))
-                    // Действие уходит в фокус окна (экран почты), как от клавиши.
-                    .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-            }))
+            .children(BUTTONS.map(button))
             .child(div().flex_1())
+            .children(SETTINGS.map(button))
             .child(div().w(px(320.)).child(Input::new(&self.search)))
     }
+}
+
+fn button((key, action): (&'static str, MakeAction)) -> impl IntoElement {
+    div()
+        .id(key)
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .bg(rgb(0xececec))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(0xe0e0e0)))
+        .child(tr!(key))
+        // Действие уходит в фокус окна (экран почты), как от клавиши.
+        .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
 }

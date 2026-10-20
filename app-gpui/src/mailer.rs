@@ -58,6 +58,8 @@ pub(crate) struct Mailer {
     /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
     pub(crate) cal: Entity<calendar::CalendarView>,
     pub(crate) meetings: crate::meeting::Meetings,
+    /// Автоответ, квота (S4-05): панель настроек, полоса автоответа, строка состояния (`settings.rs`).
+    pub(crate) settings: crate::settings::ServerSettings,
     /// Контакты и справочник — своя кэшируемая view (S4-02).
     pub(crate) contacts: Entity<crate::contacts::ContactsView>,
     pub(crate) _subscriptions: Vec<Subscription>,
@@ -99,7 +101,11 @@ impl Mailer {
             cx.subscribe(&list, |this, _, NeedMore(mailbox), cx| this.load_more(mailbox.clone(), cx)),
             crate::actions::watch_list(&list, cx),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
-                FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
+                FolderEvent::Open(id) => {
+                    // Папка или раздел вместо панели настроек — как уход из «Файл» в Outlook.
+                    this.settings.panel = None;
+                    this.open_mailbox(id.clone(), cx)
+                }
                 FolderEvent::Section(s) => this.set_section(*s, cx),
             }),
             cx.subscribe(&reading, |this, _, ev: &ReadingEvent, cx| match ev {
@@ -146,6 +152,7 @@ impl Mailer {
             section: Section::Mail,
             cal,
             meetings: Default::default(),
+            settings: Default::default(),
             contacts,
             _subscriptions: subscriptions,
         }
@@ -174,6 +181,7 @@ impl Mailer {
         self.contacts.update(cx, |c, cx| c.on_sync(ev, cx));
         let created = self.meetings.on_sync(ev, cx);
         self.meetings_created(created, cx);
+        self.on_settings_sync(ev, cx);
     }
 
     /// Действию нужен сервер, а его нет (демо): сказать тостом.
@@ -214,6 +222,7 @@ impl Mailer {
     }
 
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.settings.panel = None;
         if section == Section::Calendar && self.section != section {
             self.cal.update(cx, |c, cx| c.refresh(cx));
         }
@@ -248,8 +257,12 @@ impl Render for Mailer {
         screens::drive(self, window, cx);
         let status = self.items_status(cx);
         let unread = self.toasts.read(cx).unread();
-        // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» (`commands.rs`).
+        // Панель настроек — на месте содержимого раздела.
+        let settings = self.settings.panel.as_ref().map(|p| p.view());
+        let free = settings.is_none();
+        // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» без открытых настроек (`commands.rs`).
         let context = match self.section {
+            _ if !free => "Mailer SettingsView",
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
             Section::Contacts => "Mailer ContactsView",
@@ -284,6 +297,8 @@ impl Render for Mailer {
                 }
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
+            .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
             .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))
@@ -295,6 +310,10 @@ impl Render for Mailer {
                 }
                 // …затем строку «Удалить навсегда?».
                 if this.cancel_purge(cx) {
+                    return;
+                }
+                // …затем панель настроек.
+                if this.close_settings(window, cx) {
                     return;
                 }
                 // В контактах — строка «Удалить контакт?», форма, поиск контактов.
@@ -313,6 +332,9 @@ impl Render for Mailer {
             .text_color(rgb(0x222222))
             .text_size(px(13.))
             .child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
+            .when_some(self.settings.bar.clone(), |d, bar| {
+                d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
+            })
             .child(
                 div()
                     .flex()
@@ -320,12 +342,13 @@ impl Render for Mailer {
                     .min_h_0()
                     .child(self.folders.clone().cached(StyleRefinement::default().w(px(200.)).h_full().flex_none()))
                     // Нет учётной записи — строка входа на месте списка писем.
-                    .when_some(self.live.signin.clone().filter(|_| self.section == Section::Mail), |d, s| d.child(s))
-                    .when(self.section == Section::Mail && self.live.signin.is_none(), |d| {
+                    .when_some(settings, |d, p| d.child(p.cached(StyleRefinement::default().flex_1().min_w_0().h_full())))
+                    .when_some(self.live.signin.clone().filter(|_| free && self.section == Section::Mail), |d, s| d.child(s))
+                    .when(free && self.section == Section::Mail && self.live.signin.is_none(), |d| {
                         d.child(self.list.clone().cached(StyleRefinement::default().w(px(380.)).h_full().flex_none()))
                             .child(self.reading.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
                     })
-                    .when(self.section == Section::Calendar, |d| {
+                    .when(free && self.section == Section::Calendar, |d| {
                         d.child(self.cal.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
                     })
                     .when(self.section == Section::Contacts, |d| {
@@ -343,6 +366,7 @@ impl Render for Mailer {
                     .text_color(rgb(0x888888))
                     .child(status)
                     .child(self.live.status.clone())
+                    .child(self.settings.quota_text())
                     .child(div().flex_1())
                     .child(self.last_key.clone())
                     .child(self.sandbox.map(sandbox_label).unwrap_or_default())
