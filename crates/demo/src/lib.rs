@@ -114,6 +114,7 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             flagged: next() % 50 == 0,
             has_attachment: next() % 7 == 0,
             size: 4096 + next() % 100_000,
+            keywords: demo_keywords(i),
         });
         if batch.len() == batch.capacity() {
             cache.upsert_emails(&batch)?;
@@ -123,6 +124,32 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     cache.upsert_emails(&batch)?;
     shared(&cache, now)?;
     chain(&cache, now)
+}
+
+/// Ключевые слова демо-письма `i` (S5-02): категории по умолчанию (`postman_core::labels::DEFAULTS`) и метка
+/// Thunderbird — список показывает полосы категорий и метки, у части писем — по две.
+fn demo_keywords(i: usize) -> Vec<String> {
+    let mut out: Vec<&str> = Vec::new();
+    match i % 6 {
+        0 => out.push("pm.cat.clients"),
+        1 => out.push("pm.cat.team"),
+        3 => out.push("pm.cat.tenders"),
+        4 => out.push("pm.cat.pentest"),
+        _ => {}
+    }
+    if i.is_multiple_of(8) {
+        out.push("pm.cat.team");
+    }
+    if i % 10 == 7 {
+        out.push("pm.cat.services");
+    }
+    if i % 17 == 5 {
+        out.push("$label2");
+    }
+    let mut out: Vec<String> = out.into_iter().map(String::from).collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Письмо беседы демо (S5-05): цепочка ответов с цитатами разных клиентов, мои письма — в «Отправленных».
@@ -168,6 +195,7 @@ fn chain(cache: &Cache, now: i64) -> postman_cache::Result<()> {
             flagged: false,
             has_attachment: false,
             size: 4096,
+            keywords: Vec::new(),
         })
         .collect();
     cache.upsert_emails(&rows)
@@ -254,6 +282,7 @@ fn shared(cache: &Cache, now: i64) -> postman_cache::Result<()> {
                     flagged: false,
                     has_attachment: i % 4 == 0,
                     size: 8192,
+                    keywords: Vec::new(),
                 }
             })
             .collect();

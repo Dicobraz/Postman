@@ -139,6 +139,59 @@ pub struct EmailRow {
     pub flagged: bool,
     pub has_attachment: bool,
     pub size: u64,
+    /// Ключевые слова JMAP, кроме `$seen` и `$flagged` (у них свои поля): категории, метки, `$answered`…
+    /// В нижнем регистре, по алфавиту, без повторов ([`EmailRow::set_keyword`]).
+    pub keywords: Vec<String>,
+}
+
+pub const SEEN: &str = "$seen";
+pub const FLAGGED: &str = "$flagged";
+
+impl EmailRow {
+    /// Есть ли у письма ключевое слово (регистр не важен), включая `$seen` и `$flagged`.
+    pub fn has_keyword(&self, keyword: &str) -> bool {
+        if keyword.eq_ignore_ascii_case(SEEN) {
+            self.seen
+        } else if keyword.eq_ignore_ascii_case(FLAGGED) {
+            self.flagged
+        } else {
+            self.keywords.iter().any(|k| k.eq_ignore_ascii_case(keyword))
+        }
+    }
+
+    /// Поставить или снять ключевое слово; `$seen` и `$flagged` — в свои поля.
+    pub fn set_keyword(&mut self, keyword: &str, on: bool) {
+        let k = keyword.to_ascii_lowercase();
+        match k.as_str() {
+            SEEN => self.seen = on,
+            FLAGGED => self.flagged = on,
+            _ => match (self.keywords.binary_search(&k), on) {
+                (Err(at), true) => self.keywords.insert(at, k),
+                (Ok(at), false) => {
+                    self.keywords.remove(at);
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// Ключевые слова в индексе ([`Cache::keyword_count`]): свои и `$flagged`. `$seen` не индексируется — у почти
+    /// всех писем он есть, а непрочитанные папки считает сервер (`MailboxRow::unread`).
+    fn indexed(&self) -> impl Iterator<Item = &str> {
+        self.keywords.iter().map(String::as_str).chain(self.flagged.then_some(FLAGGED))
+    }
+
+    /// Где письмо в индексе ключевых слов: его папки и «все папки» его аккаунта.
+    fn places(&self) -> Vec<String> {
+        let mut out = self.mailbox_ids.clone();
+        out.push(all_folders(account_of(&self.id)));
+        out
+    }
+}
+
+/// «Все папки» аккаунта (`None` — основного) в индексе ключевых слов: `*` в id JMAP не бывает.
+pub fn all_folders(account: Option<&str>) -> String {
+    scoped(account, "*")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -173,8 +226,9 @@ pub struct BodyRow {
 /// Blob'ы больше этого не кэшируются (их скачивают заново по требованию).
 pub const MAX_CACHED_BLOB: usize = 16 * 1024 * 1024;
 
-/// Меняется при любом изменении формата значений или ключей. 2 — права папок и аккаунты (S4-06).
-const FORMAT_VERSION: u64 = 2;
+/// Меняется при любом изменении формата значений или ключей. 2 — права папок и аккаунты (S4-06);
+/// 3 — ключевые слова писем и их индекс (S5-02).
+const FORMAT_VERSION: u64 = 3;
 
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const MAILBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("mailbox");
@@ -189,6 +243,34 @@ const TRUSTED: TableDefinition<&str, ()> = TableDefinition::new("trusted_sender"
 const STATE: TableDefinition<&str, &str> = TableDefinition::new("sync_state");
 /// Общие ящики: id аккаунта → [`AccountRow`].
 const ACCOUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("account");
+/// (ключевое слово, папка или «все папки», -дата, id) → () — письма с меткой в папке, новые сверху (S5-02).
+const BY_KEYWORD: TableDefinition<(&str, &str, i64, &str), ()> = TableDefinition::new("by_keyword");
+/// (ключевое слово, папка или «все папки») → число писем: «N из M» без обхода диапазона.
+const KEYWORD_COUNT: TableDefinition<(&str, &str), u64> = TableDefinition::new("keyword_count");
+
+type ByKeyword<'t> = redb::Table<'t, (&'static str, &'static str, i64, &'static str), ()>;
+type KeywordCount<'t> = redb::Table<'t, (&'static str, &'static str), u64>;
+
+/// Индекс ключевых слов: письмо `row` добавить (`on`) или убрать. Повтор ничего не меняет (ключи — множество).
+fn index_keywords(by: &mut ByKeyword, count: &mut KeywordCount, row: &EmailRow, on: bool) -> Result<()> {
+    let places = row.places();
+    for kw in row.indexed() {
+        for place in &places {
+            let key = (kw, place.as_str(), -row.received_at, row.id.as_str());
+            let changed = if on { by.insert(key, ())?.is_none() } else { by.remove(key)?.is_some() };
+            if changed {
+                let cur = count.get((kw, place.as_str()))?.map_or(0, |v| v.value());
+                let next = if on { cur.saturating_add(1) } else { cur.saturating_sub(1) };
+                if next == 0 {
+                    count.remove((kw, place.as_str()))?;
+                } else {
+                    count.insert((kw, place.as_str()), next)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
 /// (цепочка, дата, id) → () — письма беседы по времени, из всех папок (S5-05). Таблица новее формата 2: в кэше без
 /// неё она строится из писем при открытии ([`Cache::init`]), без пересоздания кэша.
 const BY_THREAD: TableDefinition<(&str, i64, &str), ()> = TableDefinition::new("by_thread");
@@ -269,6 +351,8 @@ impl Cache {
         tx.open_table(TRUSTED)?;
         tx.open_table(STATE)?;
         tx.open_table(ACCOUNT)?;
+        tx.open_table(BY_KEYWORD)?;
+        tx.open_table(KEYWORD_COUNT)?;
         if !threads_indexed {
             let email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_THREAD)?;
@@ -368,6 +452,8 @@ impl Cache {
             let mut email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_MAILBOX)?;
             let mut count = tx.open_table(COUNT)?;
+            let mut by_kw = tx.open_table(BY_KEYWORD)?;
+            let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
             let mut threads = tx.open_table(BY_THREAD)?;
             for e in rows {
                 let old: Option<EmailRow> = email.get(e.id.as_str())?.map(|v| dec(v.value())).transpose()?;
@@ -377,6 +463,7 @@ impl Cache {
                             add(&mut count, mb, -1)?;
                         }
                     }
+                    index_keywords(&mut by_kw, &mut kw_count, old, false)?;
                     threads.remove((old.thread_id.as_str(), old.received_at, old.id.as_str()))?;
                 }
                 threads.insert((e.thread_id.as_str(), e.received_at, e.id.as_str()), ())?;
@@ -385,6 +472,7 @@ impl Cache {
                         add(&mut count, mb, 1)?;
                     }
                 }
+                index_keywords(&mut by_kw, &mut kw_count, e, true)?;
                 email.insert(e.id.as_str(), enc(e)?.as_slice())?;
             }
         }
@@ -400,9 +488,12 @@ impl Cache {
             let mut email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_MAILBOX)?;
             let mut count = tx.open_table(COUNT)?;
+            let mut by_kw = tx.open_table(BY_KEYWORD)?;
+            let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
             let row: Option<EmailRow> = email.get(id)?.map(|v| dec(v.value())).transpose()?;
             match row {
                 Some(mut row) if row.mailbox_ids.iter().any(|m| m == from) => {
+                    index_keywords(&mut by_kw, &mut kw_count, &row, false)?;
                     row.mailbox_ids.retain(|m| m != from);
                     if by.remove((from, -row.received_at, id))?.is_some() {
                         add(&mut count, from, -1)?;
@@ -413,6 +504,7 @@ impl Cache {
                             add(&mut count, to, 1)?;
                         }
                     }
+                    index_keywords(&mut by_kw, &mut kw_count, &row, true)?;
                     email.insert(id, enc(&row)?.as_slice())?;
                     true
                 }
@@ -430,6 +522,8 @@ impl Cache {
             let mut by = tx.open_table(BY_MAILBOX)?;
             let mut count = tx.open_table(COUNT)?;
             let mut body = tx.open_table(BODY)?;
+            let mut by_kw = tx.open_table(BY_KEYWORD)?;
+            let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
             let mut threads = tx.open_table(BY_THREAD)?;
             for id in ids {
                 let old: Option<EmailRow> = email.remove(id.as_str())?.map(|v| dec(v.value())).transpose()?;
@@ -440,6 +534,7 @@ impl Cache {
                         add(&mut count, mb, -1)?;
                     }
                 }
+                index_keywords(&mut by_kw, &mut kw_count, &old, false)?;
                 body.remove(id.as_str())?;
             }
         }
@@ -575,18 +670,87 @@ impl Cache {
     }
 
     pub fn set_flags(&self, id: &str, seen: bool, flagged: bool) -> Result<()> {
+        self.edit_row(id, |row| {
+            row.seen = seen;
+            row.flagged = flagged;
+        })
+        .map(|_| ())
+    }
+
+    /// Поставить `add` и снять `remove` (ключевые слова JMAP, в том числе `$seen` и `$flagged`) — до ответа сервера,
+    /// чтобы список изменился сразу. Новая строка; `None` — письма нет.
+    pub fn set_keywords(&self, id: &str, add: &[String], remove: &[String]) -> Result<Option<EmailRow>> {
+        self.edit_row(id, |row| {
+            for k in remove {
+                row.set_keyword(k, false);
+            }
+            for k in add {
+                row.set_keyword(k, true);
+            }
+        })
+    }
+
+    /// Изменить строку письма на месте вместе с индексом ключевых слов (папки и дата — те же).
+    fn edit_row(&self, id: &str, change: impl FnOnce(&mut EmailRow)) -> Result<Option<EmailRow>> {
         let tx = self.db.begin_write()?;
-        {
+        let row = {
             let mut email = tx.open_table(EMAIL)?;
+            let mut by_kw = tx.open_table(BY_KEYWORD)?;
+            let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
             let row: Option<EmailRow> = email.get(id)?.map(|v| dec(v.value())).transpose()?;
-            if let Some(mut row) = row {
-                row.seen = seen;
-                row.flagged = flagged;
-                email.insert(id, enc(&row)?.as_slice())?;
+            match row {
+                Some(mut row) => {
+                    index_keywords(&mut by_kw, &mut kw_count, &row, false)?;
+                    change(&mut row);
+                    index_keywords(&mut by_kw, &mut kw_count, &row, true)?;
+                    email.insert(id, enc(&row)?.as_slice())?;
+                    Some(row)
+                }
+                None => None,
+            }
+        };
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Писем с ключевым словом `keyword` в папке `mailbox` (ключ кэша) или во всех папках аккаунта
+    /// ([`all_folders`]). `$seen` не считается (см. [`MailboxRow::unread`]).
+    pub fn keyword_count(&self, keyword: &str, mailbox: &str) -> Result<usize> {
+        let tx = self.db.begin_read()?;
+        let k = keyword.to_ascii_lowercase();
+        Ok(tx.open_table(KEYWORD_COUNT)?.get((k.as_str(), mailbox))?.map_or(0, |v| v.value() as usize))
+    }
+
+    /// Все ключевые слова папки (или «всех папок») с числом писем — счётчики фильтров одним проходом.
+    pub fn keyword_counts(&self, mailbox: &str) -> Result<Vec<(String, usize)>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(KEYWORD_COUNT)?;
+        let mut out = Vec::new();
+        for r in t.iter()? {
+            let (k, v) = r?;
+            let (kw, place) = k.value();
+            if place == mailbox {
+                out.push((kw.to_owned(), v.value() as usize));
             }
         }
-        tx.commit()?;
-        Ok(())
+        Ok(out)
+    }
+
+    /// Окно писем с ключевым словом в папке (или во всех папках аккаунта), новые сверху.
+    pub fn keyword_page(&self, keyword: &str, mailbox: &str, offset: usize, limit: usize) -> Result<Vec<EmailRow>> {
+        let tx = self.db.begin_read()?;
+        let by = tx.open_table(BY_KEYWORD)?;
+        let email = tx.open_table(EMAIL)?;
+        let k = keyword.to_ascii_lowercase();
+        let (lo, hi) = ((k.as_str(), mailbox, i64::MIN, ""), (k.as_str(), mailbox, i64::MAX, MAX_ID));
+        let mut out = Vec::with_capacity(limit.min(1024));
+        for r in by.range(lo..=hi)?.skip(offset).take(limit) {
+            let (key, _) = r?;
+            if let Some(v) = email.get(key.value().3)? {
+                out.push(dec(v.value())?);
+            }
+        }
+        Ok(out)
     }
 
     pub fn body(&self, id: &str) -> Result<Option<BodyRow>> {
@@ -671,6 +835,7 @@ mod tests {
             flagged: false,
             has_attachment: false,
             size: 1,
+            keywords: Vec::new(),
         }
     }
 
@@ -792,6 +957,76 @@ mod tests {
         assert_eq!(c.state("i/Email").unwrap(), None);
         assert_eq!(c.state("Email").unwrap().as_deref(), Some("s-own"));
         assert_eq!(c.missing_bodies(10).unwrap(), ["j/e1", "e1"]);
+    }
+
+    /// Индекс ключевых слов (S5-02): «N из M» по папке и по всем папкам аккаунта, окно писем с меткой; индекс
+    /// следует за письмом при обновлении, переносе, смене меток и флага, удалении.
+    #[test]
+    fn keyword_index_follows_the_letters() {
+        let c = Cache::open_in_memory().unwrap();
+        let tagged = |id: &str, at, mbs: &[&str], kws: &[&str]| EmailRow {
+            keywords: kws.iter().map(|k| k.to_string()).collect(),
+            ..email(id, at, mbs)
+        };
+        c.upsert_emails(&[
+            tagged("a", 1, &["in"], &["pm.cat.clients"]),
+            tagged("b", 3, &["in", "x"], &["pm.cat.clients", "pm.cat.team"]),
+            tagged("c", 2, &["x"], &[]),
+            tagged("i/a", 5, &["i/in"], &["pm.cat.clients"]),
+        ])
+        .unwrap();
+        let n = |k: &str, mb: &str| c.keyword_count(k, mb).unwrap();
+        let own = all_folders(None);
+        assert_eq!(own, "*");
+        assert_eq!((n("pm.cat.clients", "in"), n("pm.cat.clients", "x"), n("pm.cat.clients", &own)), (2, 1, 2));
+        assert_eq!(n("PM.CAT.Clients", "in"), 2, "регистр не важен");
+        assert_eq!(n("pm.cat.clients", &all_folders(Some("i"))), 1, "общий ящик — свои «все папки»");
+        assert_eq!(n("pm.cat.team", &own), 1);
+        assert_eq!(ids(c.keyword_page("pm.cat.clients", "in", 0, 10).unwrap()), ["b", "a"]);
+        assert_eq!(ids(c.keyword_page("pm.cat.clients", &own, 1, 10).unwrap()), ["a"]);
+        let mut counts = c.keyword_counts("in").unwrap();
+        counts.sort();
+        assert_eq!(counts, [("pm.cat.clients".to_string(), 2), ("pm.cat.team".to_string(), 1)]);
+
+        // Метки на месте: поставить, снять, повтор ничего не меняет; `$flagged` — в индексе, `$seen` — поле.
+        let row = c.set_keywords("c", &["pm.cat.team".into(), "$flagged".into(), "$seen".into()], &[]).unwrap().unwrap();
+        assert!(row.flagged && row.seen && row.keywords == ["pm.cat.team"]);
+        c.set_keywords("c", &["pm.cat.team".into()], &[]).unwrap();
+        assert_eq!((n("pm.cat.team", "x"), n("pm.cat.team", &own), n("$flagged", "x")), (2, 2, 1));
+        assert_eq!(n("$seen", "x"), 0, "$seen не индексируется");
+        c.set_flags("c", true, false).unwrap();
+        assert_eq!(n("$flagged", "x"), 0);
+        let row = c.set_keywords("a", &[], &["pm.cat.clients".into()]).unwrap().unwrap();
+        assert!(row.keywords.is_empty());
+        assert_eq!(n("pm.cat.clients", "in"), 1);
+        assert!(c.set_keywords("zz", &["x".into()], &[]).unwrap().is_none());
+
+        // Сервер прислал письмо заново (другие метки) — индекс по новому; перенос и удаление — тоже.
+        c.upsert_emails(&[tagged("b", 3, &["in", "x"], &["pm.cat.tenders"])]).unwrap();
+        assert_eq!((n("pm.cat.clients", &own), n("pm.cat.tenders", "x"), n("pm.cat.team", "x")), (0, 1, 1));
+        assert!(c.move_email("b", "in", "trash").unwrap());
+        assert_eq!((n("pm.cat.tenders", "in"), n("pm.cat.tenders", "trash"), n("pm.cat.tenders", &own)), (0, 1, 1));
+        c.delete_emails(&["b".into(), "c".into()]).unwrap();
+        assert_eq!((n("pm.cat.tenders", &own), n("pm.cat.team", &own)), (0, 0));
+        assert!(c.keyword_counts("x").unwrap().is_empty(), "нулевые счётчики не хранятся");
+        // Общий ящик отозван — его метки уходят вместе с письмами.
+        c.replace_accounts(&[]).unwrap();
+        c.replace_accounts(&[AccountRow { id: "i".into(), name: "i".into(), is_personal: false, read_only: false }]).unwrap();
+        c.replace_accounts(&[]).unwrap();
+        assert_eq!(n("pm.cat.clients", &all_folders(Some("i"))), 0);
+    }
+
+    #[test]
+    fn row_keywords_stay_sorted_and_unique() {
+        let mut r = email("a", 1, &["in"]);
+        for k in ["pm.cat.b", "PM.cat.A", "pm.cat.b", "$Flagged"] {
+            r.set_keyword(k, true);
+        }
+        assert_eq!(r.keywords, ["pm.cat.a", "pm.cat.b"]);
+        assert!(r.flagged && r.has_keyword("$FLAGGED") && r.has_keyword("pm.cat.A") && !r.has_keyword("$seen"));
+        r.set_keyword("pm.cat.a", false);
+        r.set_keyword("pm.cat.zz", false);
+        assert_eq!(r.keywords, ["pm.cat.b"]);
     }
 
     /// Индекс бесед (S5-05): письма цепочки из всех папок по времени; перенос, смена даты и удаление его держат;

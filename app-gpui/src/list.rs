@@ -1,5 +1,5 @@
 //! Список писем: окно строк в фоне, выделение, флаги (S1-03, S1-06); полоса прокрутки и позиция в каждой
-//! папке, строка «Удалить навсегда?» (S3-02).
+//! папке, строка «Удалить навсегда?» (S3-02); полоса категории и метки, категории клавишами 1–9 (S5-02).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -9,35 +9,56 @@ use gpui_kit::*;
 use gpui_kit::prelude::*;
 use pets_i18n::tr;
 use postman_cache::{Cache, EmailRow, MailboxRow, Rights};
+use postman_core::labels::{self, Book};
 
 use crate::*;
 
 pub(crate) const ROW_HEIGHT: f32 = 44.0;
 pub(crate) const WINDOW_MARGIN: usize = 100;
 
-/// Запись флагов в хранилище по очереди в отдельном потоке: поток интерфейса не ждёт диск
+/// Запись флагов и меток в хранилище по очереди в отдельном потоке: поток интерфейса не ждёт диск
 /// (каждый коммит redb — fsync, на листании с открытием писем это до 30 мс на кадр).
 pub(crate) struct FlagWriter {
-    pub(crate) tx: std::sync::mpsc::Sender<(String, bool, bool)>,
+    pub(crate) tx: std::sync::mpsc::Sender<Write>,
     pub(crate) cache: Cache,
+}
+
+/// Что записать в хранилище.
+pub(crate) enum Write {
+    Flags { id: String, seen: bool, flagged: bool },
+    /// Ключевые слова (категории): поставить `add`, снять `remove`.
+    Keywords { id: String, add: Vec<String>, remove: Vec<String> },
+}
+
+impl Write {
+    fn apply(self, cache: &Cache) {
+        let _ = match self {
+            Write::Flags { id, seen, flagged } => cache.set_flags(&id, seen, flagged),
+            Write::Keywords { id, add, remove } => cache.set_keywords(&id, &add, &remove).map(|_| ()),
+        };
+    }
 }
 
 impl FlagWriter {
     pub(crate) fn new(cache: Cache) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, bool)>();
+        let (tx, rx) = std::sync::mpsc::channel::<Write>();
         let writer = cache.clone();
-        // Не запустился поток — получатель закрыт, `set` пишет сам (медленнее, но без потерь).
+        // Не запустился поток — получатель закрыт, `send` пишет сам (медленнее, но без потерь).
         let _ = std::thread::Builder::new().name("cache-flags".into()).spawn(move || {
-            for (id, seen, flagged) in rx {
-                let _ = writer.set_flags(&id, seen, flagged);
+            for w in rx {
+                w.apply(&writer);
             }
         });
         Self { tx, cache }
     }
 
     pub(crate) fn set(&self, id: &str, seen: bool, flagged: bool) {
-        if self.tx.send((id.to_owned(), seen, flagged)).is_err() {
-            let _ = self.cache.set_flags(id, seen, flagged);
+        self.send(Write::Flags { id: id.to_owned(), seen, flagged });
+    }
+
+    pub(crate) fn send(&self, w: Write) {
+        if let Err(std::sync::mpsc::SendError(w)) = self.tx.send(w) {
+            w.apply(&self.cache);
         }
     }
 }
@@ -70,6 +91,8 @@ pub(crate) struct MailList {
     pub(crate) more: More,
     /// Папки с урезанными правами (общие ящики, S4-06): id → права. Своих папок здесь нет.
     pub(crate) rights: HashMap<String, Rights>,
+    /// Таблицы категорий по аккаунтам (S5-02): имена и цвета меток строк, клавиши 1–9.
+    pub(crate) labels: Book,
 }
 
 /// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
@@ -159,6 +182,25 @@ pub(crate) struct ReadOnly;
 
 impl EventEmitter<ReadOnly> for MailList {}
 
+/// Категории письма изменены пользователем (в кэше уже записаны): живой ящик отдаёт их серверу (`SetKeywords`).
+pub(crate) struct Labeled {
+    pub(crate) ids: Vec<String>,
+    pub(crate) add: Vec<String>,
+    pub(crate) remove: Vec<String>,
+}
+
+impl EventEmitter<Labeled> for MailList {}
+
+/// Категория не поставлена — сказать тостом.
+pub(crate) enum LabelNotice {
+    /// На этой клавише категории нет.
+    NoCategory(u8),
+    /// Папка общего ящика без права менять ключевые слова.
+    ReadOnly,
+}
+
+impl EventEmitter<LabelNotice> for MailList {}
+
 /// Можно ли действие с письмом: хоть в одной его папке есть право (`check`). Папки без записи в `rights` — свои.
 pub(crate) fn may(rights: &HashMap<String, Rights>, row: &EmailRow, check: impl Fn(&Rights) -> bool) -> bool {
     row.mailbox_ids.is_empty() || row.mailbox_ids.iter().any(|m| rights.get(m).is_none_or(&check))
@@ -201,7 +243,43 @@ impl MailList {
             confirm: None,
             more: More::default(),
             rights: HashMap::new(),
+            labels: crate::labels::default_book(),
         }
+    }
+
+    /// Таблицы категорий учётной записи (прочитаны из файла): строки — с их именами и цветами.
+    pub(crate) fn set_labels(&mut self, book: Book, cx: &mut Context<Self>) {
+        self.labels = book;
+        cx.notify();
+    }
+
+    /// Клавиша 1–9: категория с этой клавишей на выбранном письме — поставить или снять (DESIGN.md, «Настройки»).
+    pub(crate) fn toggle_category(&mut self, key: u8, cx: &mut Context<Self>) {
+        let Some(mut row) = self.selected_row() else { return };
+        let keyword = self
+            .labels
+            .for_account(postman_cache::account_of(&row.id))
+            .and_then(|t| t.by_key(key))
+            .map(|c| c.keyword.clone());
+        let Some(keyword) = keyword else {
+            cx.emit(LabelNotice::NoCategory(key));
+            return;
+        };
+        if !may(&self.rights, &row, |r| r.keywords) {
+            cx.emit(LabelNotice::ReadOnly);
+            return;
+        }
+        let (add, remove) = labels::toggle([row.keywords.as_slice()], &keyword);
+        for k in &remove {
+            row.set_keyword(k, false);
+        }
+        for k in &add {
+            row.set_keyword(k, true);
+        }
+        self.flags.send(Write::Keywords { id: row.id.clone(), add: add.clone(), remove: remove.clone() });
+        self.patch_row(&row);
+        cx.emit(Labeled { ids: vec![row.id.clone()], add, remove });
+        cx.notify();
     }
 
     /// Права папок после перечитывания папок: запоминаются только урезанные.
@@ -521,7 +599,10 @@ impl Render for MailList {
                     }
                     range
                         .map(|i| match this.row(i).cloned() {
-                            Some(r) => list_row(i, &r, this.selected == Some(i), cx),
+                            Some(r) => {
+                                let labels = crate::labels::row_labels(&this.labels, &r);
+                                list_row(i, &r, labels, this.selected == Some(i), cx)
+                            }
                             None => empty_row(i),
                         })
                         .collect::<Vec<_>>()
@@ -573,7 +654,13 @@ pub(crate) fn empty_row(i: usize) -> AnyElement {
     div().id(i).w_full().h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
 }
 
-pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<MailList>) -> AnyElement {
+pub(crate) fn list_row(
+    i: usize,
+    r: &EmailRow,
+    labels: crate::labels::RowLabels,
+    selected: bool,
+    cx: &mut Context<MailList>,
+) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let mut icons = String::new();
     if r.has_attachment {
@@ -595,8 +682,9 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
         .line_height(px(18.))
         .border_b_1()
         .border_color(rgb(0xe5e5e5))
-        // Метка «не прочитано» — полоса слева, как в Outlook.
-        .when(!r.seen, |d| d.child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(rgb(0x1a8cff))))
+        // Слева — полоса категории (S5-02). Прежняя синяя полоса «не прочитано» убрана: её не отличить от синей
+        // категории; непрочитанное — жирным отправителем и цветной темой (DESIGN.md).
+        .when_some(labels.stripe, |d, c| d.child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(rgb(c))))
         .when(selected, |d| d.bg(rgb(0xcce4ff)))
         .hover(|d| d.bg(rgb(0xf0f6fd)))
         .cursor_pointer()
@@ -604,7 +692,12 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
             div()
                 .flex()
                 .gap_2()
-                .child(div().flex_1().truncate().when(!r.seen, |d| d.font_weight(FontWeight::BOLD)).child(from))
+                .items_center()
+                .child(
+                    div().flex_1().min_w(px(60.)).truncate().when(!r.seen, |d| d.font_weight(FontWeight::BOLD)).child(from),
+                )
+                // Метки — в строке отправителя справа, категория первой.
+                .children(labels.chips.into_iter().map(|(name, slot)| crate::labels::chip(name, slot)))
                 .child(div().text_color(rgb(0xcc3333)).child(icons))
                 .child(div().text_sm().text_color(rgb(0x888888)).child(format_date(r.received_at))),
         )
@@ -634,6 +727,7 @@ mod tests {
             flagged,
             has_attachment: false,
             size: 0,
+            keywords: Vec::new(),
         }
     }
 

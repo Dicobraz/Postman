@@ -13,7 +13,9 @@ postman-worker.workspace = true
 postman-compose.workspace = true
 postman-search.workspace = true
 postman-calendar.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 jiff = "0.2"
 cpu-time = "1"
 memory-stats = "1"
@@ -23,6 +25,7 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 [dev-dependencies]
 # Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
 postman-demo.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

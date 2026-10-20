@@ -104,6 +104,13 @@ impl Mailer {
             cx.subscribe(&list, |this, _, _: &ReadOnly, cx| {
                 this.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("shared-read-only-flags"), cx));
             }),
+            cx.subscribe(&list, |this, _, n: &LabelNotice, cx| {
+                let text = match n {
+                    LabelNotice::NoCategory(key) => tr!("labels-no-category", key = *key),
+                    LabelNotice::ReadOnly => tr!("labels-read-only"),
+                };
+                this.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
+            }),
             crate::actions::watch_list(&list, cx),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => {
@@ -285,6 +292,7 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
             .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
             .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
+            .on_action(cx.listener(|this, a: &mail::Categorize, _, cx| this.list.update(cx, |l, cx| l.toggle_category(a.key, cx))))
             .on_action(cx.listener(|this, _: &commands::thread::Next, _, cx| this.thread_step(1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Prev, _, cx| this.thread_step(-1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Toggle, _, cx| this.reading.update(cx, |r, cx| r.toggle_feed(cx))))

@@ -101,6 +101,7 @@ mod tests {
             flagged: false,
             has_attachment: false,
             size: 1,
+            keywords: Vec::new(),
         }
     }
 

@@ -8,6 +8,7 @@ cmd-mail-page-up = Page up
 cmd-mail-mark-read = Mark as read
 cmd-mail-mark-unread = Mark as unread
 cmd-mail-toggle-flag = Flag
+cmd-mail-categorize = Categorize
 cmd-mail-new = New message
 cmd-mail-reply = Reply
 cmd-mail-reply-all = Reply all

@@ -8,6 +8,7 @@ cmd-mail-page-up = Страница вверх
 cmd-mail-mark-read = Отметить как прочитанное
 cmd-mail-mark-unread = Отметить как непрочитанное
 cmd-mail-toggle-flag = Флаг
+cmd-mail-categorize = Категория
 cmd-mail-new = Создать письмо
 cmd-mail-reply = Ответить
 cmd-mail-reply-all = Ответить всем

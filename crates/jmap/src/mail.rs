@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{CORE, Client, Invocation, MAIL, Result, take};
+use crate::{CORE, Client, Error, Invocation, MAIL, Result, take};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,6 +227,58 @@ pub(crate) fn inv(name: &str, args: Value, id: &str) -> Invocation {
     Invocation(name.into(), args, id.into())
 }
 
+/// Писем в одном `Email/set` — не больше `maxObjectsInSet` сервера (Stalwart — 500).
+pub const SET_CHUNK: usize = 500;
+/// Вызовов в одном запросе — не больше `maxCallsInRequest` (Stalwart — 16).
+pub const CALLS_CHUNK: usize = 16;
+
+/// Путь патча `Email/set` к ключевому слову: JSON Pointer (RFC 6901), `~` → `~0`, `/` → `~1` — оба знака
+/// в ключевых словах допустимы (RFC 8621 §4.1.1).
+pub fn keyword_path(keyword: &str) -> String {
+    format!("keywords/{}", keyword.replace('~', "~0").replace('/', "~1"))
+}
+
+/// Патч `Email/set update`: `add` — `true`, `remove` — `null` (снять); остальные ключевые слова не меняются.
+pub fn keywords_patch(add: &[String], remove: &[String]) -> Value {
+    let mut patch = serde_json::Map::new();
+    for k in remove {
+        patch.insert(keyword_path(k), Value::Null);
+    }
+    for k in add {
+        patch.insert(keyword_path(k), Value::Bool(true));
+    }
+    Value::Object(patch)
+}
+
+/// Условие `Email/query` (RFC 8621 §4.4.1) — для фильтров панели и «Все папки».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filter {
+    InMailbox(String),
+    HasKeyword(String),
+    NotKeyword(String),
+    Text(String),
+    /// Все условия (`operator: AND`).
+    And(Vec<Filter>),
+    /// Любое из условий (`operator: OR`): закладки быстрых фильтров между собой.
+    Or(Vec<Filter>),
+}
+
+impl Filter {
+    pub fn to_json(&self) -> Value {
+        let op = |op: &str, list: &[Filter]| {
+            json!({ "operator": op, "conditions": list.iter().map(Filter::to_json).collect::<Vec<_>>() })
+        };
+        match self {
+            Filter::InMailbox(m) => json!({ "inMailbox": m }),
+            Filter::HasKeyword(k) => json!({ "hasKeyword": k }),
+            Filter::NotKeyword(k) => json!({ "notKeyword": k }),
+            Filter::Text(t) => json!({ "text": t }),
+            Filter::And(list) => op("AND", list),
+            Filter::Or(list) => op("OR", list),
+        }
+    }
+}
+
 impl Client {
     pub fn mail_account(&self) -> Result<&str> {
         self.account_for(MAIL)
@@ -361,8 +413,55 @@ impl Client {
 
     /// Поставить/снять ключевое слово (`$seen`, `$flagged`, …).
     pub async fn set_keyword(&self, id: &str, keyword: &str, on: bool) -> Result<()> {
-        self.email_patch(id, json!({ format!("keywords/{keyword}"): if on { Value::Bool(true) } else { Value::Null } }))
-            .await
+        self.email_patch(id, json!({ keyword_path(keyword): if on { Value::Bool(true) } else { Value::Null } })).await
+    }
+
+    /// Поставить `add` и снять `remove` у писем `ids`: один `Email/set` на [`SET_CHUNK`] писем, патч
+    /// `keywords/<слово>` — другие ключевые слова письма не трогаются. Ответ — письма, которые сервер не изменил,
+    /// с ошибкой (`notUpdated`); ошибка всего запроса — `Err`.
+    pub async fn set_keywords(&self, ids: &[String], add: &[String], remove: &[String]) -> Result<Vec<(String, Error)>> {
+        let acc = self.mail_account()?;
+        let patch = keywords_patch(add, remove);
+        let mut failed = Vec::new();
+        for chunk in ids.chunks(SET_CHUNK) {
+            let update: serde_json::Map<String, Value> = chunk.iter().map(|id| (id.clone(), patch.clone())).collect();
+            let mut r = self.call(USING, &[inv("Email/set", json!({ "accountId": acc, "update": update }), "s")]).await?;
+            let v: Value = take(&mut r, "s")?;
+            for id in chunk {
+                if let Err(e) = set_error(&v, "notUpdated", id, "Email/set") {
+                    failed.push((id.clone(), e));
+                }
+            }
+        }
+        Ok(failed)
+    }
+
+    /// Письма по фильтру, новые сверху (фильтры панели, «Все папки» — без `inMailbox`).
+    pub async fn filtered(&self, filter: &Filter, limit: u64) -> Result<EmailPage> {
+        self.query_page(filter.to_json(), Some(0), None, limit).await
+    }
+
+    /// Число писем по каждому фильтру — `Email/query` с `calculateTotal` и `limit: 0` (без id), до
+    /// [`CALLS_CHUNK`] вызовов в запросе: счётчики «N из M» и фильтров панели.
+    pub async fn count(&self, filters: &[Filter]) -> Result<Vec<u64>> {
+        let acc = self.mail_account()?;
+        let mut out = Vec::with_capacity(filters.len());
+        for chunk in filters.chunks(CALLS_CHUNK) {
+            let calls: Vec<Invocation> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let args = json!({ "accountId": acc, "filter": f.to_json(), "limit": 0, "calculateTotal": true });
+                    inv("Email/query", args, &format!("c{i}"))
+                })
+                .collect();
+            let mut r = self.call(USING, &calls).await?;
+            for i in 0..chunk.len() {
+                let q: QueryResponse = take(&mut r, &format!("c{i}"))?;
+                out.push(q.total.unwrap_or(0));
+            }
+        }
+        Ok(out)
     }
 
     pub async fn move_email(&self, id: &str, from: &str, to: &str) -> Result<()> {
@@ -444,6 +543,39 @@ mod tests {
         assert!(!m.my_rights.may_remove_items && !m.my_rights.may_add_items && !m.my_rights.may_submit);
         let own: Mailbox = serde_json::from_value(json!({ "id": "b", "name": "x", "parentId": null, "role": null })).unwrap();
         assert_eq!(own.my_rights, MailboxRights::default());
+    }
+
+    /// Патч меток (S5-02): только названные ключевые слова; `~` и `/` экранированы по JSON Pointer.
+    #[test]
+    fn keyword_patch_touches_only_named_keywords() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let patch = keywords_patch(&s(&["pm.cat.clients", "$flagged"]), &s(&["pm.cat.team"]));
+        assert_eq!(
+            patch,
+            json!({ "keywords/pm.cat.clients": true, "keywords/$flagged": true, "keywords/pm.cat.team": null })
+        );
+        assert_eq!(keyword_path("a/b~c"), "keywords/a~1b~0c");
+        assert_eq!(keywords_patch(&[], &[]), json!({}));
+        // Снять и поставить одно слово — ставится (добавления — после снятий).
+        assert_eq!(keywords_patch(&s(&["x"]), &s(&["x"])), json!({ "keywords/x": true }));
+    }
+
+    #[test]
+    fn filters_become_query_conditions() {
+        let f = Filter::And(vec![
+            Filter::InMailbox("a".into()),
+            Filter::Or(vec![Filter::HasKeyword("pm.cat.clients".into()), Filter::HasKeyword("$flagged".into())]),
+            Filter::NotKeyword("$seen".into()),
+        ]);
+        assert_eq!(
+            f.to_json(),
+            json!({ "operator": "AND", "conditions": [
+                { "inMailbox": "a" },
+                { "operator": "OR", "conditions": [{ "hasKeyword": "pm.cat.clients" }, { "hasKeyword": "$flagged" }] },
+                { "notKeyword": "$seen" },
+            ]})
+        );
+        assert_eq!(Filter::Text("x".into()).to_json(), json!({ "text": "x" }));
     }
 
     #[test]
