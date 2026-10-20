@@ -1,7 +1,6 @@
 //! Экран почты: связывает части, держит действия (хоткеи), поиск, календарь, тосты и замер.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui_kit::*;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -10,7 +9,7 @@ use pets_i18n::tr;
 use pets_ui::{Level as Toast, Toasts};
 use postman_cache::Cache;
 use postman_core::bench::{self, Bench, Step};
-use postman_worker::{Client as Worker, Level};
+use postman_worker::Level;
 
 use crate::*;
 use crate::backend::Backend;
@@ -77,10 +76,7 @@ impl Mailer {
             l
         });
         let folders = cx.new(|_| Folders { mailboxes, current: inbox, results: None, section: Section::Mail });
-        let reading = cx.new(|_| ReadingPane {
-            worker: Arc::new(Mutex::new(Worker::new(Worker::default_exe(), Duration::from_secs(5)))),
-            reading: None,
-        });
+        let reading = cx.new(|_| ReadingPane::new(cache.clone()));
         let bar = cx.new(|_| CommandBar { search: search.clone() });
         let toasts = cx.new(|_| Toasts::new());
         let subscriptions = vec![
@@ -103,6 +99,14 @@ impl Mailer {
                     cx.notify();
                 }
                 ReadingEvent::Error(text) => this.toasts.update(cx, |t, cx| t.push(Toast::Error, text.clone(), cx)),
+                ReadingEvent::Toast(level, text) => this.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx)),
+                ReadingEvent::NeedsServer => this.needs_server(cx),
+                ReadingEvent::Sync(req) => {
+                    if !this.backend.send(req.command()) {
+                        this.needs_server(cx);
+                        this.reading.update(cx, |r, cx| r.not_sent(req, cx));
+                    }
+                }
             }),
             // Значок уведомлений в строке состояния.
             cx.observe(&toasts, |_, _, cx| cx.notify()),

@@ -24,6 +24,11 @@ tracing = "0.1"
 # Снимки экранов (`--screens`, S2-05): дескриптор окна и запись PNG.
 raw-window-handle = "0.6"
 png = "0.17"
+# Картинки `cid:` (S3-03): воркер отдаёт готовые пиксели RGBA, здесь — только кадр для gpui, без декодеров.
+image = { version = "0.25", default-features = false }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"

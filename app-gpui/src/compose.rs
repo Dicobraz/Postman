@@ -1140,7 +1140,7 @@ impl Render for Composer {
                 .flex_col()
                 .gap_2()
                 .overflow_y_scroll()
-                .children(ir_view::blocks(&doc.blocks, "preview", cx))
+                .children(ir_view::blocks(&doc.blocks, "preview", &ir_view::Images::new(), cx))
                 .into_any_element(),
         };
 
