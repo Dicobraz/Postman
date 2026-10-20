@@ -40,6 +40,8 @@ pub(crate) struct Mailer {
     pub(crate) toasts: Entity<Toasts>,
     /// Сервер или демо (S3-04 подключает живой ящик).
     pub(crate) backend: Backend,
+    /// Живой ящик: статус синхронизации, строка входа, поиск на сервере (`live.rs`).
+    pub(crate) live: crate::live::Live,
     /// Окна письма (S3-01).
     pub(crate) compose: crate::compose::Composers,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
@@ -82,9 +84,7 @@ impl Mailer {
         let subscriptions = vec![
             on_search,
             Self::observe_keys(cx),
-            cx.subscribe(&list, |this, _, OpenRow(row), cx| {
-                this.reading.update(cx, |r, cx| r.open(row.clone(), cx));
-            }),
+            cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
                 FolderEvent::Section(s) => this.set_section(*s, cx),
@@ -123,6 +123,7 @@ impl Mailer {
             search,
             toasts,
             backend: Backend::Demo,
+            live: Default::default(),
             compose: Default::default(),
             sandbox: None,
             last_key: String::new(),
@@ -148,8 +149,8 @@ impl Mailer {
         })
     }
 
-    /// Событие синхронизации: каждая часть берёт своё (`on_sync`). Поток событий подключает S3-04.
-    #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
+    /// Событие синхронизации: каждая часть берёт своё (`on_sync`); общее (папки, список, статус, ошибки,
+    /// поиск) — `live.rs`.
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
         self.compose.on_sync(ev, cx);
@@ -161,6 +162,7 @@ impl Mailer {
     }
 
     pub(crate) fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
+        self.live.clear_search();
         self.folders.update(cx, |f, cx| {
             f.current = Some(id.clone());
             f.results = None;
@@ -171,6 +173,9 @@ impl Mailer {
     }
 
     pub(crate) fn run_search(&mut self, q: &str, cx: &mut Context<Self>) {
+        if self.backend.is_live() {
+            return self.run_live_search(q, cx);
+        }
         let q = q.trim();
         let mailbox = self.list.read(cx).mailbox.clone();
         let ids = (!q.is_empty()).then(|| self.cache.search(q, mailbox.as_deref(), 1000).unwrap_or_default());
@@ -263,7 +268,9 @@ impl Render for Mailer {
                     .flex_1()
                     .min_h_0()
                     .child(self.folders.clone().cached(StyleRefinement::default().w(px(200.)).h_full().flex_none()))
-                    .when(self.section == Section::Mail, |d| {
+                    // Нет учётной записи — строка входа на месте списка писем.
+                    .when_some(self.live.signin.clone().filter(|_| self.section == Section::Mail), |d, s| d.child(s))
+                    .when(self.section == Section::Mail && self.live.signin.is_none(), |d| {
                         d.child(self.list.clone().cached(StyleRefinement::default().w(px(380.)).h_full().flex_none()))
                             .child(self.reading.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
                     })
@@ -279,6 +286,7 @@ impl Render for Mailer {
                     .border_color(rgb(0xdddddd))
                     .text_color(rgb(0x888888))
                     .child(status)
+                    .child(self.live.status.clone())
                     .child(div().flex_1())
                     .child(self.last_key.clone())
                     .child(self.sandbox.map(sandbox_label).unwrap_or_default())

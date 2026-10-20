@@ -3,7 +3,6 @@
 //!
 //! Части экрана не держат свой канал к серверу: команды уходят через [`Backend::send`], события синхронизации
 //! `Mailer` раздаёт всем частям (`on_sync`) — каждая берёт свои (тело письма, блоб, итог отправки…).
-#![expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
 
 use postman_core::sync::{Command, UnboundedSender};
 

@@ -117,8 +117,26 @@ impl ReadingPane {
         cx.notify();
     }
 
+    /// Живой ящик (S3-04): тело — из кэша или с сервера, приходит позже (`show_body`).
+    pub(crate) fn open_live(&mut self, row: EmailRow, cx: &mut Context<Self>) {
+        if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
+            return;
+        }
+        self.reading = Some(Reading { row, body: None, doc: None, images: Images::new(), requested: HashSet::new(), invite: None });
+        cx.notify();
+    }
+
+    /// Тело открытого письма пришло (кэш, `BodyReady`): разобрать в воркере.
+    pub(crate) fn show_body(&mut self, id: &str, body: postman_cache::BodyRow, cx: &mut Context<Self>) {
+        let Some(r) = self.reading.as_mut().filter(|r| r.row.id == id) else { return };
+        r.body = Some(body);
+        r.doc = None;
+        self.render_body(cx);
+        self.ensure_invite(cx);
+        cx.notify();
+    }
+
     /// Событие синхронизации: блоб вложения, ответ на приглашение, мой адрес.
-    #[expect(dead_code, reason = "phase 2 seam: Mailer::on_sync is wired by S3-04")]
     pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) {
         match ev {
             Event::BlobReady { blob_id, data } => self.blob_ready(blob_id, data.clone(), cx),

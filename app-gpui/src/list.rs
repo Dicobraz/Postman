@@ -65,6 +65,33 @@ pub(crate) struct OpenRow(pub(crate) EmailRow);
 
 impl EventEmitter<OpenRow> for MailList {}
 
+/// Флаг письма изменён пользователем (в кэше уже записан): живой ящик отдаёт его серверу (`Keyword`).
+pub(crate) struct Flagged {
+    pub(crate) id: String,
+    pub(crate) keyword: &'static str,
+    pub(crate) on: bool,
+}
+
+impl EventEmitter<Flagged> for MailList {}
+
+/// Ключевые слова JMAP, которые меняются при переходе флагов строки `old` в (`seen`, `flagged`).
+pub(crate) fn keyword_changes(old: &EmailRow, seen: bool, flagged: bool) -> Vec<(&'static str, bool)> {
+    let mut out = Vec::new();
+    if old.seen != seen {
+        out.push(("$seen", seen));
+    }
+    if old.flagged != flagged {
+        out.push(("$flagged", flagged));
+    }
+    out
+}
+
+/// Выделение после перечитывания: то же письмо по id в новом окне строк; не нашлось — без выделения.
+pub(crate) fn reselect(id: Option<&str>, offset: usize, rows: &[EmailRow], count: usize) -> Option<usize> {
+    let pos = rows.iter().position(|r| Some(r.id.as_str()) == id)?;
+    Some(offset + pos).filter(|&i| i < count)
+}
+
 impl MailList {
     pub(crate) fn new(cache: Cache) -> Self {
         Self {
@@ -107,6 +134,31 @@ impl MailList {
         self.pending_open = None;
         let (offset, limit) = page_window(&self.visible);
         self.rows = (offset, self.page_source().read(&self.cache, offset, limit));
+    }
+
+    /// Данные изменились (синхронизация): число писем и окно строк — в фоне, выделение остаётся на том же письме.
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected.and_then(|i| self.row(i)).map(|r| r.id.clone());
+        let (offset, limit) = page_window(&self.visible);
+        self.page_gen += 1;
+        let generation = self.page_gen;
+        self.page_pending = Some(offset..offset + limit);
+        let (source, cache) = (self.page_source(), self.cache.clone());
+        let task = cx.background_spawn(async move { (source.count(&cache), source.read(&cache, offset, limit)) });
+        cx.spawn(async move |this, cx| {
+            let (count, rows) = task.await;
+            let _ = this.update(cx, |m, cx| {
+                if m.page_gen != generation {
+                    return;
+                }
+                m.page_pending = None;
+                m.count = count;
+                m.selected = reselect(selected.as_deref(), offset, &rows, count);
+                m.rows = (offset, rows);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Окно строк вокруг видимого диапазона. Читается в фоне — поток интерфейса не ждёт хранилище;
@@ -182,6 +234,7 @@ impl MailList {
             row.seen = true;
             self.flags.set(&row.id, true, row.flagged);
             self.patch_row(&row);
+            cx.emit(Flagged { id: row.id.clone(), keyword: "$seen", on: true });
         }
         cx.emit(OpenRow(row));
     }
@@ -200,6 +253,7 @@ impl MailList {
 
     pub(crate) fn set_flags(&mut self, seen: Option<bool>, toggle_flag: bool, cx: &mut Context<Self>) {
         let Some(mut row) = self.selected.and_then(|i| self.row(i)).cloned() else { return };
+        let old = row.clone();
         if let Some(s) = seen {
             row.seen = s;
         }
@@ -208,6 +262,9 @@ impl MailList {
         }
         self.flags.set(&row.id, row.seen, row.flagged);
         self.patch_row(&row);
+        for (keyword, on) in keyword_changes(&old, row.seen, row.flagged) {
+            cx.emit(Flagged { id: row.id.clone(), keyword, on });
+        }
         cx.notify();
     }
 
@@ -260,6 +317,14 @@ pub(crate) enum PageSource {
 }
 
 impl PageSource {
+    pub(crate) fn count(&self, cache: &Cache) -> usize {
+        match self {
+            PageSource::Mailbox(mb) => cache.count(mb).unwrap_or(0),
+            PageSource::Ids(ids) => ids.len(),
+            PageSource::Empty => 0,
+        }
+    }
+
     pub(crate) fn read(&self, cache: &Cache, offset: usize, limit: usize) -> Vec<EmailRow> {
         match self {
             PageSource::Mailbox(mb) => cache.page(mb, offset, limit).unwrap_or_default(),
@@ -314,4 +379,47 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
         .child(div().text_sm().truncate().text_color(if r.seen { rgb(0x777777) } else { rgb(0x1a6fd1) }).child(line2))
         .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
+    use super::{EmailRow, keyword_changes, reselect};
+
+    fn row(id: &str, seen: bool, flagged: bool) -> EmailRow {
+        EmailRow {
+            id: id.into(),
+            thread_id: String::new(),
+            mailbox_ids: Vec::new(),
+            received_at: 0,
+            subject: String::new(),
+            from_name: String::new(),
+            from_addr: String::new(),
+            preview: String::new(),
+            seen,
+            flagged,
+            has_attachment: false,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn flags_become_keywords() {
+        let r = row("a", false, false);
+        assert_eq!(keyword_changes(&r, false, false), vec![]);
+        assert_eq!(keyword_changes(&r, true, false), vec![("$seen", true)]);
+        assert_eq!(keyword_changes(&r, true, true), vec![("$seen", true), ("$flagged", true)]);
+        assert_eq!(keyword_changes(&row("a", true, true), true, false), vec![("$flagged", false)]);
+    }
+
+    #[test]
+    fn selection_follows_the_letter() {
+        let rows = vec![row("new", false, false), row("a", true, false), row("b", true, false)];
+        // Пришло новое письмо сверху: выбранное «a» сдвинулось на одну строку.
+        assert_eq!(reselect(Some("a"), 0, &rows, 3), Some(1));
+        assert_eq!(reselect(Some("b"), 100, &rows, 200), Some(102));
+        // Письмо исчезло (удалено, перенесено) — выделения нет.
+        assert_eq!(reselect(Some("gone"), 0, &rows, 3), None);
+        assert_eq!(reselect(None, 0, &rows, 3), None);
+    }
 }

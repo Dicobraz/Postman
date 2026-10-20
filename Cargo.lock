@@ -6322,9 +6322,13 @@ dependencies = [
  "postman-core",
  "postman-demo",
  "postman-ir",
+ "postman-jmap",
+ "postman-search",
  "postman-worker",
  "raw-window-handle",
+ "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "windows-sys 0.61.2",
 ]

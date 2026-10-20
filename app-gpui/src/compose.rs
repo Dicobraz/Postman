@@ -423,7 +423,6 @@ pub(crate) struct Composers {
 
 impl Composers {
     /// Событие синхронизации: Identity и контакты — себе, итоги отправки — окнам (каждое ищет свой тикет).
-    #[expect(dead_code, reason = "called from Mailer::on_sync, wired by S3-04")]
     pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) {
         match ev {
             Event::Me { address, signature } => {
@@ -771,7 +770,6 @@ impl Composer {
     }
 
     /// Итог отправки или сохранения — по тикету.
-    #[expect(dead_code, reason = "called from Mailer::on_sync, wired by S3-04")]
     fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) {
         match ev {
             Event::Sent { ticket } => self.close |= self.model.on_sent(*ticket),

@@ -6,6 +6,9 @@
 //! фоновом потоке; затем следующая сцена. На каждый снимок — строка `screen <имя> <путь> <ш>x<в>` в stdout,
 //! в конце — выход с кодом 0; ошибка (снимок не удался, одного цвета, сцена не готова) — stderr и код 1.
 //! Сообщения — по-английски: это диагностика для агентов, не текст интерфейса.
+//!
+//! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list` и
+//! `letter` после первого `EmailsChanged` синхронизации; без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -38,6 +41,8 @@ enum Scene {
     Calendar,
     /// Календарь с помощником планирования.
     Assistant,
+    /// Строка входа (нет учётной записи).
+    SignIn,
     /// Окно письма с заполненными полями (своё окно: снимается его HWND).
     Compose,
 }
@@ -53,6 +58,12 @@ const SCENES: [Scene; 8] = [
     Scene::Compose,
 ];
 
+/// Живой ящик: запрос для поиска заранее не известен, календарь — пока демо (S3-05).
+const LIVE_SCENES: [Scene; 2] = [Scene::List, Scene::Letter];
+const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
+/// Первая синхронизация живого ящика дольше сцены демо.
+const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
+
 impl Scene {
     fn name(self) -> &'static str {
         match self {
@@ -63,6 +74,7 @@ impl Scene {
             Scene::Search => "search",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
+            Scene::SignIn => "signin",
             Scene::Compose => "compose",
         }
     }
@@ -82,21 +94,43 @@ pub struct Driver {
     dir: PathBuf,
     scene: usize,
     phase: Phase,
+    /// `--live`: живой ящик стенда вместо демо.
+    live: bool,
+    /// `--live` без учётной записи в окружении: снимок строки входа.
+    signin: bool,
 }
 
 impl Driver {
     /// Каталог создаётся сразу: ошибка — до открытия окна.
-    pub fn new(dir: PathBuf) -> std::io::Result<Self> {
+    pub fn new(dir: PathBuf, live: bool) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let dir = std::path::absolute(&dir)?;
-        Ok(Self { dir, scene: 0, phase: Phase::Enter })
+        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false })
+    }
+
+    /// Окно открывается со строкой входа: снимается она.
+    pub fn sign_in(&mut self) {
+        self.signin = true;
+    }
+
+    fn scenes(&self) -> &'static [Scene] {
+        match (self.live, self.signin) {
+            (_, true) => &SIGNIN_SCENES,
+            (true, false) => &LIVE_SCENES,
+            (false, false) => &SCENES,
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        if self.live { LIVE_TIMEOUT } else { SCENE_TIMEOUT }
     }
 }
 
 /// Шаг сценария; вызывается из `Render for Mailer` на каждом кадре.
 pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
     let Some(d) = &m.screens else { return };
-    let Some(&scene) = SCENES.get(d.scene) else { return };
+    let Some(&scene) = d.scenes().get(d.scene) else { return };
+    let timeout = d.timeout();
     match d.phase {
         Phase::Capturing => return,
         Phase::Enter => {
@@ -107,8 +141,8 @@ pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
         }
         Phase::Wait { frames, since } => {
             if !ready(m, scene, cx) {
-                if since.elapsed() > SCENE_TIMEOUT {
-                    fail(scene, &format!("scene not ready in {} s", SCENE_TIMEOUT.as_secs()));
+                if since.elapsed() > timeout {
+                    fail(scene, &format!("scene not ready in {} s", timeout.as_secs()));
                 }
                 set_phase(m, Phase::Wait { frames: 0, since });
             } else if frames + 1 < SETTLE_FRAMES {
@@ -162,6 +196,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.cal.assistant = true;
             m.set_section(Section::Calendar, cx);
         }
+        Scene::SignIn => m.set_section(Section::Mail, cx),
         Scene::Compose => {
             m.cal.assistant = false;
             m.set_section(Section::Mail, cx);
@@ -181,7 +216,10 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
     let reading = m.reading.read(cx).reading.as_ref();
     match scene {
         Scene::List => {
-            m.section == Section::Mail
+            // Живой ящик: снимок — после первой синхронизации, а не по старому кэшу.
+            let synced = m.live.synced || m.screens.as_ref().is_some_and(|d| !d.live);
+            synced
+                && m.section == Section::Mail
                 && list.search_ids.is_none()
                 && list.selected.is_none()
                 && rows_loaded
@@ -204,6 +242,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => m.section == Section::Calendar && !m.cal.assistant,
         Scene::Assistant => m.section == Section::Calendar && m.cal.assistant,
+        Scene::SignIn => m.live.signin.is_some(),
         Scene::Compose => compose_hwnd(m, cx).is_some(),
     }
 }
@@ -241,7 +280,7 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
             let Some(d) = &mut m.screens else { return };
             d.scene += 1;
             d.phase = Phase::Enter;
-            if d.scene >= SCENES.len() {
+            if d.scene >= d.scenes().len() {
                 finish(0);
             }
             cx.notify();
