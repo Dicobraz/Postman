@@ -1,0 +1,15 @@
+# Синхронизация живого ящика (S4-03): состояние, ошибки, повторный вход.
+sync-connecting = Подключение к { $url }…
+sync-signed-in = Вход выполнен: { $user }
+sync-loading = Загрузка: { $mailbox }…
+sync-synced = Синхронизировано
+sync-error = { $what }: { $detail }
+sync-error-auth = Сервер отклонил вход
+sync-error-network = Нет связи с сервером
+sync-error-server = Ошибка сервера
+sync-error-protocol = Неожиданный ответ сервера
+sync-error-storage = Ошибка локальной копии
+sync-error-internal = Синхронизация не запустилась
+sync-reauth = Сервер отклонил сохранённый пароль: войдите заново.
+status-items-of = Элементов: { $n } из { $total }
+fatal-bench-account = замер живого ящика: нужны POSTMAN_URL и POSTMAN_USER/POSTMAN_PASSWORD (или POSTMAN_TOKEN)

@@ -229,9 +229,13 @@ impl CalendarView {
         match ev {
             SyncEvent::EventsLoaded { from, events, .. } if self.pending == Some(*from) => {
                 self.pending = None;
+                // Та же неделя перечитана (push): подробности открытого события остаются, если оно есть.
+                let open = self.selected.and_then(|i| self.events.get(i)).map(|e| (e.uid.clone(), e.span.start));
                 self.events = events.clone();
                 self.loaded = true;
-                self.selected = None;
+                self.selected = open.and_then(|(uid, start)| {
+                    self.events.iter().position(|e| e.uid == uid && e.span.start == start)
+                });
             }
             SyncEvent::FreeBusyShared { email } => {
                 self.sharing = None;

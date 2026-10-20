@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use postman_cache::{Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow};
 
-const SENDERS: &[(&str, &str)] = &[
+/// Отправители демо-писем (имя, адрес); их же берёт заполнение ящика стенда (`postman-core`, пример `fill_stand`).
+pub const SENDERS: &[(&str, &str)] = &[
     ("Иванова Мария", "m.ivanova@corp.example"),
     ("Петров Алексей", "a.petrov@corp.example"),
     ("Служба поддержки", "support@vendor.example"),
@@ -13,10 +14,14 @@ const SENDERS: &[(&str, &str)] = &[
     ("Бухгалтерия", "buh@corp.example"),
 ];
 
+/// Начало текста демо-писем (оно же краткое содержание в списке).
+pub const PREVIEW: &str = "Коллеги, добрый день! Направляю материалы к обсуждению, прошу посмотреть до пятницы.";
+
 /// Владелец демо-ящика: участник демо-приглашений и календаря.
 pub const ME: &str = "me@corp.example";
 
-const SUBJECTS: &[&str] = &[
+/// Темы демо-писем.
+pub const SUBJECTS: &[&str] = &[
     "Отчёт за квартал",
     "Re: Совещание по проекту",
     "Счёт на оплату №",
@@ -99,7 +104,7 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             subject: format!("{subject} {}", i % 997),
             from_name: name.into(),
             from_addr: addr.into(),
-            preview: "Коллеги, добрый день! Направляю материалы к обсуждению, прошу посмотреть до пятницы.".into(),
+            preview: PREVIEW.into(),
             seen: i > 40 && next() % 5 != 0,
             flagged: next() % 50 == 0,
             has_attachment: next() % 7 == 0,

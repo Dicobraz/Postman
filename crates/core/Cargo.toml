@@ -20,5 +20,9 @@ memory-stats = "1"
 open = "5"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
+[dev-dependencies]
+# Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
+postman-demo.workspace = true
+
 [lints]
 workspace = true
