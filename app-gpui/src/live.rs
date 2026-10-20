@@ -309,7 +309,15 @@ impl Mailer {
                     this.sync_stopped(cx);
                 }
             }));
+            // Категории (S5-02) — тоже на сервер, одним `Email/set` на аккаунт.
+            self._subscriptions.push(cx.subscribe(&self.list, |this, _, l: &crate::list::Labeled, cx| {
+                let cmd = Command::SetKeywords { ids: l.ids.clone(), add: l.add.clone(), remove: l.remove.clone() };
+                if !this.backend.send(cmd) {
+                    this.sync_stopped(cx);
+                }
+            }));
         }
+        self.load_labels(cx);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             // Поток синхронизации закончился — отправитель пробуждений закрыт, задача завершается.
@@ -470,6 +478,28 @@ impl Mailer {
             self.live.last_error = Some(text.clone());
             self.toasts.update(cx, |t, cx| t.push(Toast::Warning, text, cx));
         }
+    }
+
+    /// Таблицы категорий учётной записи (S5-02) — из файла рядом с её кэшем, в фоне. Файла нет — по умолчанию
+    /// (список их уже показывает); файл не читается — тоже по умолчанию, причина — в журнал.
+    fn load_labels(&mut self, cx: &mut Context<Self>) {
+        use postman_core::labels::{LocalFile, Store as _};
+        let Some(path) = self.live.path.clone() else { return };
+        let task = cx.background_spawn(async move { LocalFile::beside(&path).load() });
+        cx.spawn(async move |this, cx| {
+            let book = match task.await {
+                Ok(book) => book,
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    None
+                }
+            };
+            let _ = this.update(cx, |m, cx| {
+                let book = book.unwrap_or_else(crate::labels::default_book);
+                m.list.update(cx, |l, cx| l.set_labels(book, cx));
+            });
+        })
+        .detach();
     }
 
     /// Вход подтверждён сервером: адрес и логин — в файл, пароль — в диспетчер учётных данных (в фоне).

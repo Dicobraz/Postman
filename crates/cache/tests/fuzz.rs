@@ -50,8 +50,12 @@ fn row(rng: &mut Rng, id: u64) -> EmailRow {
         flagged: false,
         has_attachment: false,
         size: 100,
+        keywords: KEYWORDS.iter().filter(|_| rng.below(3) == 0).map(|k| k.to_string()).collect(),
     }
 }
+
+/// Метки писем (S5-02): индекс ключевых слов сверяется с моделью.
+const KEYWORDS: &[&str] = &["pm.cat.a", "pm.cat.b"];
 
 fn check(cache: &Cache, model: &BTreeMap<String, EmailRow>, step: usize) {
     for mb in MAILBOXES {
@@ -68,12 +72,31 @@ fn check(cache: &Cache, model: &BTreeMap<String, EmailRow>, step: usize) {
             assert_eq!(mid, want[2..5], "шаг {step}: окно {mb}");
         }
     }
+    let all = postman_cache::all_folders(None);
+    for kw in KEYWORDS.iter().copied().chain(["$flagged"]) {
+        for mb in MAILBOXES.iter().copied().chain([all.as_str()]) {
+            let mut want: Vec<&EmailRow> = model
+                .values()
+                .filter(|r| r.has_keyword(kw) && (mb == all || r.mailbox_ids.iter().any(|m| m == mb)))
+                .collect();
+            want.sort_by(|a, b| b.received_at.cmp(&a.received_at).then_with(|| a.id.cmp(&b.id)));
+            let want: Vec<String> = want.into_iter().map(|r| r.id.clone()).collect();
+            assert_eq!(cache.keyword_count(kw, mb).unwrap(), want.len(), "шаг {step}: {kw} в {mb}");
+            let page: Vec<String> = cache.keyword_page(kw, mb, 0, 1000).unwrap().into_iter().map(|r| r.id).collect();
+            assert_eq!(page, want, "шаг {step}: письма {kw} в {mb}");
+        }
+    }
     let ids: Vec<String> = model.keys().cloned().collect();
     let rows = cache.rows_by_ids(&ids).unwrap();
     assert_eq!(rows.len(), model.len(), "шаг {step}: строки по id");
     for r in rows {
         let m = &model[&r.id];
-        assert_eq!((r.seen, r.flagged, &r.mailbox_ids), (m.seen, m.flagged, &m.mailbox_ids), "шаг {step}: {}", r.id);
+        assert_eq!(
+            (r.seen, r.flagged, &r.mailbox_ids, &r.keywords),
+            (m.seen, m.flagged, &m.mailbox_ids, &m.keywords),
+            "шаг {step}: {}",
+            r.id
+        );
     }
 }
 
@@ -103,6 +126,22 @@ fn run(seed: u64) {
                 cache.delete_emails(&ids).unwrap();
                 for id in &ids {
                     model.remove(id);
+                }
+            }
+            // Метки ставятся и снимаются на месте — в том числе у отсутствующих писем.
+            5 => {
+                let id = format!("m{}", rng.below(IDS + 5));
+                let kw = KEYWORDS[rng.below(KEYWORDS.len() as u64) as usize].to_string();
+                let on = rng.below(2) == 0;
+                let (add, remove) = if on { (vec![kw.clone()], vec![]) } else { (vec![], vec![kw.clone()]) };
+                let got = cache.set_keywords(&id, &add, &remove).unwrap();
+                assert_eq!(got.is_some(), model.contains_key(&id));
+                if let Some(r) = model.get_mut(&id) {
+                    r.keywords.retain(|k| *k != kw);
+                    if on {
+                        r.keywords.push(kw);
+                        r.keywords.sort();
+                    }
                 }
             }
             // Пометки «прочитано» и флаг — в том числе у отсутствующих писем.

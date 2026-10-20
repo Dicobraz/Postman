@@ -12,6 +12,16 @@ pub mod mail {
         mail,
         [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete]
     );
+
+    use gpui_kit::gpui;
+
+    /// Категория на выбранном письме (S5-02): `key` — цифра клавиши, категория — та, у которой эта клавиша в
+    /// таблице. Данные действия — из клавиши (`super::keyed_action`), не из JSON.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, gpui::Action)]
+    #[action(namespace = mail, no_json)]
+    pub struct Categorize {
+        pub key: u8,
+    }
 }
 
 pub mod view {
@@ -73,6 +83,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.mark_read", &["ctrl-q"], MAIL),
     cmd("mail.mark_unread", &["ctrl-u"], MAIL),
     cmd("mail.toggle_flag", &["insert"], LIST),
+    // Не Outlook (там Ctrl+F2…F12 по назначению): клавиши 1–9 — категории таблицы (DESIGN.md, «Настройки»).
+    cmd("mail.categorize", &["1", "2", "3", "4", "5", "6", "7", "8", "9"], LIST),
     cmd("mail.new", &["ctrl-n"], MAILER),
     cmd("mail.reply", &["ctrl-r"], MAIL),
     cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
@@ -108,22 +120,34 @@ pub const COMMANDS: &[Command] = &[
 pub fn bind(cx: &mut App) {
     let mut bindings = Vec::new();
     for c in COMMANDS {
-        let action = match cx.build_action(&c.action_name(), None) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("command {}: no action {} ({e})", c.id, c.action_name());
-                continue;
-            }
-        };
         let context = c.context.and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
         for keys in c.keys {
-            match KeyBinding::load(keys, action.boxed_clone(), context.clone(), false, None, &DummyKeyboardMapper) {
+            let action = match keyed_action(c, keys) {
+                Some(a) => a,
+                None => match cx.build_action(&c.action_name(), None) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::error!("command {}: no action {} ({e})", c.id, c.action_name());
+                        continue;
+                    }
+                },
+            };
+            match KeyBinding::load(keys, action, context.clone(), false, None, &DummyKeyboardMapper) {
                 Ok(b) => bindings.push(b),
                 Err(e) => tracing::error!("command {}: keys {keys}: {e:?}", c.id),
             }
         }
     }
     cx.bind_keys(bindings);
+}
+
+/// Действие с данными из клавиши: у `mail.categorize` клавиша — цифра категории. Остальные команды — `None`
+/// (действие без данных по имени).
+fn keyed_action(c: &Command, keys: &str) -> Option<Box<dyn Action>> {
+    match c.id {
+        "mail.categorize" => keys.parse::<u8>().ok().map(|key| Box::new(mail::Categorize { key }) as Box<dyn Action>),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +224,20 @@ mod tests {
         }
     }
 
+    /// Клавиши 1–9 — категория с этой клавишей (S5-02): у каждой цифры своё действие с данными.
+    #[test]
+    fn digit_keys_carry_the_category_key() {
+        let c = pets_commands::find(COMMANDS, "mail.categorize").unwrap();
+        assert_eq!(c.keys.len(), 9);
+        for (n, keys) in c.keys.iter().enumerate() {
+            let a = super::keyed_action(c, keys).unwrap();
+            let got = a.as_any().downcast_ref::<super::mail::Categorize>().copied();
+            assert_eq!(got, Some(super::mail::Categorize { key: n as u8 + 1 }));
+        }
+        let next = pets_commands::find(COMMANDS, "mail.next").unwrap();
+        assert!(super::keyed_action(next, "j").is_none());
+    }
+
     /// Хоткеи classic Outlook из `docs/HANDOFF.md` §2a.
     #[test]
     fn outlook_hotkeys_are_bound() {
@@ -225,10 +263,11 @@ mod parity {
             .collect()
     }
 
-    /// Действия, у которых в коде экрана есть обработчик: `on_action(… _: &mail::Next …)`.
+    /// Действия, у которых в коде экрана есть обработчик: `on_action(… _: &mail::Next …)` или с данными
+    /// (`a: &mail::Categorize`). Прочие `x: &Тип` с именами действий не совпадают.
     fn handled(source: &str) -> Vec<String> {
         source
-            .split("_: &")
+            .split(": &")
             .skip(1)
             .filter_map(|rest| rest.split([',', ')']).next())
             .map(|path| {

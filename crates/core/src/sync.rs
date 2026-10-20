@@ -15,7 +15,7 @@ use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
-use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
+use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Filter, Identity, Mailbox, utc_to_unix};
 use postman_jmap::{MailboxRights, SharedAccount};
 use postman_jmap::{ContactCard, Principal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -65,6 +65,15 @@ impl Account {
 pub enum Command {
     Body(String),
     Keyword { id: String, keyword: &'static str, on: bool },
+    /// Поставить `add` и снять `remove` (ключевые слова — категории, метки, флаг) у писем `ids` (ключи кэша) — по
+    /// одному `Email/set` на аккаунт (S5-02). UI уже поменял кэш; письма, которые сервер не изменил, — с сервера
+    /// заново.
+    SetKeywords { ids: Vec<String>, add: Vec<String>, remove: Vec<String> },
+    /// Письма по фильтру на сервере (`hasKeyword`, `notKeyword`…) → `SearchResults`. `mailbox` — ключ папки кэша;
+    /// `None` — все папки своего аккаунта («Где искать: Все папки»).
+    Query { filter: Filter, mailbox: Option<String>, ticket: u64 },
+    /// Число писем по каждому фильтру на сервере (в папке `mailbox` или во всех) → `Counts`.
+    Counts { filters: Vec<Filter>, mailbox: Option<String>, ticket: u64 },
     /// Перенести письмо (удаление в «Удалённые»). UI уже перенёс его в кэше; сбой — письмо с сервера заново.
     Move { id: String, from: String, to: String },
     /// Удалить письмо насовсем (из «Удалённых»). UI уже убрал его из кэша; сбой — письмо с сервера заново.
@@ -214,6 +223,8 @@ pub enum Event {
     /// В календаре на сервере что-то изменилось (push, с задержкой на пачку) — открытую неделю перечитать.
     CalendarChanged,
     SearchResults { ticket: u64, ids: Vec<String>, total: u64 },
+    /// Ответ на `Counts`: по числу на фильтр; `None` — запрос не удался.
+    Counts { ticket: u64, counts: Option<Vec<u64>> },
     BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
@@ -816,6 +827,51 @@ async fn handle(
             let (acc, id) = accounts.locate(&key)?;
             acc.client.set_keyword(id, keyword, on).await?;
         }
+        Command::SetKeywords { ids, add, remove } => {
+            let mut first_error = None;
+            for (scope, keys) in by_account(&ids) {
+                let Some(acc) = accounts.by_scope(scope) else { continue };
+                let server: Vec<String> = keys.iter().map(|k| unscoped(k).1.to_owned()).collect();
+                let failed: Vec<String> = match acc.client.set_keywords(&server, &add, &remove).await {
+                    Ok(f) => f
+                        .into_iter()
+                        .map(|(id, e)| {
+                            first_error.get_or_insert(e);
+                            acc.key(&id)
+                        })
+                        .collect(),
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                        keys.clone()
+                    }
+                };
+                // Сервер не поставил метки — в кэш письма такими, какие они на сервере.
+                for key in &failed {
+                    restore(accounts, cache, index, key, notify).await;
+                }
+            }
+            if let Some(e) = first_error {
+                return Err(e);
+            }
+        }
+        Command::Query { filter, mailbox, ticket } => {
+            let (acc, mb) = query_scope(accounts, mailbox.as_deref())?;
+            let page = acc.client.filtered(&in_mailbox(mb, filter), SEARCH_LIMIT).await?;
+            save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+            let ids = page.ids.iter().map(|id| acc.key(id)).collect();
+            notify(Event::SearchResults { ticket, ids, total: page.total });
+        }
+        Command::Counts { filters, mailbox, ticket } => {
+            let counted = match query_scope(accounts, mailbox.as_deref()) {
+                Ok((acc, mb)) => {
+                    let filters: Vec<Filter> = filters.into_iter().map(|f| in_mailbox(mb, f)).collect();
+                    acc.client.count(&filters).await
+                }
+                Err(e) => Err(e),
+            };
+            notify(Event::Counts { ticket, counts: counted.as_ref().ok().cloned() });
+            counted?;
+        }
         Command::Move { id: key, from, to } => {
             let moved = match accounts.locate(&key) {
                 Ok((acc, id)) => acc.client.move_email(id, unscoped(&from).1, unscoped(&to).1).await,
@@ -946,6 +1002,32 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// Ключи кэша по аккаунтам (`None` — свой); порядок внутри аккаунта — как в `keys`.
+fn by_account(keys: &[String]) -> BTreeMap<Option<&str>, Vec<String>> {
+    let mut out: BTreeMap<Option<&str>, Vec<String>> = BTreeMap::new();
+    for key in keys {
+        out.entry(postman_cache::account_of(key)).or_default().push(key.clone());
+    }
+    out
+}
+
+/// Где искать на сервере: аккаунт папки `mailbox` (ключ кэша) и её id; без папки — все папки своего аккаунта
+/// (общие ящики в «Все папки» — по своему кэшу, как поиск).
+fn query_scope<'a>(accounts: &'a Accounts, mailbox: Option<&'a str>) -> postman_jmap::Result<(&'a MailAccount, Option<&'a str>)> {
+    match mailbox {
+        Some(key) => accounts.locate(key).map(|(acc, id)| (acc, Some(id))),
+        None => Ok((&accounts.own, None)),
+    }
+}
+
+/// Фильтр в папке (`inMailbox` вместе с ним) или как есть.
+fn in_mailbox(mailbox: Option<&str>, filter: Filter) -> Filter {
+    match mailbox {
+        Some(id) => Filter::And(vec![Filter::InMailbox(id.to_owned()), filter]),
+        None => filter,
+    }
 }
 
 /// Следующая страница папки (ключ `mailbox`) после самого старого письма в кэше; сколько писем пришло.
@@ -1241,7 +1323,22 @@ fn email_row(e: &EmailSummary, scope: Option<&str>) -> EmailRow {
         flagged: e.has_keyword("$flagged"),
         has_attachment: e.has_attachment,
         size: e.size,
+        keywords: row_keywords(e),
     }
+}
+
+/// Ключевые слова письма для кэша: кроме `$seen` и `$flagged` (свои поля), нижний регистр, по алфавиту.
+fn row_keywords(e: &EmailSummary) -> Vec<String> {
+    let mut out: Vec<String> = e
+        .keywords
+        .iter()
+        .filter(|(_, on)| **on)
+        .map(|(k, _)| k.to_ascii_lowercase())
+        .filter(|k| k != postman_cache::SEEN && k != postman_cache::FLAGGED)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -1315,6 +1412,28 @@ mod tests {
         let mb = mailbox_row(&m, Some("j"));
         assert_eq!((mb.id.as_str(), mb.parent_id.as_deref()), ("j/c", Some("j/a")));
         assert!(mb.rights.seen && !mb.rights.remove && !mb.rights.keywords);
+    }
+
+    /// Метки (S5-02): ключевые слова письма — в строку кэша без `$seen`/`$flagged`, в нижнем регистре; команды
+    /// меток делятся по аккаунтам, фильтр в папке — с `inMailbox`.
+    #[test]
+    fn keywords_reach_the_cache_row() {
+        let e: EmailSummary = serde_json::from_value(serde_json::json!({
+            "id": "m1", "threadId": "t", "mailboxIds": { "a": true },
+            "keywords": { "$seen": true, "$flagged": true, "pm.cat.team": true, "$Label1": true, "pm.cat.off": false },
+            "receivedAt": "2026-10-20T18:00:58Z"
+        }))
+        .unwrap();
+        let row = email_row(&e, None);
+        assert!(row.seen && row.flagged);
+        assert_eq!(row.keywords, ["$label1", "pm.cat.team"]);
+        let keys = ["a".to_string(), "i/b".into(), "c".into(), "i/d".into()];
+        let groups = by_account(&keys);
+        assert_eq!(groups[&None], ["a", "c"]);
+        assert_eq!(groups[&Some("i")], ["i/b", "i/d"]);
+        let f = Filter::HasKeyword("pm.cat.team".into());
+        assert_eq!(in_mailbox(None, f.clone()), f);
+        assert_eq!(in_mailbox(Some("x"), f.clone()), Filter::And(vec![Filter::InMailbox("x".into()), f]));
     }
 
     #[test]

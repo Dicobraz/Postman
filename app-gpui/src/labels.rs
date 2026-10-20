@@ -1,0 +1,115 @@
+//! Метки и категории в интерфейсе (S5-02): таблица категорий по умолчанию, имена встроенных меток, полоса и метки
+//! строки письма. Ключевые слова и таблицы — `postman_core::labels`, цвета — `postman_core::palette`.
+
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use pets_i18n::tr;
+use postman_cache::EmailRow;
+use postman_core::labels::{Book, Categories, Label, ROW_LABELS};
+use postman_core::palette::{self, Theme};
+
+/// Тема интерфейса: пока только светлая (тёмная — S5-01).
+pub(crate) const THEME: Theme = Theme::Light;
+
+/// Таблица категорий по умолчанию (DESIGN.md) с именами на языке интерфейса — пока у учётной записи нет своей.
+pub(crate) fn default_book() -> Book {
+    Book::own(Categories::defaults(default_name))
+}
+
+fn default_name(id: &str) -> String {
+    match id {
+        "clients" => tr!("labels-default-clients"),
+        "team" => tr!("labels-default-team"),
+        "tenders" => tr!("labels-default-tenders"),
+        "pentest" => tr!("labels-default-pentest"),
+        "services" => tr!("labels-default-services"),
+        other => other.to_owned(),
+    }
+}
+
+/// Имя метки в строке: категория — из таблицы, метка Thunderbird — на языке интерфейса.
+pub(crate) fn label_name(l: &Label) -> String {
+    match l {
+        Label::Category(c) => c.name.clone(),
+        Label::Thunderbird(1) => tr!("labels-thunderbird-1"),
+        Label::Thunderbird(2) => tr!("labels-thunderbird-2"),
+        Label::Thunderbird(3) => tr!("labels-thunderbird-3"),
+        Label::Thunderbird(4) => tr!("labels-thunderbird-4"),
+        Label::Thunderbird(_) => tr!("labels-thunderbird-5"),
+    }
+}
+
+/// Что нарисовать в строке письма: полоса слева — цвет первой категории; метки — не больше [`ROW_LABELS`],
+/// категория первой (DESIGN.md «Строка письма и метки»).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct RowLabels {
+    pub(crate) stripe: Option<palette::Rgb>,
+    pub(crate) chips: Vec<(String, u8)>,
+}
+
+pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
+    if row.keywords.is_empty() {
+        return RowLabels::default();
+    }
+    let Some(table) = book.for_account(postman_cache::account_of(&row.id)) else { return RowLabels::default() };
+    let labels = table.labels(&row.keywords);
+    let stripe = labels.iter().find(|l| matches!(l, Label::Category(_))).map(|l| palette::swatch(l.color(), THEME).dot);
+    let chips = labels.iter().take(ROW_LABELS).map(|l| (label_name(l), l.color())).collect();
+    RowLabels { stripe, chips }
+}
+
+/// Метка в строке отправителя: подложка и текст цвета категории; длинное имя обрезается.
+pub(crate) fn chip(name: String, slot: u8) -> Div {
+    let s = palette::swatch(slot, THEME);
+    div()
+        .flex_none()
+        .max_w(px(96.))
+        .px_1p5()
+        .rounded_sm()
+        .text_xs()
+        .line_height(px(16.))
+        .bg(rgb(s.bg))
+        .text_color(rgb(s.text))
+        .truncate()
+        .child(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RowLabels, row_labels};
+    use postman_cache::EmailRow;
+    use postman_core::labels::{Book, Categories};
+    use postman_core::palette::{self, Theme};
+
+    fn row(id: &str, keywords: &[&str]) -> EmailRow {
+        EmailRow {
+            id: id.into(),
+            thread_id: String::new(),
+            mailbox_ids: Vec::new(),
+            received_at: 0,
+            subject: String::new(),
+            from_name: String::new(),
+            from_addr: String::new(),
+            preview: String::new(),
+            seen: true,
+            flagged: false,
+            has_attachment: false,
+            size: 0,
+            keywords: keywords.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn row_shows_two_labels_category_first() {
+        let book = Book::own(Categories::defaults(|id| id.to_owned()));
+        let got = row_labels(&book, &row("a", &["$label4", "pm.cat.team", "pm.cat.clients", "pm.cat.services"]));
+        assert_eq!(got.stripe, Some(palette::swatch(palette::BLUE, Theme::Light).dot));
+        assert_eq!(got.chips, [("clients".to_string(), palette::BLUE), ("team".to_string(), palette::GREEN)]);
+        // Только метка Thunderbird — нейтральная, без полосы.
+        let tb = row_labels(&book, &row("a", &["$label4"]));
+        assert_eq!((tb.stripe, tb.chips.len(), tb.chips[0].1), (None, 1, palette::NEUTRAL));
+        assert_eq!(row_labels(&book, &row("a", &["$answered"])), RowLabels::default());
+        // Общий ящик без своей таблицы — таблица своего аккаунта.
+        assert_eq!(row_labels(&book, &row("i/a", &["pm.cat.team"])).chips.len(), 1);
+    }
+}

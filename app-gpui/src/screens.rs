@@ -65,9 +65,12 @@ enum Scene {
     Rules,
     /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06).
     Shared,
+    /// Свои «Входящие» с полосами категорий и метками (S5-02): первому письму без меток клавишами 1 и 3 (как
+    /// `mail.categorize`) поставлены «Клиенты» и «Тендеры», оно открыто.
+    Labels,
 }
 
-const SCENES: [Scene; 16] = [
+const SCENES: [Scene; 17] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -84,6 +87,7 @@ const SCENES: [Scene; 16] = [
     Scene::Vacation,
     Scene::Rules,
     Scene::Shared,
+    Scene::Labels,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -124,6 +128,7 @@ impl Scene {
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
+            Scene::Labels => "labels",
         }
     }
 }
@@ -300,6 +305,23 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 }
             });
         }
+        Scene::Labels => {
+            m.set_section(Section::Mail, cx);
+            let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes);
+            let Some(id) = inbox else { return Err("no inbox".into()) };
+            m.open_mailbox(id, cx);
+            let list = m.list.read(cx);
+            let (offset, rows) = &list.rows;
+            let plain = rows.iter().position(|r| crate::labels::row_labels(&list.labels, r).chips.is_empty());
+            let Some(i) = plain.map(|p| p + offset) else {
+                return Err("no message without labels in the first rows of the demo inbox".into());
+            };
+            m.list.update(cx, |l, cx| {
+                l.select(i, cx);
+                l.toggle_category(1, cx);
+                l.toggle_category(3, cx);
+            });
+        }
         Scene::Meeting => {
             // Окно письма прошлой сцены остаётся: снимается своё окно.
             m.set_section(Section::Calendar, cx);
@@ -406,6 +428,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 }
                 _ => false,
             }
+        }
+        Scene::Labels => {
+            let row = list.selected.and_then(|i| list.row(i));
+            let labeled = row.is_some_and(|r| crate::labels::row_labels(&list.labels, r).chips.len() == 2);
+            let id = row.map(|r| r.id.as_str());
+            labeled
+                && list.mailbox == crate::live::inbox(&m.folders.read(cx).mailboxes)
+                && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == id)
         }
         Scene::Shared => {
             // Живой общий ящик может быть пуст: тогда снимок — без письма.
