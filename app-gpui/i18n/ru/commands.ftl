@@ -30,3 +30,4 @@ cmd-calendar-today = Сегодня в календаре
 cmd-meeting-send = Отправить приглашения
 cmd-meeting-close = Закрыть окно встречи
 cmd-settings-vacation = Автоматические ответы
+cmd-settings-rules = Правила

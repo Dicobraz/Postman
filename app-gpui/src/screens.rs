@@ -10,7 +10,7 @@
 //! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list`,
 //! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
-//! `vacation` — после автоответа с сервера (S4-05);
+//! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07);
 //! без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
@@ -56,9 +56,11 @@ enum Scene {
     Meeting,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
+    /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
+    Rules,
 }
 
-const SCENES: [Scene; 12] = [
+const SCENES: [Scene; 13] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -71,12 +73,21 @@ const SCENES: [Scene; 12] = [
     Scene::Reply,
     Scene::Meeting,
     Scene::Vacation,
+    Scene::Rules,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
 /// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
-const LIVE_SCENES: [Scene; 7] =
-    [Scene::List, Scene::Letter, Scene::Reply, Scene::Calendar, Scene::Event, Scene::Meeting, Scene::Vacation];
+const LIVE_SCENES: [Scene; 8] = [
+    Scene::List,
+    Scene::Letter,
+    Scene::Reply,
+    Scene::Calendar,
+    Scene::Event,
+    Scene::Meeting,
+    Scene::Vacation,
+    Scene::Rules,
+];
 const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
 /// Первая синхронизация живого ящика дольше сцены демо.
 const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -97,6 +108,7 @@ impl Scene {
             Scene::Reply => "reply",
             Scene::Meeting => "meeting",
             Scene::Vacation => "vacation",
+            Scene::Rules => "rules",
         }
     }
 }
@@ -273,6 +285,18 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             }
             m.open_vacation(window, cx);
         }
+        Scene::Rules => {
+            m.open_rules(window, cx);
+            // Демо: редактор первого правила открыт — снимок показывает и список, и редактор.
+            if let (false, Some(crate::settings::Panel::Rules(p))) = (m.backend.is_live(), &m.settings.panel) {
+                p.update(cx, |p, cx| {
+                    let first = p.state.as_ref().and_then(|s| s.rules.first().cloned());
+                    if let Some(r) = first {
+                        p.edit(crate::rules::Draft::of(0, &r), cx);
+                    }
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -335,6 +359,16 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let live = m.screens.as_ref().is_some_and(|d| d.live);
             let state = if live { m.settings.vacation.is_some() } else { m.settings.bar.is_some() };
             matches!(m.settings.panel, Some(crate::settings::Panel::Vacation(_))) && state
+        }
+        Scene::Rules => {
+            let live = m.screens.as_ref().is_some_and(|d| d.live);
+            match &m.settings.panel {
+                Some(crate::settings::Panel::Rules(p)) => {
+                    let p = p.read(cx);
+                    if live { p.state.is_some() } else { p.editor.is_some() }
+                }
+                _ => false,
+            }
         }
     }
 }

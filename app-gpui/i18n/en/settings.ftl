@@ -1,4 +1,4 @@
-# Mailbox settings on the server: automatic replies, mailbox usage (S4-05).
+# Mailbox settings on the server: automatic replies, mailbox usage (S4-05), rules (S4-07).
 bar-vacation = Auto replies
 vacation-title = Automatic replies
 vacation-hint = The server sends the out-of-office reply, even when Postman is closed.
@@ -34,3 +34,61 @@ settings-quota = Mailbox: { $percent }% of { $unit ->
    *[gb] { $n } GB
 }
 settings-quota-warn = Mailbox is { $percent }% full: delete unneeded mail, or new mail will stop arriving.
+vacation-foreign-warning = The server has an active filter “{ $name }” not created in Postman: turning automatic replies on will turn it off.
+# Mail rules (S4-07).
+bar-rules = Rules
+rules-title = Rules
+rules-hint = The server runs the rules when mail is delivered, even when Postman is closed. Changes are saved at once.
+rules-demo = Demo: rules live on the server — an account is required.
+rules-loading = Reading rules from the server…
+rules-unsupported = The server does not support rules (Sieve).
+rules-empty = No rules yet.
+rules-all-off = All rules are off.
+rules-add = New rule
+rules-close = Close
+rules-edit = Edit
+rules-delete = Delete
+rules-delete-confirm = Delete the rule?
+rules-cancel = Cancel
+rules-new-title = New rule
+rules-edit-title = Edit rule
+rules-if = If
+rules-contains = contains
+rules-then = then
+rules-folder = Folder
+rules-address = Address
+rules-value-placeholder = text, e.g. “Report” or an address
+rules-address-placeholder = name@example.com
+rules-field-from = From
+rules-field-to = To or Cc
+rules-field-subject = Subject
+rules-kind-move = Move to folder
+rules-kind-read = Mark as read
+rules-kind-flag = Flag
+rules-kind-discard = Delete
+rules-kind-redirect = Forward
+rules-discard-hint = The message is deleted at once, without the Deleted Items folder.
+rules-editor-save = Save rule
+rules-saving = Saving…
+rules-saved = Rules saved.
+rules-bad-value = Enter the condition text.
+rules-bad-folder = Choose a folder.
+rules-bad-address = The forwarding address does not look like an address: name@example.com.
+rules-invalid = The server did not accept the rules: { $error }
+rules-failed = Rules not saved: { $error }
+rules-conflict-overwrite = The script “{ $name }” was changed outside Postman: saving will replace its text.
+rules-conflict-active = The server has an active script “{ $name }” not created in Postman: Postman rules will replace it (it stays on the server, turned off).
+rules-replace = Replace
+rules-foreign-title = Server scripts not created in Postman
+rules-foreign-hint = View only: Postman does not change them.
+rules-foreign-active = “{ $name }” — active
+rules-foreign-inactive = “{ $name }” — off
+rules-when-from = From contains “{ $value }”
+rules-when-to = To or Cc contains “{ $value }”
+rules-when-subject = Subject contains “{ $value }”
+rules-do-move = move to “{ $folder }”
+rules-do-read = mark as read
+rules-do-flag = flag
+rules-do-discard = delete without Deleted Items
+rules-do-redirect = forward to { $address }
+rules-line = { $when } → { $then }

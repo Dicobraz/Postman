@@ -1,27 +1,32 @@
-//! Настройки ящика на сервере в экране почты (S4-05): автоответ (панель и полоса), заполненность ящика в строке
-//! состояния и тост при > 90 %. Сервер — команды `sync::Command::Settings`, ответы — `sync::Event::Settings`.
+//! Настройки ящика на сервере в экране почты: автоответ (панель и полоса), заполненность ящика в строке
+//! состояния и тост при > 90 % (S4-05), правила почты (S4-07, `rules.rs`). Сервер — команды
+//! `sync::Command::Settings`, ответы — `sync::Event::Settings`.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
-use postman_core::settings::{Area, Reply, Request, Usage, WARN_PERCENT};
+use postman_core::rules::{Action, Field, Rule};
+use postman_core::settings::{Area, Foreign, Reply, Request, RulesState, Usage, WARN_PERCENT};
 use postman_core::sync::{Command, Event};
 use postman_jmap::VacationResponse;
 
 use crate::Mailer;
+use crate::rules::{RulesEvent, RulesPanel};
 use crate::vacation::{self, BarEvent, VacationBar, VacationEvent, VacationPanel};
 
 /// Панель настроек на месте содержимого окна.
 pub(crate) enum Panel {
     Vacation(Entity<VacationPanel>),
+    Rules(Entity<RulesPanel>),
 }
 
 impl Panel {
     pub(crate) fn view(&self) -> AnyView {
         match self {
             Panel::Vacation(p) => p.clone().into(),
+            Panel::Rules(p) => p.clone().into(),
         }
     }
 }
@@ -31,6 +36,8 @@ pub(crate) struct ServerSettings {
     /// Автоответ на сервере (`None` — ещё не пришёл или сервер его не знает).
     pub(crate) vacation: Option<VacationResponse>,
     pub(crate) quota: Option<Usage>,
+    /// Правила на сервере (`None` — ещё не пришли или сервер их не знает).
+    pub(crate) rules: Option<RulesState>,
     /// Тост о заполненности уже показан (снова — после того, как место освободилось).
     quota_warned: bool,
     pub(crate) panel: Option<Panel>,
@@ -66,7 +73,12 @@ impl Mailer {
         }
         let live = self.backend.is_live();
         let state = self.settings.vacation.clone();
-        let panel = cx.new(|cx| VacationPanel::new(state.as_ref(), live, window, cx));
+        let warning = self.foreign_warning();
+        let panel = cx.new(|cx| {
+            let mut p = VacationPanel::new(state.as_ref(), live, window, cx);
+            p.warning = warning;
+            p
+        });
         let sub = cx.subscribe_in(&panel, window, |this, _, ev: &VacationEvent, window, cx| match ev {
             VacationEvent::Save(v) => this.save_vacation(v.clone(), cx),
             VacationEvent::Close => {
@@ -75,6 +87,30 @@ impl Mailer {
         });
         self.settings._subscriptions.push(sub);
         self.settings.panel = Some(Panel::Vacation(panel));
+        cx.notify();
+    }
+
+    /// `settings.rules`: панель «Правила»; живой ящик — правила с сервера заново.
+    pub(crate) fn open_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.settings.panel, Some(Panel::Rules(_))) {
+            return;
+        }
+        let live = self.backend.is_live();
+        let mailboxes: Vec<(String, String)> =
+            self.folders.read(cx).mailboxes.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+        let state = if live { self.settings.rules.clone() } else { Some(rules_sample(&mailboxes)) };
+        if live && !self.backend.send(Command::Settings(Request::Rules)) {
+            self.sync_stopped(cx);
+        }
+        let panel = cx.new(|cx| RulesPanel::new(state, mailboxes, live, window, cx));
+        let sub = cx.subscribe_in(&panel, window, |this, _, ev: &RulesEvent, window, cx| match ev {
+            RulesEvent::Save { rules, replace } => this.save_rules(rules.clone(), *replace, cx),
+            RulesEvent::Close => {
+                this.close_settings(window, cx);
+            }
+        });
+        self.settings._subscriptions.push(sub);
+        self.settings.panel = Some(Panel::Rules(panel));
         cx.notify();
     }
 
@@ -93,20 +129,37 @@ impl Mailer {
         if self.backend.send(Command::Settings(Request::SetVacation(v))) {
             return;
         }
-        if self.backend.is_live() {
-            self.sync_stopped(cx);
-        } else {
-            self.needs_server(cx);
-        }
+        self.not_sent(cx);
         if let Some(Panel::Vacation(p)) = &self.settings.panel {
             p.update(cx, |p, cx| p.not_saved(cx));
         }
+    }
+
+    fn save_rules(&mut self, rules: Vec<Rule>, replace: bool, cx: &mut Context<Self>) {
+        if self.backend.send(Command::Settings(Request::SaveRules { rules, replace })) {
+            return;
+        }
+        self.not_sent(cx);
+        if let Some(Panel::Rules(p)) = &self.settings.panel {
+            p.update(cx, |p, cx| p.not_saved(cx));
+        }
+    }
+
+    /// Команда не ушла: демо — «нужен сервер», живой ящик — синхронизация остановилась.
+    fn not_sent(&mut self, cx: &mut Context<Self>) {
+        if self.backend.is_live() { self.sync_stopped(cx) } else { self.needs_server(cx) }
     }
 
     /// «Выключить» на полосе: тот же автоответ, выключенный.
     fn vacation_off(&mut self, cx: &mut Context<Self>) {
         let Some(v) = self.settings.vacation.clone() else { return };
         self.save_vacation(VacationResponse { is_enabled: false, ..v }, cx);
+    }
+
+    /// Активный скрипт сервера не из Postman: включение автоответа его выключит (`docs/STALWART.md`).
+    fn foreign_warning(&self) -> Option<String> {
+        let name = self.settings.rules.as_ref()?.active_foreign()?;
+        Some(tr!("vacation-foreign-warning", name = name.to_owned()))
     }
 
     /// Событие синхронизации — своё берём (`Event::Settings`).
@@ -129,9 +182,30 @@ impl Mailer {
                 self.set_vacation_state(Some(v.clone()), cx);
             }
             Reply::Quota(usage) => self.set_quota(*usage, cx),
+            Reply::Rules(s) => self.set_rules_state(s.clone(), false, cx),
+            Reply::RulesSaved(s) => self.set_rules_state(s.clone(), true, cx),
+            Reply::RulesInvalid(e) => {
+                tracing::warn!("rules: server rejected the script: {e}");
+                let text = tr!("rules-invalid", error = e.clone());
+                self.rules_problem(text, cx);
+            }
+            Reply::RulesConflict { name, overwrite } => {
+                let (name, overwrite) = (name.clone(), *overwrite);
+                if let Some(Panel::Rules(p)) = &self.settings.panel {
+                    p.update(cx, |p, cx| {
+                        let pending = p.pending().cloned().unwrap_or_default();
+                        p.conflict(name, overwrite, pending, cx)
+                    });
+                }
+            }
             Reply::Unsupported(Area::Vacation) => {
                 if let Some(Panel::Vacation(p)) = &self.settings.panel {
                     p.update(cx, |p, cx| p.failed(tr!("vacation-unsupported"), cx));
+                }
+            }
+            Reply::Unsupported(Area::Rules) => {
+                if let Some(Panel::Rules(p)) = &self.settings.panel {
+                    p.update(cx, |p, cx| p.failed(tr!("rules-unsupported"), cx));
                 }
             }
             Reply::Unsupported(Area::Quota) => {}
@@ -143,8 +217,36 @@ impl Mailer {
                     _ => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
                 }
             }
+            Reply::Failed { area: Area::Rules, error } => {
+                tracing::warn!("rules: {error}");
+                let text = tr!("rules-failed", error = error.clone());
+                self.rules_problem(text, cx);
+            }
             // Квота не прочиталась — строка состояния без неё; в журнал.
             Reply::Failed { area: Area::Quota, error } => tracing::warn!("quota: {error}"),
+        }
+    }
+
+    fn set_rules_state(&mut self, state: RulesState, saved: bool, cx: &mut Context<Self>) {
+        self.settings.rules = Some(state.clone());
+        let warning = self.foreign_warning();
+        match &self.settings.panel {
+            Some(Panel::Rules(p)) if saved => p.update(cx, |p, cx| p.saved(state, cx)),
+            Some(Panel::Rules(p)) => p.update(cx, |p, cx| p.server_state(state, cx)),
+            Some(Panel::Vacation(p)) => p.update(cx, |p, cx| {
+                p.warning = warning;
+                cx.notify();
+            }),
+            None if saved => self.toasts.update(cx, |t, cx| t.push(Toast::Success, tr!("rules-saved"), cx)),
+            None => {}
+        }
+    }
+
+    /// Ошибка правил — в панели «Правила» (редактор остаётся), без неё — тостом.
+    fn rules_problem(&mut self, text: String, cx: &mut Context<Self>) {
+        match &self.settings.panel {
+            Some(Panel::Rules(p)) => p.update(cx, |p, cx| p.failed(text, cx)),
+            _ => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
         }
     }
 
@@ -195,6 +297,27 @@ pub(crate) fn screen_sample() -> VacationResponse {
         subject: Some("Нет на месте".into()), // i18n-ok: образец автоответа
         text_body: Some("Здравствуйте! Я в отпуске до конца недели.\nПо срочным вопросам — Иван Петров.".into()), // i18n-ok: образец
         html_body: None,
+    }
+}
+
+/// Образец для демо и снимка `rules`: правила по папкам демо-ящика и чужой скрипт сервера.
+pub(crate) fn rules_sample(mailboxes: &[(String, String)]) -> RulesState {
+    let (mailbox_id, name) = mailboxes.get(4).or(mailboxes.last()).cloned().unwrap_or_default();
+    let rule = |enabled, field, value: &str, action| Rule { enabled, field, value: value.into(), action };
+    RulesState {
+        rules: vec![
+            rule(true, Field::Subject, "Отчёт", Action::Move { mailbox_id, name }), // i18n-ok: образец правила
+            rule(true, Field::From, "ci@corp.example", Action::MarkRead),
+            rule(true, Field::To, "director@corp.example", Action::Flag),
+            rule(false, Field::Subject, "Розыгрыш", Action::Discard), // i18n-ok: образец правила
+        ],
+        active: true,
+        foreign: vec![Foreign {
+            name: "old-filters".into(),
+            text: "require \"fileinto\";\nif address :is \"from\" \"news@example.com\" {\n    fileinto \"News\";\n}"
+                .into(),
+            active: false,
+        }],
     }
 }
 

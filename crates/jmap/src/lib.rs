@@ -7,6 +7,7 @@ mod contacts;
 mod mail;
 mod push;
 mod session;
+mod sieve;
 mod submission;
 mod vacation;
 
@@ -15,6 +16,7 @@ pub use contacts::ContactCard;
 pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};
+pub use sieve::{Activate, SaveError, SieveScript};
 pub use submission::{Envelope, Identity};
 pub use vacation::{Quota, VacationResponse};
 
@@ -31,6 +33,7 @@ pub const PRINCIPALS_AVAILABILITY: &str = "urn:ietf:params:jmap:principals:avail
 pub const WEBSOCKET: &str = "urn:ietf:params:jmap:websocket";
 pub const VACATION_RESPONSE: &str = "urn:ietf:params:jmap:vacationresponse";
 pub const QUOTA: &str = "urn:ietf:params:jmap:quota";
+pub const SIEVE: &str = "urn:ietf:params:jmap:sieve";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

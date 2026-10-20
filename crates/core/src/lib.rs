@@ -8,6 +8,7 @@ pub mod files;
 pub mod indexer;
 pub mod invite;
 pub mod render;
+pub mod rules;
 pub mod schedule;
 pub mod settings;
 pub mod sync;

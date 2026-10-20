@@ -22,7 +22,8 @@ const BUTTONS: [(&str, MakeAction); 6] = [
 ];
 
 /// Настройки ящика (в Outlook — меню «Файл»): справа, у поиска.
-const SETTINGS: [(&str, MakeAction); 1] = [("bar-vacation", || Box::new(settings::Vacation))];
+const SETTINGS: [(&str, MakeAction); 2] =
+    [("bar-vacation", || Box::new(settings::Vacation)), ("bar-rules", || Box::new(settings::Rules))];
 
 /// Высота строки команд: кэшированное view не измеряется по содержимому, размер задаётся явно.
 pub(crate) const BAR_HEIGHT: f32 = 40.0;

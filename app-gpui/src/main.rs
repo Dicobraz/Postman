@@ -27,6 +27,7 @@ mod actions;
 mod meeting;
 mod settings;
 mod vacation;
+mod rules;
 
 pub(crate) use mailer::{Mailer, Section};
 
