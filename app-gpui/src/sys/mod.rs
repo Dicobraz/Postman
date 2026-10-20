@@ -9,6 +9,31 @@ mod windows;
 #[cfg(windows)]
 mod console;
 
+#[cfg(windows)]
+mod memmap;
+
+/// Считающий распределитель для замера кучи (фича `alloc-count`).
+#[cfg(feature = "alloc-count")]
+pub mod alloc;
+
+/// Поля бенча в конце простоя (S4-08, `docs/MEMORY.md`): частный рабочий набор (столбец «Память» диспетчера
+/// задач), куча Rust при фиче `alloc-count`. `POSTMAN_BENCH_MEMMAP=1` — ещё разбивка по модулям, файлам и блокам
+/// частной памяти в stderr.
+pub fn bench_idle_fields() -> String {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        let (text, private_ws) = memmap::report();
+        out.push(format!("idle_private_ws_mb={:.0}", private_ws as f64 / 1_048_576.0));
+        if std::env::var_os("POSTMAN_BENCH_MEMMAP").is_some() {
+            eprint!("{text}");
+        }
+    }
+    #[cfg(feature = "alloc-count")]
+    out.push(alloc::fields());
+    out.join(" ")
+}
+
 /// Вывод в консоль родителя, если stdout или stderr не перенаправлены (release без консоли, S4-01):
 /// для `--bench`, `--screens`, `--help`, `--version`.
 #[cfg(windows)]
@@ -77,5 +102,16 @@ mod tests {
     #[test]
     fn manifest_is_applied() {
         assert_eq!(super::active_code_page(), 65001);
+    }
+
+    /// Разбивка памяти (S4-08): частный рабочий набор посчитан, категории — в отчёте.
+    #[test]
+    fn memory_map_is_reported() {
+        let (text, private_ws) = super::memmap::report();
+        assert!(private_ws > 0, "{text}");
+        for line in ["mem image:", "mem mapped:", "mem private:", "mem total:"] {
+            assert!(text.contains(line), "no {line}: {text}");
+        }
+        assert!(super::bench_idle_fields().starts_with("idle_private_ws_mb="));
     }
 }
