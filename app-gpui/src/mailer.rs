@@ -248,8 +248,14 @@ impl Render for Mailer {
         screens::drive(self, window, cx);
         let status = self.items_status(cx);
         let unread = self.toasts.read(cx).unread();
+        // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» (`commands.rs`).
+        let context = match self.section {
+            Section::Mail => "Mailer MailView",
+            Section::Calendar => "Mailer CalendarView",
+            Section::Contacts => "Mailer ContactsView",
+        };
         let root = crate::actions::handlers(div(), cx)
-            .key_context("Mailer")
+            .key_context(context)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &mail::Next, _, cx| this.step(|_| 1, cx)))
             .on_action(cx.listener(|this, _: &mail::Prev, _, cx| this.step(|_| -1, cx)))
