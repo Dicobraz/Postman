@@ -59,6 +59,10 @@ pub fn bench_copy(dir: &Path, n: usize) -> postman_cache::Result<PathBuf> {
 pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     let cache = Cache::open(path)?;
     if cache.count("inbox").unwrap_or(0) + cache.count("archive").unwrap_or(0) >= n {
+        // Шаблон старше беседы демо (S5-05) — дописать её.
+        if cache.rows_by_ids(&[CHAIN[0].id.to_string()])?.is_empty() {
+            chain(&cache, jiff::Timestamp::now().as_second())?;
+        }
         return Ok(());
     }
     let mb = |id: &str, name: &str, order| MailboxRow {
@@ -117,8 +121,97 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
         }
     }
     cache.upsert_emails(&batch)?;
-    shared(&cache, now)
+    shared(&cache, now)?;
+    chain(&cache, now)
 }
+
+/// Письмо беседы демо (S5-05): цепочка ответов с цитатами разных клиентов, мои письма — в «Отправленных».
+pub struct ChainMessage {
+    pub id: &'static str,
+    /// Часов назад.
+    pub hours_ago: i64,
+    pub mine: bool,
+    pub subject: &'static str,
+    html: Option<&'static str>,
+    text: Option<&'static str>,
+}
+
+/// Беседа демо: письмо, ответ из Outlook (шапка «От: … Отправлено: …»), ответ из Gmail (`gmail_quote`), ответ
+/// текстом с `>`. Снимок `thread` открывает третье.
+pub const CHAIN: &[ChainMessage] = &[
+    ChainMessage { id: "chain1", hours_ago: 50, mine: false, subject: "Пилот SIEM: сроки", html: Some(CHAIN_1), text: None },
+    ChainMessage { id: "chain2", hours_ago: 48, mine: true, subject: "RE: Пилот SIEM: сроки", html: Some(CHAIN_2), text: None },
+    ChainMessage { id: "chain3", hours_ago: 26, mine: false, subject: "Re: Пилот SIEM: сроки", html: Some(CHAIN_3), text: None },
+    ChainMessage { id: "chain4", hours_ago: 2, mine: true, subject: "Re: Пилот SIEM: сроки", html: None, text: Some(CHAIN_4) },
+];
+
+/// Письмо беседы демо, открытое в снимке `thread`.
+pub const CHAIN_OPEN: &str = "chain3";
+
+/// Имя владельца демо-ящика (адрес — [`ME`]).
+const ME_NAME: &str = "Смирнова Анна";
+
+fn chain(cache: &Cache, now: i64) -> postman_cache::Result<()> {
+    let (name, addr) = SENDERS[1];
+    let rows: Vec<EmailRow> = CHAIN
+        .iter()
+        .map(|m| EmailRow {
+            id: m.id.into(),
+            thread_id: "chain".into(),
+            mailbox_ids: vec![if m.mine { "sent" } else { "inbox" }.into()],
+            received_at: now - m.hours_ago * 3600,
+            subject: m.subject.into(),
+            from_name: if m.mine { ME_NAME } else { name }.into(),
+            from_addr: if m.mine { ME } else { addr }.into(),
+            preview: String::new(),
+            seen: true,
+            flagged: false,
+            has_attachment: false,
+            size: 4096,
+        })
+        .collect();
+    cache.upsert_emails(&rows)
+}
+
+fn chain_body(id: &str) -> Option<BodyRow> {
+    let m = CHAIN.iter().find(|m| m.id == id)?;
+    let (name, addr) = SENDERS[1];
+    let to = if m.mine { Addr { name: name.into(), email: addr.into() } } else { Addr { name: ME_NAME.into(), email: ME.into() } };
+    Some(BodyRow {
+        to: vec![to],
+        message_id: Some(format!("{id}@corp.example")),
+        html: m.html.map(Into::into),
+        text: m.text.map(Into::into),
+        ..Default::default()
+    })
+}
+
+const CHAIN_1: &str = "<p>Анна, добрый день!</p><p>Предлагаю начать пилот SIEM 3 ноября. Нужны от вас:</p>
+<ul><li>список источников событий;</li><li>контакт администратора.</li></ul><p>С уважением,<br>Алексей Петров</p>";
+
+const CHAIN_2: &str = r#"<html><body><div class=WordSection1><p class=MsoNormal>Алексей, добрый день!</p>
+<p class=MsoNormal>Источники пришлю завтра, администратор — Сидоров Игорь.</p><p class=MsoNormal>&nbsp;</p>
+<p class=MsoNormal>С уважением,<br>Анна Смирнова</p>
+<div style='border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm'><p class=MsoNormal><b>От:</b> Петров Алексей
+&lt;a.petrov@corp.example&gt;<br><b>Отправлено:</b> понедельник, 3 ноября 2026 г. 10:15<br><b>Кому:</b> Смирнова Анна<br>
+<b>Тема:</b> Пилот SIEM: сроки</p></div><p class=MsoNormal>Анна, добрый день!</p>
+<p class=MsoNormal>Предлагаю начать пилот SIEM 3 ноября.</p></div></body></html>"#;
+
+const CHAIN_3: &str = r#"<div dir="ltr">Спасибо! Тогда стартуем 3-го, созвон в 10:00.</div><br>
+<div class="gmail_quote"><div dir="ltr" class="gmail_attr">пн, 3 нояб. 2026 г. в 12:10, Смирнова Анна &lt;me@corp.example&gt;:<br></div>
+<blockquote class="gmail_quote"><p>Алексей, добрый день!</p><p>Источники пришлю завтра, администратор — Сидоров Игорь.</p>
+<p><b>От:</b> Петров Алексей<br><b>Отправлено:</b> понедельник, 3 ноября 2026 г. 10:15</p></blockquote></div>"#;
+
+const CHAIN_4: &str = "Подтверждаю, до встречи.
+
+Анна
+
+04.11.2026 10:05, Петров Алексей пишет:
+> Спасибо! Тогда стартуем 3-го, созвон в 10:00.
+>
+> пн, 3 нояб. 2026 г. в 12:10, Смирнова Анна <me@corp.example>:
+>> Алексей, добрый день!
+";
 
 /// Общие ящики демо (S4-06): ящик отдела, где можно всё, и ящик руководителя, открытый только для чтения.
 pub const SHARED: &[(&str, &str, bool)] = &[("sales", "sales@corp.example", false), ("boss", "director@corp.example", true)];
@@ -177,6 +270,9 @@ const SHARED_SUBJECTS: &[&str] = &["Заявка клиента №", "Комм�
 pub fn body(id: &str) -> BodyRow {
     // Письма общих ящиков демо — с префиксом аккаунта, тела — те же.
     let id = postman_cache::unscoped(id).1;
+    if let Some(b) = chain_body(id) {
+        return b;
+    }
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
     let att = |blob: &str, name: &str, mime: &str, size: u64, cid: Option<&str>| AttachmentRow {
         blob_id: blob.into(),

@@ -45,6 +45,7 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_shared::shared_inbox_is_synced_read_and_flagged` | S4-06, user3: ящик группы `shared-sales` в сессии и в кэше (ключи `<аккаунт>/<id>`); письмо на адрес группы → по push аккаунта группы в кэш (~1 с) → `Body` → `Keyword $flagged` на сервере в аккаунте группы → убрано |
 | `stand_shared::mail_is_sent_as_the_shared_mailbox` | S4-06: `Senders` — свой адрес первым, адрес группы — из её аккаунта; `Send` от имени группы → у получателя «От» группы, копия — в «Отправленных» группы, не в своих → убрано |
 | `stand_shared::read_only_share_has_rights_but_no_identity` | S4-06: папка `shared-ro`, открытая только для чтения: `myRights` без добавления, удаления и отправки; `Identity/get` — `forbidden` |
+| `stand_threads::reply_chain_is_one_thread_with_new_text_only` | S5-05: user1 → user3 → user1 цепочкой ответов (In-Reply-To, цитата Postman) → у user3 `Command::Thread` (`Thread/get` + `Email/get`) — одна беседа из трёх писем, своё — из «Отправленных», по времени; «только новый текст» — в каждом письме только его строки → письма убраны |
 
 Последний прогон — 2026-10-20, напрямую по HTTPS: `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
 
@@ -136,6 +137,11 @@ cargo test -p postman-core --test stand -- --ignored
 20. **Push по аккаунтам.** EventSource участника присылает и `changed.<аккаунт группы>`: письмо в ящик группы приходит
     в кэш за ~1 с (тест). Для папки, открытой другим пользователем, — тоже по аккаунту владельца [проверить]. Клиент
     сверяет только названные аккаунты (`sync::MailChange`), опрос раз в 2 минуты — все.
+21. **Беседы** (S5-05, тест `stand_threads`). Ответ с `In-Reply-To`/`References` и темой «RE: …» Stalwart кладёт в ту же
+    цепочку, что и исходное письмо, у обоих пользователей (`threadId` — свой в каждом аккаунте), вместе с копией в
+    «Отправленных». `Thread/get` отдаёт `emailIds` из всех папок; `Email/get` со ссылкой
+    `#ids: /list/*/emailIds` — одним запросом. `receivedAt` — с точностью до секунды: письма одной секунды идут в
+    порядке id. Поиск `Email/query` `text: "RE: …"` не находит ничего — искать без «RE:» и сверять тему на клиенте.
 
 ## Общие ящики на стенде (S4-06)
 

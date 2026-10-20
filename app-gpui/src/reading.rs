@@ -59,6 +59,12 @@ pub(crate) struct ReadingPane {
     pub(crate) in_flight: HashSet<String>,
     /// Куда «Открыть» кладёт файл перед запуском системного приложения.
     pub(crate) open_dir: PathBuf,
+    /// Беседа открытого письма (S5-05, `thread.rs`); `feed_on` — показана лента, `quotes` — с цитатами.
+    pub(crate) feed: Option<crate::thread::Feed>,
+    pub(crate) feed_on: bool,
+    pub(crate) quotes: bool,
+    /// Мои адреса отправителя (`Event::Senders`): свои письма в ленте беседы.
+    pub(crate) mine: Vec<String>,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -70,6 +76,8 @@ pub(crate) enum ReadingEvent {
     NeedsServer,
     /// Команда синхронизации: `Mailer` отдаёт её в `Backend`; не ушла — [`ReadingPane::not_sent`].
     Sync(SyncRequest),
+    /// Открыть письмо (щелчок по письму в ленте беседы).
+    Open(EmailRow),
 }
 
 /// Запрос области чтения к серверу: клонируемая форма `Command` (событие gpui отдаётся по ссылке).
@@ -77,6 +85,8 @@ pub(crate) enum ReadingEvent {
 pub(crate) enum SyncRequest {
     Blob(AttachmentRow),
     RespondInvite { invite: Box<Invitation>, status: Partstat, in_reply_to: Option<String> },
+    /// Беседа с сервера (ключ цепочки).
+    Thread(String),
 }
 
 impl SyncRequest {
@@ -86,6 +96,7 @@ impl SyncRequest {
             SyncRequest::RespondInvite { invite, status, in_reply_to } => {
                 Command::RespondInvite { invite: invite.clone(), status: *status, in_reply_to: in_reply_to.clone() }
             }
+            SyncRequest::Thread(key) => Command::Thread(key.clone()),
         }
     }
 }
@@ -103,6 +114,10 @@ impl ReadingPane {
             pending_files: Vec::new(),
             in_flight: HashSet::new(),
             open_dir: data_dir().join("open"),
+            feed: None,
+            feed_on: false,
+            quotes: false,
+            mine: Vec::new(),
         }
     }
 
@@ -114,6 +129,7 @@ impl ReadingPane {
         self.reading = Some(Reading { row, body, doc: None, images: Images::new(), requested: HashSet::new(), invite: None });
         self.render_body(cx);
         self.ensure_invite(cx);
+        self.sync_thread(cx);
         cx.notify();
     }
 
@@ -123,6 +139,7 @@ impl ReadingPane {
             return;
         }
         self.reading = Some(Reading { row, body: None, doc: None, images: Images::new(), requested: HashSet::new(), invite: None });
+        self.sync_thread(cx);
         cx.notify();
     }
 
@@ -172,6 +189,8 @@ impl ReadingPane {
                 self.me = Some(address.email.clone());
                 cx.notify();
             }
+            Event::Senders(list) => self.mine = list.iter().map(|s| s.address.email.clone()).collect(),
+            Event::ThreadReady { thread, .. } => self.thread_ready(thread, cx),
             _ => {}
         }
     }
@@ -191,12 +210,14 @@ impl ReadingPane {
                     card.sending = None;
                 }
             }
+            SyncRequest::Thread(_) => self.thread_not_sent(),
         }
         cx.notify();
     }
 
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.reading = None;
+        self.feed = None;
         cx.notify();
     }
 
@@ -539,6 +560,22 @@ impl Render for ReadingPane {
             .child(field(tr!("reading-from"), from))
             .child(field(tr!("reading-to"), to))
             .child(field(tr!("reading-date"), format_date(r.row.received_at)));
+        let bar = self.feed_bar(cx);
+        // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
+        if let Some(feed) = self.feed_view(cx) {
+            return div()
+                .id("reading")
+                .flex()
+                .flex_col()
+                .size_full()
+                .p_3()
+                .gap_2()
+                .overflow_y_scroll()
+                .child(header)
+                .children(bar)
+                .child(feed)
+                .into_any_element();
+        }
         let strip = self.attachment_strip(r, cx);
         let card = r.invite.as_ref().map(|c| invite_card::render(c, self.me.as_deref(), cx));
         let body: AnyElement = match &r.doc {
@@ -566,6 +603,7 @@ impl Render for ReadingPane {
             .gap_2()
             .overflow_y_scroll()
             .child(header)
+            .children(bar)
             .children(strip)
             .children(card)
             .child(body)

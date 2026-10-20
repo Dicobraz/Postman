@@ -3,7 +3,9 @@ use crate::{Align, Block, Document, Inline};
 /// text/plain -> IR: абзацы по пустым строкам, строки с `>` — цитаты.
 pub fn from_plain(text: &str) -> Document {
     let lines: Vec<&str> = text.lines().collect();
-    Document { blocks: blocks(&lines, 0), remote_images_blocked: 0 }
+    let mut blocks = blocks(&lines, 0);
+    let history = crate::history::detect(&mut blocks, &[]);
+    Document { blocks, remote_images_blocked: 0, history }
 }
 
 fn blocks(lines: &[&str], depth: usize) -> Vec<Block> {
