@@ -5,6 +5,7 @@ use html5ever::tendril::TendrilSink;
 use html5ever::{ParseOpts, parse_document};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
+use crate::history::{self, Mark, MarkKind};
 use crate::{Align, Block, Document, Inline, Marks, link, plain_text, style};
 
 /// Элементы, поддерево которых выбрасывается целиком.
@@ -32,9 +33,11 @@ pub fn from_html(html: &str) -> Document {
     }
     let dom = parse_document(RcDom::default(), ParseOpts::default()).one(html);
     let mut b = Builder::default();
-    let mut sink = Sink::default();
+    let mut sink = Sink { top: true, ..Sink::default() };
     b.children(&dom.document, Ctx::default(), &mut sink);
-    Document { blocks: sink.finish(), remote_images_blocked: b.remote_images }
+    let mut blocks = sink.finish();
+    let history = history::detect(&mut blocks, &b.quotes);
+    Document { blocks, remote_images_blocked: b.remote_images, history }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -52,6 +55,8 @@ struct Sink {
     blocks: Vec<Block>,
     para: Vec<Inline>,
     align: Align,
+    /// Поток блоков верхнего уровня письма (не цитата, не ячейка): здесь отмечается история переписки.
+    top: bool,
 }
 
 impl Sink {
@@ -204,6 +209,8 @@ fn collapse_ws(s: &str) -> String {
 #[derive(Default)]
 struct Builder {
     remote_images: usize,
+    /// Цитаты, отмеченные разметкой клиентов (S5-05).
+    quotes: Vec<Mark>,
 }
 
 impl Builder {
@@ -230,10 +237,21 @@ impl Builder {
         }
     }
 
-    fn element(&mut self, node: &Handle, tag: &str, mut ctx: Ctx, sink: &mut Sink) {
+    fn element(&mut self, node: &Handle, tag: &str, ctx: Ctx, sink: &mut Sink) {
         if DROPPED.contains(&tag) {
             return;
         }
+        let Some(kind) = sink.top.then(|| quote_mark(node, tag)).flatten() else {
+            return self.element_body(node, tag, ctx, sink);
+        };
+        sink.flush();
+        let start = sink.blocks.len();
+        self.element_body(node, tag, ctx, sink);
+        sink.flush();
+        self.quotes.push(Mark { kind, start, end: sink.blocks.len() });
+    }
+
+    fn element_body(&mut self, node: &Handle, tag: &str, mut ctx: Ctx, sink: &mut Sink) {
         if let Some(s) = attr(node, "style") {
             style::apply(&s, &mut ctx.marks, &mut ctx.align);
         }
@@ -399,6 +417,22 @@ impl Builder {
             sink.text(&format!("[{alt}]"), ctx);
         }
     }
+}
+
+/// Разметка цитаты почтовыми клиентами: класс, id или `type=cite`.
+fn quote_mark(node: &Handle, tag: &str) -> Option<MarkKind> {
+    if tag == "blockquote" && attr(node, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cite")) {
+        return Some(MarkKind::Range);
+    }
+    let class = attr(node, "class").unwrap_or_default();
+    let has = |c: &str| class.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(c));
+    // Gmail, Thunderbird (строка «… wrote:» над цитатой), Yahoo, Proton.
+    if ["gmail_quote", "gmail_quote_container", "moz-cite-prefix", "yahoo_quoted", "protonmail_quote"].iter().any(|c| has(c)) {
+        return Some(MarkKind::Range);
+    }
+    // Outlook в браузере: шапка ответа и метка, после которой идёт исходное письмо.
+    let id = attr(node, "id").unwrap_or_default();
+    ["divRplyFwdMsg", "appendonsend"].iter().any(|i| id.eq_ignore_ascii_case(i)).then_some(MarkKind::From)
 }
 
 const VOID: &[&str] = &[

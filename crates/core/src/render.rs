@@ -113,7 +113,7 @@ fn render(client: &mut Client, body: &BodyRow) -> Document {
         Some(t) => match client.render(&Request::Text(t.clone())) {
             Ok(mut doc) => {
                 if let Some(e) = html_err {
-                    doc.blocks.insert(0, notice(&format!("HTML-версия не показана ({e}); показан текст.")));
+                    doc.prepend(notice(&format!("HTML-версия не показана ({e}); показан текст.")));
                 }
                 return doc;
             }

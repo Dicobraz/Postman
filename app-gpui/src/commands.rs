@@ -14,6 +14,11 @@ pub mod mail {
     );
 }
 
+/// Беседа в области чтения (S5-05).
+pub mod thread {
+    gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev]);
+}
+
 pub mod view {
     gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
 }
@@ -78,6 +83,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
     cmd("mail.forward", &["ctrl-f"], MAIL),
     cmd("mail.delete", &["delete"], LIST),
+    // Не Outlook (DESIGN, «Беседы»): лента беседы и цитаты — кнопками; по письмам беседы — Ctrl+→ / Ctrl+←
+    // (в поле поиска эти клавиши — по словам).
+    cmd("thread.toggle", &[], MAIL),
+    cmd("thread.quotes", &[], MAIL),
+    cmd("thread.next", &["ctrl-right"], LIST),
+    cmd("thread.prev", &["ctrl-left"], LIST),
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),

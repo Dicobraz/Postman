@@ -5,6 +5,7 @@
 //! исходящий HTML ([`markdown_to_html`]). Крейт не делает ввода-вывода и
 //! предназначен для запуска внутри изолированного воркера.
 
+mod history;
 mod html;
 mod link;
 mod markdown;
@@ -23,6 +24,28 @@ pub struct Document {
     pub blocks: Vec<Block>,
     /// Сколько внешних картинок выброшено (для баннера «картинки заблокированы»).
     pub remote_images_blocked: usize,
+    /// Первый блок истории переписки (цитаты прошлых писем, шапка Outlook); `None` — истории нет или она не
+    /// отделяется надёжно. Ставит разбор в воркере (S5-05); новый текст — [`Document::new_text`].
+    #[serde(default)]
+    pub history: Option<usize>,
+}
+
+impl Document {
+    /// Только новый текст письма, без истории переписки (лента беседы).
+    pub fn new_text(&self) -> &[Block] {
+        match self.history {
+            Some(h) if h <= self.blocks.len() => &self.blocks[..h],
+            _ => &self.blocks,
+        }
+    }
+
+    /// Блок в начало (предупреждение над письмом); граница истории сдвигается.
+    pub fn prepend(&mut self, block: Block) {
+        self.blocks.insert(0, block);
+        if let Some(h) = &mut self.history {
+            *h += 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

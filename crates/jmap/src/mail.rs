@@ -196,6 +196,14 @@ pub struct Changes {
     pub destroyed: Vec<String>,
 }
 
+/// Беседа (RFC 8621 §3): письма цепочки.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Thread {
+    #[serde(default)]
+    email_ids: Vec<String>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct GetResponse<T> {
     pub(crate) state: String,
@@ -298,6 +306,28 @@ impl Client {
         let mut r = self.call(USING, &[inv("Email/get", args, "g")]).await?;
         let g: GetResponse<EmailSummary> = take(&mut r, "g")?;
         Ok((g.list, g.state))
+    }
+
+    /// Беседа целиком (S5-05): `Thread/get` и краткие записи её писем из всех папок одним запросом. Порядок id —
+    /// как у сервера (RFC 8621 §3: по `receivedAt`, старые первыми); беседы нет — пусто.
+    pub async fn thread(&self, thread_id: &str) -> Result<(Vec<String>, Vec<EmailSummary>)> {
+        let acc = self.mail_account()?;
+        let calls = [
+            inv("Thread/get", json!({ "accountId": acc, "ids": [thread_id] }), "t"),
+            inv(
+                "Email/get",
+                json!({
+                    "accountId": acc,
+                    "#ids": { "resultOf": "t", "name": "Thread/get", "path": "/list/*/emailIds" },
+                    "properties": SUMMARY_PROPERTIES,
+                }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let t: GetResponse<Thread> = take(&mut r, "t")?;
+        let g: GetResponse<EmailSummary> = take(&mut r, "g")?;
+        Ok((t.list.into_iter().flat_map(|t| t.email_ids).collect(), g.list))
     }
 
     /// Дельта с указанного состояния (`Email/changes` или `Mailbox/changes`).

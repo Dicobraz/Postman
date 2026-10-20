@@ -12,3 +12,4 @@ pub mod rules;
 pub mod schedule;
 pub mod settings;
 pub mod sync;
+pub mod thread;

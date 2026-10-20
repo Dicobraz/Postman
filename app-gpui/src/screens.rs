@@ -12,6 +12,7 @@
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
+//! `thread` (лента беседы, S5-05) — только демо;
 //! без `POSTMAN_URL` — строка входа (`signin`).
 
 use std::path::{Path, PathBuf};
@@ -65,9 +66,11 @@ enum Scene {
     Rules,
     /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06).
     Shared,
+    /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
+    Thread,
 }
 
-const SCENES: [Scene; 16] = [
+const SCENES: [Scene; 17] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -84,6 +87,8 @@ const SCENES: [Scene; 16] = [
     Scene::Vacation,
     Scene::Rules,
     Scene::Shared,
+    // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
+    Scene::Thread,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -124,6 +129,7 @@ impl Scene {
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
+            Scene::Thread => "thread",
         }
     }
 }
@@ -300,6 +306,14 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 }
             });
         }
+        Scene::Thread => {
+            m.set_section(Section::Mail, cx);
+            m.open_mailbox("inbox".into(), cx);
+            let row = m.cache.rows_by_ids(&[postman_demo::CHAIN_OPEN.into()]).map_err(|e| e.to_string())?.pop();
+            let Some(row) = row else { return Err("no demo conversation in the cache".into()) };
+            m.reading.update(cx, |r, _| r.feed_on = true);
+            m.open_letter(row, cx);
+        }
         Scene::Meeting => {
             // Окно письма прошлой сцены остаётся: снимается своё окно.
             m.set_section(Section::Calendar, cx);
@@ -406,6 +420,11 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 }
                 _ => false,
             }
+        }
+        Scene::Thread => {
+            let r = m.reading.read(cx);
+            let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN);
+            open && r.feed_on && r.feed.as_ref().is_some_and(|f| f.conv.len() == postman_demo::CHAIN.len() && f.ready())
         }
         Scene::Shared => {
             // Живой общий ящик может быть пуст: тогда снимок — без письма.

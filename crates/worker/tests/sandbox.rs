@@ -55,6 +55,18 @@ fn renders_and_survives_escape_attempts() {
     }
 }
 
+/// Граница истории переписки (S5-05) ставится в песочнице и приходит в ответе вместе с полным IR.
+#[test]
+fn history_is_marked_in_the_sandbox() {
+    let mut c = client();
+    let html = r#"<div>Да, подходит.</div><div class="gmail_quote"><div class="gmail_attr">20.10.2026 10:15, Иван &lt;i@example.ru&gt;:</div>
+        <blockquote class="gmail_quote"><div>Встречаемся?</div></blockquote></div>"#;
+    let doc = c.render(&Request::Html(html.into())).unwrap();
+    assert_eq!(doc.history, Some(1));
+    assert_eq!(postman_ir::to_markdown(&postman_ir::Document { blocks: doc.new_text().to_vec(), ..Default::default() }), "Да, подходит.");
+    assert!(postman_ir::to_markdown(&doc).contains("Встречаемся?"));
+}
+
 #[test]
 fn hang_is_killed_by_timeout() {
     let mut c = client();

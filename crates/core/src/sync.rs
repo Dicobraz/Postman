@@ -41,6 +41,8 @@ const CALENDAR_DEBOUNCE: Duration = Duration::from_millis(1500);
 const CACHE_ERROR: &str = "cache: ";
 /// Справочник целиком — не больше (подсказки адресов и раздел «Контакты»).
 const DIRECTORY_LIMIT: u64 = 10_000;
+/// Тела писем беседы: части больше — усекаются сервером (как у открытого письма — до 4 МБ, здесь писем много).
+const THREAD_BODY_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Account {
@@ -64,6 +66,8 @@ impl Account {
 
 pub enum Command {
     Body(String),
+    /// Беседа (ключ цепочки, `EmailRow::thread_id`): письма из всех папок и их тела — в кэш → `ThreadReady`.
+    Thread(String),
     Keyword { id: String, keyword: &'static str, on: bool },
     /// Перенести письмо (удаление в «Удалённые»). UI уже перенёс его в кэше; сбой — письмо с сервера заново.
     Move { id: String, from: String, to: String },
@@ -206,6 +210,8 @@ pub enum Event {
     MailboxesChanged,
     EmailsChanged,
     BodyReady(String),
+    /// Беседа загружена: ключ цепочки и ключи её писем по времени (старые первыми), тела — в кэше.
+    ThreadReady { thread: String, ids: Vec<String> },
     BlobReady { blob_id: String, data: Arc<Vec<u8>> },
     /// Тела загружены в фоне — их текст можно добавить в поиск.
     BodiesStored(Vec<String>),
@@ -812,6 +818,11 @@ async fn handle(
             cache.put_body(&key, &row).map_err(db_err)?;
             notify(Event::BodyReady(key));
         }
+        Command::Thread(key) => {
+            let (acc, id) = accounts.locate(&key)?;
+            let ids = load_thread(acc, cache, index, id, notify).await?;
+            notify(Event::ThreadReady { thread: key, ids });
+        }
         Command::Keyword { id: key, keyword, on } => {
             let (acc, id) = accounts.locate(&key)?;
             acc.client.set_keyword(id, keyword, on).await?;
@@ -946,6 +957,41 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// Беседа с сервера: `Thread/get` и краткие записи писем (из всех папок, в том числе «Отправленных» за пределами
+/// первой страницы), затем тела, которых нет в кэше. Ключи писем — по времени. Новые письма в беседе потом приходят
+/// обычной дельтой `Email/changes` (в краткой записи есть `threadId`), `Thread/changes` не нужен.
+async fn load_thread(
+    acc: &MailAccount,
+    cache: &mut Cache,
+    index: &Index,
+    thread: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<Vec<String>> {
+    let (ids, emails) = acc.client.thread(thread).await?;
+    let keys: Vec<String> = ids.iter().map(|id| acc.key(id)).collect();
+    let known = cache.rows_by_ids(&keys).map_err(db_err)?.len();
+    save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+    if known < emails.len() {
+        notify(Event::EmailsChanged);
+    }
+    let mut missing = Vec::new();
+    for (id, key) in ids.iter().zip(&keys) {
+        if cache.body(key).map_err(db_err)?.is_none() {
+            missing.push(id.clone());
+        }
+    }
+    if !missing.is_empty() {
+        let mut stored = Vec::new();
+        for (id, b) in acc.client.email_bodies(&missing, THREAD_BODY_BYTES).await? {
+            let key = acc.key(&id);
+            cache.put_body(&key, &body_row(b, acc.scope())).map_err(db_err)?;
+            stored.push(key);
+        }
+        notify(Event::BodiesStored(stored));
+    }
+    Ok(keys)
 }
 
 /// Следующая страница папки (ключ `mailbox`) после самого старого письма в кэше; сколько писем пришло.
