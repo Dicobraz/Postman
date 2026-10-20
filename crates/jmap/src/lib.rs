@@ -25,6 +25,7 @@ pub const SUBMISSION: &str = "urn:ietf:params:jmap:submission";
 pub const CALENDARS: &str = "urn:ietf:params:jmap:calendars";
 pub const CONTACTS: &str = "urn:ietf:params:jmap:contacts";
 pub const PRINCIPALS: &str = "urn:ietf:params:jmap:principals";
+pub const PRINCIPALS_AVAILABILITY: &str = "urn:ietf:params:jmap:principals:availability";
 pub const WEBSOCKET: &str = "urn:ietf:params:jmap:websocket";
 
 #[derive(Debug, thiserror::Error)]

@@ -18,7 +18,8 @@ Windows. Приложение семейства «Pets»: общий архит
 
 - Сначала исследуем, потом планируем, потом делаем. Новое — концепт в чате, файлы — после согласования.
 - Вопросы владельцу — пакетом «Решения для владельца» (№, вопрос, рекомендация).
-- Всё, что зависит от сервера, помечать [проверить] до стенда Stalwart.
+- Сервер — стенд Stalwart (`docs/STALWART.md`): новое поведение сервера сначала тестом в `crates/core/tests/stand.rs`,
+  находки — туда же в документ. Непроверенное на стенде — пометка [проверить].
 - Одна задача = ветка `sX/NN-кратко` = один PR; спека сессии — `docs/specs/Sx.md` (цели, задачи `Sx-NN`
   с зависимостями и приёмкой). Соответствие сессий фазам плана — в `S0-decisions.md`. Мерж — владелец.
 - Коммиты на русском, суть в первой строке. Перед PR: `cargo clippy --workspace --all-targets -- -D warnings`
@@ -88,6 +89,8 @@ stderr и код 1. Только Windows.
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
 данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
 `pets/scripts/stand/clean.ps1 -Repos . -Testdata` (без `-Apply` только показывает).
+Стенд Stalwart: `cargo test -p postman-core --test stand -- --ignored` с `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1..3`,
+`POSTMAN_STAND_PASSWORD1..3` в окружении (туннель и пароли — у владельца, `docs/STALWART.md`).
 Диагностика песочницы (только отладочная сборка):
 `cargo test -p postman-worker --test windows_probe -- --ignored --nocapture`.
 

@@ -282,6 +282,9 @@ pub struct NewEvent<'a> {
 }
 
 impl NewEvent<'_> {
+    /// Событие для `CalendarEvent/set` по черновику JMAP Calendars, как его понимает Stalwart: организатор —
+    /// `organizerCalendarAddress`, адреса участников — `calendarAddress` (`mailto:`). Поля RFC 8984
+    /// `replyTo`/`sendTo` сервер молча игнорирует — тогда приглашения не уходят (проверено на стенде).
     pub fn to_jmap(&self) -> Value {
         let mut participants = serde_json::Map::new();
         let (org_name, org_email) = self.organizer;
@@ -290,8 +293,8 @@ impl NewEvent<'_> {
             serde_json::json!({
                 "@type": "Participant",
                 "name": org_name,
-                "email": org_email,
-                "sendTo": { "imip": format!("mailto:{org_email}") },
+                "calendarAddress": format!("mailto:{org_email}"),
+                "kind": "individual",
                 "roles": { "owner": true, "attendee": true, "chair": true },
                 "participationStatus": "accepted",
             }),
@@ -306,8 +309,8 @@ impl NewEvent<'_> {
                 serde_json::json!({
                     "@type": "Participant",
                     "name": name,
-                    "email": email,
-                    "sendTo": { "imip": format!("mailto:{email}") },
+                    "calendarAddress": format!("mailto:{email}"),
+                    "kind": "individual",
                     "roles": roles,
                     "participationStatus": "needs-action",
                     "expectReply": true,
@@ -324,7 +327,7 @@ impl NewEvent<'_> {
             "timeZone": self.time_zone,
             "duration": format_duration(self.duration_secs),
             "participants": participants,
-            "replyTo": { "imip": format!("mailto:{org_email}") },
+            "organizerCalendarAddress": format!("mailto:{org_email}"),
         });
         if !self.location.is_empty() {
             v["locations"] = serde_json::json!({ "l1": { "@type": "Location", "name": self.location } });
@@ -376,6 +379,10 @@ mod new_event_tests {
         };
         let v = ev.to_jmap();
         assert_eq!(v["duration"], "PT1H30M");
+        // Stalwart: организатор и адреса — по черновику JMAP Calendars, без replyTo/sendTo.
+        assert_eq!(v["organizerCalendarAddress"], "mailto:me@corp.example");
+        assert_eq!(v["participants"]["a0"]["calendarAddress"], "mailto:ivan@corp.example");
+        assert!(v.get("replyTo").is_none() && v["participants"]["a0"].get("sendTo").is_none());
         let back = Event::from_jmap(&v, &TimeZone::UTC).unwrap();
         assert_eq!(back.span.len(), 5400);
         assert_eq!(back.organizer().unwrap().email, "me@corp.example");

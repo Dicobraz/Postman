@@ -77,9 +77,17 @@ pub fn participant_id(event: &Value, email: &str) -> Option<String> {
                 .iter()
                 .filter_map(|k| p[*k].as_str())
                 .chain(p["sendTo"]["imip"].as_str())
-                .any(|a| a.trim_start_matches("mailto:").eq_ignore_ascii_case(email))
+                .any(|a| strip_mailto(a).eq_ignore_ascii_case(email))
         })
         .map(|(k, _)| k.clone())
+}
+
+/// `mailto:` в адресе календаря — в любом регистре (`MAILTO:` из iCalendar).
+fn strip_mailto(a: &str) -> &str {
+    match a.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("mailto:") => &a[7..],
+        _ => a,
+    }
 }
 
 pub fn partstat_json(s: Partstat) -> &'static str {
