@@ -1,7 +1,7 @@
 //! Спайк UI на gpui (gpui-kit): тот же экран, что и в egui-версии, и тот же `--bench`.
 //! Ядро (хранилище, IR, воркер-песочница, демо-ящик) — общее; здесь только интерфейс.
 //!
-//!   postman-gpui [--demo N] [--bench] [--screens <каталог>]
+//!   postman-gpui [--demo N] [--bench] [--screens <каталог>] [--lang ru|en|auto]
 
 mod calendar;
 mod commands;
@@ -16,12 +16,17 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use pets_i18n::tr;
+use pets_ui::{Level as Toast, Toasts};
 use postman_cache::{Cache, EmailRow, MailboxRow};
 use postman_ir::Document;
 use postman_core::bench::{self, Bench, Step};
 use postman_worker::{Client as Worker, Level, Request};
 
 use commands::{mail, search, view};
+
+/// Тексты интерфейса (S2-06): ключи `.ftl`, RU и EN; `pets_ui::FTL` добавляется при запуске.
+pub const TEXTS: &[pets_i18n::Resource] = &[("ru", include_str!("../i18n/ru.ftl")), ("en", include_str!("../i18n/en.ftl"))];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -296,7 +301,7 @@ impl Render for Folders {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut col = div().flex().flex_col().size_full().border_r_1().border_color(rgb(0xdddddd)).bg(rgb(0xf7f7f7));
         if let Some(n) = self.results {
-            col = col.child(div().px_3().py_1().bg(rgb(0xcce4ff)).child(format!("🔍 Результаты ({n})")));
+            col = col.child(div().px_3().py_1().bg(rgb(0xcce4ff)).child(tr!("folders-results", n = n)));
         }
         let mut list = div().flex().flex_col().flex_1().p_1();
         for m in &self.mailboxes {
@@ -323,14 +328,14 @@ impl Render for Folders {
                 .p_2()
                 .border_t_1()
                 .border_color(rgb(0xdddddd))
-                .child(nav("nav-mail", "✉ Почта", self.section == Section::Mail, Section::Mail, cx))
-                .child(nav("nav-cal", "📅 Календарь", self.section == Section::Calendar, Section::Calendar, cx))
-                .child("👥 Контакты"),
+                .child(nav("nav-mail", tr!("nav-mail"), self.section == Section::Mail, Section::Mail, cx))
+                .child(nav("nav-cal", tr!("nav-calendar"), self.section == Section::Calendar, Section::Calendar, cx))
+                .child(tr!("nav-contacts")),
         )
     }
 }
 
-fn nav(id: &'static str, label: &'static str, active: bool, section: Section, cx: &mut Context<Folders>) -> impl IntoElement {
+fn nav(id: &'static str, label: String, active: bool, section: Section, cx: &mut Context<Folders>) -> impl IntoElement {
     div()
         .id(id)
         .px_1()
@@ -348,10 +353,13 @@ struct ReadingPane {
     reading: Option<Reading>,
 }
 
-/// Уровень песочницы последнего разбора — для строки состояния.
-struct SandboxLevel(&'static str);
+/// Итог разбора: уровень песочницы (строка состояния) и ошибка (тост).
+enum ReadingEvent {
+    Sandbox(Level),
+    Error(String),
+}
 
-impl EventEmitter<SandboxLevel> for ReadingPane {}
+impl EventEmitter<ReadingEvent> for ReadingPane {}
 
 impl ReadingPane {
     fn open(&mut self, row: EmailRow, cx: &mut Context<Self>) {
@@ -388,13 +396,14 @@ impl ReadingPane {
         cx.spawn(async move |this, cx| {
             let (result, level) = task.await;
             this.update(cx, |this, cx| {
-                cx.emit(SandboxLevel(match level {
-                    Level::Full => "Песочница: полная",
-                    Level::Partial => "Песочница: частичная",
-                    Level::None => "Песочница: нет",
-                }));
+                cx.emit(ReadingEvent::Sandbox(level));
+                let doc = result.unwrap_or_else(|e| {
+                    let text = tr!("reading-error", error = e.to_string());
+                    cx.emit(ReadingEvent::Error(text.clone()));
+                    postman_ir::from_plain(&text)
+                });
                 if let Some(r) = this.reading.as_mut().filter(|r| r.row.id == id) {
-                    r.doc = Some(result.unwrap_or_else(|e| postman_ir::from_plain(&format!("⚠ {e}"))));
+                    r.doc = Some(doc);
                 }
                 cx.notify();
             })
@@ -407,7 +416,7 @@ impl ReadingPane {
 impl Render for ReadingPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(r) = &self.reading else {
-            return div().flex().size_full().items_center().justify_center().text_color(rgb(0x888888)).child("Выберите письмо").into_any_element();
+            return div().flex().size_full().items_center().justify_center().text_color(rgb(0x888888)).child(tr!("reading-empty")).into_any_element();
         };
         let from = format!("{} <{}>", r.row.from_name, r.row.from_addr);
         let to = r
@@ -423,9 +432,9 @@ impl Render for ReadingPane {
             .border_b_1()
             .border_color(rgb(0xdddddd))
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(r.row.subject.clone()))
-            .child(field("От:", from))
-            .child(field("Кому:", to))
-            .child(field("Дата:", format_date(r.row.received_at)));
+            .child(field(tr!("reading-from"), from))
+            .child(field(tr!("reading-to"), to))
+            .child(field(tr!("reading-date"), format_date(r.row.received_at)));
         let body: AnyElement = match &r.doc {
             None => div().text_color(rgb(0x888888)).child("…").into_any_element(),
             Some(doc) => {
@@ -436,7 +445,7 @@ impl Render for ReadingPane {
                             .px_2()
                             .py_1()
                             .bg(rgb(0xfde6dc))
-                            .child(format!("Внешние картинки не загружаются ({}). Это защищает от отслеживания.", doc.remote_images_blocked)),
+                            .child(tr!("reading-remote-blocked", n = doc.remote_images_blocked)),
                     );
                 }
                 col.children(ir_view::blocks(&doc.blocks, "doc", cx)).into_any_element()
@@ -475,8 +484,8 @@ impl Render for CommandBar {
             .px_2()
             .border_b_1()
             .border_color(rgb(0xdddddd))
-            .children(["✉ Создать", "↩ Ответить", "↩↩ Ответить всем", "↪ Переслать", "🗑 Удалить", "⚑ Флаг"].map(|l| {
-                div().px_2().py_0p5().rounded_md().bg(rgb(0xececec)).child(l)
+            .children(["bar-new", "bar-reply", "bar-reply-all", "bar-forward", "bar-delete", "bar-flag"].map(|key| {
+                div().px_2().py_0p5().rounded_md().bg(rgb(0xececec)).child(tr!(key))
             }))
             .child(div().flex_1())
             .child(div().w(px(320.)).child(Input::new(&self.search)))
@@ -495,7 +504,9 @@ struct Mailer {
     reading: Entity<ReadingPane>,
     bar: Entity<CommandBar>,
     search: Entity<InputState>,
-    sandbox: &'static str,
+    toasts: Entity<Toasts>,
+    /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
+    sandbox: Option<Level>,
     /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
     last_key: String,
     bench: Option<Bench>,
@@ -508,7 +519,7 @@ struct Mailer {
 
 impl Mailer {
     fn new(cache: Cache, bench: Option<Bench>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск (Ctrl+E), Enter — искать, Esc — сбросить"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("search-placeholder")));
         let keylog = std::env::var_os("POSTMAN_KEYLOG").is_some();
         let on_search = cx.subscribe_in(&search, window, move |this: &mut Self, state, ev: &InputEvent, _window, cx| match ev {
             InputEvent::PressEnter { .. } => {
@@ -533,6 +544,7 @@ impl Mailer {
             reading: None,
         });
         let bar = cx.new(|_| CommandBar { search: search.clone() });
+        let toasts = cx.new(|_| Toasts::new());
         let subscriptions = vec![
             on_search,
             Self::observe_keys(cx),
@@ -543,10 +555,19 @@ impl Mailer {
                 FolderEvent::Open(id) => this.open_mailbox(id.clone(), cx),
                 FolderEvent::Section(s) => this.set_section(*s, cx),
             }),
-            cx.subscribe(&reading, |this, _, SandboxLevel(level), cx| {
-                this.sandbox = level;
-                cx.notify();
+            cx.subscribe(&reading, |this, _, ev: &ReadingEvent, cx| match ev {
+                ReadingEvent::Sandbox(level) => {
+                    if *level != Level::Full && this.sandbox.is_none() {
+                        let text = tr!("sandbox-weak", level = sandbox_label(*level));
+                        this.toasts.update(cx, |t, cx| t.push(Toast::Warning, text, cx));
+                    }
+                    this.sandbox = Some(*level);
+                    cx.notify();
+                }
+                ReadingEvent::Error(text) => this.toasts.update(cx, |t, cx| t.push(Toast::Error, text.clone(), cx)),
             }),
+            // Значок уведомлений в строке состояния.
+            cx.observe(&toasts, |_, _, cx| cx.notify()),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -558,7 +579,8 @@ impl Mailer {
             reading,
             bar,
             search,
-            sandbox: "",
+            toasts,
+            sandbox: None,
             last_key: String::new(),
             bench,
             screens: None,
@@ -597,6 +619,10 @@ impl Mailer {
         let mailbox = self.list.read(cx).mailbox.clone();
         let ids = (!q.is_empty()).then(|| self.cache.search(q, mailbox.as_deref(), 1000).unwrap_or_default());
         let results = ids.as_ref().map(Vec::len);
+        if results == Some(0) {
+            let text = tr!("search-nothing", query = q.to_string());
+            self.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
+        }
         self.folders.update(cx, |f, cx| {
             f.results = results;
             cx.notify();
@@ -623,7 +649,15 @@ impl Mailer {
     }
 }
 
-fn field(label: &'static str, value: String) -> impl IntoElement {
+fn sandbox_label(level: Level) -> String {
+    match level {
+        Level::Full => tr!("sandbox-full"),
+        Level::Partial => tr!("sandbox-partial"),
+        Level::None => tr!("sandbox-none"),
+    }
+}
+
+fn field(label: String, value: String) -> impl IntoElement {
     div().flex().gap_2().child(div().w(px(48.)).text_color(rgb(0x888888)).child(label)).child(value)
 }
 
@@ -707,7 +741,8 @@ impl Render for Mailer {
         let started = Instant::now();
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
-        let status = format!("Элементов: {}", self.list.read(cx).count);
+        let status = tr!("status-items", n = self.list.read(cx).count);
+        let unread = self.toasts.read(cx).unread();
         let root = div()
             .key_context("Mailer")
             .track_focus(&self.focus)
@@ -729,12 +764,21 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
+                this.toasts.update(cx, |t, cx| t.toggle_history(cx));
+            }))
             .on_action(cx.listener(|this, _: &search::Clear, window, cx| {
+                // Esc сначала закрывает историю уведомлений.
+                if this.toasts.read(cx).is_history_open() {
+                    this.toasts.update(cx, |t, cx| t.toggle_history(cx));
+                    return;
+                }
                 this.search.update(cx, |s, cx| s.set_value("", window, cx));
                 this.run_search("", cx);
                 window.focus(&this.focus, cx);
             }))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(0xfafafa))
@@ -765,9 +809,22 @@ impl Render for Mailer {
                     .child(status)
                     .child(div().flex_1())
                     .child(self.last_key.clone())
-                    .child(self.sandbox)
+                    .child(self.sandbox.map(sandbox_label).unwrap_or_default())
+                    .child(
+                        div()
+                            .id("notifications")
+                            .px_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(0xececec)))
+                            .when(unread > 0, |d| d.text_color(rgb(0x0f6cbd)))
+                            .child(tr!("status-notifications", n = unread))
+                            .on_click(cx.listener(|this, _, _, cx| this.toasts.update(cx, |t, cx| t.toggle_history(cx)))),
+                    )
                     .child("gpui"),
-            );
+            )
+            // Тосты — поверх всего, последним ребёнком.
+            .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {
             b.ui_time(started.elapsed());
         }
@@ -806,11 +863,28 @@ fn data_dir() -> std::path::PathBuf {
         .join("Postman")
 }
 
-/// Запуск невозможен (нет каталога данных, хранилище или окно не открылись): сообщение и выход с кодом 1,
-/// без паники. В журнал Windows — с S2-06 (pets-shell).
+/// Запуск невозможен (нет каталога данных, хранилище или окно не открылись): сообщение в журнал
+/// (и журнал Windows «Приложение») и выход с кодом 1, без паники.
 fn fatal(what: &str, e: impl std::fmt::Display) -> ! {
-    eprintln!("Postman не запустился: {what}: {e}");
-    std::process::exit(1)
+    pets_shell::fatal(&tr!(what), e)
+}
+
+/// Второй запуск: показать окно первого и сказать об этом тостом.
+fn listen_second_instance(listener: pets_shell::Listener, (window, mailer): (AnyWindowHandle, Entity<Mailer>), cx: &mut App) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    listener.listen(move |args| {
+        let _ = tx.unbounded_send(args);
+    });
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while rx.next().await.is_some() {
+            let _ = window.update(cx, |_, window, cx| {
+                window.activate_window();
+                mailer.update(cx, |m, cx| m.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("second-instance"), cx)));
+            });
+        }
+    })
+    .detach();
 }
 
 fn main() {
@@ -820,28 +894,46 @@ fn main() {
     let bench = args.iter().any(|a| a == "--bench");
     // `--keep`: оставить рабочую копию данных бенча (для разбора).
     let keep = args.iter().any(|a| a == "--keep");
+    let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
+    pets_shell::init_logging("Postman", "POSTMAN_LOG");
+    for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
+        tracing::warn!("i18n: {p}");
+    }
     let screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
-        screens::Driver::new(d.into()).unwrap_or_else(|e| fatal("каталог снимков", e))
+        screens::Driver::new(d.into()).unwrap_or_else(|e| fatal("fatal-screens-dir", e))
     });
+    // Второй запуск отдаёт аргументы первому (тот показывает окно) и выходит; замеры и снимки — всегда отдельно.
+    let listener = if bench || screens.is_some() {
+        None
+    } else {
+        match pets_shell::single_instance("Postman", &args) {
+            Ok(pets_shell::Instance::First(l)) => Some(l),
+            Ok(pets_shell::Instance::Second) => return,
+            Err(e) => {
+                tracing::warn!("single instance: {e}");
+                None
+            }
+        }
+    };
     let dir = data_dir();
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("каталог данных", e));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("fatal-data-dir", e));
     // Бенч — на свежей копии ящика; подготовка данных не входит в first_frame_ms.
     let prepared = Instant::now();
     let path = if bench || screens.is_some() {
         // Снимки — на небольшой свежей копии: письма в первой строке те же от прогона к прогону.
         let n = if screens.is_some() { 2000 } else { n };
-        let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("ящик для замера", e));
+        let path = postman_demo::bench_copy(&postman_demo::testdata_dir(), n).unwrap_or_else(|e| fatal("fatal-bench-mailbox", e));
         if !keep {
             bench::remove_on_finish(path.clone());
         }
         path
     } else {
         let path = dir.join("demo.redb");
-        postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("демо-ящик", e));
+        postman_demo::ensure(&path, n).unwrap_or_else(|e| fatal("fatal-demo-mailbox", e));
         path
     };
     let start = if bench { start + prepared.elapsed() } else { start };
-    let cache = Cache::open(&path).unwrap_or_else(|e| fatal("хранилище", e));
+    let cache = Cache::open(&path).unwrap_or_else(|e| fatal("fatal-store", e));
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -854,9 +946,40 @@ fn main() {
             let cache = cache.clone();
             cx.new(|cx| Mailer { screens, ..Mailer::new(cache, bench, window, cx) })
         });
-        if let Err(e) = opened {
-            fatal("окно", e);
+        match opened {
+            Ok(handle) => {
+                if let Some(l) = listener {
+                    listen_second_instance(l, handle, cx);
+                }
+            }
+            Err(e) => fatal("fatal-window", e),
         }
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    /// Наборы текстов согласованы: оба языка, одни ключи и переменные, без дублей.
+    #[test]
+    fn texts_are_consistent() {
+        assert_eq!(pets_i18n::check(&[super::TEXTS, pets_ui::FTL]), vec![]);
+    }
+
+    /// Строки интерфейса — только через Fluent: в коде экранов нет литералов с кириллицей.
+    #[test]
+    fn no_raw_ui_strings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                for r in pets_i18n::raw_strings(&source) {
+                    found.push(format!("{}:{}: {}", path.display(), r.line, r.text));
+                }
+            }
+        }
+        assert!(found.is_empty(), "сырые строки, перенести в i18n/*.ftl:\n{}", found.join("\n"));
+    }
 }

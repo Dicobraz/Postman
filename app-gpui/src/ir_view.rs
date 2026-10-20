@@ -4,6 +4,7 @@
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use pets_i18n::tr;
 use postman_ir::{Align, Block, Inline, Marks};
 
 pub fn blocks(bs: &[Block], key: &str, cx: &mut App) -> Vec<AnyElement> {
@@ -84,7 +85,7 @@ fn flatten(items: &[Inline], text: &mut String, hl: &mut Vec<(std::ops::Range<us
             Inline::LineBreak => text.push('\n'),
             Inline::Image { alt, .. } => {
                 let start = text.len();
-                text.push_str(&if alt.is_empty() { "[изображение]".to_string() } else { format!("[изображение: {alt}]") });
+                text.push_str(&if alt.is_empty() { tr!("reading-image") } else { tr!("reading-image-alt", alt = alt.as_str()) });
                 hl.push((start..text.len(), HighlightStyle { color: Some(rgb(0x888888).into()), ..Default::default() }));
             }
             Inline::Link { href, suspicious, content, .. } => {
