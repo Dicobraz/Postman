@@ -16,7 +16,7 @@ pub mod mail {
 }
 
 pub mod view {
-    gpui_kit::actions!(view, [Mail, Calendar, Contacts]);
+    gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
 }
 
 pub mod search {
@@ -55,6 +55,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),
+    // Не Outlook: история тостов (значок 🔔 в строке состояния).
+    cmd("view.notifications", &[], None),
     cmd("search.focus", &["ctrl-e"], None),
     cmd("search.clear", &["escape"], None),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
@@ -68,7 +70,7 @@ pub fn bind(cx: &mut App) {
         let action = match cx.build_action(&c.action_name(), None) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("команда {}: нет действия {} ({e})", c.id, c.action_name());
+                tracing::error!("command {}: no action {} ({e})", c.id, c.action_name());
                 continue;
             }
         };
@@ -76,7 +78,7 @@ pub fn bind(cx: &mut App) {
         for keys in c.keys {
             match KeyBinding::load(keys, action.boxed_clone(), context.clone(), false, None, &DummyKeyboardMapper) {
                 Ok(b) => bindings.push(b),
-                Err(e) => eprintln!("команда {}: сочетание {keys}: {e:?}", c.id),
+                Err(e) => tracing::error!("command {}: keys {keys}: {e:?}", c.id),
             }
         }
     }

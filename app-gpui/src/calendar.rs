@@ -4,6 +4,7 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use postman_calendar::{Busy, Cell, Event, EventStatus, Span, WorkHours, find_slots, grid, layout_day};
+use pets_i18n::tr;
 use postman_demo::calendar as demo;
 
 use crate::Mailer;
@@ -13,7 +14,10 @@ const HOURS: i64 = 12;
 const HOUR_PX: f32 = 44.;
 const STEP: i64 = 1800;
 const CELL_PX: f32 = 26.;
-const DAYS: [&str; 5] = ["Пн", "Вт", "Ср", "Чт", "Пт"];
+/// Короткое имя дня рабочей недели: 0 — понедельник.
+fn day_name(d: usize) -> String {
+    tr!("cal-day", d = d)
+}
 
 pub struct CalendarView {
     week: i64,
@@ -29,7 +33,7 @@ pub struct CalendarView {
 
 impl CalendarView {
     pub fn demo() -> Self {
-        let mut people = vec![("Я".to_string(), demo::my_busy())];
+        let mut people = vec![(tr!("cal-me"), demo::my_busy())];
         people.extend(demo::colleagues().into_iter().map(|(n, _, b)| (n.to_string(), b)));
         Self {
             week: demo::week_start(),
@@ -70,7 +74,7 @@ pub fn render(m: &mut Mailer, cx: &mut Context<Mailer>) -> AnyElement {
         .py_1()
         .border_b_1()
         .border_color(rgb(0xdddddd))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child("Рабочая неделя"))
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-work-week")))
         .child(div().flex_1())
         .child(
             div()
@@ -80,7 +84,7 @@ pub fn render(m: &mut Mailer, cx: &mut Context<Mailer>) -> AnyElement {
                 .rounded_md()
                 .bg(if v.assistant { rgb(0xcce4ff) } else { rgb(0xececec) })
                 .cursor_pointer()
-                .child("👥 Помощник планирования (Ctrl+Shift+Q)")
+                .child(tr!("cal-assistant"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.cal.assistant = !this.cal.assistant;
                     cx.notify();
@@ -144,7 +148,7 @@ fn week_grid(v: &CalendarView) -> impl IntoElement {
         let date = jiff::Timestamp::from_second(v.day_start(d))
             .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).strftime("%d.%m").to_string())
             .unwrap_or_default();
-        div().flex_1().py_1().text_center().child(format!("{} {date}", DAYS[d]))
+        div().flex_1().py_1().text_center().child(format!("{} {date}", day_name(d)))
     }));
     div()
         .id("week")
@@ -169,7 +173,7 @@ fn assistant(v: &CalendarView, cx: &mut Context<Mailer>) -> impl IntoElement {
             .rounded_md()
             .cursor_pointer()
             .bg(if d == v.day { rgb(0xcce4ff) } else { rgb(0xececec) })
-            .child(DAYS[d])
+            .child(day_name(d))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cal.day = d;
                 cx.notify();
@@ -182,7 +186,7 @@ fn assistant(v: &CalendarView, cx: &mut Context<Mailer>) -> impl IntoElement {
             .rounded_md()
             .cursor_pointer()
             .bg(if secs == v.duration { rgb(0xcce4ff) } else { rgb(0xececec) })
-            .child(format!("{} мин", secs / 60))
+            .child(tr!("cal-minutes", n = secs / 60))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cal.duration = secs;
                 this.cal.slot = None;
@@ -210,7 +214,7 @@ fn assistant(v: &CalendarView, cx: &mut Context<Mailer>) -> impl IntoElement {
             }))
     });
     let slots = v.slots();
-    let suggestions = div().flex().flex_col().gap_1().w(px(210.)).child(div().font_weight(FontWeight::SEMIBOLD).child("Свободно у всех:")).children(
+    let suggestions = div().flex().flex_col().gap_1().w(px(210.)).child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-free-for-all"))).children(
         slots.into_iter().enumerate().map(|(n, s)| {
             let day = ((s.start - v.week) / 86_400) as usize;
             let picked = v.slot == Some(s);
@@ -220,7 +224,7 @@ fn assistant(v: &CalendarView, cx: &mut Context<Mailer>) -> impl IntoElement {
                 .rounded_md()
                 .cursor_pointer()
                 .bg(if picked { rgb(0xd5f0dc) } else { rgb(0xf3f3f3) })
-                .child(format!("{} {}–{}", DAYS.get(day).unwrap_or(&""), hm(s.start), hm(s.end)))
+                .child(format!("{} {}–{}", day_name(day.min(4)), hm(s.start), hm(s.end)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cal.slot = Some(s);
                     this.cal.day = day.min(4);
@@ -229,8 +233,8 @@ fn assistant(v: &CalendarView, cx: &mut Context<Mailer>) -> impl IntoElement {
         }),
     );
     let legend = div().flex().gap_3().text_xs().children(
-        [(Cell::Busy, "занят"), (Cell::Tentative, "под вопросом"), (Cell::Unavailable, "нет на месте"), (Cell::OffHours, "нерабочее время")]
-            .map(|(c, l)| div().flex().items_center().gap_1().child(div().w(px(12.)).h(px(12.)).bg(cell_color(c))).child(l)),
+        [(Cell::Busy, "cal-busy"), (Cell::Tentative, "cal-tentative"), (Cell::Unavailable, "cal-unavailable"), (Cell::OffHours, "cal-off-hours")]
+            .map(|(c, l)| div().flex().items_center().gap_1().child(div().w(px(12.)).h(px(12.)).bg(cell_color(c))).child(tr!(l))),
     );
     div()
         .flex()
