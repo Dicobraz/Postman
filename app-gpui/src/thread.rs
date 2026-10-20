@@ -21,10 +21,6 @@ use crate::Mailer;
 use crate::ir_view::{self, Images};
 use crate::reading::{ReadingEvent, ReadingPane, SyncRequest};
 
-const MUTED: u32 = 0x888888;
-const ACCENT: u32 = 0x0f6cbd;
-/// Подложка своих писем (DESIGN: «свои письма справа на светлой подложке»).
-const MINE_BG: u32 = 0xe8f1fb;
 
 /// Лента беседы открытого письма.
 pub(crate) struct Feed {
@@ -200,6 +196,7 @@ impl ReadingPane {
 
     /// Ряд над письмом: «Беседа (N)», в ленте — «Показать цитаты»; у письма без беседы — ничего.
     pub(crate) fn feed_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
         let f = self.feed.as_ref()?;
         let button = |id: &'static str, label: String, on: bool| {
             div()
@@ -208,10 +205,10 @@ impl ReadingPane {
                 .py_0p5()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(0xdddddd))
+                .border_color(l.border())
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(0xececec)))
-                .when(on, |d| d.bg(rgb(MINE_BG)).text_color(rgb(ACCENT)))
+                .hover(|d| d.bg(l.fill()))
+                .when(on, |d| d.bg(l.picked()).text_color(l.accent_text()))
                 .child(label)
         };
         let quotes = if self.quotes { tr!("thread-quotes-hide") } else { tr!("thread-quotes-show") };
@@ -229,14 +226,15 @@ impl ReadingPane {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_quotes(cx))),
                 )
             })
-            .when(f.waiting, |d| d.child(div().text_color(rgb(MUTED)).child(tr!("thread-loading"))))
+            .when(f.waiting, |d| d.child(div().text_color(l.text2()).child(tr!("thread-loading"))))
             .child(div().flex_1())
-            .child(div().text_color(rgb(MUTED)).child(tr!("thread-keys")));
+            .child(div().text_color(l.text2()).child(tr!("thread-keys")));
         Some(bar.into_any_element())
     }
 
     /// Лента: разделители дней и письма — только новый текст (пересылка и «показать цитаты» — целиком).
     pub(crate) fn feed_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
         let f = self.feed.as_ref().filter(|_| self.feed_on)?;
         let current = self.reading.as_ref().map(|r| r.row.id.as_str());
         let today = jiff::Zoned::now().date();
@@ -253,7 +251,7 @@ impl ReadingPane {
                     } else {
                         day.strftime("%d.%m.%Y").to_string()
                     };
-                    col = col.child(div().flex().justify_center().pt_1().text_color(rgb(MUTED)).child(label));
+                    col = col.child(div().flex().justify_center().pt_1().text_color(l.text2()).child(label));
                 }
                 Item::Message(n) => {
                     let Some(m) = f.conv.messages.get(n) else { continue };
@@ -267,7 +265,7 @@ impl ReadingPane {
                     let doc = f.docs.get(&m.row.id);
                     let whole = self.quotes || thread::is_forward(&m.row.subject);
                     let body: AnyElement = match doc {
-                        None => div().text_color(rgb(MUTED)).child("…").into_any_element(),
+                        None => div().text_color(l.text2()).child("…").into_any_element(),
                         Some(d) => {
                             let blocks = if whole { &d.blocks[..] } else { d.new_text() };
                             let hidden = !whole && blocks.len() < d.blocks.len();
@@ -277,7 +275,7 @@ impl ReadingPane {
                                 .gap_1()
                                 .children(ir_view::blocks(blocks, &format!("feed{n}"), &images, cx))
                                 .when(hidden, |d| {
-                                    d.child(div().text_color(rgb(MUTED)).child(tr!("thread-quotes-hidden")))
+                                    d.child(div().text_color(l.text2()).child(tr!("thread-quotes-hidden")))
                                 })
                                 .into_any_element()
                         }
@@ -293,8 +291,8 @@ impl ReadingPane {
                         .py_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(if current == Some(m.row.id.as_str()) { ACCENT } else { 0xdddddd }))
-                        .bg(rgb(if m.mine { MINE_BG } else { 0xffffff }))
+                        .border_color(if current == Some(m.row.id.as_str()) { l.accent() } else { l.border() })
+                        .bg(if m.mine { l.picked() } else { l.panel() })
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::Open(row.clone()))))
                         .child(
@@ -302,7 +300,7 @@ impl ReadingPane {
                                 .flex()
                                 .gap_2()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child(who))
-                                .child(div().text_color(rgb(MUTED)).child(crate::format_date(m.row.received_at))),
+                                .child(div().text_color(l.text2()).child(crate::format_date(m.row.received_at))),
                         )
                         .child(body);
                     col = col.child(div().flex().w_full().when(m.mine, |d| d.justify_end()).child(card));

@@ -1,16 +1,6 @@
 # Mail screen.
-search-placeholder = Search (Ctrl+E), Enter to search, Esc to clear
 search-nothing = Nothing found: “{ $query }”
 folders-results = 🔍 Results ({ $n })
-nav-mail = ✉ Mail
-nav-calendar = 📅 Calendar
-nav-contacts = 👥 Contacts
-bar-new = ✉ New
-bar-reply = ↩ Reply
-bar-reply-all = ↩↩ Reply all
-bar-forward = ↪ Forward
-bar-delete = 🗑 Delete
-bar-flag = ⚑ Flag
 reading-empty = Select a message
 reading-from = From:
 reading-to = To:

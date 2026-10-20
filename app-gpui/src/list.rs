@@ -11,9 +11,23 @@ use pets_i18n::tr;
 use postman_cache::{Cache, EmailRow, MailboxRow, Rights};
 use postman_core::labels::{self, Book};
 
+use pets_ui::theme::{Density, Metric};
+
+use crate::roles::{Look, Pm, look};
 use crate::*;
 
-pub(crate) const ROW_HEIGHT: f32 = 44.0;
+/// Высота строки письма при обычной плотности: аватар, отправитель, тема и превью (макет главного окна).
+pub(crate) const ROW_HEIGHT: f32 = 66.0;
+
+/// Высота строки письма по плотности темы: компактная — две строки без аватара и превью (DESIGN «Главное окно»).
+pub(crate) fn row_height(d: Density) -> f32 {
+    match d {
+        Density::Compact => 46.0,
+        Density::Normal => ROW_HEIGHT,
+        Density::Comfortable => 74.0,
+        Density::Spacious => 82.0,
+    }
+}
 pub(crate) const WINDOW_MARGIN: usize = 100;
 
 /// Запись флагов и меток в хранилище по очереди в отдельном потоке: поток интерфейса не ждёт диск
@@ -95,6 +109,10 @@ pub(crate) struct MailList {
     pub(crate) labels: Book,
     /// Письма, которые сервер держит до срока (S5-06): ключ → Unix-время отправки; метка «⏱ ср 09:00».
     pub(crate) scheduled: HashMap<String, i64>,
+    /// Имена папок для заголовка карточки списка.
+    pub(crate) names: HashMap<String, String>,
+    /// Высота строки по плотности темы (последний кадр).
+    pub(crate) row_h: f32,
 }
 
 /// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
@@ -152,8 +170,8 @@ impl Positions {
 }
 
 /// Видимые строки при прокрутке `y` (смещение содержимого вверх — отрицательное) и прежнем их числе.
-pub(crate) fn rows_at(y: f32, len: usize) -> Range<usize> {
-    let start = (-y / ROW_HEIGHT).max(0.) as usize;
+pub(crate) fn rows_at(y: f32, len: usize, row_h: f32) -> Range<usize> {
+    let start = (-y / row_h).max(0.) as usize;
     start..start + len
 }
 
@@ -247,6 +265,8 @@ impl MailList {
             rights: HashMap::new(),
             labels: crate::labels::default_book(),
             scheduled: HashMap::new(),
+            names: HashMap::new(),
+            row_h: ROW_HEIGHT,
         }
     }
 
@@ -291,8 +311,9 @@ impl MailList {
         cx.notify();
     }
 
-    /// Права папок после перечитывания папок: запоминаются только урезанные.
+    /// Права и имена папок после перечитывания папок: права запоминаются только урезанные.
     pub(crate) fn set_rights(&mut self, mailboxes: &[MailboxRow]) {
+        self.names = mailboxes.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
         self.rights = mailboxes.iter().filter(|m| m.rights != Rights::ALL).map(|m| (m.id.clone(), m.rights)).collect();
     }
 
@@ -335,7 +356,7 @@ impl MailList {
         self.search_ids = search;
         self.confirm = None;
         self.set_offset_y(y);
-        self.visible = rows_at(y, self.visible.len());
+        self.visible = rows_at(y, self.visible.len(), self.row_h);
     }
 
     fn offset_y(&self) -> f32 {
@@ -568,16 +589,18 @@ impl MailList {
 
 impl Render for MailList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = look(cx);
+        self.row_h = row_height(l.density());
         let confirm = self.confirm.as_ref().map(|_| {
             let button = |id: &'static str, text: String, yes: bool| {
                 div()
                     .id(id)
                     .px_3()
                     .py_0p5()
-                    .rounded_md()
+                    .rounded(l.px(Metric::RadiusControl))
                     .cursor_pointer()
-                    .when(yes, |d| d.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)).hover(|d| d.bg(rgb(0xa52517))))
-                    .when(!yes, |d| d.bg(rgb(0xececec)).hover(|d| d.bg(rgb(0xe0e0e0))))
+                    .when(yes, |d| d.bg(l.error_bg()).text_color(l.error()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!yes, |d| d.border_1().border_color(l.stroke()).hover(|d| d.bg(l.hover())))
                     .child(text)
                     .on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
             };
@@ -588,13 +611,33 @@ impl Render for MailList {
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                .bg(rgb(0xfff4ce))
+                .bg(l.warning_bg())
                 .border_b_1()
-                .border_color(rgb(0xdddddd))
+                .border_color(l.border())
                 .child(div().flex_1().child(tr!("actions-purge-confirm")))
                 .child(button("purge-yes", tr!("actions-purge-yes"), true))
                 .child(button("purge-no", tr!("actions-purge-no"), false))
         });
+        let title = match (&self.search_ids, &self.mailbox) {
+            (Some(_), _) => tr!("frame-list-search"),
+            (None, Some(id)) => self.names.get(id).cloned().unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let caption = |text: String| div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(text);
+        let header = div()
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(14.))
+            .pr(px(10.))
+            .border_b_1()
+            .border_color(l.border())
+            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(caption(tr!("frame-list-count", n = self.count)))
+            .child(div().flex_1())
+            .child(caption(tr!("frame-list-sort")));
         let list = div().relative().flex_1().min_h_0().child(
             uniform_list(
                 "messages",
@@ -606,6 +649,7 @@ impl Render for MailList {
                         this.ensure(range.clone(), cx);
                         this.ask_more(range.end, cx);
                     }
+                    let l = look(cx);
                     range
                         .map(|i| match this.row(i).cloned() {
                             Some(r) => {
@@ -616,9 +660,9 @@ impl Render for MailList {
                                     let text = tr!("send-scheduled-row", time = crate::send_later::short(at));
                                     labels.chips.insert(0, (text, postman_core::palette::NEUTRAL));
                                 }
-                                list_row(i, &r, labels, this.selected == Some(i), cx)
+                                list_row(i, &r, labels, this.selected == Some(i), &l, cx)
                             }
-                            None => empty_row(i),
+                            None => empty_row(i, &l),
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -628,7 +672,7 @@ impl Render for MailList {
         );
         // Полоса прокрутки видна всегда и перетаскивается; кадры — только пока её двигают.
         let list = list.child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always));
-        div().size_full().flex().flex_col().border_r_1().border_color(rgb(0xdddddd)).children(confirm).child(list)
+        div().size_full().flex().flex_col().text_color(l.text()).child(header).children(confirm).child(list)
     }
 }
 
@@ -665,58 +709,107 @@ impl PageSource {
 }
 
 /// Строка, которая ещё читается из хранилища: та же высота, без текста.
-pub(crate) fn empty_row(i: usize) -> AnyElement {
-    div().id(i).w_full().h(px(ROW_HEIGHT)).border_b_1().border_color(rgb(0xe5e5e5)).into_any_element()
+pub(crate) fn empty_row(i: usize, l: &Look) -> AnyElement {
+    div().id(i).w_full().h(px(row_height(l.density()))).border_b_1().border_color(l.border()).into_any_element()
 }
 
+/// Инициалы для аватара: первые буквы двух первых слов имени (или адреса).
+pub(crate) fn initials(name: &str) -> String {
+    name.split(|c: char| c.is_whitespace() || c == '.' || c == '@')
+        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// Строка письма (DESIGN «Строка письма и метки»): слева полоса категории; отправитель (сокращается, ≥ 60 px),
+/// справа метки (обрезаются слева, категория первой), вложение, флаг и время; ниже тема; при обычной плотности —
+/// аватар и превью.
 pub(crate) fn list_row(
     i: usize,
     r: &EmailRow,
     labels: crate::labels::RowLabels,
     selected: bool,
+    l: &Look,
     cx: &mut Context<MailList>,
 ) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
-    let mut icons = String::new();
-    if r.has_attachment {
-        icons.push('📎');
-    }
-    if r.flagged {
-        icons.push('⚑');
-    }
-    let line2 = format!("{}  —  {}", r.subject, r.preview);
+    let roomy = !l.compact();
+    let stripe = labels.stripe.map(|c| l.cat(c).dot);
+    let avatar = roomy.then(|| {
+        let c = l.cat(labels.stripe.unwrap_or(postman_core::palette::NEUTRAL));
+        div()
+            .size(px(32.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(c.bg)
+            .text_color(c.text)
+            .text_size(px(12.))
+            .child(initials(&from))
+    });
+    let chips = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .justify_end()
+        .gap(px(4.))
+        .overflow_hidden()
+        .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color, l)));
+    let line1 = div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_initial()
+                .min_w(px(60.))
+                .truncate()
+                .when(!r.seen, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .child(from.clone()),
+        )
+        .child(chips)
+        .when(r.has_attachment, |d| d.child(crate::chrome::icon(crate::chrome::glyph::ATTACH, 13.).text_color(l.text3())))
+        .when(r.flagged, |d| d.child(crate::chrome::icon(crate::chrome::glyph::FLAG, 13.).text_color(l.pm(Pm::Flag))))
+        .child(div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(format_date(r.received_at)));
+    let subject = div()
+        .truncate()
+        .when(!r.seen, |d| d.text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD))
+        .when(r.seen, |d| d.text_color(l.text()))
+        .child(r.subject.clone());
+    let preview = roomy
+        .then(|| div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(r.preview.clone()));
     div()
         .id(i)
         .w_full()
-        .relative()
-        .h(px(ROW_HEIGHT))
+        .h(px(row_height(l.density())))
         .flex()
-        .flex_col()
-        .justify_center()
-        .px_3()
-        .line_height(px(18.))
+        .gap(px(10.))
+        .pr(px(12.))
         .border_b_1()
-        .border_color(rgb(0xe5e5e5))
-        // Слева — полоса категории (S5-02). Прежняя синяя полоса «не прочитано» убрана: её не отличить от синей
-        // категории; непрочитанное — жирным отправителем и цветной темой (DESIGN.md).
-        .when_some(labels.stripe, |d, c| d.child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(rgb(c))))
-        .when(selected, |d| d.bg(rgb(0xcce4ff)))
-        .hover(|d| d.bg(rgb(0xf0f6fd)))
+        .border_color(l.border())
+        .when(selected, |d| d.bg(l.picked()))
+        .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
         .cursor_pointer()
+        // Слева — полоса категории (S5-02). Синей полосы «не прочитано» нет: её не отличить от синей категории;
+        // непрочитанное — жирным отправителем и цветной темой (DESIGN.md).
+        .child(div().w(px(4.)).h_full().flex_none().rounded_r(px(2.)).when_some(stripe, |d, c| d.bg(c)))
+        .when_some(avatar, |d, a| d.child(div().flex_none().flex().items_center().child(a)))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div().flex_1().min_w(px(60.)).truncate().when(!r.seen, |d| d.font_weight(FontWeight::BOLD)).child(from),
-                )
-                // Метки — в строке отправителя справа, категория первой.
-                .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color)))
-                .child(div().text_color(rgb(0xcc3333)).child(icons))
-                .child(div().text_sm().text_color(rgb(0x888888)).child(format_date(r.received_at))),
+                .flex_col()
+                .justify_center()
+                .gap(px(2.))
+                .line_height(px(18.))
+                .child(line1)
+                .child(subject)
+                .children(preview),
         )
-        .child(div().text_sm().truncate().text_color(if r.seen { rgb(0x777777) } else { rgb(0x1a6fd1) }).child(line2))
         .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
         .into_any_element()
 }
@@ -768,8 +861,8 @@ mod tests {
         assert_eq!(p.switch(Some("archive"), -3. * ROW_HEIGHT, None), 0.);
         assert_eq!(p.switch(None, -50. * ROW_HEIGHT, Some("archive")), -3. * ROW_HEIGHT);
         // Окно строк для первого чтения — там, куда прокручено.
-        assert_eq!(rows_at(inbox, 30), 10..40);
-        assert_eq!(rows_at(0., 30), 0..30);
+        assert_eq!(rows_at(inbox, 30, ROW_HEIGHT), 10..40);
+        assert_eq!(rows_at(0., 30, ROW_HEIGHT), 0..30);
     }
 
     #[test]

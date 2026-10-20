@@ -163,14 +163,16 @@ pub struct Driver {
     signin: bool,
     /// Окно письма, открытое до сцены `reply`: ответ — следующее окно.
     composer: Option<EntityId>,
+    /// Окончание имён файлов: `-dark` для `--theme dark` (S5-01), иначе пусто.
+    suffix: &'static str,
 }
 
 impl Driver {
     /// Каталог создаётся сразу: ошибка — до открытия окна.
-    pub fn new(dir: PathBuf, live: bool) -> std::io::Result<Self> {
+    pub fn new(dir: PathBuf, live: bool, suffix: &'static str) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let dir = std::path::absolute(&dir)?;
-        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None })
+        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix })
     }
 
     /// Окно открывается со строкой входа: снимается она.
@@ -504,7 +506,8 @@ fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
 /// процедуру gpui посреди отрисовки.
 fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) {
     let Some(d) = &m.screens else { return };
-    let path = d.dir.join(format!("{}.png", scene.name()));
+    let name = format!("{}{}", scene.name(), d.suffix);
+    let path = d.dir.join(format!("{name}.png"));
     let hwnd = match scene {
         Scene::Compose | Scene::SendLater | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
         Scene::Meeting => meeting_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no meeting window")),
@@ -515,7 +518,7 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
         let result = task.await;
         let _ = this.update(cx, |m, cx| {
             match result {
-                Ok((path, (w, h))) => println!("screen {} {} {w}x{h}", scene.name(), path.display()),
+                Ok((path, (w, h))) => println!("screen {name} {} {w}x{h}", path.display()),
                 Err(e) => fail(scene, &e),
             }
             let Some(d) = &mut m.screens else { return };

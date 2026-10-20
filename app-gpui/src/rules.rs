@@ -13,10 +13,6 @@ use postman_core::settings::RulesState;
 
 use crate::vacation::{button, checkbox};
 
-const MUTED: u32 = 0x666666;
-const ERROR: u32 = 0xc42b1c;
-const ACCENT: u32 = 0x0f6cbd;
-const SELECTED: u32 = 0xcce4ff;
 
 /// Действие в редакторе (без данных: папка и адрес — отдельно).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -346,6 +342,7 @@ impl RulesPanel {
 }
 
 fn chip(id: impl Into<ElementId>, label: String, selected: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .px_2()
@@ -353,25 +350,27 @@ fn chip(id: impl Into<ElementId>, label: String, selected: bool) -> Stateful<Div
         .rounded_md()
         .cursor_pointer()
         .border_1()
-        .border_color(rgb(if selected { ACCENT } else { 0xdddddd }))
-        .when(selected, |d| d.bg(rgb(SELECTED)))
-        .when(!selected, |d| d.hover(|d| d.bg(rgb(0xf0f0f0))))
+        .border_color(if selected { l.accent() } else { l.border() })
+        .when(selected, |d| d.bg(l.picked()))
+        .when(!selected, |d| d.hover(|d| d.bg(l.fill())))
         .child(label)
 }
 
 fn link(id: impl Into<ElementId>, label: String) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .px_1()
         .rounded_md()
         .cursor_pointer()
-        .text_color(rgb(ACCENT))
-        .hover(|d| d.bg(rgb(0xe8f1fb)))
+        .text_color(l.accent_text())
+        .hover(|d| d.bg(l.hover()))
         .child(label)
 }
 
 impl RulesPanel {
     fn render_row(&self, i: usize, r: &Rule, cx: &mut Context<Self>) -> Div {
+        let l = crate::roles::look(cx);
         let confirm = self.confirm_delete == Some(i);
         let editing = self.editor.as_ref().is_some_and(|d| d.index == Some(i));
         div()
@@ -381,7 +380,7 @@ impl RulesPanel {
             .px_2()
             .py_1()
             .rounded_md()
-            .when(editing, |d| d.bg(rgb(0xf0f6fc)))
+            .when(editing, |d| d.bg(l.hover()))
             .child(
                 div()
                     .id(("rule-on", i))
@@ -393,11 +392,11 @@ impl RulesPanel {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .when(!r.enabled, |d| d.text_color(rgb(MUTED)))
+                    .when(!r.enabled, |d| d.text_color(l.text2()))
                     .child(describe(r, &self.mailboxes)),
             )
             .when(confirm, |d| {
-                d.child(div().text_color(rgb(ERROR)).child(tr!("rules-delete-confirm")))
+                d.child(div().text_color(l.error()).child(tr!("rules-delete-confirm")))
                     .child(
                         link(("rule-delete-yes", i), tr!("rules-delete"))
                             .on_click(cx.listener(move |this, _, _, cx| this.delete(i, cx))),
@@ -423,7 +422,8 @@ impl RulesPanel {
     }
 
     fn render_editor(&self, d: &Draft, cx: &mut Context<Self>) -> Div {
-        let label = |text: String| div().w(px(90.)).flex_none().text_color(rgb(MUTED)).child(text);
+        let l = crate::roles::look(cx);
+        let label = |text: String| div().w(px(90.)).flex_none().text_color(l.text2()).child(text);
         let fields = FIELDS.iter().enumerate().map(|(n, (field, key))| {
             let field = *field;
             chip(("rules-field", n), tr!(key), d.field == field)
@@ -452,8 +452,8 @@ impl RulesPanel {
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0xc7dcf0))
-            .bg(rgb(0xf7fbff))
+            .border_color(l.c(pets_ui::theme::Role::StrokeCard))
+            .bg(l.hover())
             .child(div().font_weight(FontWeight::SEMIBOLD).child(if d.index.is_some() {
                 tr!("rules-edit-title")
             } else {
@@ -484,7 +484,7 @@ impl RulesPanel {
                         .child(div().flex_1().child(Input::new(&self.address))),
                 )
             })
-            .when(d.kind == Kind::Discard, |el| el.child(div().text_color(rgb(MUTED)).child(tr!("rules-discard-hint"))))
+            .when(d.kind == Kind::Discard, |el| el.child(div().text_color(l.text2()).child(tr!("rules-discard-hint"))))
             .child(
                 div()
                     .flex()
@@ -510,6 +510,7 @@ impl RulesPanel {
 
 impl Render for RulesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         if std::mem::take(&mut self.sync_inputs)
             && let Some(d) = self.editor.clone()
         {
@@ -533,19 +534,19 @@ impl Render for RulesPanel {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0xdddddd))
-            .bg(rgb(0xffffff))
+            .border_color(l.border())
+            .bg(l.panel())
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr!("rules-title")))
-            .child(div().text_color(rgb(MUTED)).child(tr!("rules-hint")))
-            .when(!self.live, |d| d.child(div().text_color(rgb(MUTED)).child(tr!("rules-demo"))))
+            .child(div().text_color(l.text2()).child(tr!("rules-hint")))
+            .when(!self.live, |d| d.child(div().text_color(l.text2()).child(tr!("rules-demo"))))
             .when(self.live && self.state.is_none(), |d| {
-                d.child(div().text_color(rgb(MUTED)).child(tr!("rules-loading")))
+                d.child(div().text_color(l.text2()).child(tr!("rules-loading")))
             })
             .when(!rules.is_empty() && !active && self.live, |d| {
-                d.child(div().text_color(rgb(MUTED)).child(tr!("rules-all-off")))
+                d.child(div().text_color(l.text2()).child(tr!("rules-all-off")))
             })
             .when(rules.is_empty() && self.state.is_some(), |d| {
-                d.child(div().text_color(rgb(MUTED)).child(tr!("rules-empty")))
+                d.child(div().text_color(l.text2()).child(tr!("rules-empty")))
             })
             .child(list)
             .children(editor)
@@ -562,7 +563,7 @@ impl Render for RulesPanel {
                         .gap_2()
                         .p_2()
                         .rounded_md()
-                        .bg(rgb(0xfff8e1))
+                        .bg(l.warning_bg())
                         .child(div().flex_1().child(text))
                         .child(link("rules-replace", tr!("rules-replace")).on_click(cx.listener(
                             move |this, _, _, cx| {
@@ -578,7 +579,7 @@ impl Render for RulesPanel {
                         ))),
                 )
             })
-            .when_some(self.error.clone(), |d, e| d.child(div().text_color(rgb(ERROR)).child(e)))
+            .when_some(self.error.clone(), |d, e| d.child(div().text_color(l.error()).child(e)))
             .child(
                 div()
                     .flex()
@@ -595,22 +596,22 @@ impl Render for RulesPanel {
                         button("rules-close", tr!("rules-close"), false)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(RulesEvent::Close))),
                     )
-                    .when_some(self.note.clone(), |d, n| d.child(div().text_color(rgb(0x107c10)).child(n))),
+                    .when_some(self.note.clone(), |d, n| d.child(div().text_color(l.success()).child(n))),
             )
             .when(!foreign.is_empty(), |d| {
                 d.child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child(tr!("rules-foreign-title")))
-                    .child(div().text_color(rgb(MUTED)).child(tr!("rules-foreign-hint")))
+                    .child(div().text_color(l.text2()).child(tr!("rules-foreign-hint")))
                     .children(foreign.into_iter().map(|f| {
                         let title = if f.active {
                             tr!("rules-foreign-active", name = f.name)
                         } else {
                             tr!("rules-foreign-inactive", name = f.name)
                         };
-                        div().flex().flex_col().gap_1().child(div().text_color(rgb(MUTED)).child(title)).child(
+                        div().flex().flex_col().gap_1().child(div().text_color(l.text2()).child(title)).child(
                             div()
                                 .p_2()
                                 .rounded_md()
-                                .bg(rgb(0xf5f5f5))
+                                .bg(l.fill_passive())
                                 .font_family("Consolas")
                                 .text_size(px(12.))
                                 .whitespace_normal()

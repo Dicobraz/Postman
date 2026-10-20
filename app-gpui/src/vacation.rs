@@ -13,9 +13,6 @@ use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use postman_jmap::VacationResponse;
 
-const MUTED: u32 = 0x666666;
-const ERROR: u32 = 0xc42b1c;
-const ACCENT: u32 = 0x0f6cbd;
 /// Высота полосы «Автоответ включён»: кэшированное view не измеряется по содержимому.
 pub(crate) const BAR_HEIGHT: f32 = 32.0;
 
@@ -277,6 +274,7 @@ impl VacationPanel {
 
 /// Квадратик флажка: включён — залит акцентом с галочкой.
 pub(crate) fn checkbox(on: bool) -> Div {
+    let l = crate::roles::now();
     div()
         .size(px(16.))
         .flex_none()
@@ -285,37 +283,40 @@ pub(crate) fn checkbox(on: bool) -> Div {
         .justify_center()
         .rounded_sm()
         .border_1()
-        .border_color(rgb(if on { ACCENT } else { 0x8a8a8a }))
-        .when(on, |d| d.bg(rgb(ACCENT)).text_color(rgb(0xffffff)).text_size(px(11.)).child("✓"))
+        .border_color(if on { l.accent() } else { l.c(pets_ui::theme::Role::StrokeStrong) })
+        .when(on, |d| d.bg(l.accent()).text_color(l.on_accent()).text_size(px(11.)).child("✓"))
 }
 
 /// Флажок с подписью, нажатие — переключить.
 fn check(id: &'static str, on: bool, label: String, enabled: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .flex()
         .items_center()
         .gap_2()
         .when(enabled, |d| d.cursor_pointer())
-        .when(!enabled, |d| d.text_color(rgb(MUTED)))
+        .when(!enabled, |d| d.text_color(l.text2()))
         .child(checkbox(on))
         .child(label)
 }
 
 pub(crate) fn button(id: &'static str, label: String, primary: bool) -> Stateful<Div> {
+    let l = crate::roles::now();
     div()
         .id(id)
         .px_4()
         .py_1()
         .rounded_md()
         .cursor_pointer()
-        .when(primary, |d| d.text_color(rgb(0xffffff)).bg(rgb(ACCENT)).hover(|d| d.bg(rgb(0x115ea3))))
-        .when(!primary, |d| d.bg(rgb(0xececec)).hover(|d| d.bg(rgb(0xe0e0e0))))
+        .when(primary, |d| d.text_color(l.on_accent()).bg(l.accent()).hover(|d| d.bg(l.accent_hover())))
+        .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
         .child(label)
 }
 
 impl Render for VacationPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         if std::mem::take(&mut self.sync_inputs) {
             let f = self.form.clone();
             for (state, value) in [(&self.from, f.from), (&self.to, f.to), (&self.subject, f.subject)] {
@@ -324,15 +325,15 @@ impl Render for VacationPanel {
             self.body.update(cx, |s, cx| s.set_value(f.body, window, cx));
         }
         let (enabled, period) = (self.form.enabled, self.form.period);
-        let label = |text: String| div().w(px(110.)).flex_none().text_color(rgb(MUTED)).child(text);
+        let label = |text: String| div().w(px(110.)).flex_none().text_color(l.text2()).child(text);
         let dates = div()
             .flex()
             .items_center()
             .gap_2()
             .pl_6()
-            .child(div().text_color(rgb(MUTED)).child(tr!("vacation-from")))
+            .child(div().text_color(l.text2()).child(tr!("vacation-from")))
             .child(div().w(px(170.)).child(Input::new(&self.from)))
-            .child(div().text_color(rgb(MUTED)).child(tr!("vacation-to")))
+            .child(div().text_color(l.text2()).child(tr!("vacation-to")))
             .child(div().w(px(170.)).child(Input::new(&self.to)));
         let busy = self.busy || self.loading;
         let card = div()
@@ -343,17 +344,17 @@ impl Render for VacationPanel {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0xdddddd))
-            .bg(rgb(0xffffff))
+            .border_color(l.border())
+            .bg(l.panel())
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr!("vacation-title")))
-            .child(div().text_color(rgb(MUTED)).child(tr!("vacation-hint")))
-            .when(!self.live, |d| d.child(div().text_color(rgb(MUTED)).child(tr!("vacation-demo"))))
-            .when(self.loading, |d| d.child(div().text_color(rgb(MUTED)).child(tr!("vacation-loading"))))
+            .child(div().text_color(l.text2()).child(tr!("vacation-hint")))
+            .when(!self.live, |d| d.child(div().text_color(l.text2()).child(tr!("vacation-demo"))))
+            .when(self.loading, |d| d.child(div().text_color(l.text2()).child(tr!("vacation-loading"))))
             .child(
                 check("vacation-enabled", enabled, tr!("vacation-enabled"), true)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle(false, cx))),
             )
-            .when_some(self.warning.clone(), |d, w| d.child(div().pl_6().text_color(rgb(0x8a5300)).child(w)))
+            .when_some(self.warning.clone(), |d, w| d.child(div().pl_6().text_color(l.warning()).child(w)))
             .child(
                 check("vacation-period", period, tr!("vacation-period"), enabled)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle(true, cx))),
@@ -367,9 +368,9 @@ impl Render for VacationPanel {
                     .child(label(tr!("vacation-subject")))
                     .child(div().flex_1().child(Input::new(&self.subject))),
             )
-            .child(div().text_color(rgb(MUTED)).child(tr!("vacation-body")))
+            .child(div().text_color(l.text2()).child(tr!("vacation-body")))
             .child(div().h(px(180.)).child(Textarea::new(&self.body).h(relative(1.))))
-            .when_some(self.error.clone(), |d, e| d.child(div().text_color(rgb(ERROR)).child(e)))
+            .when_some(self.error.clone(), |d, e| d.child(div().text_color(l.error()).child(e)))
             .child(
                 div()
                     .flex()
@@ -387,7 +388,7 @@ impl Render for VacationPanel {
                         button("vacation-close", tr!("vacation-close"), false)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(VacationEvent::Close))),
                     )
-                    .when_some(self.note.clone(), |d, n| d.child(div().text_color(rgb(0x107c10)).child(n))),
+                    .when_some(self.note.clone(), |d, n| d.child(div().text_color(l.success()).child(n))),
             );
         div()
             .id("vacation-panel")
@@ -416,14 +417,15 @@ impl EventEmitter<BarEvent> for VacationBar {}
 
 impl Render for VacationBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let link = |id: &'static str, text: String| {
             div()
                 .id(id)
                 .px_2()
                 .rounded_md()
                 .cursor_pointer()
-                .text_color(rgb(ACCENT))
-                .hover(|d| d.bg(rgb(0xfff1c2)))
+                .text_color(l.accent_text())
+                .hover(|d| d.bg(l.warning_bg()))
                 .child(text)
         };
         div()
@@ -432,9 +434,9 @@ impl Render for VacationBar {
             .items_center()
             .gap_2()
             .px_3()
-            .bg(rgb(0xfff8e1))
+            .bg(l.warning_bg())
             .border_b_1()
-            .border_color(rgb(0xf0d58c))
+            .border_color(l.c(pets_ui::theme::Role::StrokeCard))
             .child(div().child("⚠"))
             .child(div().flex_1().min_w_0().child(self.text.clone()))
             .child(

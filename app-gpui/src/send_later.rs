@@ -236,6 +236,7 @@ impl Mailer {
     pub(crate) fn undo_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let offer = self.send_later.undo.shown(Instant::now())?;
         let id = offer.id;
+        let l = crate::roles::look(cx);
         let action = match offer.state {
             OfferState::Open => div()
                 .id("undo-send")
@@ -243,12 +244,12 @@ impl Mailer {
                 .rounded_md()
                 .cursor_pointer()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0x8cc4f0))
-                .hover(|d| d.bg(rgb(0x484644)))
+                .text_color(l.accent_text())
+                .hover(|d| d.bg(l.hover()))
                 .child(tr!("send-undo"))
                 .on_click(cx.listener(move |this, _, _, cx| this.undo_send(id, cx)))
                 .into_any_element(),
-            OfferState::Canceling(_) => div().text_color(rgb(0xc8c6c4)).child(tr!("send-undoing")).into_any_element(),
+            OfferState::Canceling(_) => div().text_color(l.text3()).child(tr!("send-undoing")).into_any_element(),
         };
         let card = div()
             .id("undo-card")
@@ -260,10 +261,12 @@ impl Mailer {
             .py_2()
             .rounded_md()
             .shadow_lg()
-            .bg(rgb(0x323130))
-            .text_color(rgb(0xffffff))
+            .border_1()
+            .border_color(l.c(pets_ui::theme::Role::StrokeCard))
+            .bg(l.c(pets_ui::theme::Role::LayerOverlay))
+            .text_color(l.text())
             .child(tr!("send-sent"))
-            .child(div().text_color(rgb(0x8a8886)).child("·"))
+            .child(div().text_color(l.text3()).child("·"))
             .child(action);
         Some(div().absolute().left_0().right_0().bottom(px(36.)).flex().justify_center().child(card).into_any_element())
     }

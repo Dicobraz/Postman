@@ -38,6 +38,9 @@ mod rules;
 mod labels;
 mod thread;
 mod send_later;
+mod roles;
+mod tabs;
+mod chrome;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -72,6 +75,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/labels.ftl")),
     ("ru", include_str!("../i18n/ru/threads.ftl")),
     ("ru", include_str!("../i18n/ru/send.ftl")),
+    ("ru", include_str!("../i18n/ru/frame.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -86,6 +90,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/labels.ftl")),
     ("en", include_str!("../i18n/en/threads.ftl")),
     ("en", include_str!("../i18n/en/send.ftl")),
+    ("en", include_str!("../i18n/en/frame.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
@@ -134,10 +139,15 @@ const USAGE: &str = "Postman - mail, calendar and contacts for Stalwart (JMAP)
 Usage: postman [options]
   --demo [N]            demo mailbox with N messages (default 50000), no server
   --lang ru|en|auto     interface language (default: from Windows)
+  --theme light|dark|system
+                        theme (default: system - light/dark and accent from Windows, live)
+  --density compact|normal|comfortable
+                        list row density (default: normal)
   --sign-out            forget the saved sign-in
   --bench               measure and exit: one key=value line on stdout
   --screens <dir> [--live] [--keep]
-                        save screenshots (PNG) and exit: one 'screen <name> <path> <w>x<h>' line per file
+                        save screenshots (PNG) and exit: one 'screen <name> <path> <w>x<h>' line per file;
+                        with --theme dark the files are <name>-dark.png
   --help, --version     this text, the version
 
 Live mailbox: POSTMAN_URL and POSTMAN_USER/POSTMAN_PASSWORD (or POSTMAN_TOKEN); otherwise the saved sign-in.
@@ -173,12 +183,16 @@ fn main() {
         bench::on_idle(sys::bench_idle_fields);
     }
     let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
+    let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str);
+    let theme = roles::choice(value("--theme"));
+    let density = roles::density(value("--density"));
     pets_shell::init_logging("Postman", "POSTMAN_LOG");
     for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
         tracing::warn!("i18n: {p}");
     }
     let mut screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
-        screens::Driver::new(d.into(), live).unwrap_or_else(|e| fatal("fatal-screens-dir", e))
+        let suffix = if theme == pets_ui::theme::FLUENT_DARK { "-dark" } else { "" };
+        screens::Driver::new(d.into(), live, suffix).unwrap_or_else(|e| fatal("fatal-screens-dir", e))
     });
     // Второй запуск отдаёт аргументы первому (тот показывает окно) и выходит; замеры и снимки — всегда отдельно.
     let listener = if bench || screens.is_some() {
@@ -216,11 +230,19 @@ fn main() {
 
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // Тема (S5-01): «как в ОС» или `--theme`, на лету; до первого окна — чтение реестра, микросекунды.
+        roles::init(theme, density, cx);
         // Клавиши — из реестра команд (S2-02); в поле ввода клавиши без модификаторов — текст.
         commands::bind(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-        let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        // Свой заголовок окна (S5-01): вкладки, перетаскивание, «─ □ ✕» — `chrome.rs`.
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions { title: Some("Postman".into()), appears_transparent: true, ..Default::default() }),
+            ..Default::default()
+        };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
+            roles::observe_window(window);
             let bench = bench.then(|| if live { Bench::live(start) } else { Bench::new(start) });
             let cache = cache.clone();
             cx.new(|cx| {
@@ -290,5 +312,31 @@ mod tests {
             }
         }
         assert!(found.is_empty(), "сырые строки, перенести в i18n/<язык>/*.ftl:\n{}", found.join("\n"));
+    }
+
+    /// Цвета — только ролями темы (S5-01, базис Pets): литералы и именованные цвета gpui — лишь в `roles.rs`.
+    #[test]
+    fn no_color_literals() {
+        const CALLS: [&str; 9] = ["rgb(", "rgba(", "hsla(", "white()", "black()", "red()", "green()", "blue()", "yellow()"];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") || path.file_name().is_some_and(|n| n == "roles.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in source.lines().enumerate() {
+                for call in CALLS {
+                    let hit = line.match_indices(call).any(|(i, _)| {
+                        !line[..i].ends_with(|c: char| c.is_alphanumeric() || "_:.\"".contains(c))
+                    });
+                    if hit {
+                        found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "цвет литералом, взять роль темы (`roles.rs`):\n{}", found.join("\n"));
     }
 }

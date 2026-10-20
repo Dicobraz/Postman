@@ -1,16 +1,6 @@
 # Экран почты.
-search-placeholder = Поиск (Ctrl+E), Enter — искать, Esc — сбросить
 search-nothing = Ничего не найдено: «{ $query }»
 folders-results = 🔍 Результаты ({ $n })
-nav-mail = ✉ Почта
-nav-calendar = 📅 Календарь
-nav-contacts = 👥 Контакты
-bar-new = ✉ Создать
-bar-reply = ↩ Ответить
-bar-reply-all = ↩↩ Ответить всем
-bar-forward = ↪ Переслать
-bar-delete = 🗑 Удалить
-bar-flag = ⚑ Флаг
 reading-empty = Выберите письмо
 reading-from = От:
 reading-to = Кому:

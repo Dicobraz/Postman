@@ -7,10 +7,8 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use postman_cache::EmailRow;
 use postman_core::labels::{Book, Categories, Label, ROW_LABELS};
-use postman_core::palette::{self, Theme};
 
-/// Тема интерфейса: пока только светлая (тёмная — S5-01).
-pub(crate) const THEME: Theme = Theme::Light;
+use crate::roles::Look;
 
 /// Таблица категорий по умолчанию (DESIGN.md) с именами на языке интерфейса — пока у учётной записи нет своей.
 pub(crate) fn default_book() -> Book {
@@ -49,7 +47,8 @@ pub(crate) fn label_name(l: &Label) -> String {
 /// категория первой (DESIGN.md «Строка письма и метки»).
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct RowLabels {
-    pub(crate) stripe: Option<palette::Rgb>,
+    /// Цвет категории для полосы (имя цвета Fluent); цвет в теме — роль (`Look::cat`).
+    pub(crate) stripe: Option<&'static str>,
     /// Имя и цвет (имя цвета Fluent).
     pub(crate) chips: Vec<(String, &'static str)>,
 }
@@ -60,23 +59,23 @@ pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
     }
     let Some(table) = book.for_account(postman_cache::account_of(&row.id)) else { return RowLabels::default() };
     let labels = table.labels(&row.keywords);
-    let stripe = labels.iter().find(|l| matches!(l, Label::Category(_))).map(|l| palette::swatch(l.color(), THEME).dot);
+    let stripe = labels.iter().find(|l| matches!(l, Label::Category(_))).map(|l| l.color());
     let chips = labels.iter().take(ROW_LABELS).map(|l| (label_name(l), l.color())).collect();
     RowLabels { stripe, chips }
 }
 
 /// Метка в строке отправителя: подложка и текст цвета категории; длинное имя обрезается.
-pub(crate) fn chip(name: String, color: &str) -> Div {
-    let s = palette::swatch(color, THEME);
+pub(crate) fn chip(name: String, color: &str, l: &Look) -> Div {
+    let s = l.cat(color);
     div()
         .flex_none()
         .max_w(px(96.))
         .px_1p5()
         .rounded_sm()
-        .text_xs()
+        .text_size(px(11.))
         .line_height(px(16.))
-        .bg(rgb(s.bg))
-        .text_color(rgb(s.text))
+        .bg(s.bg)
+        .text_color(s.text)
         .truncate()
         .child(name)
 }
@@ -86,7 +85,7 @@ mod tests {
     use super::{RowLabels, row_labels};
     use postman_cache::EmailRow;
     use postman_core::labels::{Book, Categories};
-    use postman_core::palette::{self, Theme};
+    use postman_core::palette;
 
     fn row(id: &str, keywords: &[&str]) -> EmailRow {
         EmailRow {
@@ -110,7 +109,7 @@ mod tests {
     fn row_shows_two_labels_category_first() {
         let book = Book::own(Categories::defaults(|id| id.to_owned()));
         let got = row_labels(&book, &row("a", &["$label4", "pm.cat.team", "pm.cat.clients", "pm.cat.services"]));
-        assert_eq!(got.stripe, Some(palette::swatch(palette::BLUE, Theme::Light).dot));
+        assert_eq!(got.stripe, Some(palette::BLUE));
         assert_eq!(got.chips, [("clients".to_string(), palette::BLUE), ("team".to_string(), palette::GREEN)]);
         // Только метка Thunderbird — нейтральная, без полосы.
         let tb = row_labels(&book, &row("a", &["$label4"]));

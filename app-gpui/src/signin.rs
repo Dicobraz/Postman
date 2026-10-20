@@ -97,12 +97,13 @@ pub(crate) fn normalize_url(raw: &str) -> String {
 
 impl Render for SignIn {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let row = |label: String, input: &Entity<InputState>| {
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().w(px(80.)).text_color(rgb(0x555555)).child(label))
+                .child(div().w(px(80.)).text_color(l.text2()).child(label))
                 .child(div().flex_1().child(Input::new(input)))
         };
         let busy = self.busy;
@@ -114,14 +115,14 @@ impl Render for SignIn {
             .p_4()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0xdddddd))
-            .bg(rgb(0xffffff))
+            .border_color(l.border())
+            .bg(l.panel())
             .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr!("signin-title")))
-            .child(div().text_color(rgb(0x777777)).child(tr!("signin-hint")))
+            .child(div().text_color(l.text2()).child(tr!("signin-hint")))
             .child(row(tr!("signin-url"), &self.url))
             .child(row(tr!("signin-user"), &self.user))
             .child(row(tr!("signin-password"), &self.password))
-            .when_some(self.error.clone(), |d, e| d.child(div().text_color(rgb(0xc42b1c)).child(e)))
+            .when_some(self.error.clone(), |d, e| d.child(div().text_color(l.error()).child(e)))
             .child(
                 div()
                     .flex()
@@ -133,13 +134,13 @@ impl Render for SignIn {
                             .px_4()
                             .py_1()
                             .rounded_md()
-                            .text_color(rgb(0xffffff))
-                            .bg(if busy { rgb(0x8bb8e8) } else { rgb(0x0f6cbd) })
-                            .when(!busy, |d| d.cursor_pointer().hover(|d| d.bg(rgb(0x115ea3))))
+                            .text_color(l.on_accent())
+                            .bg(if busy { l.c(pets_ui::theme::Role::AccentFillPressed) } else { l.accent() })
+                            .when(!busy, |d| d.cursor_pointer().hover(|d| d.bg(l.accent_hover())))
                             .child(if busy { tr!("signin-busy") } else { tr!("signin-submit") })
                             .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                     )
-                    .child(div().text_sm().text_color(rgb(0x888888)).child(tr!("signin-demo"))),
+                    .child(div().text_sm().text_color(l.text2()).child(tr!("signin-demo"))),
             );
         div().flex().flex_1().min_w_0().h_full().items_center().justify_center().child(card)
     }

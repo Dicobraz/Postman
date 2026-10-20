@@ -1,4 +1,4 @@
-//! Папки и переключатель разделов (почта, календарь, контакты). Общие ящики (S4-06) — свёртываемые ветки
+//! Панель папок (разделы — рейл модулей, `chrome.rs`). Общие ящики (S4-06) — свёртываемые ветки
 //! с именем аккаунта под своими папками.
 
 use std::collections::HashSet;
@@ -8,7 +8,9 @@ use gpui_kit::prelude::*;
 use pets_i18n::tr;
 use postman_cache::{AccountRow, MailboxRow, account_of};
 
-use crate::mailer::*;
+use pets_ui::theme::{Metric, Role};
+
+use crate::roles::{Look, look};
 
 // --- папки ---
 
@@ -21,19 +23,17 @@ pub(crate) struct Folders {
     pub(crate) current: Option<String>,
     /// Число результатов, пока показан поиск.
     pub(crate) results: Option<usize>,
-    pub(crate) section: Section,
 }
 
 pub(crate) enum FolderEvent {
     Open(String),
-    Section(Section),
 }
 
 impl EventEmitter<FolderEvent> for Folders {}
 
 impl Folders {
     pub(crate) fn new(mailboxes: Vec<MailboxRow>, accounts: Vec<AccountRow>, current: Option<String>) -> Self {
-        Self { mailboxes, accounts, collapsed: HashSet::new(), current, results: None, section: Section::Mail }
+        Self { mailboxes, accounts, collapsed: HashSet::new(), current, results: None }
     }
 
     /// Папки аккаунта (`None` — своего) в порядке сервера.
@@ -55,98 +55,109 @@ impl Folders {
         cx.notify();
     }
 
-    fn folder(&self, m: &MailboxRow, indent: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn folder(&self, m: &MailboxRow, indent: bool, l: &Look, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.results.is_none() && self.current.as_deref() == Some(&m.id);
         let id = m.id.clone();
         div()
             .id(SharedString::from(format!("mb-{}", m.id)))
-            .px_2()
-            .when(indent, |d| d.pl_5())
-            .py_1()
-            .rounded_md()
-            .when(selected, |d| d.bg(rgb(0xcce4ff)))
-            .hover(|d| d.bg(rgb(0xe8f1fb)))
+            .h(px(row_h(l)))
+            .flex_none()
+            .pl(px(if indent { 26. } else { 8. }))
+            .pr(px(8.))
+            .rounded(l.px(Metric::RadiusControl))
+            .when(selected, |d| d.bg(l.c(Role::FillCursor)).font_weight(FontWeight::SEMIBOLD))
+            .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
             .cursor_pointer()
             .flex()
-            .gap_2()
-            .child(div().flex_1().truncate().child(m.name.clone()))
+            .items_center()
+            .gap(px(10.))
+            .child(crate::chrome::icon(folder_glyph(m.role.as_deref()), 16.).text_color(l.text2()))
+            .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
             // Непрочитанные — с сервера (`Mailbox.unreadEmails`), а не по загруженной части папки.
-            .when(m.unread > 0, |d| unread(d, m.unread))
+            .when(m.unread > 0, |d| unread(d, m.unread, l))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Open(id.clone()))))
             .into_any_element()
     }
 
     /// Заголовок ветки общего ящика: стрелка, имя; свёрнута — непрочитанные всего ящика.
-    fn branch(&self, a: &AccountRow, cx: &mut Context<Self>) -> AnyElement {
+    fn branch(&self, a: &AccountRow, l: &Look, cx: &mut Context<Self>) -> AnyElement {
         let open = !self.collapsed.contains(&a.id);
         let total: u32 = if open { 0 } else { self.of(Some(&a.id)).map(|m| m.unread).sum() };
         let id = a.id.clone();
         div()
             .id(SharedString::from(format!("acc-{}", a.id)))
-            .mt_2()
-            .px_1()
-            .py_1()
-            .rounded_md()
-            .hover(|d| d.bg(rgb(0xe8f1fb)))
+            .mt(px(10.))
+            .h(px(28.))
+            .flex_none()
+            .px(px(8.))
+            .rounded(l.px(Metric::RadiusControl))
+            .hover(|d| d.bg(l.hover()))
             .cursor_pointer()
             .flex()
             .items_center()
             .gap_1()
-            .child(div().w(px(12.)).text_color(rgb(0x666666)).child(if open { "▾" } else { "▸" }))
-            .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(a.name.clone()))
-            .when(self.read_only(a), |d| {
-                d.child(div().flex_none().text_size(px(11.)).text_color(rgb(0x888888)).child(tr!("shared-read-only")))
-            })
-            .when(total > 0, |d| unread(d, total))
+            .text_size(l.px(Metric::TypeCaption))
+            .text_color(l.text2())
+            .child(div().w(px(12.)).child(if open { "▾" } else { "▸" }))
+            .child(div().flex_1().min_w_0().truncate().child(a.name.clone()))
+            .when(self.read_only(a), |d| d.child(div().flex_none().text_size(px(11.)).child(tr!("shared-read-only"))))
+            .when(total > 0, |d| unread(d, total, l))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
             .into_any_element()
     }
 }
 
-fn unread(d: Stateful<Div>, n: u32) -> Stateful<Div> {
-    d.child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x0f6cbd)).child(n.to_string()))
+/// Высота строки папки: 32 px при обычной плотности (макет), на 4 px меньше — при компактной.
+fn row_h(l: &Look) -> f32 {
+    l.m(Metric::HRow) + 8.
+}
+
+/// Значок папки по роли JMAP.
+fn folder_glyph(role: Option<&str>) -> char {
+    use crate::chrome::glyph;
+    match role {
+        Some("inbox") => glyph::MAIL,
+        Some("sent") => glyph::SEND,
+        Some("drafts") => glyph::DRAFT,
+        Some("trash") => glyph::DELETE,
+        Some("archive") => glyph::ARCHIVE,
+        Some("junk") => glyph::JUNK,
+        _ => glyph::FOLDER,
+    }
+}
+
+fn unread(d: Stateful<Div>, n: u32, l: &Look) -> Stateful<Div> {
+    d.child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(l.accent_text()).child(n.to_string()))
 }
 
 impl Render for Folders {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex().flex_col().size_full().border_r_1().border_color(rgb(0xdddddd)).bg(rgb(0xf7f7f7));
+        let l = look(cx);
+        let mut col = div().flex().flex_col().size_full().pt(px(4.)).pr(px(8.)).pl(px(4.)).text_color(l.text());
         if let Some(n) = self.results {
-            col = col.child(div().px_3().py_1().bg(rgb(0xcce4ff)).child(tr!("folders-results", n = n)));
+            col = col.child(
+                div()
+                    .mx(px(4.))
+                    .mb(px(4.))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(l.px(Metric::RadiusControl))
+                    .bg(l.picked())
+                    .child(tr!("folders-results", n = n)),
+            );
         }
-        let mut list = div().id("folders").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().p_1();
-        let own: Vec<AnyElement> = self.of(None).map(|m| self.folder(m, false, cx)).collect();
+        let mut list = div().id("folders").flex().flex_col().gap(px(2.)).flex_1().min_h_0().overflow_y_scroll();
+        let own: Vec<AnyElement> = self.of(None).map(|m| self.folder(m, false, &l, cx)).collect();
         list = list.children(own);
         for a in &self.accounts {
-            list = list.child(self.branch(a, cx));
+            list = list.child(self.branch(a, &l, cx));
             if !self.collapsed.contains(&a.id) {
-                let folders: Vec<AnyElement> = self.of(Some(&a.id)).map(|m| self.folder(m, true, cx)).collect();
+                let folders: Vec<AnyElement> = self.of(Some(&a.id)).map(|m| self.folder(m, true, &l, cx)).collect();
                 list = list.children(folders);
             }
         }
-        col.child(list).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .p_2()
-                .border_t_1()
-                .border_color(rgb(0xdddddd))
-                .child(nav("nav-mail", tr!("nav-mail"), self.section == Section::Mail, Section::Mail, cx))
-                .child(nav("nav-cal", tr!("nav-calendar"), self.section == Section::Calendar, Section::Calendar, cx))
-                .child(nav("nav-contacts", tr!("nav-contacts"), self.section == Section::Contacts, Section::Contacts, cx)),
-        )
+        col.child(list)
     }
-}
-
-pub(crate) fn nav(id: &'static str, label: String, active: bool, section: Section, cx: &mut Context<Folders>) -> impl IntoElement {
-    div()
-        .id(id)
-        .px_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(active, |d| d.bg(rgb(0xcce4ff)))
-        .child(label)
-        .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Section(section))))
 }
 
 #[cfg(test)]

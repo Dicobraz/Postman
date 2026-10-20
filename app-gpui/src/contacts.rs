@@ -22,7 +22,7 @@ use postman_core::contacts::AddressBook;
 use postman_core::sync::{Command, Event as SyncEvent};
 use postman_jmap::{ContactCard, Principal};
 
-use crate::calendar::{ACCENT, BORDER, BUTTON, ERROR, MUTED, PICKED, button};
+use crate::calendar::button;
 
 const LIST_W: f32 = 320.;
 const ROW_H: f32 = 40.;
@@ -583,6 +583,7 @@ impl ContactsView {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let tab = |id: &'static str, text: String, source: Source, cx: &mut Context<Self>| {
             div()
                 .id(id)
@@ -590,8 +591,8 @@ impl ContactsView {
                 .py_0p5()
                 .rounded_md()
                 .cursor_pointer()
-                .when(self.source == source, |d| d.bg(rgb(PICKED)).font_weight(FontWeight::SEMIBOLD))
-                .when(self.source != source, |d| d.hover(|d| d.bg(rgb(BUTTON))))
+                .when(self.source == source, |d| d.bg(l.picked()).font_weight(FontWeight::SEMIBOLD))
+                .when(self.source != source, |d| d.hover(|d| d.bg(l.fill())))
                 .child(text)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_source(source, cx)))
         };
@@ -624,7 +625,7 @@ impl ContactsView {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(l.border())
             .child(
                 div()
                     .flex()
@@ -641,15 +642,15 @@ impl ContactsView {
                     .gap_2()
                     .p_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(l.border())
                     .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
                     .child(
                         button("contact-new", tr!("contacts-new"), true)
                             .on_click(cx.listener(|this, _, window, cx| this.start_edit(None, window, cx))),
                     ),
             )
-            .when_some(self.error.clone(), |d, e| d.child(div().px_3().py_1().text_color(rgb(ERROR)).child(e)))
-            .when_some(note, |d, n| d.child(div().px_3().py_2().text_color(rgb(MUTED)).child(n)))
+            .when_some(self.error.clone(), |d, e| d.child(div().px_3().py_1().text_color(l.error()).child(e)))
+            .when_some(note, |d, n| d.child(div().px_3().py_2().text_color(l.text2()).child(n)))
             .child(
                 div()
                     .relative()
@@ -661,6 +662,7 @@ impl ContactsView {
     }
 
     fn card_pane(&self, e: &Entry, cx: &mut Context<Self>) -> AnyElement {
+        let l = crate::roles::look(cx);
         let c = &e.card;
         let mine = e.kind == Kind::Contact;
         let busy = self.pending.is_some();
@@ -668,7 +670,7 @@ impl ContactsView {
             div()
                 .flex()
                 .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!(label)))
+                .child(div().w(px(LABEL_W)).flex_none().text_color(l.text2()).child(tr!(label)))
                 .child(div().flex_1().min_w_0().flex().flex_col().children(values))
         };
         let confirm = matches!(self.mode, Mode::Confirm).then(|| {
@@ -679,8 +681,8 @@ impl ContactsView {
                     .py_0p5()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(yes, |d| d.bg(rgb(ERROR)).text_color(rgb(0xffffff)).hover(|d| d.bg(rgb(0xa52517))))
-                    .when(!yes, |d| d.bg(rgb(BUTTON)).hover(|d| d.bg(rgb(0xe0e0e0))))
+                    .when(yes, |d| d.bg(l.error_bg()).text_color(l.error()).font_weight(FontWeight::SEMIBOLD))
+                    .when(!yes, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
                     .child(text)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if yes {
@@ -697,9 +699,9 @@ impl ContactsView {
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                .bg(rgb(0xfff4ce))
+                .bg(l.warning_bg())
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(l.border())
                 .child(div().flex_1().child(if busy {
                     tr!("contacts-deleting")
                 } else {
@@ -753,12 +755,12 @@ impl ContactsView {
                             .flex()
                             .flex_col()
                             .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(e.name()))
-                            .child(div().text_color(rgb(MUTED)).child(e.kind.label())),
+                            .child(div().text_color(l.text2()).child(e.kind.label())),
                     )
                     .child(actions)
                     .when(!c.emails.is_empty(), |d| {
                         let emails =
-                            c.emails.iter().map(|m| div().text_color(rgb(ACCENT)).child(m.clone()).into_any_element());
+                            c.emails.iter().map(|m| div().text_color(l.accent_text()).child(m.clone()).into_any_element());
                         d.child(field("contacts-emails", emails.collect()))
                     })
                     .when(!c.phones.is_empty(), |d| {
@@ -768,19 +770,20 @@ impl ContactsView {
                         d.child(field("contacts-organization", vec![text(&c.organization)]))
                     })
                     .when(!c.title.is_empty(), |d| d.child(field("contacts-title", vec![text(&c.title)])))
-                    .when(!mine, |d| d.child(div().text_xs().text_color(rgb(MUTED)).child(tr!("contacts-readonly")))),
+                    .when(!mine, |d| d.child(div().text_xs().text_color(l.text2()).child(tr!("contacts-readonly")))),
             )
             .into_any_element()
     }
 
     fn form_pane(&self, f: &Form, cx: &mut Context<Self>) -> AnyElement {
+        let l = crate::roles::look(cx);
         let busy = self.pending.is_some();
         let field = |label: &str, state: &Entity<InputState>| {
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(rgb(MUTED)).child(tr!(label)))
+                .child(div().w(px(LABEL_W)).flex_none().text_color(l.text2()).child(tr!(label)))
                 .child(div().flex_1().min_w_0().max_w(px(520.)).child(Input::new(state)))
         };
         let title = tr!(if f.old.is_some() { "contacts-form-edit" } else { "contacts-form-new" });
@@ -798,8 +801,8 @@ impl ContactsView {
             .child(field("contacts-phones", &f.phones))
             .child(field("contacts-organization", &f.organization))
             .child(field("contacts-title", &f.title))
-            .child(div().pl(px(LABEL_W + 8.)).text_xs().text_color(rgb(MUTED)).child(tr!("contacts-form-hint")))
-            .when_some(f.error.clone(), |d, e| d.child(div().pl(px(LABEL_W + 8.)).text_color(rgb(ERROR)).child(e)))
+            .child(div().pl(px(LABEL_W + 8.)).text_xs().text_color(l.text2()).child(tr!("contacts-form-hint")))
+            .when_some(f.error.clone(), |d, e| d.child(div().pl(px(LABEL_W + 8.)).text_color(l.error()).child(e)))
             .child(
                 div()
                     .flex()
@@ -812,7 +815,7 @@ impl ContactsView {
                                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                         )
                     })
-                    .when(busy, |d| d.child(div().text_color(rgb(MUTED)).child(tr!("contacts-saving"))))
+                    .when(busy, |d| d.child(div().text_color(l.text2()).child(tr!("contacts-saving"))))
                     .child(button("form-cancel", tr!("contacts-cancel"), false).on_click(cx.listener(
                         |this, _, _, cx| {
                             this.mode = Mode::View;
@@ -827,6 +830,7 @@ impl ContactsView {
 
 /// Строка списка: имя, ниже — адрес (если имя не он сам) или тип записи справочника, организация.
 fn row(i: usize, e: &Entry, selected: bool, cx: &mut Context<ContactsView>) -> AnyElement {
+    let l = crate::roles::look(cx);
     let name = e.name();
     let email = e.card.emails.first().filter(|m| !m.eq_ignore_ascii_case(&name)).cloned();
     let email = match (email, e.kind) {
@@ -848,18 +852,19 @@ fn row(i: usize, e: &Entry, selected: bool, cx: &mut Context<ContactsView>) -> A
         .flex_col()
         .justify_center()
         .border_b_1()
-        .border_color(rgb(0xeeeeee))
+        .border_color(l.border())
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(PICKED)))
-        .when(!selected, |d| d.hover(|d| d.bg(rgb(0xe8f1fb))))
+        .when(selected, |d| d.bg(l.picked()))
+        .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
         .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name))
-        .child(div().truncate().text_xs().text_color(rgb(MUTED)).child(second))
+        .child(div().truncate().text_xs().text_color(l.text2()).child(second))
         .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
         .into_any_element()
 }
 
 impl Render for ContactsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
         let pane = match &self.mode {
             Mode::Edit(f) => self.form_pane(f, cx),
             _ => match self.selected_entry() {
@@ -869,7 +874,7 @@ impl Render for ContactsView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(MUTED))
+                    .text_color(l.text2())
                     .child(tr!("contacts-pick"))
                     .into_any_element(),
             },
@@ -878,7 +883,7 @@ impl Render for ContactsView {
             .size_full()
             .flex()
             .min_w_0()
-            .bg(rgb(0xffffff))
+            .bg(l.panel())
             .child(self.sidebar(cx))
             .child(div().flex_1().min_w_0().h_full().child(pane))
     }

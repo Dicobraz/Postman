@@ -671,7 +671,7 @@ impl Mailer {
             self.list.update(cx, |l, cx| l.show_search(None, cx));
             return;
         }
-        let mailbox = self.list.read(cx).mailbox.clone();
+        let mailbox = self.search_mailbox(cx);
         self.live.next_ticket += 1;
         let ticket = self.live.next_ticket;
         let sent = self.backend.send(Command::Search { query: query.clone(), mailbox: mailbox.clone(), ticket });
