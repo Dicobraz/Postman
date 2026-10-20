@@ -712,7 +712,7 @@ pub(crate) fn list_row(
                     div().flex_1().min_w(px(60.)).truncate().when(!r.seen, |d| d.font_weight(FontWeight::BOLD)).child(from),
                 )
                 // Метки — в строке отправителя справа, категория первой.
-                .children(labels.chips.into_iter().map(|(name, slot)| crate::labels::chip(name, slot)))
+                .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color)))
                 .child(div().text_color(rgb(0xcc3333)).child(icons))
                 .child(div().text_sm().text_color(rgb(0x888888)).child(format_date(r.received_at))),
         )
