@@ -8,6 +8,7 @@ mod mail;
 mod push;
 mod session;
 mod submission;
+mod vacation;
 
 pub use calendars::{BusyPeriod, Calendar, EVENT_PROPERTIES, Principal};
 pub use contacts::{AddressBook, ContactCard};
@@ -15,6 +16,7 @@ pub use mail::*;
 pub use push::{EventSource, SseEvent};
 pub use session::{Account, Session};
 pub use submission::{Envelope, Identity};
+pub use vacation::{Quota, VacationResponse};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +29,8 @@ pub const CONTACTS: &str = "urn:ietf:params:jmap:contacts";
 pub const PRINCIPALS: &str = "urn:ietf:params:jmap:principals";
 pub const PRINCIPALS_AVAILABILITY: &str = "urn:ietf:params:jmap:principals:availability";
 pub const WEBSOCKET: &str = "urn:ietf:params:jmap:websocket";
+pub const VACATION_RESPONSE: &str = "urn:ietf:params:jmap:vacationresponse";
+pub const QUOTA: &str = "urn:ietf:params:jmap:quota";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

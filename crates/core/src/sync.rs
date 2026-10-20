@@ -12,6 +12,7 @@ use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
 use crate::invite::{self, Delivery};
+use crate::settings;
 use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
@@ -86,6 +87,8 @@ pub enum Command {
     CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
     /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
     ShareFreeBusy { email: String },
+    /// Настройки ящика на сервере: автоответ, квота (`settings.rs`) → `Event::Settings`.
+    Settings(settings::Request),
     /// Перечитать личные контакты и справочник → `ContactsLoaded`, `DirectoryLoaded` (и `Contacts` для подсказок).
     Contacts,
     /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
@@ -222,6 +225,8 @@ pub enum Event {
     FreeBusyShared { email: String },
     /// Ошибка календаря (неделя, открытие занятости) — тостом.
     CalendarFailed(String),
+    /// Ответ по настройкам ящика (`settings.rs`).
+    Settings(settings::Reply),
     /// Личные контакты целиком (раздел «Контакты»).
     ContactsLoaded(Vec<ContactCard>),
     /// Справочник: сотрудники, переговорные и ресурсы с адресами (раздел «Контакты», подсказки адресов).
@@ -356,6 +361,7 @@ async fn run(
     }
     // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
     load_people(&client, notify).await;
+    settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
     let mut email_state =
         start_state(&client, &mut cache, &index, notify).await.map_err(|e| SyncError::new(Stage::Load, &e))?;
     notify(Event::Status(Status::Synced));
@@ -456,6 +462,7 @@ async fn apply_refresh(
             }
             notify(Event::MailboxesChanged);
             notify(Event::EmailsChanged);
+            settings::handle(client, settings::Request::Quota, &|r| notify(Event::Settings(r))).await;
             false
         }
         Ok(None) => false,
@@ -670,6 +677,7 @@ async fn handle(
                 Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
+        Command::Settings(request) => settings::handle(client, request, &|r| notify(Event::Settings(r))).await,
         Command::Contacts => load_people(client, notify).await,
         Command::SaveContact { card, old, ticket } => {
             let saved = match &old {
