@@ -29,11 +29,6 @@ pub mod thread {
     gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev]);
 }
 
-/// Беседа в области чтения (S5-05).
-pub mod thread {
-    gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev]);
-}
-
 pub mod view {
     gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
 }
