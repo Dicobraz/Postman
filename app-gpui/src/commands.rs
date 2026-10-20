@@ -27,10 +27,19 @@ pub mod calendar {
     gpui_kit::actions!(calendar, [NewMeeting]);
 }
 
+/// Окно письма (S3-01).
+pub mod compose {
+    gpui_kit::actions!(compose, [Send, Attach, Preview, Close]);
+}
+
 /// Экран почты вне полей ввода: клавиши без модификаторов в поиске — текст и курсор.
 const LIST: Option<&str> = Some("Mailer && !Input");
 /// Весь экран почты, включая поле поиска.
 const MAILER: Option<&str> = Some("Mailer");
+/// Окно письма, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
+/// отправка, а не перевод строки), а при равной глубине побеждает привязка, заданная позже (`bind` — после
+/// `gpui_kit::init`).
+const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
 
 const fn cmd(id: &'static str, keys: &'static [&'static str], context: Option<&'static str>) -> Command {
     Command { id, keys, context }
@@ -60,6 +69,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("search.focus", &["ctrl-e"], None),
     cmd("search.clear", &["escape"], None),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
+    cmd("compose.send", &["ctrl-enter", "alt-s"], COMPOSER),
+    // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
+    cmd("compose.attach", &[], COMPOSER),
+    cmd("compose.preview", &["ctrl-shift-p"], COMPOSER),
+    cmd("compose.close", &["escape"], COMPOSER),
 ];
 
 /// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал

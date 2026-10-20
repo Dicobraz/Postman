@@ -40,6 +40,8 @@ pub(crate) struct Mailer {
     pub(crate) toasts: Entity<Toasts>,
     /// Сервер или демо (S3-04 подключает живой ящик).
     pub(crate) backend: Backend,
+    /// Окна письма (S3-01).
+    pub(crate) compose: crate::compose::Composers,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
     pub(crate) sandbox: Option<Level>,
     /// Последнее нажатие и сработавшее действие — проверка хоткеев в любой раскладке (S1-01).
@@ -121,6 +123,7 @@ impl Mailer {
             search,
             toasts,
             backend: Backend::Demo,
+            compose: Default::default(),
             sandbox: None,
             last_key: String::new(),
             bench,
@@ -149,6 +152,7 @@ impl Mailer {
     #[expect(dead_code, reason = "phase 2 seam, wired by S3-01, S3-03, S3-04")]
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
+        self.compose.on_sync(ev, cx);
     }
 
     /// Действию нужен сервер, а его нет (демо): сказать тостом.
@@ -220,6 +224,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
             .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
             .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
+            .on_action(cx.listener(|this, _: &mail::New, _, cx| {
+                this.open_compose(Default::default(), cx);
+            }))
             .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
             .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {

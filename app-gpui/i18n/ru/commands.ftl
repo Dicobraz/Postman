@@ -20,3 +20,7 @@ cmd-search-focus = Поиск
 cmd-search-clear = Сбросить поиск
 cmd-calendar-new-meeting = Новая встреча (помощник планирования)
 cmd-view-notifications = Уведомления
+cmd-compose-send = Отправить письмо
+cmd-compose-attach = Вложить файл
+cmd-compose-preview = Предпросмотр письма
+cmd-compose-close = Закрыть окно письма

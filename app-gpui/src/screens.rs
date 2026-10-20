@@ -38,10 +38,20 @@ enum Scene {
     Calendar,
     /// Календарь с помощником планирования.
     Assistant,
+    /// Окно письма с заполненными полями (своё окно: снимается его HWND).
+    Compose,
 }
 
-const SCENES: [Scene; 7] =
-    [Scene::List, Scene::Letter, Scene::Attachments, Scene::Invite, Scene::Search, Scene::Calendar, Scene::Assistant];
+const SCENES: [Scene; 8] = [
+    Scene::List,
+    Scene::Letter,
+    Scene::Attachments,
+    Scene::Invite,
+    Scene::Search,
+    Scene::Calendar,
+    Scene::Assistant,
+    Scene::Compose,
+];
 
 impl Scene {
     fn name(self) -> &'static str {
@@ -53,6 +63,7 @@ impl Scene {
             Scene::Search => "search",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
+            Scene::Compose => "compose",
         }
     }
 }
@@ -151,6 +162,13 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.cal.assistant = true;
             m.set_section(Section::Calendar, cx);
         }
+        Scene::Compose => {
+            m.cal.assistant = false;
+            m.set_section(Section::Mail, cx);
+            // Окно — после кадра основного: не открывать его посреди отрисовки.
+            let mailer = cx.entity();
+            cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_compose_screen(cx)));
+        }
     }
     Ok(())
 }
@@ -186,6 +204,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => m.section == Section::Calendar && !m.cal.assistant,
         Scene::Assistant => m.section == Section::Calendar && m.cal.assistant,
+        Scene::Compose => compose_hwnd(m, cx).is_some(),
     }
 }
 
@@ -207,7 +226,10 @@ fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
 fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) {
     let Some(d) = &m.screens else { return };
     let path = d.dir.join(format!("{}.png", scene.name()));
-    let hwnd = sys::window_id(window).unwrap_or_else(|e| fail(scene, &e));
+    let hwnd = match scene {
+        Scene::Compose => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
+        _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
+    };
     let task = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) });
     cx.spawn(async move |this, cx| {
         let result = task.await;
@@ -226,6 +248,11 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
         });
     })
     .detach();
+}
+
+/// Окно письма открыто и нарисовано: его дескриптор.
+fn compose_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
+    m.compose.last().and_then(|c| c.read(cx).screen_hwnd())
 }
 
 fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), String> {
