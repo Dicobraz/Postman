@@ -197,6 +197,13 @@ pub fn remove_on_finish(path: PathBuf) {
     let _ = WORK_COPY.set(path);
 }
 
+/// Удалить рабочую копию, отмеченную `remove_on_finish` (если отмечена), — перед выходом из процесса.
+pub fn remove_work_copy() {
+    if let Some(p) = WORK_COPY.get() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Замер простоя в отдельном потоке: печатает `prefix report idle_…` и завершает процесс.
 /// Интерфейс к этому моменту должен перестать запрашивать кадры.
 pub fn finish(line: String) {
@@ -213,9 +220,7 @@ pub fn finish(line: String) {
         );
         // Хранилище ещё открыто, но std открывает файлы с FILE_SHARE_DELETE: файл исчезнет, когда процесс
         // закроет его при выходе.
-        if let Some(p) = WORK_COPY.get() {
-            let _ = std::fs::remove_file(p);
-        }
+        remove_work_copy();
         std::process::exit(0);
     });
 }

@@ -6314,13 +6314,16 @@ dependencies = [
  "pets-i18n",
  "pets-shell",
  "pets-ui",
+ "png 0.17.16",
  "postman-cache",
  "postman-calendar",
  "postman-core",
  "postman-demo",
  "postman-ir",
  "postman-worker",
+ "raw-window-handle",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
