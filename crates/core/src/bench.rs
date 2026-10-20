@@ -20,7 +20,7 @@ const STEP: usize = 25;
 /// `POSTMAN_BENCH_LIST_FRAMES` — другое число кадров.
 const LIST_FRAMES: usize = 400;
 const LIST_STEP: usize = 3;
-/// Ресайз окна туда-обратно.
+/// Ресайз окна туда-обратно. `POSTMAN_BENCH_RESIZE_FRAMES` — другое число кадров (0 — без ресайза).
 const RESIZE_FRAMES: usize = 120;
 /// Простой: окно открыто, ввода нет. Сначала даём улечься фоновым задачам.
 const IDLE_SETTLE: Duration = Duration::from_secs(3);
@@ -88,8 +88,13 @@ pub struct Bench {
     ui_cpu: Vec<f32>,
     rss_peak: usize,
     private_peak: usize,
+    /// Память на границах фаз (S4-08): после прогрева, листания с открытием, листания списка — кто сколько добавил.
+    marks: Vec<(&'static str, Memory)>,
+    /// Текущая фаза сценария ([`Bench::enter`]).
+    phase: u8,
     scroll_frames: usize,
     list_frames: usize,
+    resize_frames: usize,
     /// Живой ящик: ждать первой синхронизации ([`Bench::synced`]).
     live: bool,
     synced_at: Option<Duration>,
@@ -115,8 +120,11 @@ impl Bench {
             ui_cpu: Vec::new(),
             rss_peak: 0,
             private_peak: 0,
+            marks: Vec::new(),
+            phase: 0,
             scroll_frames: frames("POSTMAN_BENCH_SCROLL_FRAMES", SCROLL_FRAMES),
             list_frames: frames("POSTMAN_BENCH_LIST_FRAMES", LIST_FRAMES),
+            resize_frames: frames("POSTMAN_BENCH_RESIZE_FRAMES", RESIZE_FRAMES),
             live: false,
             synced_at: None,
             list_at: None,
@@ -158,27 +166,27 @@ impl Bench {
         }
         let f = f - WARMUP;
         if f <= self.scroll_frames {
+            self.enter(1);
             self.scroll.frame(f, dt);
             return Step::Select((f * STEP) % rows);
         }
         let f = f - self.scroll_frames;
         if f <= self.list_frames {
-            if f == 1 {
-                self.scroll.stop();
-            }
+            self.enter(2);
             self.list.frame(f, dt);
             return Step::Scroll((f * LIST_STEP) % rows);
         }
         let f = f - self.list_frames;
-        if f <= RESIZE_FRAMES {
-            if f == 1 {
-                self.list.stop();
-            } else if let Some(dt) = dt {
+        if f <= self.resize_frames {
+            if !self.enter(3)
+                && let Some(dt) = dt
+            {
                 self.resize.push(dt);
             }
             let w = if (f / 4).is_multiple_of(2) { 1000.0 } else { 1280.0 };
             return Step::Resize(w, 800.0);
         }
+        self.enter(4);
         Step::Done(self.report(rows))
     }
 
@@ -187,6 +195,36 @@ impl Bench {
         if self.frame > WARMUP {
             self.ui_cpu.push(d.as_secs_f32() * 1000.0);
         }
+    }
+
+    /// Переход к фазе `phase` (1 — листание с открытием, 2 — листание списка, 3 — ресайз, 4 — итог): закрыть
+    /// прошедшие фазы (и пропущенные — с нулём кадров) и отметить память на их границе. `true` — первый кадр фазы.
+    fn enter(&mut self, phase: u8) -> bool {
+        if self.phase >= phase {
+            return false;
+        }
+        while self.phase < phase {
+            match self.phase {
+                0 => self.mark("start"),
+                1 => {
+                    self.scroll.stop();
+                    self.mark("scroll");
+                }
+                2 => {
+                    self.list.stop();
+                    self.mark("list");
+                }
+                3 => self.mark("resize"),
+                _ => {}
+            }
+            self.phase += 1;
+        }
+        true
+    }
+
+    fn mark(&mut self, phase: &'static str) {
+        self.sample_memory();
+        self.marks.push((phase, memory()));
     }
 
     fn sample_memory(&mut self) {
@@ -200,6 +238,11 @@ impl Bench {
         let r = stats(&mut self.resize);
         let c = stats(&mut self.ui_cpu);
         let ms = |d: Option<Duration>| d.unwrap_or_default().as_secs_f32() * 1000.0;
+        let marks: String = self
+            .marks
+            .iter()
+            .map(|(p, m)| format!(" rss_{p}_mb={:.0} private_{p}_mb={:.0}", mb(m.rss), mb(m.private)))
+            .collect();
         let live = if self.live {
             format!("live=1 first_sync_ms={:.0} list_ms={:.0} ", ms(self.synced_at), ms(self.list_at))
         } else {
@@ -207,7 +250,7 @@ impl Bench {
         };
         format!(
             "{live}rows={rows} exe_mb={:.1} first_frame_ms={:.0} {} {} resize_p50={:.2} resize_p99={:.2} resize_max={:.2} \
-             ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_peak_mb={:.0} private_peak_mb={:.0}",
+             ui_cpu_p50={:.2} ui_cpu_p99={:.2} rss_peak_mb={:.0} private_peak_mb={:.0}{marks}",
             exe_mb(),
             self.first_frame.unwrap_or_default().as_secs_f32() * 1000.0,
             self.scroll.report("scroll"),
@@ -240,6 +283,15 @@ pub fn remove_work_copy() {
     }
 }
 
+/// Дополнительные поля строки итога в конце простоя (S4-08): например, куча из считающего распределителя
+/// приложения. Вызывается в потоке замера после снятия `idle_…`.
+static IDLE_FIELDS: OnceLock<fn() -> String> = OnceLock::new();
+
+/// Задать [`IDLE_FIELDS`] (один раз за процесс).
+pub fn on_idle(fields: fn() -> String) {
+    let _ = IDLE_FIELDS.set(fields);
+}
+
 /// Замер простоя в отдельном потоке: печатает `prefix report idle_…` и завершает процесс.
 /// Интерфейс к этому моменту должен перестать запрашивать кадры.
 pub fn finish(line: String) {
@@ -248,8 +300,9 @@ pub fn finish(line: String) {
         let load = Load::start();
         std::thread::sleep(IDLE);
         let m = memory();
+        let extra = IDLE_FIELDS.get().map(|f| format!(" {}", f())).unwrap_or_default();
         println!(
-            "{line} idle_cpu_pct={:.1} idle_rss_mb={:.0} idle_private_mb={:.0}",
+            "{line} idle_cpu_pct={:.1} idle_rss_mb={:.0} idle_private_mb={:.0}{extra}",
             load.percent(),
             mb(m.rss),
             mb(m.private)
@@ -257,8 +310,26 @@ pub fn finish(line: String) {
         // Хранилище ещё открыто, но std открывает файлы с FILE_SHARE_DELETE: файл исчезнет, когда процесс
         // закроет его при выходе.
         remove_work_copy();
+        let limit = std::env::var(MAX_IDLE_RSS_VAR).ok();
+        if let Some(e) = over_limit(mb(m.rss), limit.as_deref()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
         std::process::exit(0);
     });
+}
+
+/// Порог рабочего набора в простое, МБ (S4-08): задан и превышен — бенч выходит с кодом 1 (для CI и стенда).
+pub const MAX_IDLE_RSS_VAR: &str = "POSTMAN_BENCH_MAX_IDLE_RSS_MB";
+
+/// Сообщение о превышении порога `limit` (значение [`MAX_IDLE_RSS_VAR`]) рабочим набором `rss_mb`.
+fn over_limit(rss_mb: f32, limit: Option<&str>) -> Option<String> {
+    let limit = limit?;
+    match limit.trim().parse::<f32>() {
+        Ok(max) if rss_mb > max => Some(format!("bench: idle working set {rss_mb:.0} MB is over {MAX_IDLE_RSS_VAR}={max}")),
+        Ok(_) => None,
+        Err(_) => Some(format!("bench: {MAX_IDLE_RSS_VAR}={limit:?} is not a number")),
+    }
 }
 
 /// Загрузка CPU процессом: процессорное время / прошедшее, в % от одного ядра.
@@ -298,6 +369,7 @@ pub fn rss() -> usize {
     memory().rss
 }
 
+#[derive(Clone, Copy)]
 struct Memory {
     /// Рабочий набор (Working Set): столбец «Память» в диспетчере задач.
     rss: usize,
@@ -319,4 +391,17 @@ fn mb(bytes: usize) -> f32 {
 /// Размер исполняемого файла, МиБ.
 fn exe_mb() -> f32 {
     std::env::current_exe().and_then(std::fs::metadata).map_or(0.0, |m| m.len() as f32 / 1_048_576.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::over_limit;
+
+    #[test]
+    fn idle_rss_limit() {
+        assert_eq!(over_limit(140.0, None), None);
+        assert_eq!(over_limit(140.0, Some("150")), None);
+        assert!(over_limit(151.0, Some("150")).is_some_and(|e| e.contains("151 MB")));
+        assert!(over_limit(1.0, Some("много")).is_some());
+    }
 }
