@@ -189,7 +189,7 @@ async fn reply_chain_is_one_thread_with_new_text_only() {
     let sent = role(&c3, "sent").await;
     assert_eq!(rows.iter().filter(|r| r.mailbox_ids.contains(&sent)).count(), 1, "своё письмо из «Отправленных»");
 
-    let conv = Conversation::assemble(&last.thread_id, rows, &[me3.clone()], &jiff::tz::TimeZone::UTC);
+    let conv = Conversation::assemble(&last.thread_id, rows, std::slice::from_ref(&me3), &jiff::tz::TimeZone::UTC);
     assert_eq!(conv.messages.iter().map(|m| m.mine).collect::<Vec<_>>(), [false, true, false]);
     let order: Vec<(&str, bool)> =
         conv.messages.iter().map(|m| (m.row.subject.as_str(), m.row.mailbox_ids.contains(&sent))).collect();
