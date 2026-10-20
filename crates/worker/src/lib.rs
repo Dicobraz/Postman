@@ -79,17 +79,31 @@ pub struct Rgba {
 }
 
 fn decode_image(bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
-    use image::{ImageFormat, ImageReader, Limits};
-    let mut reader = ImageReader::new(io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
-    if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP)) {
-        return Err("формат картинки не поддерживается".into());
+    use image::codecs::{gif::GifDecoder, jpeg::JpegDecoder, png::PngDecoder, webp::WebPDecoder};
+    use image::{DynamicImage, ImageDecoder, ImageFormat, ImageResult, Limits};
+
+    // Как `ImageReader::decode`, но с декодером нужного формата напрямую: `ImageReader` выбирает декодер
+    // во время работы и тянет в exe все форматы, включённые в `image` по рабочей области (gpui включает
+    // exr, tiff, dds, hdr…), хотя всё, кроме четырёх, мы отвергаем: +1,2 МиБ к воркеру (docs/SIZE.md).
+    fn load(mut decoder: impl ImageDecoder, mut limits: Limits) -> ImageResult<DynamicImage> {
+        limits.reserve(decoder.total_bytes())?;
+        decoder.set_limits(limits)?;
+        DynamicImage::from_decoder(decoder)
     }
+
     let mut limits = Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
     limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    let mut img = reader.decode().map_err(|e| e.to_string())?;
+    let r = io::Cursor::new(bytes);
+    let decoded = match image::guess_format(bytes) {
+        Ok(ImageFormat::Png) => PngDecoder::with_limits(r, limits.clone()).and_then(|d| load(d, limits)),
+        Ok(ImageFormat::Jpeg) => JpegDecoder::new(r).and_then(|d| load(d, limits)),
+        Ok(ImageFormat::Gif) => GifDecoder::new(r).and_then(|d| load(d, limits)),
+        Ok(ImageFormat::WebP) => WebPDecoder::new(r).and_then(|d| load(d, limits)),
+        _ => return Err("формат картинки не поддерживается".into()),
+    };
+    let mut img = decoded.map_err(|e| e.to_string())?;
     let max_side = max_side.clamp(16, 4096);
     if img.width() > max_side || img.height() > max_side {
         img = img.thumbnail(max_side, max_side);

@@ -100,6 +100,12 @@ fn decodes_images_and_rejects_others() {
     assert_eq!(&img.pixels[..3], &[255, 0, 0]);
     assert!(c.decode_image(b"<svg onload=alert(1)>", 512).is_err());
     assert!(c.decode_image(&png[..20], 512).is_err());
+    // Формат, который `image` узнаёт, но воркер не берёт (BMP 1×1): отказ до разбора.
+    let bmp = [
+        0x42, 0x4D, 0x3A, 0, 0, 0, 0, 0, 0, 0, 0x36, 0, 0, 0, 0x28, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0x18, 0, 0, 0,
+        0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0,
+    ];
+    assert_eq!(c.decode_image(&bmp, 512).err().as_deref(), Some("формат картинки не поддерживается"));
     // Воркер жив после ошибок разбора.
     assert!(c.render(&Request::Text("ok".into())).is_ok());
 }
