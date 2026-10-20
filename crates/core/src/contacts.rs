@@ -241,6 +241,13 @@ fn translit(s: &str) -> String {
     out
 }
 
+/// Справочник для людей: сотрудники, переговорные и ресурсы с адресом (без групп), по имени.
+pub fn directory(mut people: Vec<postman_jmap::Principal>) -> Vec<postman_jmap::Principal> {
+    people.retain(|p| p.kind != "group" && p.email.as_deref().is_some_and(|e| e.contains('@')));
+    people.sort_by_cached_key(|p| (p.name.to_lowercase(), p.email.clone()));
+    people
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +296,24 @@ mod tests {
         let e = &b.suggest("мария", 1, NOW)[0];
         assert_eq!(e.display(), "Мария Иванова <m@x.ru>");
         assert_eq!(e.source, Source::Contact);
+    }
+
+    #[test]
+    fn directory_has_people_with_addresses() {
+        let p = |name: &str, email: Option<&str>, kind: &str| postman_jmap::Principal {
+            id: name.into(),
+            name: name.into(),
+            email: email.map(str::to_string),
+            kind: kind.into(),
+        };
+        let people = directory(vec![
+            p("Щукин Алексей", Some("a.shchukin@corp.example"), "individual"),
+            p("Все сотрудники", Some("all@corp.example"), "group"),
+            p("admin", None, "individual"),
+            p("Переговорная 3", Some("room3@corp.example"), "location"),
+            p("Анна", Some("anna@corp.example"), "individual"),
+        ]);
+        let names: Vec<&str> = people.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Анна", "Переговорная 3", "Щукин Алексей"]);
     }
 }

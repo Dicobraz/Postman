@@ -1,10 +1,14 @@
-//! Спайк UI на gpui (gpui-kit): тот же экран, что и в egui-версии, и тот же `--bench`.
-//! Ядро (хранилище, IR, воркер-песочница, демо-ящик) — общее; здесь только интерфейс.
+//! Postman (`postman.exe`): интерфейс на gpui (gpui-kit). Ядро (хранилище, IR, воркер-песочница, демо-ящик) —
+//! в крейтах ниже; здесь только интерфейс.
 //!
-//!   postman-gpui [--demo N] [--bench] [--screens <каталог> [--live]] [--sign-out] [--lang ru|en|auto]
+//!   postman [--demo N] [--bench] [--screens <каталог> [--live]] [--sign-out] [--lang ru|en|auto] [--help] [--version]
 //!
 //! Без `--demo` — живой ящик: `POSTMAN_URL` + `POSTMAN_USER`/`POSTMAN_PASSWORD` (или `POSTMAN_TOKEN`), иначе
 //! сохранённый вход, иначе строка входа в окне. `--sign-out` — забыть сохранённый вход.
+//! Release-сборка — без консоли; вывод `--bench`, `--screens`, `--help` — в консоль родителя или в перенаправление.
+
+// Release: без окна консоли (S4-01). Отладочная сборка — с консолью, журнал виден сразу.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod calendar;
 mod commands;
@@ -27,6 +31,7 @@ mod actions;
 mod meeting;
 mod settings;
 mod vacation;
+mod contacts;
 mod rules;
 
 pub(crate) use mailer::{Mailer, Section};
@@ -52,6 +57,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/actions.ftl")),
     ("ru", include_str!("../i18n/ru/calendar.ftl")),
     ("ru", include_str!("../i18n/ru/settings.ftl")),
+    ("ru", include_str!("../i18n/ru/contacts.ftl")),
+    ("ru", include_str!("../i18n/ru/sync.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -60,6 +67,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/actions.ftl")),
     ("en", include_str!("../i18n/en/calendar.ftl")),
     ("en", include_str!("../i18n/en/settings.ftl")),
+    ("en", include_str!("../i18n/en/contacts.ftl")),
+    ("en", include_str!("../i18n/en/sync.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
@@ -102,9 +111,38 @@ fn listen_second_instance(listener: pets_shell::Listener, (window, mailer): (Any
     .detach();
 }
 
+/// `--help`: консольный вывод — по-английски, как журнал.
+const USAGE: &str = "Postman - mail, calendar and contacts for Stalwart (JMAP)
+
+Usage: postman [options]
+  --demo [N]            demo mailbox with N messages (default 50000), no server
+  --lang ru|en|auto     interface language (default: from Windows)
+  --sign-out            forget the saved sign-in
+  --bench               measure and exit: one key=value line on stdout
+  --screens <dir> [--live] [--keep]
+                        save screenshots (PNG) and exit: one 'screen <name> <path> <w>x<h>' line per file
+  --help, --version     this text, the version
+
+Live mailbox: POSTMAN_URL and POSTMAN_USER/POSTMAN_PASSWORD (or POSTMAN_TOKEN); otherwise the saved sign-in.
+Log: POSTMAN_LOG (e.g. debug); errors also go to the Windows Application log.
+cmd waits for postman.exe only with 'start /wait'; PowerShell - with '| Out-Default'; Git Bash and .cmd files wait.
+";
+
 fn main() {
     let mut start = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Release без консоли: вывод этих режимов — в консоль родителя (если поток не перенаправлен).
+    if args.iter().any(|a| ["--bench", "--screens", "--help", "-h", "--version"].contains(&a.as_str())) {
+        sys::attach_parent_console();
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return;
+    }
+    if args.iter().any(|a| a == "--version") {
+        println!("postman {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let n = args.iter().position(|a| a == "--demo").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let bench = args.iter().any(|a| a == "--bench");
     let demo = args.iter().any(|a| a == "--demo");
@@ -112,6 +150,8 @@ fn main() {
     let live = args.iter().any(|a| a == "--live");
     // `--keep`: оставить рабочую копию данных бенча (для разбора).
     let keep = args.iter().any(|a| a == "--keep");
+    // `--bench --live --warm`: замер живого ящика на кэше прошлого прогона (`--keep`), без — с первой синхронизации.
+    let warm = args.iter().any(|a| a == "--warm");
     let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
     pets_shell::init_logging("Postman", "POSTMAN_LOG");
     for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
@@ -140,12 +180,16 @@ fn main() {
     }
     let flags = account::Flags { demo, bench, screens: screens.is_some(), live };
     let start_with = account::choose(flags, postman_core::sync::Account::from_env(), || account::load_stored(&dir));
+    if bench && live && !matches!(start_with, account::Start::Live(_)) {
+        fatal("fatal-bench-account", "POSTMAN_URL");
+    }
     if let (Some(d), account::Start::SignIn(_)) = (&mut screens, &start_with) {
         d.sign_in();
     }
     // Живой ящик: кэш учётной записи; нет учётной записи — пустой кэш в памяти до входа.
     let (cache, index) = match &start_with {
         account::Start::Demo => (demo_cache(&dir, bench, screens.is_some(), keep, n, &mut start), None),
+        account::Start::Live(_) if bench => live::bench_store(warm, keep, &mut start).unwrap_or_else(|e| fatal("fatal-store", e)),
         account::Start::Live(a) => live::open_store(&account::cache_path(&dir, a)).unwrap_or_else(|e| fatal("fatal-store", e)),
         account::Start::SignIn(_) => (Cache::open_in_memory().unwrap_or_else(|e| fatal("fatal-store", e)), None),
     };
@@ -157,7 +201,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            let bench = bench.then(|| Bench::new(start));
+            let bench = bench.then(|| if live { Bench::live(start) } else { Bench::new(start) });
             let cache = cache.clone();
             cx.new(|cx| {
                 let mut m = Mailer { screens, ..Mailer::new(cache, bench, window, cx) };

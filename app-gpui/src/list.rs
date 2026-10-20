@@ -66,7 +66,49 @@ pub(crate) struct MailList {
     pub(crate) positions: Positions,
     /// Строка «Удалить навсегда? Да / Нет» над списком: письмо из «Удалённых» и его номер.
     pub(crate) confirm: Option<(usize, EmailRow)>,
+    /// Догрузка с сервера при прокрутке (живой ящик, S4-03).
+    pub(crate) more: More,
 }
+
+/// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct More {
+    /// Писем в папке на сервере (`Mailbox.totalEmails`); `None` — демо или поиск: догружать нечего.
+    pub(crate) total: Option<usize>,
+    /// Страница запрошена, ответа (`LoadedMore`) ещё нет.
+    pub(crate) asked: bool,
+    /// Сервер вернул пустую страницу (или ошибку): не просить, пока не изменится число писем в папке.
+    pub(crate) exhausted: bool,
+}
+
+impl More {
+    /// Просить следующую страницу: до конца загруженного меньше запаса окна, а на сервере писем больше.
+    pub(crate) fn wanted(&self, visible_end: usize, count: usize) -> bool {
+        !self.asked
+            && !self.exhausted
+            && self.total.is_some_and(|t| count < t)
+            && visible_end + WINDOW_MARGIN >= count
+    }
+
+    /// Число писем на сервере (папки перечитаны); изменилось — снова можно просить.
+    pub(crate) fn set_total(&mut self, total: Option<usize>) {
+        if self.total != total {
+            self.exhausted = false;
+        }
+        self.total = total;
+    }
+
+    /// Ответ на догрузку: `added` писем пришло.
+    pub(crate) fn loaded(&mut self, added: usize) {
+        self.asked = false;
+        self.exhausted = added == 0;
+    }
+}
+
+/// Список подошёл к концу загруженного: догрузить папку с сервера (`Command::LoadMore`).
+pub(crate) struct NeedMore(pub(crate) String);
+
+impl EventEmitter<NeedMore> for MailList {}
 
 /// Позиция прокрутки (смещение по вертикали, px) каждой папки; результаты поиска — всегда сверху.
 #[derive(Default)]
@@ -145,10 +187,15 @@ impl MailList {
             scroll: UniformListScrollHandle::new(),
             positions: Positions::default(),
             confirm: None,
+            more: More::default(),
         }
     }
 
     pub(crate) fn show_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
+        // Другая папка — своя догрузка; число писем на сервере ставит экран (`Mailer::sync_total`).
+        if self.mailbox.as_deref() != Some(id.as_str()) {
+            self.more = More::default();
+        }
         self.switch_view(Some(id), None);
         self.selected = None;
         self.reload();
@@ -313,6 +360,15 @@ impl MailList {
         .detach();
     }
 
+    /// Видно конец загруженного — попросить следующую страницу у сервера (один запрос до ответа).
+    fn ask_more(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        let Some(mb) = self.mailbox.clone().filter(|_| self.search_ids.is_none()) else { return };
+        if self.more.wanted(visible_end, self.count) {
+            self.more.asked = true;
+            cx.emit(NeedMore(mb));
+        }
+    }
+
     /// Откуда читать строки списка: папка или результаты поиска.
     pub(crate) fn page_source(&self) -> PageSource {
         match (&self.search_ids, &self.mailbox) {
@@ -436,6 +492,7 @@ impl Render for MailList {
                     if range.len() > 1 {
                         this.visible = range.clone();
                         this.ensure(range.clone(), cx);
+                        this.ask_more(range.end, cx);
                     }
                     range
                         .map(|i| match this.row(i).cloned() {
@@ -534,7 +591,7 @@ pub(crate) fn list_row(i: usize, r: &EmailRow, selected: bool, cx: &mut Context<
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{EmailRow, Positions, ROW_HEIGHT, keyword_changes, reselect, rows_at};
+    use super::{EmailRow, More, Positions, ROW_HEIGHT, WINDOW_MARGIN, keyword_changes, reselect, rows_at};
 
     fn row(id: &str, seen: bool, flagged: bool) -> EmailRow {
         EmailRow {
@@ -577,6 +634,31 @@ mod tests {
         // Окно строк для первого чтения — там, куда прокручено.
         assert_eq!(rows_at(inbox, 30), 10..40);
         assert_eq!(rows_at(0., 30), 0..30);
+    }
+
+    #[test]
+    fn more_is_asked_near_the_end_once() {
+        // Демо и поиск: числа на сервере нет — не просить.
+        let mut m = More::default();
+        assert!(!m.wanted(500, 500));
+        // В кэше 500 из 20 000: далеко от конца — рано, у конца — просить.
+        m.set_total(Some(20_000));
+        assert!(!m.wanted(30, 500));
+        assert!(m.wanted(500 - WINDOW_MARGIN, 500));
+        // Запрошено — второй раз не просить, пока нет ответа.
+        m.asked = true;
+        assert!(!m.wanted(500, 500));
+        m.loaded(500);
+        assert!(m.wanted(1000, 1000));
+        // Всё загружено — не просить.
+        assert!(!m.wanted(20_000, 20_000));
+        // Пустая страница: больше нет; новые письма на сервере (число изменилось) — снова можно.
+        m.loaded(0);
+        assert!(!m.wanted(1000, 1000));
+        m.set_total(Some(20_000));
+        assert!(!m.wanted(1000, 1000), "the same total keeps the mailbox exhausted");
+        m.set_total(Some(20_001));
+        assert!(m.wanted(1000, 1000));
     }
 
     #[test]

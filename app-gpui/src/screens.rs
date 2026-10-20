@@ -10,6 +10,7 @@
 //! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list`,
 //! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
+//! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07);
 //! без `POSTMAN_URL` — строка входа (`signin`).
 
@@ -54,13 +55,17 @@ enum Scene {
     Reply,
     /// Окно новой встречи с помощником планирования (своё окно, S3-05).
     Meeting,
+    /// Раздел «Контакты»: список и карточка первого контакта (S4-02).
+    Contacts,
+    /// Форма правки первого контакта (демо).
+    ContactEdit,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
     Rules,
 }
 
-const SCENES: [Scene; 13] = [
+const SCENES: [Scene; 15] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -69,6 +74,8 @@ const SCENES: [Scene; 13] = [
     Scene::Calendar,
     Scene::Assistant,
     Scene::Event,
+    Scene::Contacts,
+    Scene::ContactEdit,
     Scene::Compose,
     Scene::Reply,
     Scene::Meeting,
@@ -78,13 +85,14 @@ const SCENES: [Scene; 13] = [
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
 /// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
-const LIVE_SCENES: [Scene; 8] = [
+const LIVE_SCENES: [Scene; 9] = [
     Scene::List,
     Scene::Letter,
     Scene::Reply,
     Scene::Calendar,
     Scene::Event,
     Scene::Meeting,
+    Scene::Contacts,
     Scene::Vacation,
     Scene::Rules,
 ];
@@ -107,6 +115,8 @@ impl Scene {
             Scene::Compose => "compose",
             Scene::Reply => "reply",
             Scene::Meeting => "meeting",
+            Scene::Contacts => "contacts",
+            Scene::ContactEdit => "contact-edit",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
         }
@@ -269,6 +279,12 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let mailer = cx.entity();
             cx.defer(move |cx| mailer.update(cx, |m, cx| m.respond(postman_compose::Mode::Reply, cx)));
         }
+        Scene::Contacts => {
+            m.cal.update(cx, |c, cx| c.close_details(cx));
+            m.set_section(Section::Contacts, cx);
+            m.contacts.update(cx, |c, cx| c.select_first(cx));
+        }
+        Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
         Scene::Meeting => {
             // Окно письма прошлой сцены остаётся: снимается своё окно.
             m.set_section(Section::Calendar, cx);
@@ -354,6 +370,12 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             reply && compose_hwnd(m, cx).is_some()
         }
         Scene::Meeting => meeting_hwnd(m, cx).is_some(),
+        Scene::Contacts => {
+            // Живой ящик: контакты с сервера пришли — выделить первый (до ответа выделять нечего).
+            let c = m.contacts.read(cx);
+            m.section == Section::Contacts && c.ready()
+        }
+        Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
         Scene::Vacation => {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);

@@ -127,9 +127,13 @@ pub(crate) struct Flags {
     pub(crate) live: bool,
 }
 
-/// Выбор при запуске: демо по флагам; иначе окружение (`POSTMAN_URL`…), затем сохранённый вход, иначе — строка
+/// Выбор при запуске: замер живого ящика — из окружения; демо по флагам; иначе окружение (`POSTMAN_URL`…), затем сохранённый вход, иначе — строка
 /// входа. `--screens --live` — только из окружения (агенты снимают живой ящик стенда), без него — строка входа.
 pub(crate) fn choose(flags: Flags, env: Option<Account>, stored: impl FnOnce() -> Stored) -> Start {
+    // Замер живого ящика (`--bench --live`, S4-03) — только из окружения, как снимки.
+    if flags.bench && flags.live {
+        return env.map_or(Start::SignIn(None), Start::Live);
+    }
     if flags.bench || flags.demo || (flags.screens && !flags.live) {
         return Start::Demo;
     }
@@ -197,6 +201,8 @@ mod tests {
         let f = |demo, bench, screens, live| Flags { demo, bench, screens, live };
         assert!(matches!(choose(f(true, false, false, false), env(), none), Start::Demo));
         assert!(matches!(choose(f(false, true, false, false), env(), none), Start::Demo));
+        assert!(matches!(choose(f(false, true, false, true), env(), || unreachable!()), Start::Live(_)));
+        assert!(matches!(choose(f(false, true, false, true), None, || unreachable!()), Start::SignIn(None)));
         assert!(matches!(choose(f(false, false, true, false), env(), none), Start::Demo));
         assert!(matches!(choose(f(false, false, true, true), env(), none), Start::Live(_)));
         assert!(matches!(choose(f(false, false, true, true), None, || unreachable!()), Start::SignIn(None)));
