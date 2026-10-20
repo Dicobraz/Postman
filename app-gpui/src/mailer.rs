@@ -23,6 +23,7 @@ use crate::reading::*;
 pub(crate) enum Section {
     Mail,
     Calendar,
+    Contacts,
 }
 
 // --- экран ---
@@ -57,6 +58,8 @@ pub(crate) struct Mailer {
     /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
     pub(crate) cal: Entity<calendar::CalendarView>,
     pub(crate) meetings: crate::meeting::Meetings,
+    /// Контакты и справочник — своя кэшируемая view (S4-02).
+    pub(crate) contacts: Entity<crate::contacts::ContactsView>,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -86,7 +89,9 @@ impl Mailer {
         let bar = cx.new(|_| CommandBar { search: search.clone() });
         let toasts = cx.new(|_| Toasts::new());
         let cal = cx.new(|cx| calendar::CalendarView::new(window, cx));
+        let contacts = cx.new(|cx| crate::contacts::ContactsView::new(window, cx));
         let subscriptions = vec![
+            cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
             cx.subscribe(&cal, |this, _, action: &calendar::CalendarAction, cx| this.on_calendar(action, cx)),
             on_search,
             Self::observe_keys(cx),
@@ -140,6 +145,7 @@ impl Mailer {
             section: Section::Mail,
             cal,
             meetings: Default::default(),
+            contacts,
             _subscriptions: subscriptions,
         }
     }
@@ -164,6 +170,7 @@ impl Mailer {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
         self.compose.on_sync(ev, cx);
         self.cal.update(cx, |c, cx| c.on_sync(ev, cx));
+        self.contacts.update(cx, |c, cx| c.on_sync(ev, cx));
         let created = self.meetings.on_sync(ev, cx);
         self.meetings_created(created, cx);
     }
@@ -208,6 +215,9 @@ impl Mailer {
         if section == Section::Calendar && self.section != section {
             self.cal.update(cx, |c, cx| c.refresh(cx));
         }
+        if section == Section::Contacts && self.section != section {
+            self.contacts.update(cx, |c, cx| c.refresh(cx));
+        }
         self.section = section;
         self.folders.update(cx, |f, cx| {
             f.section = section;
@@ -249,6 +259,7 @@ impl Render for Mailer {
             }))
             .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
             .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
+            .on_action(cx.listener(|this, _: &view::Contacts, _, cx| this.set_section(Section::Contacts, cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {
                 this.open_meeting(None, cx);
             }))
@@ -256,6 +267,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::calendar::NextWeek, _, cx| this.calendar_week(Some(1), cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::Today, _, cx| this.calendar_week(None, cx)))
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
+                if this.section == Section::Contacts {
+                    return this.contacts.update(cx, |c, cx| c.focus_search(window, cx));
+                }
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
             .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
@@ -269,6 +283,10 @@ impl Render for Mailer {
                 }
                 // …затем строку «Удалить навсегда?».
                 if this.cancel_purge(cx) {
+                    return;
+                }
+                // В контактах — строка «Удалить контакт?», форма, поиск контактов.
+                if this.section == Section::Contacts && this.contacts.update(cx, |c, cx| c.escape(window, cx)) {
                     return;
                 }
                 this.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -297,6 +315,9 @@ impl Render for Mailer {
                     })
                     .when(self.section == Section::Calendar, |d| {
                         d.child(self.cal.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
+                    })
+                    .when(self.section == Section::Contacts, |d| {
+                        d.child(self.contacts.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
                     }),
             )
             .child(

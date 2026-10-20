@@ -188,6 +188,22 @@ impl Client {
         Ok(g.list)
     }
 
+    /// Справочник: все сотрудники, переговорные и ресурсы (`Principal/query` без фильтра), не больше `limit`.
+    pub async fn directory(&self, limit: u64) -> Result<Vec<Principal>> {
+        let acc = self.account_for(PRINCIPALS)?;
+        let calls = [
+            inv("Principal/query", json!({ "accountId": acc, "limit": limit }), "q"),
+            inv(
+                "Principal/get",
+                json!({ "accountId": acc, "#ids": { "resultOf": "q", "name": "Principal/query", "path": "/ids" } }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let g: GetResponse<Principal> = take(&mut r, "g")?;
+        Ok(g.list)
+    }
+
     /// Сотрудник по адресу (фильтр `email`).
     pub async fn principal_by_email(&self, email: &str) -> Result<Option<Principal>> {
         let acc = self.account_for(PRINCIPALS)?;

@@ -334,6 +334,119 @@ async fn contacts_are_read() {
         .unwrap();
 }
 
+/// Контакты (S4-02) методами клиента, как в приложении: user3 создаёт карточку с телефоном, организацией и
+/// должностью → правит её патчем (новый адрес, без телефона, другое имя) → удаляет; справочник (Principals)
+/// отдаёт сотрудников стенда с адресами.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn contacts_are_edited_and_directory_is_listed() {
+    use postman_jmap::ContactCard;
+
+    let c = user(3).await;
+    let stamp = stamp();
+    let new = ContactCard {
+        id: String::new(),
+        name: format!("Стендов{stamp} Пётр"),
+        emails: vec![format!("petr.{stamp}@example.com")],
+        phones: vec!["+7 495 000-00-01".into()],
+        organization: "ООО Стенд".into(),
+        title: "Инженер".into(),
+    };
+    let id = c.client.create_contact(&new).await.unwrap();
+    let find = |cards: Vec<ContactCard>| cards.into_iter().find(|x| x.id == id);
+    let got = find(c.client.contact_cards().await.unwrap()).expect("карточка в списке");
+    // Имя — как задано (`name.full` без компонентов сервер не переписывает).
+    assert_eq!(got, ContactCard { id: id.clone(), ..new.clone() });
+
+    let edited = ContactCard {
+        name: format!("Стендов{stamp} Пётр Иванович"),
+        emails: vec![format!("petr.{stamp}@example.com"), format!("p.{stamp}@home.example")],
+        phones: Vec::new(),
+        title: "Ведущий инженер".into(),
+        ..got.clone()
+    };
+    c.client.update_contact(&got, &edited).await.unwrap();
+    let got = find(c.client.contact_cards().await.unwrap()).expect("карточка после правки");
+    assert_eq!(got, edited);
+
+    c.client.destroy_contact(&id).await.unwrap();
+    assert!(find(c.client.contact_cards().await.unwrap()).is_none(), "карточка не удалена");
+
+    let people = c.client.directory(1000).await.unwrap();
+    for n in 1..=3 {
+        let email = env(&format!("POSTMAN_STAND_USER{n}"));
+        let p = people
+            .iter()
+            .find(|p| p.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&email)))
+            .unwrap_or_else(|| panic!("{email} нет в справочнике: {people:?}"));
+        assert_eq!(p.kind, "individual", "{p:?}");
+    }
+}
+
+/// Контакты (S4-02) через поток синхронизации, как раздел «Контакты»: после входа — `ContactsLoaded` и
+/// `DirectoryLoaded`; `SaveContact` (новая, затем правка) и `DeleteContact` — итог и свежий список. user3.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn contacts_through_sync() {
+    use postman_core::sync::{self, Account, Command, Event as SyncEvent};
+    use postman_jmap::ContactCard;
+
+    let email = env("POSTMAN_STAND_USER3");
+    let account = Account {
+        url: env("POSTMAN_STAND_URL"),
+        auth: Auth::Basic { user: email.clone(), password: env("POSTMAN_STAND_PASSWORD3") },
+    };
+    let cache = postman_cache::Cache::open_in_memory().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let commands = sync::spawn(account, cache, None, tx, || {});
+    let wait = |what: &str, pick: &dyn Fn(&SyncEvent) -> bool| -> SyncEvent {
+        let start = Instant::now();
+        loop {
+            let left = DELIVERY.checked_sub(start.elapsed()).unwrap_or_else(|| panic!("не дождались: {what}"));
+            match rx.recv_timeout(left) {
+                Ok(SyncEvent::Error(e)) => panic!("синхронизация: {e}"),
+                Ok(SyncEvent::ContactFailed { error, .. }) => panic!("контакты: {error}"),
+                Ok(ev) if pick(&ev) => return ev,
+                Ok(_) => {}
+                Err(e) => panic!("не дождались: {what} ({e})"),
+            }
+        }
+    };
+    let SyncEvent::DirectoryLoaded(people) = wait("DirectoryLoaded", &|e| matches!(e, SyncEvent::DirectoryLoaded(_))) else {
+        unreachable!()
+    };
+    assert!(people.iter().any(|p| p.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&email))), "{people:?}");
+
+    let stamp = stamp();
+    let card = ContactCard {
+        name: format!("Синхронов{stamp} Иван"),
+        emails: vec![format!("ivan.{stamp}@example.com")],
+        ..Default::default()
+    };
+    // Список с карточкой `id` и `phones` телефонами; `None` — без неё.
+    let listed = |e: &SyncEvent, id: &str, phones: Option<usize>| match (e, phones) {
+        (SyncEvent::ContactsLoaded(cards), Some(n)) => cards.iter().any(|c| c.id == id && c.phones.len() == n),
+        (SyncEvent::ContactsLoaded(cards), None) => cards.iter().all(|c| c.id != id),
+        _ => false,
+    };
+    assert!(commands.send(Command::SaveContact { card: Box::new(card.clone()), old: None, ticket: 1 }).is_ok());
+    let SyncEvent::ContactSaved { ticket: 1, id } = wait("ContactSaved", &|e| matches!(e, SyncEvent::ContactSaved { .. })) else {
+        panic!("не тот тикет")
+    };
+    wait("новая карточка в списке", &|e| listed(e, &id, Some(0)));
+
+    let old = ContactCard { id: id.clone(), ..card };
+    let edited = ContactCard { phones: vec!["+7 495 000-00-02".into()], ..old.clone() };
+    let cmd = Command::SaveContact { card: Box::new(edited), old: Some(Box::new(old)), ticket: 2 };
+    assert!(commands.send(cmd).is_ok());
+    wait("ContactSaved 2", &|e| matches!(e, SyncEvent::ContactSaved { ticket: 2, .. }));
+    wait("правка в списке", &|e| listed(e, &id, Some(1)));
+
+    assert!(commands.send(Command::DeleteContact { id: id.clone(), ticket: 3 }).is_ok());
+    wait("ContactDeleted", &|e| matches!(e, SyncEvent::ContactDeleted { ticket: 3, .. }));
+    wait("карточки нет в списке", &|e| listed(e, &id, None));
+}
+
 /// Календарь на сервере (S3-05) через поток синхронизации, как в приложении: user3 открывает user1 свою
 /// занятость и занят в 14:00 → user1 командой `CreateMeeting` приглашает user3 на 16:00 → у user3 событие по uid →
 /// `Events` отдаёт встречу в неделе user1 → `Availability` показывает занятость user3. Затем всё удаляется.

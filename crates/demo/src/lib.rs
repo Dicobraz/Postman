@@ -254,3 +254,62 @@ pub mod calendar {
             .collect()
     }
 }
+
+/// Демо-контакты (S4-02): личная адресная книга и справочник сотрудников; одни и те же от запуска к запуску.
+pub mod contacts {
+    /// Личный контакт.
+    pub struct Card {
+        pub name: &'static str,
+        pub emails: &'static [&'static str],
+        pub phones: &'static [&'static str],
+        pub organization: &'static str,
+        pub title: &'static str,
+    }
+
+    const fn card(
+        name: &'static str,
+        emails: &'static [&'static str],
+        phones: &'static [&'static str],
+        organization: &'static str,
+        title: &'static str,
+    ) -> Card {
+        Card { name, emails, phones, organization, title }
+    }
+
+    const MINE: &[Card] = &[
+        card("Белова Ольга", &["o.belova@partner.example", "olga.belova@mail.example"], &["+7 495 123-45-67", "+7 916 555-01-02"], "ООО «Партнёр»", "Руководитель отдела закупок"),
+        card("Гусев Дмитрий", &["d.gusev@integrator.example"], &["+7 903 222-33-44"], "АО «Интегратор»", "Архитектор решений"),
+        card("Курьерская служба", &["orders@courier.example"], &["+7 495 777-00-11"], "", ""),
+        card("Лебедева Анна", &["anna.lebedeva@law.example"], &[], "Юридическая фирма «Лебедева и партнёры»", "Партнёр"),
+        card("Морозов Кирилл", &["k.morozov@bank.example"], &["+7 495 600-60-60"], "Банк", "Персональный менеджер"),
+        card("Никитина Светлана", &["svetlana@design.example"], &["+7 921 000-12-34"], "Студия дизайна", "Арт-директор"),
+        card("Служба поддержки", &["support@vendor.example"], &["8 800 100-00-00"], "Вендор", ""),
+        card("Тарасов Олег", &["oleg.tarasov@mail.example"], &["+7 905 111-22-33"], "", ""),
+    ];
+
+    /// Справочник: (имя, адрес, тип Principal) — `individual`, `location` (переговорная), `resource`.
+    const DIRECTORY: &[(&str, &str, &str)] = &[
+        ("Бухгалтерия", "buh@corp.example", "individual"),
+        ("Волков Сергей", "s.volkov@corp.example", "individual"),
+        ("Иванова Мария", "m.ivanova@corp.example", "individual"),
+        ("Кузнецова Елена", "e.kuznetsova@corp.example", "individual"),
+        ("Переговорная 1", "room1@corp.example", "location"),
+        ("Переговорная 2", "room2@corp.example", "location"),
+        ("Переговорная 3", "room3@corp.example", "location"),
+        ("Петров Алексей", "a.petrov@corp.example", "individual"),
+        ("Петров Иван", "ivan.petrov@corp.example", "individual"),
+        ("Проектор в учебном классе", "projector@corp.example", "resource"),
+        ("Сидоров Игорь", "i.sidorov@corp.example", "individual"),
+        ("Смирнова Анна", "anna.smirnova@corp.example", "individual"),
+        ("Фёдорова Наталья", "n.fedorova@corp.example", "individual"),
+        ("Щукин Алексей", "a.shchukin@corp.example", "individual"),
+    ];
+
+    pub fn mine() -> &'static [Card] {
+        MINE
+    }
+
+    pub fn directory() -> &'static [(&'static str, &'static str, &'static str)] {
+        DIRECTORY
+    }
+}

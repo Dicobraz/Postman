@@ -15,6 +15,7 @@ use crate::invite::{self, Delivery};
 use crate::schedule::{self, Meeting};
 use postman_search::SearchIndex;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
+use postman_jmap::{ContactCard, Principal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 /// Канал команд синхронизации (UI держит отправителя).
 pub use tokio::sync::mpsc::UnboundedSender;
@@ -32,6 +33,8 @@ const PREFETCH_LIMIT: usize = 20_000;
 /// Догрузка при прокрутке.
 const PAGE: u64 = 500;
 const SEARCH_LIMIT: u64 = 1000;
+/// Справочник целиком — не больше (подсказки адресов и раздел «Контакты»).
+const DIRECTORY_LIMIT: u64 = 10_000;
 
 #[derive(Clone)]
 pub struct Account {
@@ -79,6 +82,12 @@ pub enum Command {
     CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
     /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
     ShareFreeBusy { email: String },
+    /// Перечитать личные контакты и справочник → `ContactsLoaded`, `DirectoryLoaded` (и `Contacts` для подсказок).
+    Contacts,
+    /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
+    SaveContact { card: Box<ContactCard>, old: Option<Box<ContactCard>>, ticket: u64 },
+    /// Удалить карточку → `ContactDeleted` или `ContactFailed`, затем `ContactsLoaded`.
+    DeleteContact { id: String, ticket: u64 },
 }
 
 pub enum Event {
@@ -112,6 +121,14 @@ pub enum Event {
     FreeBusyShared { email: String },
     /// Ошибка календаря (неделя, открытие занятости) — тостом.
     CalendarFailed(String),
+    /// Личные контакты целиком (раздел «Контакты»).
+    ContactsLoaded(Vec<ContactCard>),
+    /// Справочник: сотрудники, переговорные и ресурсы с адресами (раздел «Контакты», подсказки адресов).
+    DirectoryLoaded(Vec<Principal>),
+    ContactSaved { ticket: u64, id: String },
+    ContactDeleted { ticket: u64, id: String },
+    /// Ошибка контактов: `ticket` — сохранения или удаления, `0` — загрузки.
+    ContactFailed { ticket: u64, error: String },
     Error(String),
 }
 
@@ -166,12 +183,8 @@ async fn run(
     if let Some(i) = identities.first() {
         notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
     }
-    if client.has(postman_jmap::CONTACTS)
-        && let Ok(cards) = client.contact_cards().await
-    {
-        let pairs = cards.into_iter().flat_map(|c| c.emails.into_iter().map(move |e| (c.name.clone(), e))).collect();
-        notify(Event::Contacts(pairs));
-    }
+    // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
+    load_people(&client, notify).await;
     let mut email_state = initial_load(&client, &mut cache, &index, notify).await.map_err(|e| e.to_string())?;
     let mut poll = tokio::time::interval(POLL);
     poll.tick().await;
@@ -424,6 +437,25 @@ async fn handle(
                 Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
+        Command::Contacts => load_people(client, notify).await,
+        Command::SaveContact { card, old, ticket } => {
+            let saved = match &old {
+                Some(old) => client.update_contact(old, &card).await.map(|()| old.id.clone()),
+                None => client.create_contact(&card).await,
+            };
+            notify(match saved {
+                Ok(id) => Event::ContactSaved { ticket, id },
+                Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
+            });
+            load_cards(client, notify).await;
+        }
+        Command::DeleteContact { id, ticket } => {
+            notify(match client.destroy_contact(&id).await {
+                Ok(()) => Event::ContactDeleted { ticket, id },
+                Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
+            });
+            load_cards(client, notify).await;
+        }
         Command::SaveDraft { draft, replace, ticket } => {
             let r = save_draft(client, cache, &draft, replace.as_deref()).await;
             notify(match r {
@@ -433,6 +465,34 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// Личные контакты и справочник; чего сервер не объявил — того нет (без ошибки).
+async fn load_people(client: &Client, notify: &impl Fn(Event)) {
+    load_cards(client, notify).await;
+    if !client.has(postman_jmap::PRINCIPALS) {
+        return notify(Event::DirectoryLoaded(Vec::new()));
+    }
+    match client.directory(DIRECTORY_LIMIT).await {
+        Ok(people) => notify(Event::DirectoryLoaded(crate::contacts::directory(people))),
+        Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
+    }
+}
+
+/// Личные контакты — разделу целиком и подсказкам адресов парами (имя, адрес).
+async fn load_cards(client: &Client, notify: &impl Fn(Event)) {
+    if !client.has(postman_jmap::CONTACTS) {
+        // Раздел «Контакты» не ждёт того, чего сервер не умеет.
+        return notify(Event::ContactsLoaded(Vec::new()));
+    }
+    match client.contact_cards().await {
+        Ok(cards) => {
+            let pairs = cards.iter().flat_map(|c| c.emails.iter().map(|e| (c.name.clone(), e.clone()))).collect();
+            notify(Event::Contacts(pairs));
+            notify(Event::ContactsLoaded(cards));
+        }
+        Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
+    }
 }
 
 /// Сервер не выполнил перенос или удаление: письмо — в кэш таким, какое оно на сервере (UI уже поменял кэш сам).
