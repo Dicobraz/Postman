@@ -72,7 +72,10 @@ pub mod calendar {
 
 /// Вкладка встречи (S3-05, вкладкой — S5-11).
 pub mod meeting {
-    gpui_kit::actions!(meeting, [Send, Close, NextSlot, PrevSlot, PickSlot, AddPerson]);
+    gpui_kit::actions!(
+        meeting,
+        [Send, Close, Discard, NextSlot, PrevSlot, PickSlot, Longer, Shorter, PrevDay, NextDay, Today, AddPerson]
+    );
 }
 
 /// Контакты (S5-11): новый, изменить, удалить, написать, встреча, копировать адрес.
@@ -247,10 +250,20 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.discard", &[], COMPOSER),
     cmd("meeting.send", &["ctrl-enter"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Не Outlook (там Ctrl+D — «Удалить»): «Удалить черновик» встречи — Ctrl+D по макету (решение владельца
+    // 2026-10-22, S5.md «Вопросы владельцу» №5).
+    cmd("meeting.discard", &["ctrl-d"], MEETING),
     // Не Outlook (там подбор — мышью): ←/→ — по общим свободным окнам, Enter — встреча в окно (S5-23).
     cmd("meeting.next_slot", &["right"], MEETING_GRID),
     cmd("meeting.prev_slot", &["left"], MEETING_GRID),
     cmd("meeting.pick_slot", &["enter"], MEETING_GRID),
+    // Макет встречи: Shift+←/→ — конец выбранного времени (длительность) с шагом сетки; PgUp/PgDn — день, Home —
+    // сегодня, как в календаре.
+    cmd("meeting.longer", &["shift-right"], MEETING_GRID),
+    cmd("meeting.shorter", &["shift-left"], MEETING_GRID),
+    cmd("meeting.prev_day", &["pageup"], MEETING_GRID),
+    cmd("meeting.next_day", &["pagedown"], MEETING_GRID),
+    cmd("meeting.today", &["home"], MEETING_GRID),
     // Outlook: Ctrl+Shift+B — «Адресная книга»; здесь — к полю участников с подсказками справочника.
     cmd("meeting.add_person", &["ctrl-shift-b"], MEETING),
     // Контакты (S5-11): Outlook — Ctrl+Shift+C новый контакт; F2 — правка, Delete — удалить (после «Да»).

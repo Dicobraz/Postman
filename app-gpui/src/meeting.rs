@@ -48,6 +48,8 @@ const SUGGEST_FROM: usize = 2;
 /// Занятость спрашиваем, когда участники перестали меняться.
 const QUERY_DELAY: Duration = Duration::from_millis(400);
 const DURATIONS: [i64; 4] = [1800, 3600, 5400, 7200];
+/// Самый мелкий шаг сетки (S5-20, «Шаг сетки» — 15 или 30 мин): встреча не короче.
+const MIN_STEP: i64 = 15 * 60;
 /// Переговорных в строке выбора — не больше.
 const ROOMS: usize = 6;
 
@@ -187,6 +189,39 @@ pub(crate) fn step_slot(runs: &[Span], from: Option<i64>, forward: bool) -> Opti
         (None, false) => runs.last().copied(),
         (Some(t), true) => runs.iter().find(|r| r.start > t).copied(),
         (Some(t), false) => runs.iter().rev().find(|r| r.start < t).copied(),
+    }
+}
+
+/// Что тянут у выбранного времени (S5-23, макет встречи): рамку целиком или ручку края.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grip {
+    Move,
+    Start,
+    End,
+}
+
+/// Выбранное время после сдвига на `dt` секунд за `grip` (перетаскивание мышью; Shift+←/→ — конец на шаг): края —
+/// по шагу сетки от начала сетки `range`, внутри `range`, не короче шага.
+pub(crate) fn dragged(grip: Grip, from: Span, dt: i64, range: Span, step: i64) -> Span {
+    let step = step.max(MIN_STEP);
+    let snap = |t: i64| range.start + ((t - range.start) as f64 / step as f64).round() as i64 * step;
+    let len = from.len().max(step);
+    match grip {
+        Grip::Move => {
+            let start = snap(from.start + dt).clamp(range.start, (range.end - len).max(range.start));
+            Span::new(start, start + len)
+        }
+        Grip::Start => Span::new(snap(from.start + dt).clamp(range.start, from.end - step), from.end),
+        Grip::End => Span::new(from.start, snap(from.end + dt).clamp(from.start + step, range.end.max(from.start + step))),
+    }
+}
+
+/// Пустой «призрак» перетаскивания: рамка двигается сама.
+struct DragGhost;
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
     }
 }
 
@@ -345,7 +380,7 @@ impl MeetingModel {
             self.date = z.strftime("%d.%m.%Y").to_string();
             self.start = z.strftime("%H:%M").to_string();
         }
-        self.duration = s.len().max(1800);
+        self.duration = s.len().max(MIN_STEP);
     }
 
     /// Другой день: время остаётся.
@@ -615,6 +650,10 @@ pub(crate) struct MeetingView {
     free_color: FreeColor,
     /// Окно под курсором ←/→ (S5-23): его начало; Enter ставит встречу в него.
     pub(crate) slot_cursor: Option<i64>,
+    /// Шаг сетки, с (S5-20): перетаскивание выбранного времени и Shift+←/→.
+    step: i64,
+    /// Перетаскивание выбранного времени: где нажата мышь и какое было время.
+    drag_from: Option<(Pixels, Span)>,
     desc_open: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -665,6 +704,7 @@ impl MeetingView {
             let cal = crate::prefs::get(cx).calendar;
             this.free_color = cal.free_color;
             this.hours = cal.work_hours(this.tz.clone());
+            this.step = i64::from(cal.step) * 60;
             cx.notify();
         }));
         let tz = cal.zone();
@@ -695,6 +735,8 @@ impl MeetingView {
             with_optional: cal.with_optional,
             free_color: cal.free_color,
             slot_cursor: None,
+            step: i64::from(cal.step) * 60,
+            drag_from: None,
             desc_open,
             _subscriptions: subscriptions,
         };
@@ -1052,8 +1094,54 @@ impl MeetingView {
 
     fn pick_day(&mut self, date: Date, cx: &mut Context<Self>) {
         self.model.set_day(date);
+        self.slot_cursor = None;
         self.sync_inputs = true;
         cx.notify();
+    }
+
+    /// PgUp/PgDn (S5-23, макет встречи): соседний день; время остаётся.
+    fn shift_day(&mut self, days: i64, cx: &mut Context<Self>) {
+        self.pick_day(add_days(self.day(), days), cx);
+    }
+
+    /// Выбранное время в сетке дня.
+    fn picked_in(&self, range: Span) -> Option<Span> {
+        self.model.span(&self.tz, self.today()).filter(|p| p.overlaps(&range))
+    }
+
+    /// Shift+←/→ (S5-23): конец выбранного времени — на шаг сетки.
+    fn resize(&mut self, steps: i64, cx: &mut Context<Self>) {
+        let (range, _) = self.windows();
+        if let Some(p) = self.picked_in(range) {
+            self.set_picked(dragged(Grip::End, p, steps * self.step, range, self.step), cx);
+        }
+    }
+
+    fn set_picked(&mut self, span: Span, cx: &mut Context<Self>) {
+        if self.model.span(&self.tz, self.today()) != Some(span) {
+            self.model.set_slot(span, &self.tz);
+            self.sync_inputs = true;
+            cx.notify();
+        }
+    }
+
+    /// Мышь тянет рамку или ручку выбранного времени: `x` — курсор, `width` — ширина дорожек.
+    fn drag_to(&mut self, grip: Grip, x: Pixels, width: Pixels, cx: &mut Context<Self>) {
+        let Some((x0, from)) = self.drag_from else { return };
+        let w = f32::from(width);
+        if w <= 0. {
+            return;
+        }
+        let (range, _) = self.windows();
+        let dt = (f32::from(x - x0) / w * range.len() as f32) as i64;
+        self.set_picked(dragged(grip, from, dt, range, self.step), cx);
+    }
+
+    /// Нажата мышь на рамке или ручке: запомнить начало перетаскивания, фокус — вкладке.
+    fn grab(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let (range, _) = self.windows();
+        self.drag_from = self.picked_in(range).map(|p| (x, p));
+        self.focus.focus(window, cx);
     }
 
     fn status_line(&self) -> Option<(String, bool)> {
@@ -1462,7 +1550,7 @@ impl MeetingView {
         } else {
             vec![
                 (swatch(l.pm(Pm::FbBusy), None), tr!("cal-busy")),
-                (swatch(l.pm(Pm::FbTentative), Some(l.pm(Pm::FbBusy))), tr!("cal-tentative")),
+                (swatch(l.pm(Pm::FbTentative), Some(l.pm(Pm::FbBusyLine))), tr!("cal-tentative")),
                 (swatch(l.pm(Pm::FbOof), None), tr!("cal-unavailable")),
                 (swatch(unknown_fill, None), tr!("meeting-legend-unknown")),
                 (swatch(external_fill, None), tr!("meeting-legend-external")),
@@ -1506,14 +1594,14 @@ impl MeetingView {
             }
             let (bg, fg, border) = if self.only_free {
                 match b.kind {
-                    BusyKind::Tentative => (l.panel(), l.text3(), Some(l.pm(Pm::FbMute))),
-                    _ => (l.pm(Pm::FbMute), l.text3(), None),
+                    BusyKind::Tentative => (l.panel(), l.pm(Pm::FbMuteFg), Some(l.pm(Pm::FbMute))),
+                    _ => (l.pm(Pm::FbMute), l.pm(Pm::FbMuteFg), None),
                 }
             } else {
                 match b.kind {
-                    BusyKind::Busy => (l.pm(Pm::FbBusy), l.on_accent(), None),
-                    BusyKind::Tentative => (l.pm(Pm::FbTentative), l.text(), Some(l.pm(Pm::FbBusy))),
-                    BusyKind::Unavailable => (l.pm(Pm::FbOof), l.on_accent(), None),
+                    BusyKind::Busy => (l.pm(Pm::FbBusy), l.pm(Pm::FbBusyFg), None),
+                    BusyKind::Tentative => (l.pm(Pm::FbTentative), l.pm(Pm::FbTentativeFg), Some(l.pm(Pm::FbBusyLine))),
+                    BusyKind::Unavailable => (l.pm(Pm::FbOof), l.pm(Pm::FbOofFg), None),
                 }
             };
             Some(
@@ -1589,7 +1677,7 @@ impl MeetingView {
                     .child(
                         div()
                             .relative()
-                            .child(avatar(name, 24., &l).when(i == 0, |d| d.bg(l.picked()).text_color(l.accent_text())))
+                            .child(avatar(name, 24., &l).when(i == 0, |d| d.bg(l.pm(Pm::FbTentative)).text_color(l.pm(Pm::FbTentativeFg))))
                             .child(div().absolute().right(px(-2.)).bottom(px(-2.)).child(presence_dot(p, 10., &l, free.line))),
                     )
                     .child(
@@ -1740,18 +1828,53 @@ impl MeetingView {
                     this.pick_slot(pick, cx);
                 }))
         });
-        // Выбранное время — рамка цвета свободного времени со свечением (макет встречи).
+        // Выбранное время — рамка цвета свободного времени со свечением и ручками краёв (макет встречи): рамку
+        // тянут целиком, ручки — начало и конец; шаг — шаг сетки. Рамка закрывает окна под собой от щелчка.
+        let frame_h = ROW_H * (rows.len() + 1) as f32;
+        let handle = |id: &'static str, grip: Grip| {
+            div()
+                .id(id)
+                .absolute()
+                .top(px(frame_h / 2. - 12.))
+                .when(grip == Grip::Start, |d| d.left(px(-5.)))
+                .when(grip == Grip::End, |d| d.right(px(-5.)))
+                .w(px(8.))
+                .h(px(24.))
+                .rounded(px(4.))
+                .bg(l.panel())
+                .border_1()
+                .border_color(free.line)
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.grab(ev.position.x, window, cx);
+                    }),
+                )
+                .on_drag(grip, |_, _, _, cx| cx.new(|_| DragGhost))
+        };
         let frame = picked.filter(|p| p.overlaps(&range)).map(|p| {
             div()
+                .id("picked")
                 .absolute()
                 .top(px(24.))
-                .h(px(ROW_H * (rows.len() + 1) as f32))
+                .h(px(frame_h))
                 .left(relative(frac(p.start)))
                 .w(relative(frac(p.end) - frac(p.start)))
                 .rounded(px(4.))
                 .border_2()
                 .border_color(free.line)
+                .occlude()
+                .cursor(CursorStyle::OpenHand)
                 .children(glow(free.line))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| this.grab(ev.position.x, window, cx)),
+                )
+                .on_drag(Grip::Move, |_, _, _, cx| cx.new(|_| DragGhost))
+                .child(handle("picked-start", Grip::Start))
+                .child(handle("picked-end", Grip::End))
         });
         // Подсказка у сетки (S5-23): клавиши окон — из реестра, с учётом своих.
         let hint = slot_hint(cx);
@@ -1770,6 +1893,10 @@ impl MeetingView {
                         .flex_1()
                         .min_w_0()
                         .relative()
+                        .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<Grip>, _, cx| {
+                            let grip = *ev.drag(cx);
+                            this.drag_to(grip, ev.event.position.x, ev.bounds.size.width, cx);
+                        }))
                         .children(off)
                         .children(lines)
                         .child(hour_labels)
@@ -1841,9 +1968,9 @@ fn presence_dot(p: Presence, size: f32, l: &Look, free: Hsla) -> Div {
     let d = div().size(px(size)).flex_none().rounded_full();
     match p {
         Presence::Free => d.bg(free),
-        Presence::Busy => d.bg(l.pm(Pm::FbBusy)),
-        Presence::Tentative => d.bg(l.pm(Pm::FbTentative)).border_1().border_color(l.pm(Pm::FbBusy)),
-        Presence::Away => d.bg(l.pm(Pm::FbOof)),
+        Presence::Busy => d.bg(l.pm(Pm::FbBusyLine)),
+        Presence::Tentative => d.bg(l.pm(Pm::FbTentative)).border_1().border_color(l.pm(Pm::FbBusyLine)),
+        Presence::Away => d.bg(l.pm(Pm::FbOofLine)),
         Presence::Unknown => d.bg(l.panel()).border_2().border_color(l.pm(Pm::FbUnknown)),
         Presence::External => d.bg(l.panel()).border_2().border_color(l.pm(Pm::FbExt)),
     }
@@ -1913,7 +2040,17 @@ impl Render for MeetingView {
                     .child(zone_label(&self.tz)),
             )
             .child(div().flex_1())
-            .children(status);
+            .children(status)
+            // «Удалить черновик» (макет встречи, Ctrl+D): вкладка закрывается без отправки.
+            .child(
+                outline_button("discard", &l)
+                    .w(px(32.))
+                    .px_0()
+                    .justify_center()
+                    .child(icon(g::DELETE, 14.))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("cmd-meeting-discard")).build(window, cx))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(MeetingEvent::Close))),
+            );
         let fields = div()
             .flex_none()
             .flex()
@@ -1942,6 +2079,15 @@ impl Render for MeetingView {
             .on_action(cx.listener(|this, _: &meeting::NextSlot, _, cx| this.step_cursor(true, cx)))
             .on_action(cx.listener(|this, _: &meeting::PrevSlot, _, cx| this.step_cursor(false, cx)))
             .on_action(cx.listener(|this, _: &meeting::PickSlot, _, cx| this.pick_cursor(cx)))
+            .on_action(cx.listener(|this, _: &meeting::Longer, _, cx| this.resize(1, cx)))
+            .on_action(cx.listener(|this, _: &meeting::Shorter, _, cx| this.resize(-1, cx)))
+            .on_action(cx.listener(|this, _: &meeting::PrevDay, _, cx| this.shift_day(-1, cx)))
+            .on_action(cx.listener(|this, _: &meeting::NextDay, _, cx| this.shift_day(1, cx)))
+            .on_action(cx.listener(|this, _: &meeting::Today, _, cx| {
+                let today = this.today();
+                this.pick_day(today, cx);
+            }))
+            .on_action(cx.listener(|_, _: &meeting::Discard, _, cx| cx.emit(MeetingEvent::Close)))
             .on_action(cx.listener(|this, _: &meeting::AddPerson, window, cx| this.add_person(window, cx)))
             .size_full()
             .flex()
@@ -1960,7 +2106,8 @@ impl Render for MeetingView {
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
     use super::{
-        Command, Date, MeetingModel, Status, TimeZone, chips_of, default_start, free_runs, parse_date, parse_time, step_slot,
+        Command, Date, Grip, MeetingModel, Status, TimeZone, chips_of, default_start, dragged, free_runs, parse_date, parse_time,
+        step_slot,
     };
     use postman_calendar::{Busy, BusyKind, Span, WorkHours};
 
@@ -2150,5 +2297,29 @@ mod tests {
         assert_eq!(half.first(), Some(&Span::new(h(10.), h(10.5))));
         assert_eq!(step_slot(&half, Some(h(11.)), false), Some(Span::new(h(10.), h(10.5))));
         assert_eq!(step_slot(&hour, Some(h(11.)), false), None, "часовые окна: левее 11:00 окон нет");
+    }
+
+    /// Перетаскивание выбранного времени и Shift+←/→ (S5-23, макет встречи): шаг сетки, края дня, не короче шага.
+    #[test]
+    fn dragging_the_picked_time_snaps_and_stays_in_the_day() {
+        let h = |x: f64| (x * 3600.) as i64;
+        let range = Span::new(h(8.), h(19.));
+        let at = Span::new(h(10.), h(11.));
+        let half = 1800;
+        // Рамка целиком: сдвиг на 40 мин — к ближайшему шагу (30 мин), длина та же.
+        assert_eq!(dragged(Grip::Move, at, 40 * 60, range, half), Span::new(h(10.5), h(11.5)));
+        assert_eq!(dragged(Grip::Move, at, 10 * 60, range, half), at, "меньше полшага — на месте");
+        // Шаг 15 мин — 40 мин становятся 45.
+        assert_eq!(dragged(Grip::Move, at, 40 * 60, range, 900), Span::new(h(10.75), h(11.75)));
+        // Края дня.
+        assert_eq!(dragged(Grip::Move, at, h(-5.), range, half), Span::new(h(8.), h(9.)));
+        assert_eq!(dragged(Grip::Move, at, h(20.), range, half), Span::new(h(18.), h(19.)));
+        // Ручки: начало и конец, не короче шага и не за край.
+        assert_eq!(dragged(Grip::Start, at, -h(1.5), range, half), Span::new(h(8.5), h(11.)));
+        assert_eq!(dragged(Grip::Start, at, h(3.), range, half), Span::new(h(10.5), h(11.)));
+        assert_eq!(dragged(Grip::End, at, h(0.5), range, half), Span::new(h(10.), h(11.5)), "Shift+→");
+        assert_eq!(dragged(Grip::End, at, -h(0.5), range, half), Span::new(h(10.), h(10.5)), "Shift+←");
+        assert_eq!(dragged(Grip::End, Span::new(h(10.), h(10.5)), -h(0.5), range, half), Span::new(h(10.), h(10.5)));
+        assert_eq!(dragged(Grip::End, at, h(10.), range, half), Span::new(h(10.), h(19.)));
     }
 }

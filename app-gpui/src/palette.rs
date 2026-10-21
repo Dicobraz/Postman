@@ -544,7 +544,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "mail.reply" => REPLY,
         "mail.reply_all" => REPLY_ALL,
         "mail.forward" => FORWARD,
-        "mail.delete" | "compose.discard" | "contacts.delete" => DELETE,
+        "mail.delete" | "compose.discard" | "meeting.discard" | "contacts.delete" => DELETE,
         "mail.due" => CLOCK,
         "mail.remind" | "view.notifications" => RINGER,
         "mail.wait" => WAIT,
@@ -557,8 +557,8 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "mail.report_phishing" => PHISHING,
         "thread.toggle" | "thread.fold" | "thread.expand" | "thread.collapse" => CONVERSATION,
         "thread.quotes" | "compose.quote" => QUOTE,
-        "thread.next" | "attach.next" | "tab.next" | "calendar.next_week" => CHEVRON_RIGHT,
-        "thread.prev" | "attach.prev" | "tab.prev" | "calendar.prev_week" => CHEVRON_LEFT,
+        "thread.next" | "attach.next" | "tab.next" | "calendar.next_week" | "meeting.next_day" => CHEVRON_RIGHT,
+        "thread.prev" | "attach.prev" | "tab.prev" | "calendar.prev_week" | "meeting.prev_day" => CHEVRON_LEFT,
         "attach.preview" | "compose.preview" => PREVIEW,
         "attach.save_all" => SAVE,
         "view.calendar" | "calendar.new_meeting" | "contacts.meeting" => CALENDAR,
@@ -571,7 +571,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "search.folder" => FOLDER,
         "search.attachments" | "compose.attach" => ATTACH,
         "search.recent" => HISTORY,
-        "calendar.today" => TODAY,
+        "calendar.today" | "meeting.today" => TODAY,
         "compose.send" | "meeting.send" => SEND,
         "compose.bold" => BOLD,
         "compose.italic" => ITALIC,
@@ -598,7 +598,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
 /// Команды, которых в палитре нет: сама палитра, клавиши с данными (категория — клавишей 1–9) и шаги по списку и
 /// вложениям и окнам встречи — это клавиши, а не действия.
 fn hidden(id: &str) -> bool {
-    const STEPS: [&str; 11] = [
+    const STEPS: [&str; 13] = [
         "mail.next",
         "mail.prev",
         "mail.first",
@@ -610,6 +610,8 @@ fn hidden(id: &str) -> bool {
         "meeting.next_slot",
         "meeting.prev_slot",
         "meeting.pick_slot",
+        "meeting.longer",
+        "meeting.shorter",
     ];
     id.starts_with("palette.") || id == "mail.categorize" || STEPS.contains(&id)
 }
