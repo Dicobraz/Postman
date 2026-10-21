@@ -101,8 +101,10 @@ impl Entry {
         Self { card, kind, keys, digits }
     }
 
+    /// Имя — ФИО из `description`, без него — `name` (у Stalwart это логин).
     fn from_principal(p: Principal) -> Self {
-        let card = ContactCard { id: p.id, name: p.name, emails: p.email.into_iter().collect(), ..Default::default() };
+        let name = p.display_name().to_owned();
+        let card = ContactCard { id: p.id, name, emails: p.email.into_iter().collect(), ..Default::default() };
         Self::new(card, Kind::of_principal(&p.kind))
     }
 
@@ -1606,6 +1608,7 @@ fn demo_directory() -> Vec<Entry> {
             Entry::from_principal(Principal {
                 id: format!("demo-principal-{i}"),
                 name: name.into(),
+                description: None,
                 email: Some(email.into()),
                 kind: kind.into(),
             })
