@@ -5,7 +5,7 @@ cal-today-tip = Go to today (Alt+Home)
 cal-prev-week-tip = Previous week (Alt+↑)
 cal-next-week-tip = Next week (Alt+↓)
 cal-new-meeting = New meeting
-cal-new-meeting-tip = New meeting (Ctrl+Shift+Q)
+cal-new-meeting-tip = New meeting
 cal-loading = Loading the week…
 cal-day = { $d ->
     [0] Mon
@@ -116,7 +116,7 @@ cal-write-participants = Email attendees
 meeting-title-new = New meeting
 meeting-tab-titled = New meeting · { $title }
 meeting-send = Send
-meeting-send-tip = Send invitations (Ctrl+Enter)
+meeting-send-tip = Send invitations
 meeting-subject = Subject
 meeting-subject-placeholder = Meeting subject
 meeting-required = Required

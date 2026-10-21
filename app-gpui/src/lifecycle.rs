@@ -187,11 +187,11 @@ fn action(kind: Kind) -> Box<dyn Action> {
 }
 
 /// Шапка письма: метки сроков и кнопки «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (команды `mail.due`…).
-pub(crate) fn header_row(row: &EmailRow, l: &Look) -> Div {
+pub(crate) fn header_row(row: &EmailRow, l: &Look, cx: &App) -> Div {
     let now = Zoned::now();
     let badges = lifecycle::badges(&row.keywords, &now);
     let button = |kind: Kind| {
-        div()
+        let b = div()
             .id(kind_key(kind))
             .flex()
             .flex_none()
@@ -207,7 +207,14 @@ pub(crate) fn header_row(row: &EmailRow, l: &Look) -> Div {
             .when(kind == Kind::Due, |d| d.child(icon(glyph::CLOCK, 12.)))
             .when(kind == Kind::Remind, |d| d.child(icon(glyph::RINGER, 12.)))
             .child(tr!(kind_key(kind)))
-            .on_click(move |_, window, cx| window.dispatch_action(action(kind), cx))
+            .on_click(move |_, window, cx| window.dispatch_action(action(kind), cx));
+        let command = match kind {
+            Kind::Due => "mail.due",
+            Kind::Remind => "mail.remind",
+            Kind::Wait => "mail.wait",
+            Kind::Expire => "mail.expire",
+        };
+        crate::keytips::command(b, command, Some(tr!(kind_key(kind))), l, cx)
     };
     div()
         .flex()

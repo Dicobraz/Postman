@@ -333,7 +333,10 @@ impl MailList {
                     .text_color(l.on_accent())
                     .child(if all { icon(glyph::CHECK, 12.) } else { div().w(px(8.)).h(px(2.)).bg(l.on_accent()) }),
             )
-            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("bulk-select-all")).build(window, cx))
+            .tooltip({
+                let tip = crate::keytips::with_key(tr!("bulk-select-all"), crate::keytips::key("mail.select_all", cx));
+                move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if all {
                     this.clear_selection(cx);
@@ -364,7 +367,10 @@ impl MailList {
                     .cursor_pointer()
                     .hover(|d| d.bg(l.hover()))
                     .child(icon(glyph::CLOSE, 11.))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("bulk-clear-hint")).build(window, cx))
+                    .tooltip({
+                        let tip = crate::keytips::with_key(tr!("bulk-clear-hint"), crate::keytips::key("search.clear", cx));
+                        move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.clear_selection(cx);
                     })),
@@ -1068,8 +1074,9 @@ impl Render for SummaryView {
         }
         let unread = s.unread > 0 || s.count == 0;
         let flag_on = s.flagged < s.count || s.count == 0;
-        let cell = |id: &'static str, g: Option<char>, label: String, key: String| {
-            div()
+        // Клавиши — подсказкой «Название (клавиша)» и KeyTips, не в тексте (S5-18).
+        let cell = |id: &'static str, g: Option<char>, label: String, command: &'static str| {
+            let c = div()
                 .id(id)
                 .h(px(36.))
                 .flex()
@@ -1083,10 +1090,8 @@ impl Render for SummaryView {
                 .cursor_pointer()
                 .hover(|d| d.bg(l.hover()))
                 .children(g.map(|g| icon(g, 16.)))
-                .child(div().flex_1().min_w_0().truncate().child(label))
-                .when(!key.is_empty(), |d| {
-                    d.child(div().flex_none().px(px(5.)).rounded(px(4.)).border_1().border_color(l.stroke()).text_size(px(11.)).text_color(l.text2()).child(key))
-                })
+                .child(div().flex_1().min_w_0().truncate().child(label.clone()));
+            crate::keytips::command(c, command, Some(label), &l, cx)
         };
         let ask = |a: Ask| cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(SummaryAsk::Ask(a.clone())));
         let sub = |s: crate::menu::Sub| cx.listener(move |_, ev: &ClickEvent, _, cx| cx.emit(SummaryAsk::Sub(s, ev.position())));
@@ -1112,13 +1117,13 @@ impl Render for SummaryView {
             .grid()
             .grid_cols(2)
             .gap(px(8.))
-            .child(cell("summary-archive", Some(glyph::ARCHIVE), tr!("bulk-archive"), key_hint("mail.archive", cx)).on_click(ask(Ask::Archive)))
-            .child(cell("summary-delete", Some(glyph::DELETE), tr!("bulk-delete"), key_hint("mail.delete", cx)).on_click(ask(Ask::Trash)))
-            .child(cell("summary-move", Some(glyph::MOVE), tr!("bulk-move-plain"), key_hint("mail.move", cx)).on_click(sub(crate::menu::Sub::Move)))
-            .child(cell("summary-cat", Some(glyph::TAG), tr!("bulk-category-plain"), tr!("bulk-category-keys")).on_click(sub(crate::menu::Sub::Category)))
-            .child(cell("summary-seen", Some(glyph::READ), seen, key_hint(if unread { "mail.mark_read" } else { "mail.mark_unread" }, cx)).on_click(ask(Ask::Seen(None))))
-            .child(cell("summary-due", Some(glyph::CLOCK), tr!("bulk-due-plain"), key_hint("mail.due", cx)).on_click(ask(Ask::Lifecycle(Kind::Due))))
-            .child(cell("summary-flag", Some(glyph::FLAG), flag, key_hint("mail.toggle_flag", cx)).on_click(ask(Ask::Flag(None))))
+            .child(cell("summary-archive", Some(glyph::ARCHIVE), tr!("bulk-archive"), "mail.archive").on_click(ask(Ask::Archive)))
+            .child(cell("summary-delete", Some(glyph::DELETE), tr!("bulk-delete"), "mail.delete").on_click(ask(Ask::Trash)))
+            .child(cell("summary-move", Some(glyph::MOVE), tr!("bulk-move-plain"), "mail.move").on_click(sub(crate::menu::Sub::Move)))
+            .child(cell("summary-cat", Some(glyph::TAG), tr!("bulk-category-plain"), "mail.categorize").on_click(sub(crate::menu::Sub::Category)))
+            .child(cell("summary-seen", Some(glyph::READ), seen, if unread { "mail.mark_read" } else { "mail.mark_unread" }).on_click(ask(Ask::Seen(None))))
+            .child(cell("summary-due", Some(glyph::CLOCK), tr!("bulk-due-plain"), "mail.due").on_click(ask(Ask::Lifecycle(Kind::Due))))
+            .child(cell("summary-flag", Some(glyph::FLAG), flag, "mail.toggle_flag").on_click(ask(Ask::Flag(None))))
             .child(phish);
         let foot = div()
             .flex()
@@ -1126,8 +1131,6 @@ impl Render for SummaryView {
             .gap(px(6.))
             .text_size(px(12.))
             .text_color(l.text2())
-            .child(div().px(px(5.)).rounded(px(4.)).border_1().border_color(l.stroke()).text_size(px(11.)).child("Esc"))
-            .child(tr!("bulk-summary-esc"))
             .child(div().flex_1())
             .child(
                 div()

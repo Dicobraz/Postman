@@ -1503,26 +1503,10 @@ impl Render for ContactsBar {
             .hover(|d| d.bg(l.accent_hover()))
             .child(icon(g::ADD, 14.))
             .child(tr!("contacts-new"))
-            .child(
-                div()
-                    .px(px(6.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(l.on_accent().opacity(0.55))
-                    .text_size(px(11.))
-                    .child("Ctrl+Shift+C"),
-            )
             .on_click(|_, window, cx| window.dispatch_action(Box::new(cmd::New), cx));
-        let kbd = div()
-            .flex_none()
-            .px(px(6.))
-            .rounded(l.px(Metric::RadiusControl))
-            .border_1()
-            .border_color(l.stroke())
-            .text_size(px(11.))
-            .text_color(l.text3())
-            .child("Ctrl+E");
-        let search = Input::new(&search_state).prefix(icon(g::SEARCH, 14.).text_color(l.text3())).suffix(kbd);
+        // Клавиши — подсказкой и KeyTips (S5-18), не в тексте кнопки и поля.
+        let new = crate::keytips::command(new, "contacts.new", Some(tr!("contacts-new")), &l, cx);
+        let search = Input::new(&search_state).prefix(icon(g::SEARCH, 14.).text_color(l.text3()));
         div()
             .size_full()
             .flex()
@@ -1544,7 +1528,12 @@ impl Render for ContactsBar {
             ))
             .child(action("contacts-delete", g::DELETE, "contacts-delete", kind == Some(Kind::Contact), || Box::new(cmd::Delete)))
             .child(div().flex_1())
-            .child(div().ml(px(12.)).w(px(300.)).flex_none().child(search))
+            .child(crate::keytips::badge(
+                div().ml(px(12.)).w(px(300.)).flex_none().child(search),
+                crate::keytips::key("search.focus", cx),
+                &l,
+                cx,
+            ))
     }
 }
 

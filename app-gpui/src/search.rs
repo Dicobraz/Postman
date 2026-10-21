@@ -411,7 +411,10 @@ pub(crate) fn header(found: &Found, count: usize, l: &Look, cx: &mut Context<cra
         .cursor_pointer()
         .hover(|d| d.bg(l.hover()))
         .child(crate::chrome::icon(crate::chrome::glyph::CLOSE, 10.))
-        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("search-close")).build(window, cx))
+        .tooltip({
+            let tip = crate::keytips::with_key(tr!("search-close"), crate::keytips::key("search.clear", cx));
+            move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
         .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::commands::search::Clear), cx));
     let line = div()
         .id("list-header")

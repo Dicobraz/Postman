@@ -1381,10 +1381,16 @@ impl Composer {
             .when(busy || blocked, |d| d.opacity(0.5))
             .child(icon(glyph::SEND, 14.))
             .child(tr!("compose-send"))
-            .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx)));
+            .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx)))
+            .tooltip({
+                let tip = crate::keytips::tip("compose.send", cx);
+                move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            });
         let group = div().relative().flex().flex_none().rounded(px(4.)).overflow_hidden().child(send);
+        // Плашка KeyTips — снаружи группы (у неё `overflow_hidden`).
+        let key = crate::keytips::key("compose.send", cx);
         if self.later.max_delay == 0 {
-            return group.into_any_element();
+            return crate::keytips::badge(div().flex_none().child(group), key, l, cx).into_any_element();
         }
         let caret = div()
             .id("send-later")
@@ -1596,10 +1602,7 @@ impl Composer {
             .border_t_1()
             .border_color(l.border())
             .child(self.send_group(l, cx))
-            .when(wide, |d| {
-                d.child(div().flex_none().text_size(px(12.)).text_color(l.text2()).child(tr!("compose-send-hint")))
-                    .child(div().w_px().h(px(20.)).mx(px(6.)).bg(l.stroke()))
-            })
+            .when(wide, |d| d.child(div().w_px().h(px(20.)).mx(px(6.)).bg(l.stroke())))
             .child(self.wait_toggle(l, cx))
             .when(wide, |d| d.child(self.category_chip(l, cx)))
             // Состояние — справа, длинное обрезается (строка не переносится).

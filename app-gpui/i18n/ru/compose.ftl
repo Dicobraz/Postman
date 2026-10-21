@@ -1,7 +1,6 @@
 # Письмо: вкладка и ответ в области чтения (S3-01, S5-06б).
 compose-title-new = Новое письмо
 compose-send = Отправить
-compose-send-hint = Ctrl+Enter
 compose-attach = Вложить
 compose-to = Кому
 compose-cc = Копия

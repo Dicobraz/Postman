@@ -1,7 +1,6 @@
 # Message: tab and reply in the reading pane (S3-01, S5-06b).
 compose-title-new = New message
 compose-send = Send
-compose-send-hint = Ctrl+Enter
 compose-attach = Attach
 compose-to = To
 compose-cc = Cc

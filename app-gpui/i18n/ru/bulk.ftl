@@ -1,9 +1,9 @@
 # Выделение и массовые действия (S5-08): флажки, панель над списком, сводка, контекстное меню, «Сообщить о фишинге».
 bulk-pick = Выбрать (Ctrl+щелчок, Shift+щелчок — диапазон)
-bulk-select-all = Выделить все (Ctrl+A)
+bulk-select-all = Выделить все
 bulk-selected = Выбрано: { $n }
 bulk-of = из { $total }
-bulk-clear-hint = Снять выделение (Esc)
+bulk-clear-hint = Снять выделение
 bulk-read = Прочитано
 bulk-unread = Не прочитано
 bulk-flag = Флаг
@@ -13,7 +13,6 @@ bulk-delete = Удалить
 bulk-uncategorize = Снять категорию
 bulk-move-plain = В папку
 bulk-category-plain = Категория
-bulk-category-keys = 1–9
 bulk-due-plain = Срок
 bulk-phishing = Сообщить о фишинге
 bulk-letters = { $n ->
@@ -116,7 +115,6 @@ bulk-summary-from = От: { $who }
 bulk-summary-unread = непрочитанных: { $n }
 bulk-summary-more = и ещё { $n }
 bulk-unpick = Убрать из выделения
-bulk-summary-esc = — снять выделение
 bulk-summary-clear = Снять
 
 # Контекстное меню письма.

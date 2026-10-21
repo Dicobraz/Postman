@@ -77,6 +77,8 @@ pub(crate) fn update(cx: &mut App, f: impl FnOnce(&mut Prefs)) {
     }
     if before.keys != after.keys || before.keys_single != after.keys_single || before.key_scheme != after.key_scheme {
         crate::commands::bind(cx, &after);
+    } else if before.keytips != after.keytips {
+        crate::keytips::rebuild(cx, &after);
     }
     let Some(path) = path else { return };
     let seq = writer.next();
