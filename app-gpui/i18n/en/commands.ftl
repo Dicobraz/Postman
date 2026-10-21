@@ -56,6 +56,7 @@ cmd-palette-prev = Palette: previous row
 cmd-palette-run = Palette: run
 cmd-palette-close = Palette: close
 cmd-calendar-new-meeting = New meeting (scheduling assistant)
+cmd-tab-new = New mail tab
 cmd-tab-next = Next tab
 cmd-tab-prev = Previous tab
 cmd-tab-close = Close tab

@@ -887,7 +887,7 @@ impl Mailer {
         self.list.update(cx, |l, cx| l.set_flags(seen, false, cx));
     }
 
-    /// `mail.toggle_flag` (Insert).
+    /// `mail.toggle_flag` (без клавиши: кнопка, меню, панель выделения; S5-16).
     pub(crate) fn toggle_flag(&mut self, cx: &mut Context<Self>) {
         if self.picking(cx) {
             let ids = self.targets(cx);

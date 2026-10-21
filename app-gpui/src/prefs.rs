@@ -24,14 +24,18 @@ pub(crate) fn path(dir: &Path) -> PathBuf {
 
 /// Прочитать настройки при запуске. Файл испорчен или новее этой версии — по умолчанию, причина — в журнал
 /// (файл не перезаписывается до первой правки).
+/// Свои клавиши — к текущей ревизии реестра (`keymap::migrate`).
 pub(crate) fn load(dir: &Path) -> Prefs {
-    match Prefs::load(&path(dir)) {
+    let mut p = match Prefs::load(&path(dir)) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("{e}");
             Prefs::default()
         }
-    }
+    };
+    crate::keymap::migrate(crate::commands::COMMANDS, &mut p.keys, p.keys_rev);
+    p.keys_rev = crate::keymap::KEYS_REV;
+    p
 }
 
 /// Поставить `Global`; `path` — куда писать (`None` — не писать).

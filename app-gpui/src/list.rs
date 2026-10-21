@@ -106,6 +106,8 @@ pub(crate) struct MailList {
     /// Видимые письма (номера по порядку списка, без заголовков групп).
     pub(crate) visible: Range<usize>,
     pub(crate) selected: Option<usize>,
+    /// Письмо, которое выделить, когда придут его строки (вкладка почты вернула своё состояние, S5-16).
+    pub(crate) restore: Option<String>,
     pub(crate) scroll: VirtualListScrollHandle,
     /// Прокрутка каждой папки: вернулись в папку — список там же, где был.
     pub(crate) positions: Positions,
@@ -440,6 +442,7 @@ impl MailList {
             pending_open: None,
             visible: 0..30,
             selected: None,
+            restore: None,
             scroll: VirtualListScrollHandle::new(),
             positions: Positions::default(),
             confirm: None,
@@ -736,6 +739,7 @@ impl MailList {
         self.found = None;
         self.switch_view(Some(id), None);
         self.selected = None;
+        self.restore = None;
         // Другая папка — выделение снято (S5-08).
         self.clear_selection(cx);
         self.reload();
@@ -856,6 +860,25 @@ impl MailList {
         self.pending_open = None;
         let (offset, limit) = page_window(&self.visible);
         self.rows = (offset, source.read(&self.cache, offset, limit));
+        self.take_restore();
+    }
+
+    /// Выделить письмо `id`, когда его строка будет в окне (сейчас или после перечитывания) — без открытия:
+    /// область чтения вкладка ставит сама (S5-16).
+    pub(crate) fn reselect_id(&mut self, id: String, cx: &mut Context<Self>) {
+        self.restore = Some(id);
+        self.take_restore();
+        if self.restore.is_some() {
+            self.reread(None, cx);
+        }
+    }
+
+    /// Ждущее выделение — если строка письма уже прочитана.
+    fn take_restore(&mut self) {
+        if let Some(i) = reselect(self.restore.as_deref(), self.rows.0, &self.rows.1, self.count) {
+            self.selected = Some(i);
+            self.restore = None;
+        }
     }
 
     /// Данные изменились (синхронизация): число писем и окно строк — в фоне, выделение остаётся на том же письме.
@@ -867,7 +890,7 @@ impl MailList {
 
     /// Перечитать в фоне; `select` — затем выделить и открыть письмо с этим номером (иначе — то же письмо).
     fn reread(&mut self, select: Option<usize>, cx: &mut Context<Self>) {
-        let selected = self.selected.and_then(|i| self.row(i)).map(|r| r.id.clone());
+        let selected = self.selected.and_then(|i| self.row(i)).map(|r| r.id.clone()).or_else(|| self.restore.clone());
         let (offset, limit) = page_window(&self.visible);
         self.page_gen += 1;
         let generation = self.page_gen;
@@ -888,6 +911,9 @@ impl MailList {
                 m.groups = groups;
                 m.relayout();
                 m.selected = reselect(selected.as_deref(), offset, &rows, count);
+                if m.selected.is_some() {
+                    m.restore = None;
+                }
                 m.rows = (offset, rows);
                 if let Some(i) = select {
                     m.selected = None;
@@ -970,6 +996,7 @@ impl MailList {
             return;
         }
         let i = i.min(self.count - 1);
+        self.restore = None;
         // Щелчок по письму (без Ctrl и Shift) и стрелки — одно письмо: выделение снято (S5-08).
         self.clear_selection(cx);
         // Другое письмо — вопрос об удалении прежнего снят.

@@ -1,11 +1,21 @@
 //! Вкладки окна (S5-01, DESIGN «Главное окно»): заголовок окна — только вкладки. «Почта» — первая, не закрывается;
 //! остальные открываются и закрываются (Ctrl+W), переключаются Ctrl+Tab / Ctrl+Shift+Tab. Модель общая:
 //! настройки ящика (автоответ, правила), письма (S5-06б: по вкладке на черновик), дальше — настройки (S5-09).
+//!
+//! Вкладки почты (S5-16, Ctrl+T): ещё один список с областью чтения на своей папке, фильтрах и письме. Части экрана
+//! почты одни на всё окно: в них — состояние вкладки-«владельца» ([`Tabs::owner`]); перешли в другую вкладку почты —
+//! состояние прежней запоминается ([`MailState`]), новой — ставится в части ([`Tabs::hand_over`]).
+
+use std::collections::HashMap;
+
+use crate::filters::Query;
 
 /// Что во вкладке.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TabKind {
     /// Почта, календарь, контакты (рейл модулей слева) — главная вкладка.
+    Main,
+    /// Ещё вкладка почты (Ctrl+T, S5-16): список и область чтения со своим состоянием; их — сколько угодно.
     Mail,
     /// Вкладка «Настройки» (`settings_tab.rs`, S5-09).
     Settings,
@@ -18,13 +28,29 @@ pub(crate) enum TabKind {
 impl TabKind {
     /// Главную вкладку не закрыть.
     pub(crate) fn closable(self) -> bool {
-        self != TabKind::Mail
+        self != TabKind::Main
     }
 
     /// Вкладка этого вида одна: повторное открытие показывает её.
     fn single(self) -> bool {
-        matches!(self, TabKind::Mail | TabKind::Settings)
+        matches!(self, TabKind::Main | TabKind::Settings)
     }
+
+    /// Во вкладке — список писем и область чтения (главная — в разделе «Почта»).
+    pub(crate) fn shows_mail(self) -> bool {
+        matches!(self, TabKind::Main | TabKind::Mail)
+    }
+}
+
+/// Состояние вкладки почты (S5-16): папка, фильтры и режим панели слева, выбранное письмо.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MailState {
+    pub(crate) mailbox: Option<String>,
+    pub(crate) query: Query,
+    /// Слева — панель фильтров, а не папки.
+    pub(crate) panel: bool,
+    /// Выбранное (и открытое) письмо.
+    pub(crate) letter: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -40,11 +66,15 @@ pub(crate) struct Tabs {
     tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
+    /// Чьё состояние почты сейчас в частях экрана; `None` — владельца закрыли.
+    owner: Option<u64>,
+    /// Состояние остальных вкладок почты.
+    saved: HashMap<u64, MailState>,
 }
 
 impl Default for Tabs {
     fn default() -> Self {
-        Tabs { tabs: vec![Tab { id: 0, kind: TabKind::Mail }], active: 0, next_id: 1 }
+        Tabs { tabs: vec![Tab { id: 0, kind: TabKind::Main }], active: 0, next_id: 1, owner: Some(0), saved: HashMap::new() }
     }
 }
 
@@ -54,7 +84,43 @@ impl Tabs {
     }
 
     pub(crate) fn active(&self) -> Tab {
-        self.tabs.get(self.active).copied().unwrap_or(Tab { id: 0, kind: TabKind::Mail })
+        self.tabs.get(self.active).copied().unwrap_or(Tab { id: 0, kind: TabKind::Main })
+    }
+
+    /// Вкладка почты, чьё состояние — в частях экрана.
+    pub(crate) fn owner(&self) -> Option<u64> {
+        self.owner
+    }
+
+    /// Запомненное состояние вкладки почты (не владельца).
+    pub(crate) fn saved(&self, id: u64) -> Option<&MailState> {
+        self.saved.get(&id)
+    }
+
+    /// Ctrl+T: новая вкладка почты рядом с остальными, активная, с тем же состоянием, что сейчас в частях экрана
+    /// (`current`): прежний владелец запоминает его, новая вкладка становится владельцем — частям менять нечего.
+    pub(crate) fn open_mail(&mut self, current: MailState) -> u64 {
+        if let Some(owner) = self.owner {
+            self.saved.insert(owner, current);
+        }
+        let id = self.open(TabKind::Mail);
+        self.owner = Some(id);
+        id
+    }
+
+    /// Активна вкладка почты, а в частях экрана — состояние другой: прежний владелец запоминает `current`, активная
+    /// становится владельцем; её состояние — поставить в части. `None` — ставить нечего (та же вкладка, не почта или
+    /// состояние не запомнено).
+    pub(crate) fn hand_over(&mut self, current: impl FnOnce() -> MailState) -> Option<MailState> {
+        let active = self.active();
+        if !active.kind.shows_mail() || self.owner == Some(active.id) {
+            return None;
+        }
+        if let Some(owner) = self.owner.filter(|o| self.tabs.iter().any(|t| t.id == *o)) {
+            self.saved.insert(owner, current());
+        }
+        self.owner = Some(active.id);
+        self.saved.remove(&active.id)
     }
 
     pub(crate) fn is_active(&self, kind: TabKind) -> bool {
@@ -102,6 +168,10 @@ impl Tabs {
             return None;
         }
         let tab = self.tabs.remove(i);
+        self.saved.remove(&id);
+        if self.owner == Some(id) {
+            self.owner = None;
+        }
         if self.active > i || (self.active == i && i > 0) {
             self.active -= 1;
         }
@@ -126,28 +196,28 @@ impl Tabs {
 
 #[cfg(test)]
 mod tests {
-    use super::{TabKind, Tabs};
+    use super::{MailState, TabKind, Tabs};
 
     #[test]
     fn mail_tab_stays_and_others_open_close_and_cycle() {
         let mut t = Tabs::default();
-        assert_eq!(t.active().kind, TabKind::Mail);
+        assert_eq!(t.active().kind, TabKind::Main);
         assert!(t.close(0).is_none(), "«Почта» не закрывается");
         let s = t.open(TabKind::Settings);
         assert!(t.is_active(TabKind::Settings));
         assert_eq!(t.open(TabKind::Settings), s, "вторая вкладка настроек — та же");
         assert_eq!(t.iter().count(), 2);
         t.step(1);
-        assert!(t.is_active(TabKind::Mail), "по кругу");
+        assert!(t.is_active(TabKind::Main), "по кругу");
         t.step(-1);
         assert!(t.is_active(TabKind::Settings));
-        assert!(t.activate_kind(TabKind::Mail));
+        assert!(t.activate_kind(TabKind::Main));
         assert_eq!(t.close_kind(TabKind::Settings).map(|t| t.id), Some(s));
-        assert!(t.is_active(TabKind::Mail));
+        assert!(t.is_active(TabKind::Main));
         // Закрыли активную — активна соседняя слева.
         t.open(TabKind::Settings);
         assert_eq!(t.close(s + 1).map(|t| t.kind), Some(TabKind::Settings));
-        assert!(t.is_active(TabKind::Mail));
+        assert!(t.is_active(TabKind::Main));
         assert!(!t.activate(99));
     }
 
@@ -162,6 +232,53 @@ mod tests {
         assert_eq!(t.iter().count(), 3);
         assert_eq!(t.close(b).map(|t| t.kind), Some(TabKind::Compose(8)));
         assert!(t.is_active(TabKind::Compose(7)), "активна соседняя слева");
-        assert!(t.activate_kind(TabKind::Mail));
+        assert!(t.activate_kind(TabKind::Main));
+    }
+
+    fn at(mailbox: &str, letter: Option<&str>) -> MailState {
+        MailState { mailbox: Some(mailbox.into()), letter: letter.map(Into::into), ..Default::default() }
+    }
+
+    /// S5-16: вкладки почты (Ctrl+T) — по порядку справа, закрываются, у каждой своё состояние; главная — тоже.
+    #[test]
+    fn mail_tabs_keep_their_own_state() {
+        let mut t = Tabs::default();
+        assert_eq!(t.owner(), Some(0), "в частях экрана — главная");
+        // Ctrl+T на «Входящих» с письмом: новая вкладка — копия, главная её запомнила.
+        let a = t.open_mail(at("inbox", Some("m1")));
+        assert!(t.is_active(TabKind::Mail));
+        assert_eq!(t.owner(), Some(a));
+        assert_eq!(t.saved(0), Some(&at("inbox", Some("m1"))));
+        assert_eq!(t.hand_over(|| unreachable!()), None, "владелец — уже активная");
+        // Во вкладке A открыли «Отправленные»; ещё Ctrl+T, там — «Архив».
+        let b = t.open_mail(at("sent", None));
+        assert_eq!(t.iter().map(|t| t.id).collect::<Vec<_>>(), [0, a, b], "новые — справа");
+        assert_eq!(t.saved(a), Some(&at("sent", None)));
+        // Назад в A: B запоминает «Архив», A получает своё.
+        assert!(t.activate(a));
+        assert_eq!(t.hand_over(|| at("archive", Some("m9"))), Some(at("sent", None)));
+        assert_eq!(t.owner(), Some(a));
+        assert_eq!(t.saved(b), Some(&at("archive", Some("m9"))));
+        assert_eq!(t.saved(a), None, "у владельца состояние — в частях экрана");
+        // Не почта (настройки) — ставить нечего, владелец тот же.
+        t.open(TabKind::Settings);
+        assert_eq!(t.hand_over(|| unreachable!()), None);
+        assert_eq!(t.owner(), Some(a));
+        // Главная — своё, с самого начала.
+        assert!(t.activate(0));
+        assert_eq!(t.hand_over(|| at("sent", Some("m2"))), Some(at("inbox", Some("m1"))));
+        // Закрыли вкладку-владельца: состояние ушло с ней, следующая вкладка почты получает своё без записи.
+        assert!(t.activate(a));
+        assert_eq!(t.hand_over(|| at("inbox", Some("m1"))), Some(at("sent", Some("m2"))));
+        assert_eq!(t.close(a).map(|t| t.kind), Some(TabKind::Mail));
+        assert_eq!(t.owner(), None);
+        assert_eq!(t.saved(a), None);
+        assert!(t.activate(b));
+        assert_eq!(t.hand_over(|| unreachable!()), Some(at("archive", Some("m9"))));
+        assert!(t.activate(0));
+        assert_eq!(t.hand_over(|| at("drafts", None)), Some(at("inbox", Some("m1"))));
+        assert!(t.close(0).is_none(), "главную не закрыть");
+        assert!(TabKind::Mail.closable() && TabKind::Mail.shows_mail() && TabKind::Main.shows_mail());
+        assert!(!TabKind::Settings.shows_mail());
     }
 }

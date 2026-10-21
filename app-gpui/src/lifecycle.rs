@@ -559,7 +559,6 @@ impl Mailer {
         self.lifecycle.cards.retain(|(i, _)| *i != id);
         cx.notify();
         let Some(row) = self.cache.rows_by_ids(std::slice::from_ref(&id)).ok().and_then(|mut r| r.pop()) else { return };
-        self.tabs.activate_kind(crate::tabs::TabKind::Mail);
         self.set_section(crate::Section::Mail, cx);
         self.list.update(cx, |l, cx| l.open_row(row, cx));
     }
