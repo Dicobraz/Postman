@@ -27,4 +27,5 @@ pub mod send_later;
 pub mod settings;
 pub mod smime;
 pub mod sync;
+pub mod tasks;
 pub mod thread;
