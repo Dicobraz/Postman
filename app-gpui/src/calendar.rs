@@ -1377,7 +1377,7 @@ impl Render for CalendarBar {
             .hover(|d| d.bg(l.accent_hover()))
             .child(icon(g::ADD, 14.))
             .child(tr!("cal-new-meeting"))
-            .tooltip(tip(tr!("cal-new-meeting-tip")))
+            .tooltip(tip(crate::keytips::with_key(tr!("cal-new-meeting-tip"), crate::keytips::key("calendar.new_meeting", cx))))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::commands::calendar::NewMeeting), cx));
         div()
             .size_full()

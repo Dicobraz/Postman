@@ -1,9 +1,9 @@
 # Selection and bulk actions (S5-08): checkboxes, the bar above the list, the summary, the context menu, phishing.
 bulk-pick = Select (Ctrl+click; Shift+click — a range)
-bulk-select-all = Select all (Ctrl+A)
+bulk-select-all = Select all
 bulk-selected = Selected: { $n }
 bulk-of = of { $total }
-bulk-clear-hint = Clear selection (Esc)
+bulk-clear-hint = Clear selection
 bulk-read = Read
 bulk-unread = Unread
 bulk-flag = Flag
@@ -13,7 +13,6 @@ bulk-delete = Delete
 bulk-uncategorize = Clear category
 bulk-move-plain = Move
 bulk-category-plain = Category
-bulk-category-keys = 1–9
 bulk-due-plain = Due date
 bulk-phishing = Report phishing
 bulk-letters = { $n ->
@@ -99,7 +98,6 @@ bulk-summary-from = From: { $who }
 bulk-summary-unread = unread: { $n }
 bulk-summary-more = and { $n } more
 bulk-unpick = Remove from selection
-bulk-summary-esc = — clear selection
 bulk-summary-clear = Clear
 
 # Message context menu.

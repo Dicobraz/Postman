@@ -11,18 +11,20 @@ use pets_ui::theme::Metric;
 
 use crate::chrome::{self, glyph};
 use crate::commands::mail;
+use crate::keytips;
 use crate::roles::{Look, look};
 
 /// Действие кнопки (новое на каждое нажатие).
 type MakeAction = fn() -> Box<dyn Action>;
 
 /// Тихие кнопки: значок Segoe Fluent Icons, текст, действие команды.
-const BUTTONS: [(char, &str, MakeAction); 5] = [
-    (glyph::REPLY, "frame-reply", || Box::new(mail::Reply)),
-    (glyph::REPLY_ALL, "frame-reply-all", || Box::new(mail::ReplyAll)),
-    (glyph::FORWARD, "frame-forward", || Box::new(mail::Forward)),
-    (glyph::DELETE, "frame-delete", || Box::new(mail::Delete)),
-    (glyph::FLAG, "frame-flag", || Box::new(mail::ToggleFlag)),
+/// Кнопки командной строки: значок, подпись, команда (подсказка и KeyTips, S5-18), действие.
+const BUTTONS: [(char, &str, &str, MakeAction); 5] = [
+    (glyph::REPLY, "frame-reply", "mail.reply", || Box::new(mail::Reply)),
+    (glyph::REPLY_ALL, "frame-reply-all", "mail.reply_all", || Box::new(mail::ReplyAll)),
+    (glyph::FORWARD, "frame-forward", "mail.forward", || Box::new(mail::Forward)),
+    (glyph::DELETE, "frame-delete", "mail.delete", || Box::new(mail::Delete)),
+    (glyph::FLAG, "frame-flag", "mail.toggle_flag", || Box::new(mail::ToggleFlag)),
 ];
 
 /// Высота командной строки: кэшированное view не измеряется по содержимому, размер задаётся явно.
@@ -117,26 +119,21 @@ impl Render for CommandBar {
             .child(chrome::icon(glyph::NEW_MAIL, 16.))
             .child(tr!("frame-new"))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(mail::New), cx));
-        let buttons = BUTTONS.map(|(g, key, action)| {
-            chrome::quiet_button(key, &l)
+        // Подсказка «Название (клавиша)» и плашка KeyTips (S5-18); клавиш в подписях нет.
+        let new = keytips::command(new, "mail.new", Some(tr!("frame-new")), &l, cx);
+        let buttons = BUTTONS.map(|(g, key, cmd, action)| {
+            let b = chrome::quiet_button(key, &l)
                 .child(chrome::icon(g, 16.))
                 .child(tr!(key))
                 // Действие уходит в фокус окна (экран почты), как от клавиши.
-                .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+                .on_click(move |_, window, cx| window.dispatch_action(action(), cx));
+            keytips::command(b, cmd, Some(tr!(key)), &l, cx)
         });
-        let kbd = div()
-            .flex_none()
-            .px(px(6.))
-            .rounded(l.px(Metric::RadiusControl))
-            .border_1()
-            .border_color(l.stroke())
-            .text_size(px(11.))
-            .text_color(l.text3())
-            .child("Ctrl+E");
-        // Во время поиска — шире, охват внутри поля; иначе — подсказка клавиши.
+        // Во время поиска — шире, охват внутри поля. Клавиша поиска — плашкой KeyTips, не в поле.
         let active = self.focused || !self.search.read(cx).value().trim().is_empty();
         let search = Input::new(&self.search).prefix(chrome::icon(glyph::SEARCH, 14.).text_color(l.text3()));
-        let search = if active { search.suffix(self.scope_switch(&l, cx)) } else { search.suffix(kbd) };
+        let search = if active { search.suffix(self.scope_switch(&l, cx)) } else { search };
+        let search_key = keytips::key("search.focus", cx);
         let more = chrome::quiet_button("bar-more", &l)
             .when(self.more_open, |d| d.bg(l.pressed()))
             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("frame-more")).build(window, cx))
@@ -152,7 +149,12 @@ impl Render for CommandBar {
             .child(new)
             .children(buttons)
             .child(div().flex_1())
-            .child(div().ml(px(12.)).w(px(if active { SEARCH_W_ACTIVE } else { SEARCH_W })).flex_none().child(search))
+            .child(keytips::badge(
+                div().ml(px(12.)).w(px(if active { SEARCH_W_ACTIVE } else { SEARCH_W })).flex_none().child(search),
+                search_key,
+                &l,
+                cx,
+            ))
             .child(div().ml(px(4.)).child(more))
     }
 }

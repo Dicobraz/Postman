@@ -406,28 +406,33 @@ fn tinted_button(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
         .hover(move |d| d.bg(hover))
 }
 
-/// Кнопки ответа: «Принять» — заливка, «Под вопросом» и «Отклонить» — тонированные; подсказка — «Название (клавиша)».
+/// Кнопки ответа: «Принять» — заливка, «Под вопросом» и «Отклонить» — тонированные, у всех — значок в круге; клавиша
+/// (A / T / N в схеме «Одиночные клавиши») — подсказкой «Название (клавиша)» и KeyTips, не в тексте кнопки (S5-18).
 fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPane>) -> Vec<Stateful<Div>> {
     let sending = card.sending;
-    [("invite-accept", "cal-accept", "A", Partstat::Accepted), ("invite-tentative", "cal-tentative-answer", "T", Partstat::Tentative), ("invite-decline", "cal-decline", "N", Partstat::Declined)]
-        .into_iter()
-        .map(|(id, key, hotkey, s)| {
-            let primary = s == Partstat::Accepted;
-            let b = if primary { accent_button(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { tinted_button(id, l) };
-            let hint = tr!("invite-key-hint", name = tr!(key), key = hotkey);
-            let ink = if primary { l.on_accent() } else { l.pm(Pm::TintedFg) };
-            b.when(!side, |d| d.w(px(160.)).min_w(px(88.)).px(px(8.)))
-                .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
-                .child(status_mark(s, ink))
-                .child(tr!(key))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if sending.is_none() {
-                        this.answer_invite(s, cx);
-                    }
-                }))
-        })
-        .collect()
+    [
+        ("invite-accept", "cal-accept", "invite.accept", Partstat::Accepted),
+        ("invite-tentative", "cal-tentative-answer", "invite.tentative", Partstat::Tentative),
+        ("invite-decline", "cal-decline", "invite.decline", Partstat::Declined),
+    ]
+    .into_iter()
+    .map(|(id, key, command, s)| {
+        let primary = s == Partstat::Accepted;
+        let b = if primary { accent_button(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { tinted_button(id, l) };
+        let ink = if primary { l.on_accent() } else { l.pm(Pm::TintedFg) };
+        let b = b
+            .when(!side, |d| d.w(px(160.)).min_w(px(88.)).px(px(8.)))
+            .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
+            .child(status_mark(s, ink))
+            .child(tr!(key))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if sending.is_none() {
+                    this.answer_invite(s, cx);
+                }
+            }));
+        crate::keytips::command(b, command, Some(tr!(key)), l, cx)
+    })
+    .collect()
 }
 
 /// Значок ответа в круге (DESIGN «Цвет», кнопки статуса): ✓ принять, ? под вопросом, ✕ отклонить.

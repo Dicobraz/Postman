@@ -747,7 +747,7 @@ impl Render for ReadingPane {
                 .gap(px(12.))
                 .pb(px(8.))
                 .child(title)
-                .child(crate::lifecycle::header_row(&r.row, &l))
+                .child(crate::lifecycle::header_row(&r.row, &l, cx))
                 .children(self.stack_info(cx));
             return div()
                 .id("reading")
@@ -838,7 +838,7 @@ impl Render for ReadingPane {
                 .children(seal),
             )
             // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
-            .child(crate::lifecycle::header_row(&r.row, &l));
+            .child(crate::lifecycle::header_row(&r.row, &l, cx));
         // Вид «как Outlook» — строка «Беседа: N писем · ← · →» (S5-05б), лента — переключатель «Беседа (N)».
         let bar = match self.view(cx) {
             postman_core::prefs::Conversation::Outlook => self.outlook_bar(cx),

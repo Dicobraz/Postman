@@ -181,6 +181,9 @@ impl Mailer {
     /// Заголовок окна: [значок][вкладки][перетаскивание][─ □ ✕].
     pub(crate) fn titlebar(&self, l: &Look, window: &Window, cx: &mut Context<Self>) -> Div {
         let active = self.tabs.active().id;
+        // «Закрыть вкладку (Ctrl+W)»: подсказка и плашка KeyTips у активной (S5-18).
+        let close_tip = crate::keytips::tip("tab.close", cx);
+        let close_key = crate::keytips::key("tab.close", cx);
         let tabs = self.tabs.iter().map(|t| {
             let on = t.id == active;
             let id = t.id;
@@ -195,12 +198,16 @@ impl Mailer {
                     .rounded(l.px(Metric::RadiusControl))
                     .hover(|d| d.bg(l.hover()))
                     .child(icon(glyph::CLOSE, 10.))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("frame-tab-close")).build(window, cx))
+                    .tooltip({
+                        let tip = close_tip.clone();
+                        move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_tab(id, window, cx);
                     }))
             });
+            let close = close.map(|c| crate::keytips::badge(c, close_key.clone().filter(|_| on), l, cx));
             let (title, dirty) = self.tab_title(t, cx);
             let letter = matches!(t.kind, TabKind::Compose(_));
             div()
@@ -269,10 +276,17 @@ impl Mailer {
     }
 
     /// Рейл модулей: Почта, Календарь, Контакты; внизу — Настройки. Подписи — подсказкой.
-    pub(crate) fn rail(&self, l: &Look) -> Div {
+    pub(crate) fn rail(&self, l: &Look, cx: &App) -> Div {
         let settings_tab = self.tabs.is_active(TabKind::Settings);
+        // Команды кнопок рейла — для подсказки «Название (клавиша)» и KeyTips (S5-18).
+        let command = |key: &str| match key {
+            "frame-rail-mail" => "view.mail",
+            "frame-rail-calendar" => "view.calendar",
+            "frame-rail-contacts" => "view.contacts",
+            _ => "settings.open",
+        };
         let button = |id: &'static str, g: char, key: &'static str, on: bool, action: fn() -> Box<dyn Action>| {
-            div()
+            let b = div()
                 .id(id)
                 .size(px(RAIL_BUTTON))
                 .flex()
@@ -283,8 +297,8 @@ impl Mailer {
                 .when(on, |d| d.bg(l.panel()).text_color(l.accent_text()))
                 .when(!on, |d| d.text_color(l.text2()).hover(|d| d.bg(l.hover())))
                 .child(icon(g, 20.))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(key)).build(window, cx))
-                .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+                .on_click(move |_, window, cx| window.dispatch_action(action(), cx));
+            crate::keytips::command(b, command(key), Some(tr!(key)), l, cx)
         };
         let module = |s: Section| self.tabs.active().kind.shows_mail() && self.section == s;
         div()

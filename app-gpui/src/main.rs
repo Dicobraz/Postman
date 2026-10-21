@@ -47,6 +47,7 @@ mod tabs;
 mod chrome;
 mod prefs;
 mod keymap;
+mod keytips;
 mod settings_tab;
 mod settings_cats;
 mod settings_cal;
