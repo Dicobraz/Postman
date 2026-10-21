@@ -102,6 +102,14 @@ pub(crate) struct ReadingPane {
     pub(crate) folder: Option<String>,
     /// Идёт поиск (S5-10): строка запроса и слова — подсветка в теме и тексте, строка «Совпадения».
     pub(crate) marks: Option<(String, Arc<Vec<String>>)>,
+    /// Текущее совпадение (S5-14, F3 / Shift+F3): номер по порядку чтения — тема, затем текст.
+    pub(crate) hit: usize,
+    /// Совпадений в открытом письме — по последней отрисовке (тема и текст).
+    pub(crate) hits: std::cell::Cell<usize>,
+    /// Перешли к другому совпадению: при отрисовке прокрутить его в вид.
+    reveal: bool,
+    /// Прокрутка письма (обычный вид): к текущему совпадению.
+    pub(crate) scroll: ScrollHandle,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -167,6 +175,10 @@ impl ReadingPane {
             save_all: None,
             folder: None,
             marks: None,
+            hit: 0,
+            hits: std::cell::Cell::new(0),
+            reveal: false,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -174,16 +186,43 @@ impl ReadingPane {
     pub(crate) fn set_marks(&mut self, marks: Option<(String, Arc<Vec<String>>)>, cx: &mut Context<Self>) {
         if self.marks != marks {
             self.marks = marks;
+            self.hit = 0;
             cx.notify();
         }
     }
 
-    /// Строка «Совпадения: N · «запрос»» над текстом письма во время поиска.
-    fn match_bar(&self, doc: Option<&postman_ir::Document>, l: &crate::roles::Look) -> Option<Div> {
-        let (query, marks) = self.marks.as_ref()?;
-        let subject = self.reading.as_ref().map_or(0, |r| postman_core::fuzzy::term_spans(&r.row.subject, marks).len());
-        let n = subject + doc.map_or(0, |d| ir_view::count_marks(&d.blocks, marks));
-        let count = if n == 0 { tr!("search-matches-none") } else { tr!("search-matches", n = n) };
+    /// F3 / Shift+F3 (S5-14): следующее или предыдущее совпадение по кругу, прокрутить к нему.
+    pub(crate) fn step_hit(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.hits.get();
+        if self.marks.is_none() || self.reading.is_none() || n == 0 {
+            return;
+        }
+        self.hit = step(self.hit, delta, n);
+        self.reveal = true;
+        cx.notify();
+    }
+
+    /// Строка «Совпадение k из N · ↑ ↓ · «запрос»» над текстом письма во время поиска; `n` — совпадений в теме и
+    /// тексте.
+    fn match_bar(&self, n: usize, l: &crate::roles::Look) -> Option<Div> {
+        let (query, _) = self.marks.as_ref()?;
+        let count = if n == 0 { tr!("search-matches-none") } else { tr!("search-matches", k = self.hit.min(n - 1) + 1, n = n) };
+        let arrow = |id: &'static str, g: char, name: &'static str, action: fn() -> Box<dyn Action>| {
+            div()
+                .id(id)
+                .size(px(24.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(l.px(pets_ui::theme::Metric::RadiusControl))
+                .text_color(l.text2())
+                .cursor_pointer()
+                .hover(|d| d.bg(l.hover()))
+                .child(crate::chrome::icon(g, 12.))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(name)).build(window, cx))
+                .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+        };
         Some(
             div()
                 .h(px(34.))
@@ -198,6 +237,14 @@ impl ReadingPane {
                 .text_color(l.text2())
                 .child(crate::chrome::icon(crate::chrome::glyph::SEARCH, 14.))
                 .child(div().text_color(l.text()).child(count))
+                .when(n > 1, |d| {
+                    d.child(arrow("hit-prev", crate::chrome::glyph::UP, "cmd-search-prev-match", || {
+                        Box::new(crate::commands::search::PrevMatch)
+                    }))
+                    .child(arrow("hit-next", crate::chrome::glyph::DOWN, "cmd-search-next-match", || {
+                        Box::new(crate::commands::search::NextMatch)
+                    }))
+                })
                 .child(div().flex_1())
                 .child(div().min_w_0().truncate().child(tr!("search-matches-query", query = query.clone()))),
         )
@@ -238,6 +285,9 @@ impl ReadingPane {
     /// Показать другое письмо (или ничего): картинки прежнего — в [`ReadingPane::retired`].
     fn replace(&mut self, next: Option<Reading>) {
         self.save_all = None;
+        if next.as_ref().map(|n| &n.row.id) != self.reading.as_ref().map(|r| &r.row.id) {
+            self.hit = 0;
+        }
         if let Some(old) = std::mem::replace(&mut self.reading, next) {
             self.retired.extend(old.preview.as_ref().and_then(|p| p.image()));
             self.retired.extend(old.images.into_values());
@@ -641,6 +691,7 @@ impl Render for ReadingPane {
         for image in self.retired.drain(..) {
             let _ = window.drop_image(image);
         }
+        let reveal = std::mem::take(&mut self.reveal);
         let l = look(cx);
         let Some(r) = &self.reading else {
             return div()
@@ -689,6 +740,20 @@ impl Render for ReadingPane {
             .as_ref()
             .map(|b| b.to.iter().map(|a| if a.name.is_empty() { a.email.clone() } else { a.name.clone() }).collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
+        // Совпадения поиска — по порядку чтения: тема, затем текст; текущее (F3) — плотной подложкой (S5-14).
+        let feed = self.feed_view(cx);
+        let words: &[String] = self.marks.as_ref().map_or(&[], |(_, m)| m.as_slice());
+        let plain = feed.is_none() && r.preview.is_none();
+        let target = (reveal && plain).then(|| ir_view::Reveal { scroll: self.scroll.clone(), view: cx.entity_id() });
+        let hits = ir_view::Hits::new(words, self.hit, 0).with_reveal(target);
+        let subject = {
+            let (styled, at) = ir_view::hit_text(r.row.subject.clone(), Vec::new(), &hits, &l);
+            let layout = styled.layout().clone();
+            match at {
+                Some(at) => ir_view::reveal_at(styled.into_any_element(), layout, at, &hits),
+                None => styled.into_any_element(),
+            }
+        };
         let neutral = l.cat(postman_core::palette::NEUTRAL);
         let avatar = div()
             .size(px(40.))
@@ -713,7 +778,7 @@ impl Render for ReadingPane {
                     .text_size(l.px(pets_ui::theme::Metric::TypeSubtitle))
                     .line_height(px(26.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(crate::search::marked(&r.row.subject, self.marks.as_ref().map(|(_, m)| m.as_slice()), &l)),
+                    .child(subject),
             )
             .child(
                 div().flex().items_center().gap(px(12.)).child(avatar).child(
@@ -747,7 +812,7 @@ impl Render for ReadingPane {
             _ => self.feed_bar(cx),
         };
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
-        if let Some(feed) = self.feed_view(cx) {
+        if let Some(feed) = feed {
             return div()
                 .id("reading")
                 .flex()
@@ -799,11 +864,13 @@ impl Render for ReadingPane {
                             .child(tr!("reading-remote-blocked", n = doc.remote_images_blocked)),
                     );
                 }
-                let marks: &[String] = self.marks.as_ref().map_or(&[], |(_, m)| m.as_slice());
-                col.children(ir_view::blocks_marked(&doc.blocks, "doc", &r.images, marks, cx)).into_any_element()
+                col.children(ir_view::blocks_marked(&doc.blocks, "doc", &r.images, &hits, cx)).into_any_element()
             }
         };
-        let matches = self.match_bar(r.doc.as_ref(), &l);
+        // Текст ещё не пришёл — совпадения только в теме.
+        let n = hits.seen();
+        self.hits.set(n);
+        let matches = self.match_bar(n, &l);
         div()
             .id("reading")
             .flex()
@@ -813,6 +880,7 @@ impl Render for ReadingPane {
             .py(px(20.))
             .gap(px(12.))
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .child(header)
             .children(scheduled)
             .children(bar)
@@ -822,6 +890,13 @@ impl Render for ReadingPane {
             .child(body)
             .into_any_element()
     }
+}
+
+/// Номер совпадения после шага `delta` по кругу из `n` (текущий за пределами — как первый).
+fn step(current: usize, delta: isize, n: usize) -> usize {
+    let n = isize::try_from(n).unwrap_or(isize::MAX).max(1);
+    let current = isize::try_from(current).unwrap_or(0).min(n - 1);
+    usize::try_from((current + delta).rem_euclid(n)).unwrap_or(0)
 }
 
 pub(crate) fn sandbox_label(level: Level) -> String {
@@ -835,10 +910,21 @@ pub(crate) fn sandbox_label(level: Level) -> String {
 #[cfg(test)]
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
-    use super::{SyncRequest, render_image};
+    use super::{SyncRequest, render_image, step};
     use postman_cache::AttachmentRow;
     use postman_core::sync::Command;
     use postman_worker::Rgba;
+
+    /// F3 / Shift+F3 — по кругу; номер за пределами (совпадений стало меньше) — от последнего.
+    #[test]
+    fn hits_step_around() {
+        assert_eq!(step(0, 1, 3), 1);
+        assert_eq!(step(2, 1, 3), 0);
+        assert_eq!(step(0, -1, 3), 2);
+        assert_eq!(step(7, 1, 3), 0);
+        assert_eq!(step(7, -1, 3), 1);
+        assert_eq!(step(0, 1, 1), 0);
+    }
 
     #[test]
     fn worker_pixels_become_bgra() {

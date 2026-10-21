@@ -3,11 +3,16 @@
 //! «Повторить сейчас». Правки писем без связи копятся в очереди синхронизации (`postman_core::link`) и уходят, когда
 //! связь вернётся, — так и сказано в полосе. Связь вернулась — всё снимается. Вместо прежнего тоста «Нет связи…».
 //!
-//! Состояние — [`Offline`] (без gpui, тесты); обратный отсчёт — один таймер раз в секунду, только пока связи нет.
+//! Состояние — [`Offline`] (без gpui, тесты); обратный отсчёт — один таймер к следующей смене числа, только пока связи
+//! нет и до попытки: последние 10 с — по секунде, раньше — шагом 5 с (S5-14: без связи окно перерисовывается реже).
 
 use std::time::{Duration, Instant};
 
 use postman_core::link::Connection;
+
+/// До стольких секунд до повтора счёт идёт по секунде, дальше — шагом [`STEP`] (вверх: «через 60 с», «55 с»…).
+const EXACT: u64 = 10;
+const STEP: u64 = 5;
 
 /// Что изменилось с событием связи.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +70,24 @@ impl Offline {
         Some(self.retry_at.map_or(0, |t| t.saturating_duration_since(now).as_secs_f32().ceil() as u64))
     }
 
+    /// Секунды для строки состояния: последние [`EXACT`] — точно, раньше — вверх до кратного [`STEP`].
+    pub(crate) fn shown(&self, now: Instant) -> Option<u64> {
+        let left = self.left(now)?;
+        Some(if left > EXACT { left.div_ceil(STEP) * STEP } else { left })
+    }
+
+    /// Через сколько сменится [`Offline::shown`] — таймер строки состояния. Связь есть или попытка уже идёт
+    /// («подключение…» до ответа синхронизации) — `None`: менять нечего.
+    pub(crate) fn next_change(&self, now: Instant) -> Option<Duration> {
+        if !self.down {
+            return None;
+        }
+        let rest = self.retry_at?.checked_duration_since(now).filter(|d| !d.is_zero())?;
+        let shown = self.shown(now)?;
+        let below = if shown > EXACT { shown - STEP } else { shown.saturating_sub(1) };
+        Some(rest.saturating_sub(Duration::from_secs(below)).max(Duration::from_millis(20)))
+    }
+
     /// «Повторить сейчас»: попытка уже идёт (до ответа синхронизации).
     pub(crate) fn retry_now(&mut self, now: Instant) {
         if self.down {
@@ -76,7 +99,7 @@ impl Offline {
 /// Текст строки состояния без связи: «Нет связи · повтор через 25 с», попытка — «Нет связи · подключение…»; в
 /// очереди правки — «· изменений в очереди: 3».
 pub(crate) fn status_text(o: &Offline, now: Instant) -> Option<String> {
-    let left = o.left(now)?;
+    let left = o.shown(now)?;
     let head = if left > 0 { pets_i18n::tr!("states-offline-retry", n = left as i64) } else { pets_i18n::tr!("states-offline-trying") };
     Some(match o.queued() {
         0 => head,
@@ -135,14 +158,15 @@ impl crate::Mailer {
         });
     }
 
-    /// Раз в секунду, пока связи нет: «повтор через N с». Таймер один.
+    /// Пока связи нет: «повтор через N с» — к следующей смене числа ([`Offline::next_change`]). Таймер один.
     fn offline_tick(&mut self, cx: &mut gpui_kit::Context<Self>) {
-        if !self.offline.is_down() || self.offline_ticking {
+        if self.offline_ticking {
             return;
         }
+        let Some(wait) = self.offline.next_change(Instant::now()) else { return };
         self.offline_ticking = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |m, cx| {
                 m.offline_ticking = false;
                 m.offline_tick(cx);
@@ -197,6 +221,37 @@ mod tests {
         assert_eq!(o.on(Connection::Online, later), Change::Back);
         assert_eq!((o.is_down(), o.left(later), o.queued()), (false, None, 0));
         assert_eq!(o.on(Connection::Online, later), Change::None);
+    }
+
+    /// Отсчёт без связи (S5-14): дальше 10 с — шагом 5 с вверх, последние 10 с — по секунде; таймер — к смене числа;
+    /// попытка идёт — таймера нет.
+    #[test]
+    fn countdown_steps_and_wakes_only_on_change() {
+        let mut o = Offline::default();
+        let now = Instant::now();
+        assert_eq!(o.next_change(now), None, "связь есть");
+        o.on(Connection::Offline { retry_in: 60, queued: 0 }, now);
+        assert_eq!(o.shown(now), Some(60));
+        let t = now + Duration::from_millis(2_700);
+        assert_eq!(o.shown(t), Some(60));
+        assert_eq!(o.next_change(t), Some(Duration::from_millis(2_300)), "до 55 с");
+        assert_eq!(o.shown(now + Duration::from_secs(5)), Some(55));
+        let t = now + Duration::from_millis(49_500);
+        assert_eq!(o.shown(t), Some(15));
+        assert_eq!(o.next_change(t), Some(Duration::from_millis(500)), "до 10 с");
+        let t = now + Duration::from_millis(53_250);
+        assert_eq!(o.shown(t), Some(7));
+        assert_eq!(o.next_change(t), Some(Duration::from_millis(750)));
+        // Срок прошёл — «подключение…», будить нечего до нового события связи.
+        assert_eq!(o.shown(now + Duration::from_secs(61)), Some(0));
+        assert_eq!(o.next_change(now + Duration::from_secs(61)), None);
+        // Дальше 10 с — всегда кратно 5, таймер никогда не нулевой.
+        for ms in (0..60_000).step_by(37) {
+            let t = now + Duration::from_millis(ms);
+            let shown = o.shown(t).unwrap_or(0);
+            assert!(shown <= 10 || shown % 5 == 0, "{ms}: {shown}");
+            assert!(o.next_change(t).is_some_and(|d| d >= Duration::from_millis(20)), "{ms}");
+        }
     }
 
     #[test]

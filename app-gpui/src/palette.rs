@@ -111,7 +111,7 @@ impl Item {
             extra: String::new(),
             meta: String::new(),
             keys,
-            mark: Mark::Glyph(glyph::CHEVRON_RIGHT),
+            mark: Mark::Glyph(command_icon(id).unwrap_or(glyph::CHEVRON_RIGHT)),
             act: Act::Command(id),
         }
     }
@@ -527,6 +527,72 @@ impl Render for Palette {
 
 // --- экран почты ---
 
+/// Значок команды в палитре (S5-14): глиф Segoe Fluent Icons по id реестра; команды без своего — шеврон.
+/// Таблица — здесь, а не в реестре `pets-commands`: значок — дело экрана, реестр общий для приложений Pets.
+pub(crate) fn command_icon(id: &str) -> Option<char> {
+    use glyph::*;
+    Some(match id {
+        "mail.next" | "mail.page_down" | "mail.select_down" => DOWN,
+        "mail.prev" | "mail.page_up" | "mail.select_up" => UP,
+        "mail.first" => CHEVRON_UP,
+        "mail.last" => CHEVRON_DOWN,
+        "mail.mark_read" => READ,
+        "mail.mark_unread" | "search.unread" | "view.mail" | "contacts.write" => MAIL,
+        "mail.toggle_flag" => FLAG,
+        "mail.categorize" => TAG,
+        "mail.new" => NEW_MAIL,
+        "mail.reply" => REPLY,
+        "mail.reply_all" => REPLY_ALL,
+        "mail.forward" => FORWARD,
+        "mail.delete" | "compose.discard" | "contacts.delete" => DELETE,
+        "mail.due" => CLOCK,
+        "mail.remind" | "view.notifications" => RINGER,
+        "mail.wait" => WAIT,
+        "mail.expire" => EXPIRE,
+        "mail.select_all" => SELECT_ALL,
+        "mail.clear_selection" | "search.clear" | "filters.reset" => CLEAR,
+        "mail.context_menu" => MORE,
+        "mail.move" => MOVE,
+        "mail.archive" => ARCHIVE,
+        "mail.report_phishing" => PHISHING,
+        "thread.toggle" | "thread.fold" | "thread.expand" | "thread.collapse" => CONVERSATION,
+        "thread.quotes" | "compose.quote" => QUOTE,
+        "thread.next" | "attach.next" | "tab.next" | "calendar.next_week" => CHEVRON_RIGHT,
+        "thread.prev" | "attach.prev" | "tab.prev" | "calendar.prev_week" => CHEVRON_LEFT,
+        "attach.preview" | "compose.preview" => PREVIEW,
+        "attach.save_all" => SAVE,
+        "view.calendar" | "calendar.new_meeting" | "contacts.meeting" => CALENDAR,
+        "view.contacts" => CONTACTS,
+        "tab.close" | "compose.close" | "meeting.close" | "invite.decline" => CLOSE,
+        "search.focus" | "palette.open" => SEARCH,
+        "search.next_match" => DOWN,
+        "search.prev_match" => UP,
+        "search.all" => GLOBE,
+        "search.folder" => FOLDER,
+        "search.attachments" | "compose.attach" => ATTACH,
+        "search.recent" => HISTORY,
+        "calendar.today" => TODAY,
+        "compose.send" | "meeting.send" => SEND,
+        "compose.bold" => BOLD,
+        "compose.italic" => ITALIC,
+        "compose.underline" => UNDERLINE,
+        "compose.bullets" | "compose.numbers" => BULLETS,
+        "compose.link" => LINK,
+        "compose.expand" => EXPAND,
+        "contacts.new" => ADD_CONTACT,
+        "contacts.edit" => EDIT,
+        "contacts.copy_address" => COPY,
+        "invite.accept" => CHECK,
+        "invite.tentative" => TENTATIVE,
+        "settings.open" => SETTINGS,
+        "settings.vacation" => VACATION,
+        "settings.rules" => RULES,
+        "view.filters" | "view.quick_filters" => FILTER,
+        "view.sort_by_date" | "view.sort_by_sender" | "view.sort_by_size" => SORT,
+        _ => return None,
+    })
+}
+
 /// Команды, которых в палитре нет: сама палитра, клавиши с данными (категория — клавишей 1–9) и шаги по списку и
 /// вложениям — это клавиши, а не действия.
 fn hidden(id: &str) -> bool {
@@ -676,5 +742,21 @@ impl Mailer {
                 .child(p.clone().cached(StyleRefinement::default().size_full()))
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
+    use super::{command_icon, hidden};
+    use crate::commands::COMMANDS;
+
+    /// Каждая команда палитры — со своим значком (S5-14), а не общим шевроном: новая команда — строкой в
+    /// `command_icon`.
+    #[test]
+    fn palette_commands_have_icons() {
+        for c in COMMANDS.iter().filter(|c| !hidden(c.id)) {
+            assert!(command_icon(c.id).is_some(), "{}: нет значка в палитре (command_icon)", c.id);
+        }
     }
 }

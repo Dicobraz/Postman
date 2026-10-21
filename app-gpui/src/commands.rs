@@ -55,9 +55,10 @@ pub mod tab {
     gpui_kit::actions!(tab, [Next, Prev, Close]);
 }
 
-/// Поиск в командной строке (S5-10): охват «Везде | Текущая папка» и уточнения — как чипы «Уточнить».
+/// Поиск в командной строке (S5-10): охват «Везде | Текущая папка» и уточнения — как чипы «Уточнить»; по
+/// совпадениям в открытом письме (S5-14).
 pub mod search {
-    gpui_kit::actions!(search, [Focus, Clear, All, Folder, Attachments, Unread, Recent]);
+    gpui_kit::actions!(search, [Focus, Clear, All, Folder, Attachments, Unread, Recent, NextMatch, PrevMatch]);
 }
 
 /// Палитра команд (S5-10): открыть, по строкам, выполнить, закрыть.
@@ -199,6 +200,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("search.attachments", &[], MAIL),
     cmd("search.unread", &[], MAIL),
     cmd("search.recent", &[], MAIL),
+    // По совпадениям поиска в открытом письме (S5-14): F3 / Shift+F3, как «Найти далее» в браузерах и редакторах
+    // (в classic Outlook F3 — ещё одна клавиша поиска, она у нас — Ctrl+E). В поле поиска тоже: набрал — F3.
+    cmd("search.next_match", &["f3"], MAIL),
+    cmd("search.prev_match", &["shift-f3"], MAIL),
     // Не Outlook (там Ctrl+K — «Проверить имена» в письме): палитра команд, как в новом Outlook и редакторах.
     cmd("palette.open", &["ctrl-k"], MAILER),
     cmd("palette.next", &["down"], PALETTE),

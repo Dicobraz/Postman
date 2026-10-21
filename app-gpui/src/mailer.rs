@@ -506,6 +506,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &search::Recent, window, cx| {
                 this.refine(&postman_core::query::Refine::Within(30), window, cx)
             }))
+            // По совпадениям в открытом письме (S5-14).
+            .on_action(cx.listener(|this, _: &search::NextMatch, _, cx| this.reading.update(cx, |r, cx| r.step_hit(1, cx))))
+            .on_action(cx.listener(|this, _: &search::PrevMatch, _, cx| this.reading.update(cx, |r, cx| r.step_hit(-1, cx))))
             .on_action(cx.listener(|this, _: &commands::palette::Open, window, cx| this.toggle_palette(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Open, window, cx| this.open_settings(None, window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
@@ -746,6 +749,14 @@ impl Mailer {
                 // Дальше — простой: кадры больше не запрашиваем, процесс завершит замер.
                 bench::finish(format!("bench ui=gpui {report}"));
                 self.bench = None;
+                // Простой с фоновыми частями (S5-14): планировщик жизненного цикла и обратный отсчёт «нет связи» —
+                // проверка, что их таймеры не крутятся (`idle_cpu_pct`). По умолчанию простой — без них (повторяемо).
+                if std::env::var_os(bench::IDLE_LIFECYCLE_VAR).is_some() {
+                    self.lifecycle_pass(false, cx);
+                }
+                if std::env::var_os(bench::IDLE_OFFLINE_VAR).is_some() {
+                    self.on_connection(postman_core::link::Connection::Offline { retry_in: postman_core::link::MAX_RETRY, queued: 0 }, cx);
+                }
                 return;
             }
         }
