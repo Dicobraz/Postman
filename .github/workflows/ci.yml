@@ -25,6 +25,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
+      - name: Нет меток конфликта слияния
+        shell: bash
+        run: |
+          if git grep -nE '^(<<<<<<<|>>>>>>>)( |$)|^=======$' -- . ':!*.png'; then
+            echo "Метки конфликта слияния в файлах выше"; exit 1
+          fi
+
       - name: Clippy
         # Не через RUSTFLAGS: он перекрыл бы +crt-static из .cargo/config.toml.
         run: cargo clippy --workspace --all-targets -- -D warnings
