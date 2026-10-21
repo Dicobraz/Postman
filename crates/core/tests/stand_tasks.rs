@@ -989,3 +989,143 @@ async fn imip_request_by_mail_lands_in_calendar() {
     sweep(&a, prefix, subject).await;
     sweep(&b, prefix, subject).await;
 }
+
+/// S6-02: хранилище задач Postman (`postman_core::tasks`, `JmapStore`) — два клиента user1 со своими кэшами:
+/// создать → у второго по дельте (`CalendarEvent/changes`) → выполнить вторым → у первого → удалить → у второго нет.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn task_round_trip() {
+    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    let (a, b) = (user(1).await, user(1).await);
+    let prefix = "postman-s601-store-";
+    let subject = "Postman s601 store";
+    sweep(&a, prefix, subject).await;
+    let (ca, cb) = (postman_cache::Cache::open_in_memory().unwrap(), postman_cache::Cache::open_in_memory().unwrap());
+    let (sa, sb) = (JmapStore::new(&a.jmap), JmapStore::new(&b.jmap));
+    let quiet = |_: Reply| {};
+    let list = |c: &postman_cache::Cache| -> Vec<postman_calendar::Task> {
+        c.tasks().unwrap().iter().filter_map(tasks::from_row).filter(|t| t.uid.starts_with(prefix)).collect()
+    };
+    tasks::handle(&sa, &ca, Request::Load, &quiet).await.unwrap();
+    tasks::handle(&sb, &cb, Request::Load, &quiet).await.unwrap();
+
+    let uid = format!("{prefix}{}@itt.test", stamp());
+    let mut t = postman_calendar::Task::new(&uid, "", &format!("{subject} {}", stamp()));
+    t.project = Some("IV кв.".into());
+    t.important = true;
+    t.due = Some(postman_calendar::Moment::new("2027-03-02T16:00:00".parse().unwrap(), Some("Europe/Moscow")));
+    tasks::handle(&sa, &ca, Request::Save(Box::new(t)), &quiet).await.unwrap();
+    let mine = list(&ca);
+    assert_eq!(mine.len(), 1);
+    assert!(!mine[0].id.is_empty() && !mine[0].calendar_ids.is_empty(), "{:?}", mine[0]);
+    assert!(ca.dirty_tasks().unwrap().is_empty());
+
+    tasks::handle(&sb, &cb, Request::Refresh, &quiet).await.unwrap();
+    let theirs = list(&cb);
+    assert_eq!(theirs.len(), 1, "второй клиент не увидел задачу по дельте");
+    assert_eq!((theirs[0].project.as_deref(), theirs[0].important), (Some("IV кв."), true));
+    let mut done = theirs[0].clone();
+    done.set_done(true, jiff::Timestamp::now().as_second());
+    tasks::handle(&sb, &cb, Request::Save(Box::new(done)), &quiet).await.unwrap();
+
+    tasks::handle(&sa, &ca, Request::Refresh, &quiet).await.unwrap();
+    let mine = list(&ca);
+    assert_eq!(mine[0].progress, postman_calendar::Progress::Completed);
+    assert!(mine[0].completed_at.is_some(), "дата выполнения дошла через iCalendar");
+    assert_eq!(mine[0].project.as_deref(), Some("IV кв."), "свои поля не потеряны патчем");
+
+    tasks::handle(&sa, &ca, Request::Delete(uid.clone()), &quiet).await.unwrap();
+    tasks::handle(&sb, &cb, Request::Refresh, &quiet).await.unwrap();
+    assert!(list(&cb).is_empty(), "удаление не дошло до второго клиента");
+    assert!(by_uid(&a.jmap, &uid, &["id"]).await.is_none());
+    sweep(&a, prefix, subject).await;
+}
+
+/// Письмо стенда как строка кэша (только то, что нужно связи письма и задачи).
+async fn letter_row(c: &Client, id: &str) -> Option<postman_cache::EmailRow> {
+    let (list, _) = c.email_get(&[id.to_owned()]).await.unwrap();
+    let e = list.into_iter().next()?;
+    let mut keywords: Vec<String> = e.keywords.iter().filter(|(_, on)| **on).map(|(k, _)| k.to_lowercase()).collect();
+    keywords.sort();
+    keywords.retain(|k| k != "$seen" && k != "$flagged");
+    Some(postman_cache::EmailRow {
+        id: e.id,
+        thread_id: e.thread_id,
+        mailbox_ids: e.mailbox_ids.into_keys().collect(),
+        received_at: 0,
+        subject: e.subject.unwrap_or_default(),
+        from_name: String::new(),
+        from_addr: String::new(),
+        preview: e.preview,
+        seen: true,
+        flagged: false,
+        has_attachment: e.has_attachment,
+        size: e.size,
+        keywords,
+    })
+}
+
+/// S6-03: письмо со сроком у user1 — задача «Из почты» → заметка → задача в хранилище со ссылкой → выполнить →
+/// оба слова срока сняты на сервере (видит второй клиент) → письмо удалено → у задачи второго клиента ссылки нет.
+/// Письмо создаётся прямо во «Входящих» (`Email/set create`, без SMTP).
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn mail_due_is_task() {
+    use postman_core::mailtask;
+    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    let (a, b) = (user(1).await, user(1).await);
+    let prefix = "postman-s601-maildue-";
+    let subject = "Postman s601 maildue";
+    sweep(&a, prefix, subject).await;
+    let tz = jiff::tz::TimeZone::system();
+    let run = stamp();
+    let (boxes, _) = a.jmap.mailboxes().await.unwrap();
+    let inbox = boxes.iter().find(|m| m.role.as_deref() == Some("inbox")).unwrap().id.clone();
+    let acc = a.jmap.mail_account().unwrap().to_owned();
+    let email = json!({
+        "mailboxIds": { &inbox: true },
+        "keywords": { "$seen": true, "pm.due": true, "pm.due.2027-03-02t1500": true },
+        "from": [{ "email": "plain@itt.test" }],
+        "subject": format!("{subject} {run}"),
+        "bodyValues": { "t": { "value": "Письмо со сроком (S6-03)." } },
+        "textBody": [{ "partId": "t", "type": "text/plain" }],
+    });
+    let r = call(&a.jmap, &[CORE, MAIL], vec![("Email/set", json!({ "accountId": acc, "create": { "n": email } }))]).await;
+    let email_id = r[0]["created"]["n"]["id"].as_str().unwrap_or_else(|| panic!("письмо не создано: {}", r[0])).to_owned();
+
+    // Письмо — задача «Из почты» со сроком письма.
+    let row = letter_row(&a.jmap, &email_id).await.unwrap();
+    let letter = mailtask::as_task(&row, None).expect("письмо со сроком — задача");
+    assert_eq!(mailtask::due_when(&letter, &tz), mailtask::letter_due(&row));
+    // Правка заметки — задача в хранилище со ссылкой.
+    let mut t = mailtask::promote(&row, None, &format!("{prefix}{run}@itt.test"));
+    t.notes = "Заметка к письму".into();
+    let (ca, cb) = (postman_cache::Cache::open_in_memory().unwrap(), postman_cache::Cache::open_in_memory().unwrap());
+    let (sa, sb) = (JmapStore::new(&a.jmap), JmapStore::new(&b.jmap));
+    let quiet = |_: Reply| {};
+    tasks::handle(&sa, &ca, Request::Save(Box::new(t.clone())), &quiet).await.unwrap();
+
+    // Выполнить: задача — выполнена, у письма — оба слова срока сняты одним Email/set.
+    let mut done = tasks::from_row(&ca.task(&t.uid).unwrap().unwrap()).unwrap();
+    done.set_done(true, jiff::Timestamp::now().as_second());
+    let patch = mailtask::letter_patch(&done, &row, &tz).expect("выполнение снимает срок");
+    let add: Vec<String> = patch.keywords.iter().filter(|(_, on)| *on).map(|(k, _)| k.clone()).collect();
+    let remove: Vec<String> = patch.keywords.iter().filter(|(_, on)| !*on).map(|(k, _)| k.clone()).collect();
+    assert!(a.jmap.set_keywords(std::slice::from_ref(&email_id), &add, &remove).await.unwrap().is_empty());
+    tasks::handle(&sa, &ca, Request::Save(Box::new(done)), &quiet).await.unwrap();
+    let seen = letter_row(&b.jmap, &email_id).await.unwrap();
+    assert!(!seen.keywords.iter().any(|k| k.starts_with("pm.due")), "у второго клиента срок не снят: {:?}", seen.keywords);
+
+    // Второй клиент: задача выполнена; письмо удалено — сверка снимает ссылку, не падая.
+    tasks::handle(&sb, &cb, Request::Load, &quiet).await.unwrap();
+    let theirs = tasks::from_row(&cb.task(&t.uid).unwrap().expect("задача у второго клиента")).unwrap();
+    assert_eq!(theirs.progress, postman_calendar::Progress::Completed);
+    let mut reopened = theirs.clone();
+    reopened.set_done(false, 0);
+    a.jmap.destroy_email(&email_id).await.unwrap();
+    let lookup = |_: &str| None;
+    let fixed = mailtask::reconcile(&[reopened], lookup, 0, &tz);
+    assert_eq!(fixed.len(), 1);
+    assert_eq!(fixed[0].mail, None, "письмо удалено — задача без ссылки");
+    sweep(&a, prefix, subject).await;
+}
