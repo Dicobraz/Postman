@@ -130,6 +130,11 @@ impl Mailer {
         let Some(row) = self.list.read(cx).selected_row() else {
             return self.toast(Toast::Info, tr!("actions-select-letter"), cx);
         };
+        self.respond_to(row, mode, cx);
+    }
+
+    /// Ответ на письмо `row` (выбранное в списке или из стопки беседы, S5-05б): оно открывается, если ещё не открыто.
+    pub(crate) fn respond_to(&mut self, row: postman_cache::EmailRow, mode: Mode, cx: &mut Context<Self>) {
         if self.respond_now(mode, &row.id, cx) {
             return;
         }

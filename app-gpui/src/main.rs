@@ -39,6 +39,8 @@ mod contacts;
 mod rules;
 mod labels;
 mod thread;
+mod outline;
+mod folder_menu;
 mod send_later;
 mod roles;
 mod tabs;

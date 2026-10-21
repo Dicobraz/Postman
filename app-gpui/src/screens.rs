@@ -12,7 +12,8 @@
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
-//! `thread` (лента беседы, S5-05), `lifecycle` и `overdue` (сроки, S5-04) — только демо;
+//! `thread` (лента беседы, S5-05), `folder-menu`, `thread-stack`, `thread-list` (виды беседы, S5-05б), `lifecycle` и
+//! `overdue` (сроки, S5-04) — только демо;
 //! вкладка «Настройки» (S5-09): `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts` и первый
 //! запуск `firstrun` — демо; `--live` без `POSTMAN_URL` — первый запуск (`firstrun`).
 
@@ -98,6 +99,12 @@ enum Scene {
     Quick,
     /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
     Thread,
+    /// Меню папки «Входящие» (S5-05б) с открытым подменю «Вид беседы».
+    FolderMenu,
+    /// Стопка беседы в панели чтения (S5-05б): старые письма свёрнуты строками, последнее и открытое раскрыты.
+    ThreadStack,
+    /// «Входящие» в виде «как Outlook» (S5-05б): беседа цепочки демо развёрнута, выбрано письмо под головой.
+    ThreadList,
     /// Жизненный цикл (S5-04): «Входящие» со всеми метками сроков (срок впереди, сегодня к часу, ждём ответа,
     /// напомнит, исчезнет, просрочено — наверху, «Срочное») и открытая панель «Срок» у первого письма.
     Lifecycle,
@@ -129,7 +136,7 @@ enum Scene {
     Toasts,
 }
 
-const SCENES: [Scene; 47] = [
+const SCENES: [Scene; 50] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -177,8 +184,12 @@ const SCENES: [Scene; 47] = [
     Scene::Toasts,
     // Первый запуск (S5-09): добавление аккаунта на месте экрана почты (сроки прошлых сцен сняты).
     Scene::SignIn,
-    // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
+    // Последней из прежних: лента остаётся включённой, прежние сцены снимаются без неё.
     Scene::Thread,
+    // Виды беседы (S5-05б): свой вид «Входящих» — только в этих сценах.
+    Scene::FolderMenu,
+    Scene::ThreadStack,
+    Scene::ThreadList,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -235,6 +246,9 @@ impl Scene {
             Scene::Filters => "filters",
             Scene::Quick => "quick",
             Scene::Thread => "thread",
+            Scene::FolderMenu => "folder-menu",
+            Scene::ThreadStack => "thread-stack",
+            Scene::ThreadList => "thread-list",
             Scene::Lifecycle => "lifecycle",
             Scene::Overdue => "overdue",
             Scene::SettingsGeneral => "settings-general",
@@ -329,6 +343,7 @@ pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
             }
         }
         Phase::Wait { frames, since } => {
+            wait_step(m, scene, cx);
             if !ready(m, scene, cx) {
                 if since.elapsed() > timeout {
                     fail(scene, &format!("scene not ready in {} s", timeout.as_secs()));
@@ -633,6 +648,27 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.reading.update(cx, |r, _| r.feed_on = true);
             m.open_letter(row, cx);
         }
+        Scene::FolderMenu => {
+            // Как правая кнопка по «Входящим» и наведение на «Вид беседы».
+            m.reading.update(cx, |r, _| r.feed_on = false);
+            m.screen_folder_menu("inbox".into(), point(px(150.), px(140.)), cx);
+        }
+        Scene::ThreadStack | Scene::ThreadList => {
+            use postman_core::prefs::Conversation;
+            m.close_folder_menu(cx);
+            let view = if matches!(scene, Scene::ThreadStack) { Conversation::Stack } else { Conversation::Outlook };
+            // Как выбор в меню папки.
+            crate::prefs::update(cx, |p| p.reading.set_folder("inbox", Some(view)));
+            m.open_mailbox("inbox".into(), cx);
+            if matches!(scene, Scene::ThreadStack) {
+                let row = m.cache.rows_by_ids(&[postman_demo::CHAIN_OPEN.into()]).map_err(|e| e.to_string())?.pop();
+                let Some(row) = row else { return Err("no demo conversation in the cache".into()) };
+                m.open_letter(row, cx);
+            } else {
+                // Как щелчок по стрелке беседы; письмо под головой выбирается, когда беседы посчитаны (`wait_step`).
+                m.list.update(cx, |l, _| l.threads_open.insert("chain".into()));
+            }
+        }
         Scene::Meeting => {
             m.set_section(Section::Calendar, cx);
             m.open_meeting_screen(cx);
@@ -876,6 +912,17 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN);
             open && r.feed_on && r.feed.as_ref().is_some_and(|f| f.conv.len() == postman_demo::CHAIN.len() && f.ready())
         }
+        Scene::FolderMenu => m.folder_menu.is_some(),
+        Scene::ThreadStack => {
+            let r = m.reading.read(cx);
+            let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN && r.doc.is_some());
+            open && r.stacked(cx) && r.feed.as_ref().is_some_and(|f| f.conv.len() == postman_demo::CHAIN.len() && f.ready())
+        }
+        Scene::ThreadList => {
+            let open = reading.is_some_and(|r| r.row.id == THREAD_CHILD && r.doc.is_some());
+            let picked = list.selected.and_then(|i| list.row(i)).is_some_and(|r| r.id == THREAD_CHILD);
+            list.outline.is_some() && !list.computing && rows_loaded && picked && open
+        }
         Scene::Shared => {
             // Живой общий ящик может быть пуст: тогда снимок — без письма.
             let want = shared_inbox(m, cx);
@@ -884,6 +931,23 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let letter = rows_loaded && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == first);
             m.section == Section::Mail && opened && (list.count == 0 || letter)
         }
+    }
+}
+
+/// Письмо под головой беседы демо во «Входящих» (сцена `thread-list`): старшее из двух писем цепочки там.
+const THREAD_CHILD: &str = "chain1";
+
+/// Шаг ожидания сцены (перед проверкой готовности): то, что можно сделать только после фоновой работы.
+fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
+    if let Scene::ThreadList = scene {
+        // Беседы посчитаны — выбрать письмо под головой, как щелчок по нему.
+        m.list.update(cx, |l, cx| {
+            let at = l.outline.as_ref().filter(|_| !l.computing).and_then(|o| o.position(THREAD_CHILD));
+            let picked = l.selected.and_then(|i| l.row(i)).is_some_and(|r| r.id == THREAD_CHILD);
+            if let (Some(i), false) = (at, picked) {
+                l.select(i, cx);
+            }
+        });
     }
 }
 

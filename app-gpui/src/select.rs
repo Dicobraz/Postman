@@ -68,6 +68,19 @@ impl Selection {
         self.base = self.ids.clone();
     }
 
+    /// Строка беседы (вид «как Outlook», S5-05б): все её письма — в выделение, если хоть одного там нет, иначе — из
+    /// него; якорь — строка.
+    pub(crate) fn toggle_all(&mut self, ids: &[String], index: usize) {
+        let Some(first) = ids.first() else { return };
+        if ids.iter().all(|id| self.contains(id)) {
+            ids.iter().for_each(|id| self.remove(id));
+        } else {
+            ids.iter().for_each(|id| self.add(id));
+        }
+        self.anchor = Some((first.clone(), index));
+        self.base = self.ids.clone();
+    }
+
     /// Начать с одного письма (оно же якорь): Shift+↑/↓ от открытого письма.
     pub(crate) fn start(&mut self, id: &str, index: usize) {
         if self.anchor.is_none() {
@@ -153,6 +166,20 @@ mod tests {
         // Ctrl+щелчок по выделенному — снять.
         s.toggle("c", 2);
         assert!(!s.contains("c") && s.len() == 3);
+    }
+
+    /// Строка беседы — все её письма: щелчок добавляет недостающие, повторный снимает все.
+    #[test]
+    fn thread_row_picks_the_whole_conversation() {
+        let mut s = Selection::default();
+        s.toggle("a1", 3);
+        s.toggle_all(&ids(&["a3", "a2", "a1"]), 0);
+        assert_eq!(s.ids(), ids(&["a1", "a3", "a2"]));
+        assert_eq!(s.anchor(), Some(0));
+        s.toggle_all(&ids(&["a3", "a2", "a1"]), 0);
+        assert!(s.is_empty());
+        s.toggle_all(&[], 5);
+        assert_eq!(s.anchor(), Some(0), "пустая беседа ничего не меняет");
     }
 
     /// Shift+↓ от открытого письма: начало — оно само, дальше — диапазон.

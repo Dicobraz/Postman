@@ -47,6 +47,8 @@ pub(crate) struct Mailer {
     pub(crate) summary: Entity<crate::bulk::SummaryView>,
     /// Контекстное меню письма (S5-08, `menu.rs`); после закрытия — фокус обратно экрану.
     pub(crate) menu: Option<crate::menu::Menu>,
+    /// Меню папки (S5-05б, `folder_menu.rs`): «Вид беседы ▸».
+    pub(crate) folder_menu: Option<crate::folder_menu::FolderMenu>,
     pub(crate) refocus: bool,
     /// Связи с сервером нет (S5-08, `states.rs`): строка состояния, метка у аккаунта, полоса над списком.
     pub(crate) offline: crate::states::Offline,
@@ -116,8 +118,12 @@ impl Mailer {
             }
             l
         });
-        let folders = cx.new(|cx| Folders::new(mailboxes, accounts, inbox).watch(filters.clone(), cx));
-        let reading = cx.new(|_| ReadingPane::new(cache.clone()));
+        let folders = cx.new(|cx| Folders::new(mailboxes, accounts, inbox.clone()).watch(filters.clone(), cx));
+        let reading = cx.new(|_| {
+            let mut r = ReadingPane::new(cache.clone());
+            r.folder = inbox.clone();
+            r
+        });
         let bar = cx.new(|_| CommandBar::new(search.clone()));
         let toasts = cx.new(|_| Notices::new());
         let summary = cx.new(|_| crate::bulk::SummaryView::new());
@@ -155,9 +161,12 @@ impl Mailer {
             crate::actions::watch_list(&list, cx),
             // Сводка выделения: кнопки — как у панели; «В папку» и «Категория» — меню у кнопки.
             cx.subscribe(&summary, |this, _, a: &crate::bulk::SummaryAsk, cx| this.on_summary(a, cx)),
-            cx.subscribe(&folders, |this, _, FolderEvent::Open(id), cx| {
-                this.tabs.activate_kind(crate::tabs::TabKind::Mail);
-                this.open_mailbox(id.clone(), cx)
+            cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
+                FolderEvent::Open(id) => {
+                    this.tabs.activate_kind(crate::tabs::TabKind::Mail);
+                    this.open_mailbox(id.clone(), cx)
+                }
+                FolderEvent::Menu { id, at } => this.open_folder_menu(id.clone(), *at, cx),
             }),
             cx.subscribe(&reading, |this, _, ev: &ReadingEvent, cx| match ev {
                 ReadingEvent::Sandbox(level) => {
@@ -173,6 +182,7 @@ impl Mailer {
                 ReadingEvent::NeedsServer => this.needs_server(cx),
                 ReadingEvent::Open(row) => this.open_letter(row.clone(), cx),
                 ReadingEvent::Unsend(s) => this.unsend_scheduled(s.clone(), cx),
+                ReadingEvent::Respond(row, mode) => this.respond_to(row.clone(), *mode, cx),
                 ReadingEvent::Sync(req) => {
                     if !this.backend.send(req.command()) {
                         this.needs_server(cx);
@@ -182,8 +192,9 @@ impl Mailer {
             }),
             // Значок уведомлений в строке состояния.
             cx.observe(&toasts, |_, _, cx| cx.notify()),
-            // Настройки (S5-09): «Панель чтения» меняет раскладку.
+            // Настройки (S5-09): «Панель чтения» меняет раскладку; вид беседы (S5-05б) — область чтения.
             crate::prefs::observe(cx),
+            crate::prefs::observe_with(cx, |this: &mut Self, cx| this.reading.update(cx, |r, cx| r.view_changed(cx))),
             // Ответ в области чтения — над своим письмом: открыли другое — ответ уходит во вкладку или закрывается.
             // Скрытая панель чтения (S5-09) — письмо на месте списка: раскладка меняется вместе с письмом.
             cx.observe(&reading, |this, _, cx| {
@@ -219,6 +230,7 @@ impl Mailer {
             toasts,
             summary,
             menu: None,
+            folder_menu: None,
             refocus: false,
             offline: Default::default(),
             offline_ticking: false,
@@ -292,9 +304,12 @@ impl Mailer {
             f.results = None;
             cx.notify();
         });
-        self.list.update(cx, |l, cx| l.show_mailbox(id, cx));
+        self.list.update(cx, |l, cx| l.show_mailbox(id.clone(), cx));
         self.sync_total(cx);
-        self.reading.update(cx, |r, cx| r.clear(cx));
+        self.reading.update(cx, |r, cx| {
+            r.folder = Some(id);
+            r.clear(cx)
+        });
     }
 
     pub(crate) fn run_search(&mut self, q: &str, cx: &mut Context<Self>) {
@@ -370,6 +385,7 @@ impl Render for Mailer {
         }
         let l = crate::roles::look(cx);
         let menu = self.context_menu(window, &l, cx);
+        let folder_menu = self.folder_menu(window, &l, cx);
         let picker = self.lifecycle_overlay(&l, cx);
         // Вкладка «Настройки» (S5-09) — на месте рейла и модуля.
         let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
@@ -436,7 +452,12 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::thread::Next, _, cx| this.thread_step(1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Prev, _, cx| this.thread_step(-1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Toggle, _, cx| this.reading.update(cx, |r, cx| r.toggle_feed(cx))))
-            .on_action(cx.listener(|this, _: &commands::thread::Quotes, _, cx| this.reading.update(cx, |r, cx| r.toggle_quotes(cx))))
+            .on_action(cx.listener(|this, _: &commands::thread::Quotes, _, cx| this.reading.update(cx, |r, cx| r.quotes_key(cx))))
+            .on_action(cx.listener(|this, _: &commands::thread::Fold, _, cx| this.thread_fold(crate::outline::Fold::Toggle, cx)))
+            .on_action(cx.listener(|this, _: &commands::thread::Expand, _, cx| this.thread_fold(crate::outline::Fold::Expand, cx)))
+            .on_action(cx.listener(|this, _: &commands::thread::Collapse, _, cx| {
+                this.thread_fold(crate::outline::Fold::Collapse, cx)
+            }))
             .on_action(cx.listener(|this, _: &mail::New, _, cx| {
                 this.open_compose(Default::default(), cx);
             }))
@@ -491,8 +512,8 @@ impl Render for Mailer {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))
             .on_action(cx.listener(|this, _: &search::Clear, window, cx| {
-                // Esc сначала закрывает контекстное меню (S5-08)…
-                if this.close_menu(cx) {
+                // Esc сначала закрывает контекстное меню письма (S5-08) или папки (S5-05б)…
+                if this.close_menu(cx) || this.close_folder_menu(cx) {
                     return;
                 }
                 // …затем историю уведомлений.
@@ -580,8 +601,9 @@ impl Render for Mailer {
             // Окно «Отменить» отправки — внизу, над строкой состояния; над ним — напоминания (S5-04).
             .children(self.undo_card(cx))
             .children(self.reminder_cards(cx))
-            // Контекстное меню письма (S5-08) — над всем, кроме тостов.
+            // Контекстное меню письма (S5-08) и папки (S5-05б) — над всем, кроме тостов.
             .children(menu)
+            .children(folder_menu)
             // Тосты — поверх всего, последним ребёнком.
             .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {

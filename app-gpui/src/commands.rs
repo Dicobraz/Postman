@@ -30,7 +30,7 @@ pub mod mail {
 
 /// Беседа в области чтения (S5-05).
 pub mod thread {
-    gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev]);
+    gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev, Fold, Expand, Collapse]);
 }
 
 /// Вложения открытого письма (S5-07): встроенный просмотр, «Сохранить все», по вложениям в просмотре.
@@ -160,6 +160,13 @@ pub const COMMANDS: &[Command] = &[
     cmd("thread.quotes", &[], MAIL),
     cmd("thread.next", &["ctrl-right"], LIST),
     cmd("thread.prev", &["ctrl-left"], LIST),
+    // Вид беседы (S5-05б): Enter — свернуть или развернуть письмо стопки или беседу в списке «как Outlook»;
+    // «Развернуть» и «Свернуть» — все письма стопки или беседу в списке. В списке «как Outlook» → и ← делают то же
+    // (как стрелки в дереве Outlook): это клавиши `attach.next` / `attach.prev` — без открытого просмотра вложения
+    // они идут беседе (`attachments::handlers`), второй привязки той же клавиши в почте нет (`keymap::conflicts`).
+    cmd("thread.fold", &["enter"], LIST),
+    cmd("thread.expand", &[], MAIL),
+    cmd("thread.collapse", &[], MAIL),
     // Не Outlook (там просмотр — щелчком по вложению): просмотр и «Сохранить все» — кнопками ленты; в открытом
     // просмотре ← / → — по вложениям письма, Esc — закрыть (как поиск: `search.clear`).
     cmd("attach.preview", &[], MAIL),

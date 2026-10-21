@@ -78,6 +78,8 @@ pub(crate) mod glyph {
     pub(crate) const WARNING: char = '\u{E7BA}';
     pub(crate) const ERROR: char = '\u{EA39}';
     pub(crate) const OFFLINE: char = '\u{F384}';
+    /// Беседа (меню папки «Вид беседы», S5-05б).
+    pub(crate) const CONVERSATION: char = '\u{E8F2}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).

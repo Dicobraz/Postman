@@ -610,6 +610,26 @@ mod tests {
         assert_eq!(p.normalized().general.phishing_report, None);
     }
 
+    /// Вид беседы (S5-05б): у папки свой — он, иначе общий; поиск (нет папки) — общий; «По умолчанию» снимает свой.
+    #[test]
+    fn conversation_view_resolves_per_folder() {
+        let mut r = Reading { conversation: Conversation::Stack, ..Reading::default() };
+        assert_eq!(r.conversation_in(Some("inbox")), Conversation::Stack);
+        assert_eq!(r.conversation_in(None), Conversation::Stack);
+        r.set_folder("inbox", Some(Conversation::Outlook));
+        r.set_folder("sent", Some(Conversation::Feed));
+        assert_eq!(r.conversation_in(Some("inbox")), Conversation::Outlook);
+        assert_eq!(r.conversation_in(Some("sent")), Conversation::Feed);
+        assert_eq!(r.conversation_in(Some("archive")), Conversation::Stack);
+        assert_eq!(r.conversation_in(None), Conversation::Stack);
+        // Общий сменился — папка со своим видом его не замечает, без своего — следует за ним.
+        r.conversation = Conversation::Feed;
+        assert_eq!((r.conversation_in(Some("inbox")), r.conversation_in(Some("archive"))), (Conversation::Outlook, Conversation::Feed));
+        r.set_folder("inbox", None);
+        assert_eq!(r.conversation_in(Some("inbox")), Conversation::Feed);
+        assert!(!r.folders.contains_key("inbox"));
+    }
+
     /// Чужие и испорченные значения — к допустимым; файл новее версии — ошибка, а не тихое затирание.
     #[test]
     fn bad_values_are_normalized_and_newer_file_is_refused() {

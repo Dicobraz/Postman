@@ -98,6 +98,8 @@ pub(crate) struct ReadingPane {
     pub(crate) scheduled: Vec<postman_core::send_later::Scheduled>,
     /// «Сохранить все» ждёт байтов вложений (S5-07).
     pub(crate) save_all: Option<crate::preview::SaveAll>,
+    /// Открытая папка: её вид беседы (лента, стопка, «как Outlook», S5-05б).
+    pub(crate) folder: Option<String>,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -113,6 +115,8 @@ pub(crate) enum ReadingEvent {
     Open(EmailRow),
     /// «Отменить отправку» запланированного письма.
     Unsend(postman_core::send_later::Scheduled),
+    /// «Ответить» или «Переслать» у письма стопки (S5-05б).
+    Respond(EmailRow, postman_compose::Mode),
 }
 
 /// Запрос области чтения к серверу: клонируемая форма `Command` (событие gpui отдаётся по ссылке).
@@ -159,6 +163,7 @@ impl ReadingPane {
             mine: Vec::new(),
             scheduled: Vec::new(),
             save_all: None,
+            folder: None,
         }
     }
 
@@ -611,6 +616,37 @@ impl Render for ReadingPane {
                 .child(tr!("reading-empty"))
                 .into_any_element();
         };
+        let scheduled = self.scheduled_bar(cx);
+        // Стопка беседы (S5-05б, макет «Беседа»): тема, сроки, «N писем · M участников», письма карточками — у каждого
+        // своя шапка.
+        if self.stacked(cx) {
+            let title = div()
+                .text_size(l.px(pets_ui::theme::Metric::TypeSubtitle))
+                .line_height(px(26.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(r.row.subject.clone());
+            let top = div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .pb(px(8.))
+                .child(title)
+                .child(crate::lifecycle::header_row(&r.row, &l))
+                .children(self.stack_info(cx));
+            return div()
+                .id("reading")
+                .flex()
+                .flex_col()
+                .size_full()
+                .px(px(24.))
+                .py(px(20.))
+                .gap(px(4.))
+                .overflow_y_scroll()
+                .child(top)
+                .children(scheduled)
+                .children(self.stack_view(r, cx))
+                .into_any_element();
+        }
         let name = if r.row.from_name.is_empty() { r.row.from_addr.clone() } else { r.row.from_name.clone() };
         let to = r
             .body
@@ -663,8 +699,11 @@ impl Render for ReadingPane {
             )
             // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
             .child(crate::lifecycle::header_row(&r.row, &l));
-        let bar = self.feed_bar(cx);
-        let scheduled = self.scheduled_bar(cx);
+        // Вид «как Outlook» — строка «Беседа: N писем · ← · →» (S5-05б), лента — переключатель «Беседа (N)».
+        let bar = match self.view(cx) {
+            postman_core::prefs::Conversation::Outlook => self.outlook_bar(cx),
+            _ => self.feed_bar(cx),
+        };
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
         if let Some(feed) = self.feed_view(cx) {
             return div()

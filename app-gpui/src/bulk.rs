@@ -101,17 +101,23 @@ fn selected_of(rows: &[EmailRow], book: &postman_core::labels::Book) -> Selected
 
 impl MailList {
     /// Ctrl+щелчок (`seed` — открытое письмо тоже в выделение, как в Outlook) или флажок: письмо — в выделение или
-    /// из него.
+    /// из него; строка беседы (вид «как Outlook», S5-05б) — все письма беседы.
     pub(crate) fn pick(&mut self, i: usize, seed: bool, cx: &mut Context<Self>) {
         let Some(id) = self.row(i).map(|r| r.id.clone()) else { return };
         if seed
             && self.selection.is_empty()
             && let Some(c) = self.selected.filter(|&c| c != i)
-            && let Some(open) = self.row(c).map(|r| r.id.clone())
+            && self.row(c).is_some()
         {
-            self.selection.toggle(&open, c);
+            let open = self.members_of(c);
+            self.selection.toggle_all(&open, c);
         }
-        self.selection.toggle(&id, i);
+        let members = self.members_of(i);
+        if members.len() > 1 {
+            self.selection.toggle_all(&members, i);
+        } else {
+            self.selection.toggle(&id, i);
+        }
         self.picked_changed(cx);
     }
 
@@ -143,6 +149,7 @@ impl MailList {
         let loaded: Option<Vec<String>> = range.clone().map(|k| self.row(k).map(|r| r.id.clone())).collect();
         match loaded {
             Some(ids) => {
+                let ids = self.expand_members(ids);
                 self.selection.set_range(&ids);
                 self.picked_changed(cx);
             }
@@ -154,6 +161,7 @@ impl MailList {
                 cx.spawn(async move |this, cx| {
                     let ids = task.await;
                     let _ = this.update(cx, |l, cx| {
+                        let ids = l.expand_members(ids);
                         l.selection.set_range(&ids);
                         l.picked_changed(cx);
                     });
@@ -173,6 +181,12 @@ impl MailList {
 
     /// Ctrl+A: все письма списка (id — в фоне: в большом ящике их десятки тысяч).
     pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+        // Беседы (S5-05б): и письма свёрнутых бесед; их id уже в памяти.
+        if let Some(o) = self.threads() {
+            let ids: Vec<String> = o.all_ids().cloned().collect();
+            self.selection.select_all(ids);
+            return self.picked_changed(cx);
+        }
         let (source, cache, count) = (self.page_source(), self.cache.clone(), self.count);
         if count == 0 {
             return;
@@ -233,7 +247,7 @@ impl MailList {
         }
         self.summary_gen += 1;
         let generation = self.summary_gen;
-        let (ids, cache, book, source) = (self.selection.ids().to_vec(), self.cache.clone(), self.labels.clone(), self.page_source());
+        let (ids, cache, book, source) = (self.selection.ids().to_vec(), self.cache.clone(), self.labels.clone(), self.alive_source());
         let task = cx.background_spawn(async move {
             let rows = cache.rows_by_ids(&ids).unwrap_or_default();
             let rows: Vec<EmailRow> = match &source {

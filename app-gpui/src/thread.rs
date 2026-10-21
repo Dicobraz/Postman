@@ -1,26 +1,34 @@
-//! Беседа в области чтения (S5-05, минимальная): переключатель «Беседа (N)» и лента писем цепочки — только новый
-//! текст (границу истории ставит воркер-песочница), разделители по дням, свои письма отмечены и сдвинуты вправо;
-//! цитаты — переключателем. Ctrl+→ / Ctrl+← — по письмам беседы. Оформление по макетам — S5-01.
+//! Беседа в области чтения (S5-05). Вид — из настроек «Чтение», свой у папки (`Reading::conversation_in`):
+//! - лента (по умолчанию): переключатель «Беседа (N)» и лента писем цепочки — только новый текст (границу истории
+//!   ставит воркер-песочница), разделители по дням, свои письма отмечены и сдвинуты вправо; цитаты — переключателем;
+//! - стопка (S5-05б, макет «Беседа»): письма карточками от старых к новым; прочитанные свёрнуты строкой (отправитель,
+//!   начало текста, дата), последнее и непрочитанные раскрыты; щелчок или Enter — раскрыть, цитата — переключателем;
+//! - «как Outlook» (S5-05б): беседа — в списке (`outline.rs`), здесь — одно письмо и строка «Беседа: N писем · ← · →».
 //!
-//! Письма беседы — из кэша (индекс цепочек, все папки); живой ящик при первом показе ленты просит беседу у сервера
-//! (`Command::Thread` → `Event::ThreadReady`): письма из папок за пределами первой страницы и недостающие тела.
+//! Ctrl+→ / Ctrl+← — по письмам беседы в любом виде. Письма беседы — из кэша (индекс цепочек, все папки); живой ящик
+//! при первом показе ленты или стопки просит беседу у сервера (`Command::Thread` → `Event::ThreadReady`): письма из
+//! папок за пределами первой страницы и недостающие тела.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::PoisonError;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
+use pets_ui::theme::Metric;
 use postman_cache::{BodyRow, EmailRow};
+use postman_compose::Mode;
+use postman_core::prefs::Conversation as View;
 use postman_core::thread::{self, Conversation, Item};
 use postman_ir::Document;
 use postman_worker::Request;
 
 use crate::Mailer;
+use crate::chrome::{glyph, icon};
 use crate::ir_view::{self, Images};
-use crate::reading::{ReadingEvent, ReadingPane, SyncRequest};
-
+use crate::outline::Fold;
+use crate::reading::{Reading, ReadingEvent, ReadingPane, SyncRequest};
 
 /// Лента беседы открытого письма.
 pub(crate) struct Feed {
@@ -33,11 +41,38 @@ pub(crate) struct Feed {
     /// Беседу уже просили у сервера; `waiting` — ответа ещё нет.
     fetched: bool,
     pub(crate) waiting: bool,
+    /// Стопка (S5-05б): раскрытые письма, письма с показанной цитатой, «Кому» каждого письма (из тела).
+    pub(crate) open: HashSet<String>,
+    pub(crate) quoted: HashSet<String>,
+    pub(crate) to: HashMap<String, String>,
 }
 
 impl Feed {
     fn new(conv: Conversation) -> Self {
-        Self { conv, docs: HashMap::new(), rendering: false, again: false, fetched: false, waiting: false }
+        Self {
+            conv,
+            docs: HashMap::new(),
+            rendering: false,
+            again: false,
+            fetched: false,
+            waiting: false,
+            open: HashSet::new(),
+            quoted: HashSet::new(),
+            to: HashMap::new(),
+        }
+    }
+
+    /// Раскрыты в стопке: последнее письмо, непрочитанные и открытое (`current`).
+    fn unfold_fresh(&mut self, current: Option<&str>) {
+        let last = self.conv.messages.last().map(|m| m.row.id.clone());
+        let unread = self.conv.messages.iter().filter(|m| !m.row.seen).map(|m| m.row.id.clone());
+        self.open.extend(last.into_iter().chain(unread).chain(current.map(str::to_owned)));
+    }
+
+    /// Участники: разные отправители; меня нет среди отправителей — я получатель, тоже участник.
+    fn people(&self) -> usize {
+        let senders: HashSet<String> = self.conv.messages.iter().map(|m| m.row.from_addr.to_lowercase()).collect();
+        senders.len() + usize::from(!self.conv.messages.iter().any(|m| m.mine))
     }
 
     /// Все письма ленты разобраны (снимок `thread`).
@@ -65,7 +100,9 @@ impl ReadingPane {
     pub(crate) fn sync_thread(&mut self, cx: &mut Context<Self>) {
         let Some(r) = &self.reading else { return };
         let key = r.row.thread_id.clone();
-        if self.feed.as_ref().is_some_and(|f| f.conv.thread == key) {
+        if let Some(f) = self.feed.as_mut().filter(|f| f.conv.thread == key) {
+            // Стопка: открытое письмо (Ctrl+→, щелчок по строке) — раскрыто.
+            f.open.insert(r.row.id.clone());
             return;
         }
         self.feed = None;
@@ -94,13 +131,35 @@ impl ReadingPane {
             return;
         }
         let conv = Conversation::assemble(key, rows, &self.my_addresses(), &TimeZone::system());
+        let current = self.reading.as_ref().map(|r| r.row.id.clone());
         match &mut self.feed {
             Some(f) if f.conv.thread == key => f.conv = conv,
             // Одно письмо — не беседа: переключателя нет.
             _ if conv.len() < 2 => return,
             _ => self.feed = Some(Feed::new(conv)),
         }
-        if self.feed_on {
+        if let Some(f) = &mut self.feed {
+            f.unfold_fresh(current.as_deref());
+        }
+        if self.feed_on || self.view(cx) == View::Stack {
+            self.load_feed(cx);
+        }
+        cx.notify();
+    }
+
+    /// Вид беседы в папке письма (настройки «Чтение», свой у папки — поверх общего).
+    pub(crate) fn view(&self, cx: &App) -> View {
+        crate::prefs::get(cx).reading.conversation_in(self.folder.as_deref())
+    }
+
+    /// Стопка показана: беседа из 2+ писем, вид — стопка, просмотр вложения закрыт.
+    pub(crate) fn stacked(&self, cx: &App) -> bool {
+        self.feed.is_some() && self.view(cx) == View::Stack && self.reading.as_ref().is_some_and(|r| r.preview.is_none())
+    }
+
+    /// Вид беседы сменился (настройки, меню папки): стопке нужны разобранные письма.
+    pub(crate) fn view_changed(&mut self, cx: &mut Context<Self>) {
+        if self.feed.is_some() && self.view(cx) == View::Stack {
             self.load_feed(cx);
         }
         cx.notify();
@@ -164,8 +223,9 @@ impl ReadingPane {
                 let body = if live { cache.body(&id).ok().flatten() } else { Some(postman_demo::body(&id)) };
                 // Тела нет — придёт с сервера (`ThreadReady`).
                 let Some(body) = body else { continue };
+                let to = body.to.iter().map(|a| if a.name.is_empty() { a.email.clone() } else { a.name.clone() }).collect::<Vec<_>>();
                 let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
-                out.push((id, w.render(&request(body))));
+                out.push((id, w.render(&request(body)), to.join(", ")));
             }
             out
         });
@@ -173,9 +233,10 @@ impl ReadingPane {
             let docs = task.await;
             this.update(cx, |this, cx| {
                 let Some(f) = this.feed.as_mut().filter(|f| f.conv.thread == key) else { return };
-                for (id, doc) in docs {
+                for (id, doc, to) in docs {
                     let doc = doc.unwrap_or_else(|e| postman_ir::from_plain(&tr!("reading-error", error = e)));
-                    f.docs.insert(id, doc);
+                    f.docs.insert(id.clone(), doc);
+                    f.to.insert(id, to);
                 }
                 f.rendering = false;
                 if std::mem::take(&mut f.again) {
@@ -235,7 +296,7 @@ impl ReadingPane {
     /// Лента: разделители дней и письма — только новый текст (пересылка и «показать цитаты» — целиком).
     pub(crate) fn feed_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let l = crate::roles::look(cx);
-        let f = self.feed.as_ref().filter(|_| self.feed_on)?;
+        let f = self.feed.as_ref().filter(|_| self.feed_on && self.view(cx) == View::Feed)?;
         let current = self.reading.as_ref().map(|r| r.row.id.as_str());
         let today = jiff::Zoned::now().date();
         // Картинки `cid:` в ленте не грузим: на их месте подписи; письмо целиком — в обычном виде.
@@ -311,11 +372,399 @@ impl ReadingPane {
     }
 }
 
+// --- стопка (S5-05б) ---
+
+/// Начало нового текста письма — строка свёрнутого письма стопки, если у письма нет превью.
+fn snippet(doc: Option<&Document>) -> String {
+    let Some(doc) = doc else { return String::new() };
+    doc.new_text()
+        .iter()
+        .find_map(|b| match b {
+            postman_ir::Block::Paragraph { content, .. } | postman_ir::Block::Heading { content, .. } => {
+                let t = postman_ir::plain_text(content);
+                let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Круг с инициалами (нейтральный цвет, как в шапке письма).
+fn avatar(name: &str, size: f32, text: f32, l: &crate::roles::Look) -> Div {
+    let c = l.cat(postman_core::palette::NEUTRAL);
+    div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(c.bg)
+        .text_color(c.text)
+        .text_size(px(text))
+        .child(crate::list::initials(name))
+}
+
+impl ReadingPane {
+    /// Щелчок по свёрнутому письму стопки — раскрыть и открыть его (шапка, вложения, Ctrl+→ — от него); по шапке
+    /// раскрытого — свернуть.
+    fn stack_click(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(f) = &mut self.feed else { return };
+        if f.open.remove(id) {
+            return cx.notify();
+        }
+        f.open.insert(id.to_owned());
+        if let Some(row) = f.conv.messages.iter().find(|m| m.row.id == id).map(|m| m.row.clone()) {
+            cx.emit(ReadingEvent::Open(row));
+        }
+        cx.notify();
+    }
+
+    /// Enter — свернуть или раскрыть открытое письмо; «Развернуть» и «Свернуть» — все письма стопки.
+    pub(crate) fn stack_fold(&mut self, how: Fold, cx: &mut Context<Self>) -> bool {
+        if !self.stacked(cx) {
+            return false;
+        }
+        let current = self.reading.as_ref().map(|r| r.row.id.clone());
+        let Some(f) = &mut self.feed else { return false };
+        match how {
+            Fold::Expand => f.open = f.conv.messages.iter().map(|m| m.row.id.clone()).collect(),
+            Fold::Collapse => f.open.clear(),
+            Fold::Toggle => {
+                let Some(id) = current else { return false };
+                if !f.open.remove(&id) {
+                    f.open.insert(id);
+                }
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// «Показать цитату» у письма стопки; без `id` — у открытого (команда `thread.quotes`).
+    fn stack_quote(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        let Some(id) = id.or_else(|| self.reading.as_ref().map(|r| r.row.id.clone())) else { return };
+        let Some(f) = &mut self.feed else { return };
+        if !f.quoted.remove(&id) {
+            f.quoted.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// `thread.quotes`: в стопке — цитата открытого письма, иначе — цитаты ленты.
+    pub(crate) fn quotes_key(&mut self, cx: &mut Context<Self>) {
+        if self.stacked(cx) { self.stack_quote(None, cx) } else { self.toggle_quotes(cx) }
+    }
+
+    /// Строка под темой: «4 письма · 3 участника» и «Развернуть все» / «Свернуть все».
+    pub(crate) fn stack_info(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
+        let f = self.feed.as_ref()?;
+        let all = f.conv.messages.iter().all(|m| f.open.contains(&m.row.id));
+        let (label, how) = if all { (tr!("thread-collapse-all"), Fold::Collapse) } else { (tr!("thread-expand-all"), Fold::Expand) };
+        let info = tr!("thread-info", n = f.conv.len(), people = f.people());
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_color(l.text2())
+                .child(info)
+                .child(
+                    div()
+                        .id("stack-all")
+                        .px(px(4.))
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .text_size(l.px(Metric::TypeCaption))
+                        .text_color(l.accent_text())
+                        .cursor_pointer()
+                        .hover(|d| d.bg(l.hover()))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.stack_fold(how, cx);
+                        })),
+                )
+                .child(div().flex_1())
+                .when(f.waiting, |d| d.child(tr!("thread-loading")))
+                .into_any_element(),
+        )
+    }
+
+    /// Карточки стопки — от старых писем к новым. У открытого письма — его вложения и приглашение.
+    pub(crate) fn stack_view(&self, r: &Reading, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
+        let f = self.feed.as_ref()?;
+        let none = Images::new();
+        let mut col = div().flex().flex_col();
+        for (n, m) in f.conv.messages.iter().enumerate() {
+            let id = m.row.id.clone();
+            let current = r.row.id == id;
+            let who = if m.mine {
+                tr!("thread-me")
+            } else if m.row.from_name.is_empty() {
+                m.row.from_addr.clone()
+            } else {
+                m.row.from_name.clone()
+            };
+            // Открытое письмо — разобранное целиком, с картинками `cid:`; остальные — из ленты.
+            let (doc, images) = match (current, &r.doc) {
+                (true, Some(d)) => (Some(d), &r.images),
+                _ => (f.docs.get(&id), &none),
+            };
+            let card = if !f.open.contains(&id) {
+                let text = if m.row.preview.is_empty() { snippet(doc) } else { m.row.preview.clone() };
+                let click = id.clone();
+                div()
+                    .id(("stack-row", n))
+                    .h(px(36.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(l.hover()))
+                    .child(avatar(&who, 24., 10., &l))
+                    .child(div().w(px(128.)).flex_none().truncate().font_weight(FontWeight::SEMIBOLD).child(who))
+                    .child(div().flex_1().min_w_0().truncate().text_color(l.text2()).child(text))
+                    .when(m.row.has_attachment, |d| d.child(icon(glyph::ATTACH, 13.).text_color(l.text3())))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(l.px(Metric::TypeCaption))
+                            .text_color(l.text2())
+                            .child(crate::format_date(m.row.received_at)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.stack_click(&click, cx)))
+                    .into_any_element()
+            } else {
+                self.stack_card(n, m, &who, doc, images, current.then_some(r), cx)
+            };
+            col = col.child(div().w_full().when(n > 0, |d| d.border_t_1().border_color(l.border())).child(card));
+        }
+        Some(col.into_any_element())
+    }
+
+    /// Раскрытое письмо стопки: шапка (щелчок — свернуть), «Ответить» и «Переслать», новый текст, цитата
+    /// переключателем; у открытого (`open`) — вложения и приглашение.
+    #[allow(clippy::too_many_arguments)]
+    fn stack_card(
+        &self,
+        n: usize,
+        m: &thread::Message,
+        who: &str,
+        doc: Option<&Document>,
+        images: &Images,
+        open: Option<&Reading>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let l = crate::roles::look(cx);
+        let Some(f) = &self.feed else { return div().into_any_element() };
+        let id = m.row.id.clone();
+        let to = f.to.get(&id).cloned().unwrap_or_default();
+        let quoted = f.quoted.contains(&id);
+        let whole = thread::is_forward(&m.row.subject);
+        let action = |key: &'static str, g: char, mode: Mode, row: EmailRow, cx: &mut Context<Self>| {
+            div()
+                .id((key, n))
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .text_color(l.text2())
+                .cursor_pointer()
+                .hover(|d| d.bg(l.hover()))
+                .child(icon(g, 16.))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(key)).build(window, cx))
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::Respond(row.clone(), mode))))
+        };
+        let click = id.clone();
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .pt(px(12.))
+            .child(
+                div()
+                    .id(("stack-head", n))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(l.hover()))
+                    .child(avatar(who, 32., 12., &l))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.))
+                                    .items_baseline()
+                                    .child(div().flex_none().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(who.to_owned()))
+                                    .child(div().min_w_0().truncate().text_color(l.text2()).child(format!("<{}>", m.row.from_addr))),
+                            )
+                            .when(!to.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(l.px(Metric::TypeCaption))
+                                        .text_color(l.text2())
+                                        .child(tr!("thread-to", to = to)),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(l.px(Metric::TypeCaption))
+                            .text_color(l.text2())
+                            .child(crate::format_date(m.row.received_at)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.stack_click(&click, cx))),
+            )
+            .child(action("thread-reply", glyph::REPLY, Mode::Reply, m.row.clone(), cx))
+            .child(action("thread-forward", glyph::FORWARD, Mode::Forward, m.row.clone(), cx));
+        let body: AnyElement = match doc {
+            None => div().text_color(l.text2()).child("…").into_any_element(),
+            Some(d) => {
+                let fresh = if whole { &d.blocks[..] } else { d.new_text() };
+                let history = &d.blocks[fresh.len()..];
+                let key = format!("stack{n}");
+                let mut col = div().flex().flex_col().gap_1().children(ir_view::blocks(fresh, &key, images, cx));
+                if !history.is_empty() {
+                    let label = if quoted { tr!("thread-quote-hide") } else { tr!("thread-quote-show") };
+                    let qid = id.clone();
+                    col = col.child(
+                        div().flex().pt(px(8.)).child(
+                            div()
+                                .id(("stack-quote", n))
+                                .h(px(20.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .px(px(8.))
+                                .rounded(px(10.))
+                                .bg(l.fill())
+                                .text_color(l.text2())
+                                .text_size(l.px(Metric::TypeCaption))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(l.hover()))
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child("···"))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| this.stack_quote(Some(qid.clone()), cx))),
+                        ),
+                    );
+                    if quoted {
+                        col = col.child(
+                            div()
+                                .mt(px(8.))
+                                .pl(px(10.))
+                                .border_l_2()
+                                .border_color(l.stroke())
+                                .text_color(l.text2())
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(ir_view::blocks(history, &format!("{key}q"), images, cx)),
+                        );
+                    }
+                }
+                col.into_any_element()
+            }
+        };
+        let strip = open.and_then(|r| self.ribbon(r, cx));
+        let invite = open.and_then(|r| r.invite.as_ref()).map(|c| crate::invite_card::render(c, self.me.as_deref(), cx));
+        div()
+            .flex()
+            .flex_col()
+            .child(head)
+            .child(div().pl(px(48.)).pt(px(10.)).pb(px(16.)).flex().flex_col().gap(px(12.)).children(strip).children(invite).child(body))
+            .into_any_element()
+    }
+
+    /// Вид «как Outlook»: над письмом — «Беседа: N писем · ← пред. · след. → · k из N».
+    pub(crate) fn outlook_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let l = crate::roles::look(cx);
+        let f = self.feed.as_ref()?;
+        let id = &self.reading.as_ref()?.row.id;
+        let at = f.conv.position(id)?;
+        let n = f.conv.len();
+        let step = |key: &'static str, label: String, delta: isize, on: bool, cx: &mut Context<Self>| {
+            div()
+                .id(key)
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .px(px(6.))
+                .rounded(px(4.))
+                .when(on, |d| d.text_color(l.accent_text()).cursor_pointer().hover(|d| d.bg(l.hover())))
+                .when(!on, |d| d.text_color(l.text3()))
+                .child(label)
+                .when(on, |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(row) = this.thread_neighbor(delta) {
+                            cx.emit(ReadingEvent::Open(row));
+                        }
+                    }))
+                })
+        };
+        Some(
+            div()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(8.))
+                .pr(px(4.))
+                .rounded(px(4.))
+                .bg(l.fill_passive())
+                .text_size(l.px(Metric::TypeCaption))
+                .text_color(l.text2())
+                .child(div().text_color(l.text()).child(tr!("thread-outlook", n = n)))
+                .child("·")
+                .child(step("thread-prev", tr!("thread-prev"), -1, at > 0, cx))
+                .child("·")
+                .child(step("thread-next", tr!("thread-next"), 1, at + 1 < n, cx))
+                .child(div().flex_1())
+                .child(div().pr(px(4.)).child(tr!("thread-position", at = at + 1, n = n)))
+                .into_any_element(),
+        )
+    }
+}
+
 impl Mailer {
     /// Ctrl+→ / Ctrl+←: следующее или предыдущее письмо беседы — в области чтения (список не трогаем).
     pub(crate) fn thread_step(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(row) = self.reading.read(cx).thread_neighbor(delta) {
             self.open_letter(row, cx);
         }
+    }
+
+    /// Enter, «Развернуть», «Свернуть» (S5-05б): беседа в списке «как Outlook», иначе — письма стопки.
+    pub(crate) fn thread_fold(&mut self, how: Fold, cx: &mut Context<Self>) {
+        if self.section != crate::Section::Mail {
+            return;
+        }
+        if !self.list.update(cx, |l, cx| l.fold(how, cx)) {
+            self.reading.update(cx, |r, cx| r.stack_fold(how, cx));
+        }
+    }
+
+    /// → / ← без открытого просмотра вложения: беседа в списке «как Outlook». `false` — клавиша не нужна.
+    pub(crate) fn thread_arrow(&mut self, how: Fold, cx: &mut Context<Self>) -> bool {
+        self.section == crate::Section::Mail && self.list.update(cx, |l, cx| l.fold(how, cx))
     }
 }

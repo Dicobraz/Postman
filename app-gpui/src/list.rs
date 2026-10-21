@@ -163,6 +163,12 @@ pub(crate) struct MailList {
     pub(crate) offline_hidden: bool,
     /// Где список в окне (последний кадр): контекстное меню с клавиатуры — у выбранной строки.
     pub(crate) bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// Вид «В списке, как Outlook» (S5-05б, `outline.rs`): строки по беседам; `outlook` — вид включён в этой папке,
+    /// `threads_open` — развёрнутые беседы, `thread_groups` — группы списка по номеру `Head::group`.
+    pub(crate) outline: Option<postman_core::thread::Outline>,
+    pub(crate) outlook: bool,
+    pub(crate) threads_open: HashSet<String>,
+    pub(crate) thread_groups: Vec<Group>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -177,12 +183,16 @@ struct Job {
     own: bool,
     /// «Просроченный срок — наверх» (S5-04): такие письма и сработавшие напоминания — группой «Срочное».
     overdue_first: bool,
+    /// Вид «как Outlook» (S5-05б): свой набор писем, сгруппированный по беседам; `open` — развёрнутые беседы.
+    outlook: bool,
+    open: HashSet<String>,
 }
 
 /// Итог пересчёта: счётчики и, если нужен, список с группами.
 struct Computed {
     counts: Counts,
     list: Option<Arranged>,
+    outline: Option<postman_core::thread::Outline>,
 }
 
 impl Job {
@@ -192,24 +202,30 @@ impl Job {
         let folders = matches!(self.scan, Scan::Account(_));
         // Папка по дате без фильтров — страницы из кэша; есть «Срочное» (S5-04) — свой набор с ним наверху.
         let pins = !folders && self.query.sort == Sort::Date;
-        let mut own = self.own;
+        let mut own = self.own || self.outlook;
         loop {
-            let (counts, hits, tops) = self.pass(cache, own, pins, folders, &now);
+            let (counts, hits, tops, threads) = self.pass(cache, own, pins, folders, &now);
             if !own && tops > 0 {
                 own = true;
                 continue;
             }
             let list = own.then(|| arrange(hits, self.query.sort, folders.then_some(self.order.as_slice()), &days));
-            return Computed { counts, list };
+            let outline = list
+                .as_ref()
+                .filter(|_| self.outlook)
+                .map(|(ids, groups)| crate::outline::outline_of(ids, groups, &threads, folders, self.open.clone()));
+            return Computed { counts, list, outline };
         }
     }
 
-    /// Один обход: счётчики, письма своего набора (`own`) и сколько из них — наверху.
-    fn pass(&self, cache: &Cache, own: bool, pins: bool, folders: bool, now: &jiff::Zoned) -> (Counts, Vec<Hit>, usize) {
+    /// Один обход: счётчики, письма своего набора (`own`), сколько из них — наверху, и цепочки писем набора (вид
+    /// «как Outlook»).
+    fn pass(&self, cache: &Cache, own: bool, pins: bool, folders: bool, now: &jiff::Zoned) -> Pass {
         let index: HashMap<&str, usize> = self.order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
         let mut counts = Counts::default();
         let mut hits = Vec::new();
         let mut tops = 0;
+        let mut threads = HashMap::new();
         let scanned = cache.scan(&self.scan, |row, to| {
             let f = Facts::of(&self.me, &row, &to);
             let mut pass = counts.add(&self.query.criteria, &f, &row.keywords);
@@ -223,6 +239,9 @@ impl Job {
                 let folder = if folders { row.mailbox_ids.iter().filter_map(|m| index.get(m.as_str())).min().copied() } else { Some(0) };
                 if let Some(folder) = folder {
                     hits.push(Hit { top, ..Hit::of(&row, folder) });
+                    if self.outlook {
+                        threads.insert(row.id.clone(), row.thread_id.clone());
+                    }
                 }
             }
             true
@@ -230,9 +249,12 @@ impl Job {
         if let Err(e) = scanned {
             tracing::warn!("filters: {e}");
         }
-        (counts, hits, tops)
+        (counts, hits, tops, threads)
     }
 }
+
+/// Итог обхода: счётчики, письма набора, сколько наверху, цепочки (id → ключ цепочки).
+type Pass = (Counts, Vec<Hit>, usize, HashMap<String, String>);
 
 /// Откуда группы списка при перечитывании.
 enum Groups {
@@ -393,8 +415,14 @@ impl MailList {
             cx.subscribe(&filters, |this, _, _: &Changed, cx| this.on_filters(cx)),
             // Панель и закладки — из модели: её перерисовка — и списка (закладки, чип, «N из M»).
             cx.observe(&filters, |_, _, cx| cx.notify()),
-            // Закладки скрыты или показаны (настройки) — место под ними в конце списка.
-            crate::prefs::observe(cx),
+            // Закладки скрыты или показаны (настройки) — место под ними в конце списка; вид беседы «как Outlook»
+            // (S5-05б) включён или выключен в открытой папке — пересчитать.
+            crate::prefs::observe_with(cx, |this: &mut Self, cx| {
+                if this.outlook_mode(cx) != this.outlook {
+                    this.recompute(cx);
+                }
+                cx.notify();
+            }),
         ];
         let identity = vec![(postman_demo::ME.to_owned(), postman_demo::ME_NAME.to_owned())];
         let mut list = Self {
@@ -442,6 +470,10 @@ impl MailList {
             offline: None,
             offline_hidden: false,
             bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
+            outline: None,
+            outlook: false,
+            threads_open: HashSet::new(),
+            thread_groups: Vec::new(),
             _subscriptions: subscriptions,
         };
         list.me = list.who_am_i();
@@ -516,7 +548,8 @@ impl MailList {
         let own = query.own_list();
         self.query = query;
         self.server_hits = Arc::new(HashSet::new());
-        if !own {
+        // Беседы (S5-05б) — свой набор всегда: прежний остаётся до пересчёта.
+        if !own && self.outline.is_none() {
             self.view = None;
         }
         self.selected = None;
@@ -540,6 +573,11 @@ impl MailList {
     pub(crate) fn recompute(&mut self, cx: &mut Context<Self>) {
         self.compute_gen += 1;
         let generation = self.compute_gen;
+        let outlook = self.outlook_mode(cx);
+        if outlook != self.outlook {
+            self.outlook = outlook;
+            self.outline = None;
+        }
         let Some(scan) = self.scan_target() else {
             self.computing = false;
             return;
@@ -553,6 +591,8 @@ impl MailList {
             order: self.order.clone(),
             own: self.query.own_list(),
             overdue_first: crate::prefs::get(cx).lifecycle.overdue_first,
+            outlook,
+            open: self.threads_open.clone(),
         };
         let cache = self.cache.clone();
         let task = cx.background_spawn(async move { job.run(&cache) });
@@ -574,13 +614,18 @@ impl MailList {
                 m.set(cx, |m| m.counts = counts);
             }
         });
-        match out.list {
-            Some((ids, groups)) => {
+        match (out.list, out.outline) {
+            (Some((_, groups)), Some(outline)) => self.set_outline(outline, &groups),
+            (Some((ids, groups)), None) => {
+                self.outline = None;
                 self.view = Some(Arc::new(ids));
                 self.groups = groups;
             }
-            None if self.view.is_some() => self.view = None,
-            None => return,
+            (None, _) if self.view.is_some() => {
+                self.outline = None;
+                self.view = None;
+            }
+            (None, _) => return,
         }
         self.reread(None, cx);
     }
@@ -596,7 +641,7 @@ impl MailList {
     }
 
     /// Раскладка строк с заголовками групп — после смены числа писем, групп или свёрнутых.
-    fn relayout(&mut self) {
+    pub(crate) fn relayout(&mut self) {
         self.layout = Layout::new(&self.groups, self.count, &self.collapsed);
         self.sizes_for = None;
     }
@@ -669,6 +714,7 @@ impl MailList {
         // Другая папка — своя догрузка; число писем на сервере ставит экран (`Mailer::sync_total`).
         if self.mailbox.as_deref() != Some(id.as_str()) {
             self.more = More::default();
+            self.threads_open.clear();
         }
         // Папка выбрана в дереве — искать в ней (не «Все папки»); фильтры остаются.
         let name = self.names.get(&id).cloned().unwrap_or_default();
@@ -680,6 +726,7 @@ impl MailList {
             })
         });
         self.view = None;
+        self.outline = None;
         self.server_hits = Arc::new(HashSet::new());
         self.switch_view(Some(id), None);
         self.selected = None;
@@ -764,8 +811,11 @@ impl MailList {
         if let Some(ids) = &mut self.search_ids {
             ids.retain(|x| x != id);
         }
-        // Свой набор (фильтры): письмо уходит из него и из своей группы.
-        if self.search_ids.is_none()
+        // Беседы (вид «как Outlook», S5-05б): письмо уходит из своей беседы. Свой набор (фильтры): из него и из
+        // своей группы.
+        if self.search_ids.is_none() && self.outline.is_some() {
+            self.outline_removed(id);
+        } else if self.search_ids.is_none()
             && let Some(view) = &mut self.view
         {
             if let Some(g) = self.layout.group_of(index).cloned()
@@ -994,7 +1044,10 @@ impl MailList {
     fn sizes(&mut self, tail: bool) -> Rc<Vec<Size<Pixels>>> {
         let key = (self.row_h, tail);
         if self.sizes_for != Some(key) {
-            self.sizes = Rc::new(self.layout.sizes(self.row_h, HEADER_H, if tail { QUICK_H } else { 0. }));
+            let mut sizes = self.layout.sizes(self.row_h, HEADER_H, if tail { QUICK_H } else { 0. });
+            // Письма под головой беседы (S5-05б) — строки ниже обычных.
+            self.child_sizes(&mut sizes);
+            self.sizes = Rc::new(sizes);
             self.sizes_for = Some(key);
         }
         self.sizes.clone()
@@ -1011,10 +1064,12 @@ impl MailList {
         };
         let caption = |text: String| div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(text);
         let filtered = self.search_ids.is_none() && !self.query.criteria.is_empty();
+        // Беседы (вид «как Outlook», S5-05б): писем, а не строк.
+        let letters = self.threads().map_or(self.count, |o| o.total());
         let summary = if filtered && m.counts.total > 0 {
-            tr!("filters-shown", n = self.count, total = m.counts.total)
+            tr!("filters-shown", n = letters, total = m.counts.total)
         } else {
-            tr!("frame-list-count", n = self.count)
+            tr!("frame-list-count", n = letters)
         };
         let chip = m.chip_text().filter(|_| self.search_ids.is_none()).map(|text| {
             let model = self.filters.clone();
@@ -1172,9 +1227,14 @@ impl Render for MailList {
                                 picked: this.selection.contains(&r.id),
                                 boxes,
                                 menu: this.menu_row == Some(i),
+                                thread: this.thread_mark(i),
                             };
-                            list_row(i, &r, labels, state, &l, cx)
+                            match state.thread {
+                                crate::outline::Mark::Child { .. } => crate::outline::child_row(i, &r, labels, state, &l, cx),
+                                _ => list_row(i, &r, labels, state, &l, cx),
+                            }
                         }
+                        None if matches!(this.thread_mark(i), crate::outline::Mark::Child { .. }) => crate::outline::empty_child(i, &l),
                         None => empty_row(i, &l),
                     },
                     // Место под закладками быстрых фильтров: последнее письмо прокручивается над ними.
@@ -1303,13 +1363,15 @@ pub(crate) fn initials(name: &str) -> String {
         .collect()
 }
 
-/// Как рисовать строку: открыта (курсор), выделена, флажки видны у всех (что-то выделено), под контекстным меню.
+/// Как рисовать строку: открыта (курсор), выделена, флажки видны у всех (что-то выделено), под контекстным меню;
+/// место в беседе (вид «как Outlook», S5-05б).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RowState {
     pub(crate) open: bool,
     pub(crate) picked: bool,
     pub(crate) boxes: bool,
     pub(crate) menu: bool,
+    pub(crate) thread: crate::outline::Mark,
 }
 
 /// Группа наведения строки: флажок на месте аватара по наведению (S5-08).
@@ -1409,6 +1471,8 @@ pub(crate) fn list_row(
                 .child(from.clone()),
         )
         .child(chips)
+        // Число писем беседы (S5-05б).
+        .children(state.thread.count(l))
         .when(r.has_attachment, |d| d.child(crate::chrome::icon(crate::chrome::glyph::ATTACH, 13.).text_color(l.text3())))
         .when(r.flagged, |d| d.child(crate::chrome::icon(crate::chrome::glyph::FLAG, 13.).text_color(l.pm(Pm::Flag))))
         .child(div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(format_date(r.received_at)));
@@ -1420,15 +1484,18 @@ pub(crate) fn list_row(
     let preview = roomy
         .then(|| div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(r.preview.clone()));
     let lit = state.open || state.picked;
+    let open_head = state.thread.open_head();
     div()
         .id(i)
         .group(ROW_GROUP)
+        .relative()
         .w_full()
         .h(px(row_height(l.density())))
         .flex()
         .gap(px(10.))
         .pr(px(12.))
-        .border_b_1()
+        // Развёрнутая беседа — без черты снизу, к письмам под ней — линия (макет «В списке, как Outlook»).
+        .when(!open_head, |d| d.border_b_1())
         .border_color(l.border())
         .when(lit, |d| d.bg(l.picked()))
         .when(!lit, |d| d.hover(|d| d.bg(l.hover())))
@@ -1438,6 +1505,9 @@ pub(crate) fn list_row(
         // Слева — полоса категории (S5-02). Синей полосы «не прочитано» нет: её не отличить от синей категории;
         // непрочитанное — жирным отправителем и цветной темой (DESIGN.md).
         .child(div().w(px(4.)).h_full().flex_none().rounded_r(px(2.)).when_some(stripe, |d, c| d.bg(c)))
+        // Стрелка беседы и линия к письмам под головой (S5-05б).
+        .children(state.thread.chevron(i, l, cx))
+        .children(open_head.then(|| crate::outline::guide(l)))
         .child(div().flex_none().flex().items_center().child(slot))
         .child(
             div()
