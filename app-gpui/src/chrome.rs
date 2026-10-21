@@ -65,6 +65,9 @@ pub(crate) mod glyph {
     pub(crate) const CHEVRON_DOWN: char = '\u{E70D}';
     pub(crate) const CHEVRON_RIGHT: char = '\u{E76C}';
     pub(crate) const SORT: char = '\u{E8CB}';
+    /// Срок и напоминание (S5-04): часы и звонок.
+    pub(crate) const CLOCK: char = '\u{E121}';
+    pub(crate) const RINGER: char = '\u{EA8F}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).

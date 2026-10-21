@@ -12,6 +12,7 @@ pub mod filters;
 pub mod indexer;
 pub mod invite;
 pub mod labels;
+pub mod lifecycle;
 pub mod marks;
 pub mod palette;
 pub mod prefs;

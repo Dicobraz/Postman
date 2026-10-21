@@ -12,6 +12,7 @@ use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
 use crate::categories;
+use crate::lifecycle;
 use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
@@ -120,6 +121,13 @@ pub enum Command {
     DeleteContact { id: String, ticket: u64 },
     /// Таблица категорий аккаунта на сервере (`categories.rs`, S5-02б) → `Event::Categories`.
     Categories(categories::Request),
+    /// Жизненный цикл (S5-04, `lifecycle.rs`): правки писем (ключи кэша; папки — ключи кэша или
+    /// [`lifecycle::ARCHIVE`] — «Архив» аккаунта, нет — создаётся с именем `archive_name`) — один `Email/set` на
+    /// аккаунт. UI уже поменял кэш; письма, которые сервер не изменил, — с сервера заново.
+    Patch { patches: Vec<lifecycle::Patch>, archive_name: String },
+    /// Рассылки «Входящих» своего аккаунта: прочитанные раньше `cutoff` (Unix-секунды), кроме последней от каждого
+    /// отправителя, — в «Архив» → `Event::Newsletters`.
+    Newsletters { cutoff: i64, archive_name: String },
 }
 
 /// Что делает синхронизация. Текст — у интерфейса (`sync.ftl`), здесь только код и данные.
@@ -285,6 +293,8 @@ pub enum Event {
     ContactFailed { ticket: u64, error: String },
     /// Таблица категорий: прочитана при входе или по push, записана, снята с писем (`categories.rs`).
     Categories(categories::Reply),
+    /// Рассылки перенесены в «Архив» (`Command::Newsletters`): сколько.
+    Newsletters { archived: usize },
     Error(SyncError),
 }
 
@@ -1060,6 +1070,15 @@ async fn handle(
             });
             load_cards(client, notify).await;
         }
+        Command::Patch { patches, archive_name } => patch(accounts, cache, index, patches, &archive_name, notify).await?,
+        Command::Newsletters { cutoff, archive_name } => {
+            let archived = newsletters(&accounts.own, cache, cutoff, &archive_name, notify).await;
+            notify(Event::Newsletters { archived: *archived.as_ref().unwrap_or(&0) });
+            if archived.as_ref().is_ok_and(|n| *n > 0) {
+                notify(Event::EmailsChanged);
+            }
+            archived?;
+        }
         Command::SaveDraft { draft, replace, ticket } => {
             let r = save_draft(accounts, cache, send_as, &draft, replace.as_deref()).await;
             notify(match r {
@@ -1069,6 +1088,143 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// «Архив» аккаунта (id на сервере): из кэша папок; нет — создать папку с ролью `archive` (у Stalwart по умолчанию
+/// её нет, `docs/STALWART.md`) и перечитать папки.
+async fn ensure_archive(acc: &MailAccount, cache: &Cache, name: &str, notify: &impl Fn(Event)) -> postman_jmap::Result<String> {
+    let known = cache
+        .mailboxes()
+        .map_err(db_err)?
+        .into_iter()
+        .find(|m| m.role.as_deref() == Some("archive") && postman_cache::account_of(&m.id) == acc.scope());
+    if let Some(m) = known {
+        return Ok(unscoped(&m.id).1.to_owned());
+    }
+    let id = acc.client.create_mailbox(name, Some("archive")).await?;
+    load_mailboxes(acc, cache).await?;
+    notify(Event::MailboxesChanged);
+    Ok(id)
+}
+
+/// Правка жизненного цикла для сервера: id и папки — без префикса аккаунта; [`lifecycle::ARCHIVE`] — `archive`.
+fn server_patch(p: &lifecycle::Patch, archive: Option<&str>) -> (String, postman_jmap::EmailPatch) {
+    let mut out = postman_jmap::EmailPatch::default();
+    for (m, on) in &p.mailboxes {
+        let id = if m == lifecycle::ARCHIVE { archive } else { Some(unscoped(m).1) };
+        if let Some(id) = id {
+            out = out.mailbox(id, *on);
+        }
+    }
+    for (k, on) in &p.keywords {
+        out = out.keyword(k, *on);
+    }
+    (unscoped(&p.id).1.to_owned(), out)
+}
+
+/// `Command::Patch`: по аккаунтам, одним `Email/set` (по 500); не принятые — с сервера заново.
+async fn patch(
+    accounts: &Accounts,
+    cache: &mut Cache,
+    index: &Index,
+    patches: Vec<lifecycle::Patch>,
+    archive_name: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<()> {
+    let mut first_error = None;
+    let mut by: BTreeMap<Option<String>, Vec<lifecycle::Patch>> = BTreeMap::new();
+    for p in patches {
+        by.entry(postman_cache::account_of(&p.id).map(str::to_owned)).or_default().push(p);
+    }
+    for (scope, list) in by {
+        let Some(acc) = accounts.by_scope(scope.as_deref()) else { continue };
+        let wants_archive = list.iter().any(|p| p.mailboxes.iter().any(|(m, _)| m == lifecycle::ARCHIVE));
+        let archive = if wants_archive {
+            match ensure_archive(acc, cache, archive_name, notify).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let server: Vec<(String, postman_jmap::EmailPatch)> = list.iter().map(|p| server_patch(p, archive.as_deref())).collect();
+        let failed: Vec<String> = match acc.client.patch_emails(&server).await {
+            Ok(f) => f
+                .into_iter()
+                .map(|(id, e)| {
+                    first_error.get_or_insert(e);
+                    acc.key(&id)
+                })
+                .collect(),
+            Err(e) => {
+                first_error.get_or_insert(e);
+                list.iter().map(|p| p.id.clone()).collect()
+            }
+        };
+        // Папку «Архив» UI ещё не знал (в кэше письмо без неё) — письма такими, какие они теперь на сервере.
+        let refetch: Vec<String> = if wants_archive { list.iter().map(|p| p.id.clone()).collect() } else { failed };
+        for key in &refetch {
+            restore(accounts, cache, index, key, notify).await;
+        }
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// `Command::Newsletters`: письма «Входящих» с `List-Id` или `List-Unsubscribe` (сырые заголовки — у сервера) →
+/// [`lifecycle::newsletter_sweep`] → в «Архив». Ответ — сколько перенесено.
+async fn newsletters(
+    acc: &MailAccount,
+    cache: &mut Cache,
+    cutoff: i64,
+    archive_name: &str,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<usize> {
+    let mailboxes = cache.mailboxes().map_err(db_err)?;
+    let roles = lifecycle::Roles::of(&mailboxes, acc.scope());
+    let Some(inbox_key) = roles.inbox else { return Ok(0) };
+    let inbox = unscoped(&inbox_key).1.to_owned();
+    let seen = || vec![Filter::InMailbox(inbox.clone()), Filter::HasKeyword(postman_cache::SEEN.into())];
+    // Свежие — чтобы знать последнюю от отправителя; старые — чтобы дойти до них в большом ящике.
+    let mut letters = acc.client.list_letters(&Filter::And(seen()), lifecycle::NEWS_LIMIT).await?;
+    let mut old = seen();
+    old.push(Filter::Before(postman_jmap::unix_to_utc(cutoff)));
+    for l in acc.client.list_letters(&Filter::And(old), lifecycle::NEWS_LIMIT).await? {
+        if !letters.iter().any(|x| x.id == l.id) {
+            letters.push(l);
+        }
+    }
+    let items: Vec<lifecycle::NewsItem> = letters
+        .into_iter()
+        .filter(|l| l.list)
+        .map(|l| lifecycle::NewsItem { id: l.id, sender: l.from, received_at: l.received_at, seen: l.seen })
+        .collect();
+    let ids = lifecycle::newsletter_sweep(&items, cutoff);
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let archive = ensure_archive(acc, cache, archive_name, notify).await?;
+    let patches: Vec<(String, postman_jmap::EmailPatch)> = ids
+        .iter()
+        .map(|id| (id.clone(), postman_jmap::EmailPatch::default().mailbox(&inbox, false).mailbox(&archive, true)))
+        .collect();
+    let failed = acc.client.patch_emails(&patches).await?;
+    let moved: Vec<lifecycle::Patch> = ids
+        .iter()
+        .filter(|id| !failed.iter().any(|(f, _)| f == *id))
+        .map(|id| lifecycle::Patch {
+            id: acc.key(id),
+            keywords: Vec::new(),
+            mailboxes: vec![(inbox_key.clone(), false), (acc.key(&archive), true)],
+        })
+        .collect();
+    cache.patch_emails(&moved).map_err(db_err)?;
+    Ok(moved.len())
 }
 
 /// Ключи кэша по аккаунтам (`None` — свой); порядок внутри аккаунта — как в `keys`.

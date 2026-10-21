@@ -660,7 +660,9 @@ impl Render for ReadingPane {
                                 .child(tr!("frame-reading-to", to = to, date = format_date(r.row.received_at))),
                         ),
                 ),
-            );
+            )
+            // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
+            .child(crate::lifecycle::header_row(&r.row, &l));
         let bar = self.feed_bar(cx);
         let scheduled = self.scheduled_bar(cx);
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).

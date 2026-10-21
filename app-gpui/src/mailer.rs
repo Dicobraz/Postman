@@ -72,6 +72,8 @@ pub(crate) struct Mailer {
     pub(crate) contacts: Entity<crate::contacts::ContactsView>,
     /// «Отправить позже» и окно «Отменить» отправки (S5-06, `send_later.rs`).
     pub(crate) send_later: crate::send_later::SendLater,
+    /// Сроки, напоминания, «Ждём ответа», «Исчезнет» (S5-04, `lifecycle.rs`).
+    pub(crate) lifecycle: crate::lifecycle::Lifecycle,
     /// Вкладки в заголовке окна (S5-01).
     pub(crate) tabs: crate::tabs::Tabs,
     /// Меню «…» командной строки.
@@ -184,6 +186,11 @@ impl Mailer {
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // Планировщик жизненного цикла — после создания экрана (снимки и замер ставят себя сразу после `new`).
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |m: &mut Mailer, cx| m.lifecycle_pass(false, cx));
+        })
+        .detach();
         Self {
             cache,
             focus,
@@ -211,6 +218,7 @@ impl Mailer {
             settings: Default::default(),
             contacts,
             send_later: Default::default(),
+            lifecycle: Default::default(),
             tabs: Default::default(),
             more: Default::default(),
             _subscriptions: subscriptions,
@@ -243,6 +251,7 @@ impl Mailer {
         let created = self.meetings.on_sync(ev, cx);
         self.meetings_created(created, cx);
         self.on_settings_sync(ev, cx);
+        self.on_lifecycle_sync(ev, cx);
     }
 
     /// Действию нужен сервер, а его нет (демо): сказать тостом.
@@ -331,6 +340,7 @@ impl Render for Mailer {
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
         let l = crate::roles::look(cx);
+        let picker = self.lifecycle_overlay(&l, cx);
         // Вкладка «Настройки» (S5-09) — на месте рейла и модуля.
         let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
         let settings: Option<AnyView> = self.settings.view.clone().filter(|_| settings_tab).map(Into::into);
@@ -370,6 +380,10 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
             .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
             .on_action(cx.listener(|this, a: &mail::Categorize, _, cx| this.list.update(cx, |l, cx| l.toggle_category(a.key, cx))))
+            .on_action(cx.listener(|this, _: &mail::Due, _, cx| this.open_picker(postman_core::marks::Kind::Due, cx)))
+            .on_action(cx.listener(|this, _: &mail::Remind, _, cx| this.open_picker(postman_core::marks::Kind::Remind, cx)))
+            .on_action(cx.listener(|this, _: &mail::Wait, _, cx| this.open_picker(postman_core::marks::Kind::Wait, cx)))
+            .on_action(cx.listener(|this, _: &mail::Expire, _, cx| this.open_picker(postman_core::marks::Kind::Expire, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Next, _, cx| this.thread_step(1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Prev, _, cx| this.thread_step(-1, cx)))
             .on_action(cx.listener(|this, _: &commands::thread::Toggle, _, cx| this.reading.update(cx, |r, cx| r.toggle_feed(cx))))
@@ -433,8 +447,8 @@ impl Render for Mailer {
                     this.toasts.update(cx, |t, cx| t.toggle_history(cx));
                     return;
                 }
-                // …затем меню «…».
-                if this.close_more(cx) {
+                // …затем меню «…» и панель выбора срока.
+                if this.close_more(cx) || this.close_picker(cx) {
                     return;
                 }
                 // …затем просмотр вложения (S5-07).
@@ -499,12 +513,16 @@ impl Render for Mailer {
                         .child(card(&l).flex_1().child(view.cached(StyleRefinement::default().size_full()))),
                 ),
                 // Закладки быстрых фильтров — поверх карточки списка (S5-03).
-                (None, None) => d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx))),
+                // Панель выбора срока (S5-04) — там же, у шапки письма.
+                (None, None) => {
+                    d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx)).children(picker))
+                }
             })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
-            // Окно «Отменить» отправки — внизу, над строкой состояния.
+            // Окно «Отменить» отправки — внизу, над строкой состояния; над ним — напоминания (S5-04).
             .children(self.undo_card(cx))
+            .children(self.reminder_cards(cx))
             // Тосты — поверх всего, последним ребёнком.
             .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {

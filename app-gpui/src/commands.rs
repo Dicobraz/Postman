@@ -10,7 +10,10 @@ use pets_commands::Command;
 pub mod mail {
     gpui_kit::actions!(
         mail,
-        [Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete]
+        [
+            Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete,
+            Due, Remind, Wait, Expire
+        ]
     );
 
     use gpui_kit::gpui;
@@ -131,6 +134,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
     cmd("mail.forward", &["ctrl-f"], MAIL),
     cmd("mail.delete", &["delete"], LIST),
+    // Жизненный цикл (S5-04): выбор — панелью на месте. «Срок…» — Ctrl+Shift+G, как «К исполнению → Настраиваемый»
+    // в Outlook (флаг со сроком); у «Напомнить», «Ждать ответа», «Исчезнет» в Outlook клавиш нет — здесь тоже.
+    cmd("mail.due", &["ctrl-shift-g"], MAIL),
+    cmd("mail.remind", &[], MAIL),
+    cmd("mail.wait", &[], MAIL),
+    cmd("mail.expire", &[], MAIL),
     // Не Outlook (DESIGN, «Беседы»): лента беседы и цитаты — кнопками; по письмам беседы — Ctrl+→ / Ctrl+←
     // (в поле поиска эти клавиши — по словам).
     cmd("thread.toggle", &[], MAIL),

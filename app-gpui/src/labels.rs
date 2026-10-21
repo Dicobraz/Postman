@@ -51,6 +51,8 @@ pub(crate) struct RowLabels {
     pub(crate) stripe: Option<&'static str>,
     /// Имя и цвет (имя цвета Fluent).
     pub(crate) chips: Vec<(String, &'static str)>,
+    /// Метки сроков (S5-04, `lifecycle.rs`): ставит список — им нужно «сейчас».
+    pub(crate) marks: Vec<postman_core::lifecycle::Badge>,
 }
 
 pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
@@ -61,7 +63,7 @@ pub(crate) fn row_labels(book: &Book, row: &EmailRow) -> RowLabels {
     let labels = table.labels(&row.keywords);
     let stripe = labels.iter().find(|l| matches!(l, Label::Category(_))).map(|l| l.color());
     let chips = labels.iter().take(ROW_LABELS).map(|l| (label_name(l), l.color())).collect();
-    RowLabels { stripe, chips }
+    RowLabels { stripe, chips, marks: Vec::new() }
 }
 
 /// Метка в строке отправителя: подложка и текст цвета категории; длинное имя обрезается.

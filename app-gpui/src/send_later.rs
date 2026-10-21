@@ -230,6 +230,11 @@ impl Mailer {
         }
     }
 
+    /// Окно «Отменить» отправки на экране (над ним — карточки напоминаний, S5-04).
+    pub(crate) fn undo_shown(&self) -> bool {
+        self.send_later.undo.shown(Instant::now()).is_some()
+    }
+
     /// Окно «Письмо отправлено · Отменить» внизу экрана почты (тосты `pets-ui` без кнопок действия).
     pub(crate) fn undo_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let offer = self.send_later.undo.shown(Instant::now())?;
