@@ -952,7 +952,8 @@ impl CalendarView {
             _ => format!("{}–{}{place}", hm(e.span.start, tz), hm(e.span.end, tz)),
         };
         let stripe: AnyElement = match look {
-            Shown::Pending => div().into_any_element(),
+            // Без ответа (DESIGN «Календарь»): без заливки, контур и полоса цветом календаря на 70 % и 45 %.
+            Shown::Pending => div().absolute().left_0().top_0().bottom_0().w(px(4.)).bg(bar.opacity(0.45)).into_any_element(),
             Shown::Tentative => div()
                 .absolute()
                 .left_0()
@@ -981,7 +982,7 @@ impl CalendarView {
             .text_size(px(12.))
             .line_height(px(15.))
             .text_color(fg)
-            .when(look == Shown::Pending, |d| d.bg(l.panel()).border_1().border_dashed().border_color(bar))
+            .when(look == Shown::Pending, |d| d.bg(l.none()).border_1().border_dashed().border_color(bar.opacity(0.7)))
             .when(look != Shown::Pending, |d| d.bg(bg))
             .when(selected, |d| d.border_2().border_color(bar).shadow_md())
             .cursor_pointer()

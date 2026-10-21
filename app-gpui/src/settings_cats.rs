@@ -427,16 +427,21 @@ mod tests {
     /// Правка на месте проверяется таблицей: близкий цвет (ΔE < 25) и занятая клавиша — отказ, остальное — новая таблица.
     #[test]
     fn category_edit_rules() {
-        let t = table();
+        let full = table();
+        // Цветов в таблице пять — все заняты категориями по умолчанию; серый освобождается удалением «services».
+        assert!(full.colors(None).iter().all(|(_, c)| c.is_some()));
+        let mut t = full.clone();
+        t.delete(&full.by_key(5).unwrap().keyword, 1).unwrap();
         // Новая категория: свободный цвет и клавиша.
         let free = t.colors(None).into_iter().find(|(_, c)| c.is_none()).map(|(k, _)| k).unwrap();
+        assert_eq!(free, palette::GREY);
         let added = apply(&t, None, "Partners", free, Some(6), 1).unwrap();
-        assert_eq!(added.visible().count(), 6);
+        assert_eq!(added.visible().count(), 5);
         assert_eq!(added.by_key(6).map(|c| c.name.as_str()), Some("Partners"));
         // Тот же цвет, что у «clients», — отказ ΔE.
         assert!(matches!(apply(&t, None, "Partners", palette::BLUE, None, 1), Err(Problem::Colour { .. })));
-        // Красный безопасности — отказ.
-        assert!(matches!(apply(&t, None, "Partners", "red", None, 1), Err(Problem::Colour { .. })));
+        // Цвета вне палитры — отказ.
+        assert!(matches!(apply(&t, None, "Partners", "chartreuse", None, 1), Err(Problem::Colour { .. })));
         // Клавиша занята «team».
         assert_eq!(apply(&t, None, "Partners", free, Some(2), 1), Err(Problem::DuplicateKey(2)));
         // Повтор имени и пустое имя.

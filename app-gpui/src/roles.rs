@@ -1,10 +1,13 @@
 //! Цвета и размеры экранов (S5-01, `docs/DESIGN.md` «Цвет»): роли pets-ui ([`Role`], [`Metric`]) и роли Postman
 //! (`app.*`, [`Pm`]) поверх них; итог темы для отрисовки — [`Look`] (`look(cx)`).
 //!
-//! Единственный модуль интерфейса с литералами цвета (тест `no_color_literals` в `main.rs`). Цвета категорий,
-//! красный безопасности и янтарный сроков считает `postman_core::palette` (OKLCH, ΔE2000) — здесь они только
-//! становятся ролями `app.*`, чтобы тема пользователя могла их переопределить, а высокая контрастность —
-//! заменить системными.
+//! Единственный модуль интерфейса с литералами цвета (тест `no_color_literals` в `main.rs`). Цвета — только из таблицы
+//! DESIGN «Токены цвета» (S5-31, решение владельца 2026-10-21 вечер): роли pets-ui, которые таблица задаёт, — слой
+//! [`base`] поверх Fluent ([`CORE`]); роли, чьи оттенки почти совпадали с токеном таблицы (ΔE2000 ≤ 5), сведены к
+//! нему. Роли вне таблицы сохранили прежние значения — список в тесте `colors_come_from_the_design_table`, его
+//! расширяет владелец через таблицу. Цвета категорий, красный безопасности и янтарный сроков — в
+//! `postman_core::palette`; здесь они только становятся ролями `app.*`, чтобы тема пользователя могла их
+//! переопределить, а высокая контрастность — заменить системными.
 
 use std::rc::Rc;
 use std::sync::LazyLock;
@@ -18,15 +21,8 @@ use postman_core::prefs::FreeColor;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Pm {
-    /// Основной текст. Тёмная тема — #D2D2D2 по DESIGN («основной текст #D2D2D2»), а не #FFFFFF ядра pets-ui
-    /// (вопрос владельцу №2 в PR pets-ui открыт): решится в пользу ядра — тёмное значение станет ядерным здесь.
-    Text,
-    /// Вторичный текст: тёмная — #A6A6A6 по DESIGN.
-    Text2,
-    /// Подписи полей и кнопки панели письма, единые с «Отправить» (DESIGN «Новое письмо»).
+    /// Подписи полей и кнопки панели письма, единые с «Отправить» (DESIGN «Новое письмо») — токен акцента-текста.
     LabelAccent,
-    /// Кнопки панели форматирования письма: светлая — как подписи, тёмная — #8CC4F0 (DESIGN «Новое письмо»).
-    ToolbarAccent,
     /// Угроза (DESIGN: бледно-красная подложка с тёмно-красным текстом); красный — только безопасность.
     ThreatFg,
     ThreatBg,
@@ -77,19 +73,54 @@ const fn c(v: u32) -> Color {
     Color::rgb(v)
 }
 
+const fn a(v: u32) -> Color {
+    Color::argb(v)
+}
+
+/// Роли pets-ui из таблицы DESIGN «Токены цвета»: (роль, светлая, тёмная). Слой [`base`] поверх Fluent — и для
+/// компонентов pets-ui и gpui-kit; при высокой контрастности не действует (системные цвета). Наведение и нажатие
+/// акцента — токен акцента с прозрачностью, как в pets-ui (90 % и 80 %).
+pub(crate) const CORE: &[(Role, Color, Color)] = &[
+    // Акцент: кнопка, ссылка, выбор; тёмная — текст #7CC4F0, заливка кнопки #2B6CA8.
+    (Role::AccentFill, c(0x0067C0), c(0x2B6CA8)),
+    (Role::AccentFillHover, a(0xE600_67C0), a(0xE62B_6CA8)),
+    (Role::AccentFillPressed, a(0xCC00_67C0), a(0xCC2B_6CA8)),
+    (Role::AccentText, c(0x0067C0), c(0x7CC4F0)),
+    (Role::AccentOn, c(0xFFFFFF), c(0xFFFFFF)),
+    // Синяя подложка: выделение, тонированные кнопки.
+    (Role::AccentSubtle, c(0xDFF0FF), c(0x23364F)),
+    // Текст основной / вторичный / подписи.
+    (Role::TextPrimary, c(0x242424), c(0xD2D2D2)),
+    (Role::TextSecondary, c(0x616161), c(0xA6A6A6)),
+    (Role::TextTertiary, c(0x8A8A8A), c(0x8A8A8A)),
+    // Фон окна / карточка (и всплывающие — Fluent #F9F9F9 / #2C2C2C, ΔE ≤ 1,2) / наведение / выбранное.
+    (Role::BgBase, c(0xF3F3F3), c(0x202020)),
+    (Role::LayerPanel, c(0xFFFFFF), c(0x2B2B2B)),
+    (Role::LayerOverlay, c(0xFFFFFF), c(0x2B2B2B)),
+    (Role::FillSubtleHover, c(0xF5F5F5), c(0x323232)),
+    (Role::FillCursor, c(0xEBEBEB), c(0x3A3A3A)),
+    // Разделитель / рамка поля.
+    (Role::StrokeDivider, c(0xE0E0E0), c(0x3D3D3D)),
+    (Role::StrokeControl, c(0xD1D1D1), c(0x505050)),
+    // Подложка ошибки — подложка угрозы (Fluent #FDE7E9 / #442726, ΔE 2,3).
+    (Role::CriticalBg, c(0xFFE6E3), c(0x4C2B28)),
+];
+
+/// Слой таблицы DESIGN поверх Fluent ([`CORE`]) и плотность — переопределения темы Postman.
+pub(crate) fn base(density: Option<Density>) -> ThemeSpec {
+    let table = |dark: bool| CORE.iter().map(|&(r, l, d)| (r.name().to_owned(), if dark { d } else { l })).collect();
+    ThemeSpec { density, light: table(false), dark: table(true), ..ThemeSpec::default() }
+}
+
 /// Цвета ролей Postman: (роль, имя, светлая, тёмная, при высокой контрастности — роль pets-ui). Роли из палитры
 /// (угроза, срок) — в [`roles`], по `palette::reserved`.
 const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
-    (Pm::Text, "app.text", Color::argb(0xE400_0000), c(0xD2D2D2), Role::TextPrimary),
-    (Pm::Text2, "app.text.secondary", Color::argb(0x9E00_0000), c(0xA6A6A6), Role::TextSecondary),
-    (Pm::LabelAccent, "app.label.accent", c(0x0067C0), c(0x7DB8E8), Role::AccentText),
-    (Pm::ToolbarAccent, "app.toolbar.accent", c(0x0067C0), c(0x8CC4F0), Role::AccentText),
-    (Pm::DeadlineFill, "app.deadline.fill", c(0xF8DEA8), c(0x6C5005), Role::CautionBg),
-    (Pm::DeadlineOn, "app.deadline.on", c(0x5B4404), c(0xF7E2B8), Role::CautionFg),
+    (Pm::LabelAccent, "app.label.accent", c(0x0067C0), c(0x7CC4F0), Role::AccentText),
+    (Pm::DeadlineOn, "app.deadline.on", c(0x664700), c(0xF7E2B8), Role::CautionFg),
     (Pm::Flag, "app.flag", c(0xC50F1F), c(0xD47C76), Role::TextPrimary),
     (Pm::CaptionClose, "app.caption.close", c(0xC42B1C), c(0xC42B1C), Role::AccentFill),
     (Pm::CaptionCloseOn, "app.caption.close.on", c(0xFFFFFF), c(0xFFFFFF), Role::AccentOn),
-    (Pm::EventBg, "app.event.bg", c(0xD6E6F9), c(0x23364F), Role::AccentSubtle),
+    (Pm::EventBg, "app.event.bg", c(0xDFF0FF), c(0x23364F), Role::AccentSubtle),
     (Pm::EventBgTentative, "app.event.bg.tentative", c(0xEEF4FB), c(0x1E2A38), Role::LayerPanel),
     (Pm::EventBorder, "app.event.border", c(0x2F6DB5), c(0x689BDB), Role::AccentFill),
     (Pm::EventBorderSelected, "app.event.border.selected", c(0x1B4F8A), c(0xAFD1FC), Role::TextPrimary),
@@ -100,7 +131,7 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::FbOff, "app.fb.off", c(0xF0F0F0), c(0x2C2C2C), Role::BgBase),
     (Pm::FbMute, "app.fb.mute", c(0xE3E3E3), c(0x3A3A3A), Role::TextDisabled),
     (Pm::FbFreeOn, "app.fb.free.on", c(0xFFFFFF), c(0xFFFFFF), Role::AccentOn),
-    (Pm::FbExt, "app.fb.ext", c(0x009F99), c(0x00837E), Role::TextSecondary),
+    (Pm::FbExt, "app.fb.ext", c(0x177CAA), c(0x5FA8D3), Role::TextSecondary),
     (Pm::ConflictFg, "app.conflict.fg", c(0x5C2E91), c(0xDFC1EE), Role::TextPrimary),
     (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
@@ -119,7 +150,7 @@ pub(crate) const FREE: [FreeRow; 3] = [
     (
         FreeColor::Brand,
         ["app.fb.free.brand", "app.fb.free.brand.bg", "app.fb.free.brand.hover", "app.fb.free.brand.fg"],
-        [0xE4107F, 0xFCE4EF, 0xF8CDE1, 0xA30B5B],
+        [0xE4107F, 0xFCE4EF, 0xF8CDE1, 0x8C0B4E],
         [0xD2569A, 0x3A1A2A, 0x4A2135, 0xF0A8CA],
     ),
     (
@@ -150,13 +181,13 @@ pub(crate) struct Free {
 /// Части цвета категории: точка и полоса, текст и подложка метки.
 const CAT_PARTS: [&str; 3] = ["dot", "text", "bg"];
 
-/// Имена ролей категорий `app.cat.<цвет Fluent>.<часть>` по порядку `palette::PALETTE` — строки живут весь процесс
+/// Имена ролей категорий `app.cat.<цвет>.<часть>` по порядку `palette::PALETTE` — строки живут весь процесс
 /// (имя роли pets-ui — `&'static str`).
 static CAT_NAMES: LazyLock<Vec<[String; 3]>> = LazyLock::new(|| {
     palette::PALETTE.iter().map(|c| CAT_PARTS.map(|part| format!("app.cat.{}.{part}", c.key))).collect()
 });
 
-/// Все роли Postman для `Themes::init`: постоянные, угроза и срок из палитры, цвета категорий (общие цвета Fluent 2).
+/// Все роли Postman для `Themes::init`: постоянные, угроза и срок из палитры, цвета категорий (таблица DESIGN).
 pub(crate) static ROLES: LazyLock<Vec<AppRole>> = LazyLock::new(roles);
 
 fn roles() -> Vec<AppRole> {
@@ -170,6 +201,7 @@ fn roles() -> Vec<AppRole> {
         AppRole { name: "app.threat.bg", light: c(tl.bg), dark: c(td.bg), hc: Role::LayerPanel },
         AppRole { name: "app.threat.dot", light: c(tl.dot), dark: c(td.dot), hc: Role::CriticalFg },
         AppRole { name: "app.deadline.fg", light: c(dl.text), dark: c(dd.text), hc: Role::CautionFg },
+        AppRole { name: "app.deadline.fill", light: c(dl.bg), dark: c(dd.bg), hc: Role::CautionBg },
     ]);
     for (_, names, light, dark) in FREE {
         let hc = [Role::AccentFill, Role::LayerPanel, Role::FillSubtleHover, Role::TextPrimary];
@@ -194,15 +226,13 @@ fn pm_name(r: Pm) -> &'static str {
         Pm::ThreatBg => "app.threat.bg",
         Pm::ThreatDot => "app.threat.dot",
         Pm::DeadlineFg => "app.deadline.fg",
+        Pm::DeadlineFill => "app.deadline.fill",
         other => FIXED.iter().find(|f| f.0 == other).map_or("app.text", |f| f.1),
     }
 }
 
 const PMS: [Pm; Pm::COUNT] = [
-    Pm::Text,
-    Pm::Text2,
     Pm::LabelAccent,
-    Pm::ToolbarAccent,
     Pm::ThreatFg,
     Pm::ThreatBg,
     Pm::ThreatDot,
@@ -280,10 +310,10 @@ impl Look {
         self.pm[r as usize]
     }
 
-    /// Цвета категории по имени цвета Fluent; неизвестный цвет — нейтральный.
+    /// Цвета категории по имени цвета (прежнее имя Fluent — ближайший цвет таблицы); неизвестный — нейтральный.
     pub(crate) fn cat(&self, key: &str) -> Cat {
         let index = |k: &str| palette::PALETTE.iter().position(|c| c.key == k);
-        let i = index(key).or_else(|| index(palette::NEUTRAL));
+        let i = index(palette::resolve(key)).or_else(|| index(palette::NEUTRAL));
         i.and_then(|i| self.cats.get(i)).copied().unwrap_or(Cat {
             dot: self.c(Role::TextTertiary),
             text: self.text2(),
@@ -315,11 +345,11 @@ impl Look {
     // --- частые роли ---
 
     pub(crate) fn text(&self) -> Hsla {
-        self.pm(Pm::Text)
+        self.c(Role::TextPrimary)
     }
 
     pub(crate) fn text2(&self) -> Hsla {
-        self.pm(Pm::Text2)
+        self.c(Role::TextSecondary)
     }
 
     pub(crate) fn text3(&self) -> Hsla {
@@ -413,8 +443,18 @@ impl Look {
 }
 
 impl Default for Look {
+    /// Светлая тема с таблицей DESIGN — до [`init`] (тесты).
     fn default() -> Self {
-        Look::new(&Theme::default())
+        static LIGHT: LazyLock<Theme> = LazyLock::new(|| {
+            pets_ui::theme::resolve(
+                &ThemeSpec::default(),
+                Some(&base(None)),
+                &pets_ui::theme::OsLook::default(),
+                pets_ui::theme::FontSizes::default(),
+                &ROLES,
+            )
+        });
+        Look::new(&LIGHT)
     }
 }
 
@@ -465,7 +505,7 @@ pub(crate) fn init(choice: &str, density: Option<Density>, cx: &mut App) {
         ThemeConfig {
             app: "Postman",
             choice: choice.to_owned(),
-            overrides: density.map(|d| ThemeSpec { density: Some(d), ..ThemeSpec::default() }),
+            overrides: Some(base(density)),
             app_roles: ROLES.as_slice(),
             ..ThemeConfig::default()
         },
@@ -521,7 +561,7 @@ fn sync_components(l: &Look, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Look, PMS, Pm, ROLES, pm_name};
+    use super::{Look, PMS, Pm, ROLES, base, pm_name};
     use pets_ui::theme::{FontSizes, OsLook, ThemeSpec, resolve};
 
     #[test]
@@ -576,29 +616,141 @@ mod tests {
             }
         }
         // Look отдаёт роли выбранного цвета; по умолчанию — розовый бренда.
-        let look = Look::new(&resolve(&ThemeSpec::default(), None, &OsLook::default(), FontSizes::default(), &ROLES));
+        let look = theme(&OsLook::default());
         let hex = |c| pets_ui::theme::Color::from_hsla(c).hex();
         assert_eq!(hex(look.free(FreeColor::default()).line), "#E4107F");
         assert_eq!(hex(look.free(FreeColor::Blue).line), "#3A9BD5");
         assert_eq!(hex(look.free(FreeColor::Slate).fg), "#4F6378");
     }
 
-    /// Тёмная тема: текст — по DESIGN, категории — тёмные варианты палитры.
+    /// Тема Postman, как после [`super::init`]: Fluent и слой таблицы DESIGN.
+    fn theme(os: &OsLook) -> Look {
+        Look::new(&resolve(&ThemeSpec::default(), Some(&base(None)), os, FontSizes::default(), &ROLES))
+    }
+
+    /// Тёмная и светлая тема — токены таблицы DESIGN; категории — тёмные варианты палитры.
     #[test]
-    fn dark_theme_uses_design_text_and_dark_palette() {
-        let dark = OsLook { dark: true, ..OsLook::default() };
-        let light = OsLook::default();
-        let theme = |os: &OsLook| Look::new(&resolve(&ThemeSpec::default(), None, os, FontSizes::default(), &ROLES));
-        let (l, d) = (theme(&light), theme(&dark));
+    fn themes_use_design_tokens() {
+        let (l, d) = (theme(&OsLook::default()), theme(&OsLook { dark: true, ..OsLook::default() }));
         assert!(d.dark() && !l.dark());
         let hex = |c| pets_ui::theme::Color::from_hsla(c).hex();
-        assert_eq!(hex(d.pm(Pm::Text)), "#D2D2D2");
-        assert_eq!(hex(d.pm(Pm::Text2)), "#A6A6A6");
+        assert_eq!([hex(d.text()), hex(d.text2()), hex(d.text3())], ["#D2D2D2", "#A6A6A6", "#8A8A8A"]);
+        assert_eq!([hex(l.text()), hex(l.text2()), hex(l.text3())], ["#242424", "#616161", "#8A8A8A"]);
+        assert_eq!([hex(d.accent()), hex(d.accent_text()), hex(d.pm(Pm::LabelAccent))], ["#2B6CA8", "#7CC4F0", "#7CC4F0"]);
+        assert_eq!([hex(l.accent()), hex(l.accent_text()), hex(l.picked())], ["#0067C0", "#0067C0", "#DFF0FF"]);
+        assert_eq!([hex(d.base()), hex(d.panel()), hex(d.hover()), hex(d.fill())], ["#202020", "#2B2B2B", "#323232", "#3A3A3A"]);
+        assert_eq!([hex(l.border()), hex(l.stroke()), hex(d.border()), hex(d.stroke())], ["#E0E0E0", "#D1D1D1", "#3D3D3D", "#505050"]);
+        assert_eq!([hex(d.pm(Pm::ThreatBg)), hex(d.pm(Pm::ThreatFg))], ["#4C2B28", "#F9BDB7"]);
+        assert_eq!([hex(l.pm(Pm::DeadlineFg)), hex(l.pm(Pm::DeadlineFill)), hex(l.pm(Pm::DeadlineOn))], ["#664700", "#F8DEA8", "#664700"]);
         let blue = postman_core::palette::BLUE;
         let dark_bg = postman_core::palette::swatch(blue, postman_core::palette::Theme::Dark).bg;
         assert_eq!(hex(d.cat(blue).bg), format!("#{dark_bg:06X}"));
         assert_ne!(l.cat(blue).bg, d.cat(blue).bg);
-        // Неизвестный цвет — нейтральный.
+        // Розовый бренда — у «Тендеров»; прежнее имя Fluent — ближайший цвет таблицы; неизвестный — нейтральный.
+        assert_eq!(hex(l.cat(postman_core::palette::PINK).dot), "#E4107F");
+        assert_eq!(l.cat("lightTeal"), l.cat(postman_core::palette::GREY));
         assert_eq!(l.cat("no-such-color"), l.cat(postman_core::palette::NEUTRAL));
+        // До `init` (тесты экранов) — та же светлая тема.
+        assert_eq!(Look::default().pm, l.pm);
+        assert_eq!(hex(Look::default().text()), "#242424");
+    }
+
+    /// Цвета вне таблицы DESIGN «Токены цвета»: (цвет, где и почему). Таблицу расширяет владелец; новый цвет — сначала
+    /// в таблицу (DESIGN), затем в код — иначе тест [`colors_come_from_the_design_table`] не пройдёт.
+    const OUTSIDE: &[(&str, &str)] = &[
+        ("#C50F1F", "app.flag, светлая: флаг письма"),
+        ("#D47C76", "app.flag и app.phish, тёмная"),
+        ("#CD605A", "app.phish: маска «Сообщить о фишинге» (DESIGN «Действия и состояния»)"),
+        ("#C42B1C", "app.caption.close: «Закрыть» окна при наведении — красный Windows"),
+        ("#EEF4FB", "app.event.bg.tentative, светлая"),
+        ("#1E2A38", "app.event.bg.tentative, тёмная"),
+        ("#2F6DB5", "app.event.border и app.fb.busy, светлая (ΔE 10 к синему категорий)"),
+        ("#1B4F8A", "app.event.border.selected, светлая"),
+        ("#AFD1FC", "app.event.border.selected, тёмная"),
+        ("#4C82C4", "app.fb.busy, тёмная"),
+        ("#9CC3EE", "app.fb.tentative, светлая"),
+        ("#2F4C6E", "app.fb.tentative, тёмная"),
+        ("#7B3FA0", "app.fb.oof, светлая"),
+        ("#9466B0", "app.fb.oof, тёмная"),
+        ("#C8C8C8", "app.fb.unknown, светлая"),
+        ("#F0F0F0", "app.fb.off, светлая"),
+        ("#2C2C2C", "app.fb.off, тёмная"),
+        ("#E3E3E3", "app.fb.mute, светлая"),
+        ("#5C2E91", "app.conflict.fg, светлая: пересечение — фиолетовое (DESIGN «Календарь»)"),
+        ("#DFC1EE", "app.conflict.fg, тёмная"),
+        ("#F3EEFA", "app.conflict.bg, светлая"),
+        ("#3F2D47", "app.conflict.bg, тёмная"),
+        ("#FAFAFA", "app.cal.off, светлая: нерабочие часы"),
+        ("#272727", "app.cal.off, тёмная"),
+        ("#F9EDD5", "app.search.hit, светлая: совпадение поиска"),
+        ("#413315", "app.search.hit, тёмная"),
+        ("#F8CDE1", "app.fb.free.brand.hover, светлая"),
+        ("#4A2135", "app.fb.free.brand.hover, тёмная (DESIGN «Цвет», вариант B)"),
+        ("#3A9BD5", "app.fb.free.blue: синий бренда (DESIGN «Цвет»)"),
+        ("#EDF6FC", "app.fb.free.blue.bg, светлая"),
+        ("#D9ECF8", "app.fb.free.blue.hover, светлая"),
+        ("#1F5F8A", "app.fb.free.blue.fg, светлая"),
+        ("#4F94C4", "app.fb.free.blue, тёмная"),
+        ("#1A2B3A", "app.fb.free.blue.bg, тёмная"),
+        ("#213648", "app.fb.free.blue.hover, тёмная"),
+        ("#A8D2F0", "app.fb.free.blue.fg, тёмная"),
+        ("#7A8FA6", "app.fb.free.slate: серо-голубой бренда (DESIGN «Цвет»)"),
+        ("#F2F5F8", "app.fb.free.slate.bg, светлая"),
+        ("#E3E9EF", "app.fb.free.slate.hover, светлая"),
+        ("#4F6378", "app.fb.free.slate.fg, светлая"),
+        ("#8494A8", "app.fb.free.slate, тёмная"),
+        ("#262C34", "app.fb.free.slate.bg, тёмная"),
+        ("#2F3741", "app.fb.free.slate.hover, тёмная"),
+        ("#C2CCD8", "app.fb.free.slate.fg, тёмная"),
+        ("#CECCCB", "категория «серый»: подложка (светлая) и текст (тёмная) метки — в таблице только точка"),
+        ("#343231", "категория «серый»: текст (светлая) и подложка (тёмная) метки"),
+        ("#D13438", "точка и полоса угрозы (palette::Reserved::Threat) — в таблице только подложка и текст"),
+        ("#EAA300", "точка срока (palette::Reserved::Deadline) для проверки ΔE — в таблице только текст и подложка"),
+    ];
+
+    /// Цвета `0xRRGGBB` и `0xAARRGGBB` в коде (до тестов): цвет — последние шесть цифр.
+    fn literals(source: &str) -> Vec<String> {
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let mut out = Vec::new();
+        for (i, _) in code.match_indices("0x") {
+            let digits: String =
+                code[i + 2..].chars().take_while(|c| c.is_ascii_hexdigit() || *c == '_').filter(|c| *c != '_').collect();
+            if matches!(digits.len(), 6 | 8) {
+                out.push(format!("#{}", digits[digits.len() - 6..].to_ascii_uppercase()));
+            }
+        }
+        out
+    }
+
+    /// Единственный источник цвета (S5-31): каждый цвет в `roles.rs` и `postman_core::palette` — из таблицы DESIGN
+    /// «Токены цвета» или из списка [`OUTSIDE`]; список не устаревает (каждый цвет в нём — в коде и не в таблице).
+    #[test]
+    fn colors_come_from_the_design_table() {
+        let design = include_str!("../../docs/DESIGN.md");
+        let start = design.find("## Токены цвета").expect("DESIGN: раздел «Токены цвета»");
+        let table = &design[start..];
+        let table = &table[..table[3..].find("\n## ").map_or(table.len(), |e| e + 3)];
+        let tokens: Vec<String> = table
+            .match_indices('#')
+            .filter_map(|(i, _)| table.get(i + 1..i + 7))
+            .filter(|h| h.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(|h| format!("#{}", h.to_ascii_uppercase()))
+            .collect();
+        assert!(tokens.len() > 40, "таблица DESIGN не разобрана: {tokens:?}");
+        let mut used = Vec::new();
+        let mut stray = Vec::new();
+        for (file, source) in [("roles.rs", include_str!("roles.rs")), ("palette.rs", include_str!("../../crates/core/src/palette.rs"))] {
+            for hex in literals(source) {
+                if !tokens.contains(&hex) && !OUTSIDE.iter().any(|(c, _)| *c == hex) {
+                    stray.push(format!("{file}: {hex}"));
+                }
+                used.push(hex);
+            }
+        }
+        assert!(stray.is_empty(), "цвет не из таблицы DESIGN «Токены цвета» и не в OUTSIDE:\n{}", stray.join("\n"));
+        for (hex, what) in OUTSIDE {
+            assert!(!tokens.contains(&(*hex).to_owned()), "{hex} ({what}) уже в таблице — убрать из OUTSIDE");
+            assert!(used.iter().any(|u| u == hex), "{hex} ({what}) в коде больше нет — убрать из OUTSIDE");
+        }
     }
 }
