@@ -377,7 +377,7 @@ impl ContactsView {
             want_first: false,
             me: Some(postman_demo::ME.to_string()),
             today: Today::default(),
-            tz: TimeZone::system(),
+            tz: crate::prefs::get(cx).calendar.zone(),
             _subscriptions: vec![on_search],
         };
         this.reshow();
@@ -1563,7 +1563,8 @@ impl crate::Mailer {
             }
             ContactsAction::Meet(address) => {
                 let now = jiff::Zoned::now();
-                let mut model = crate::meeting::MeetingModel::new(crate::meeting::default_start(&now), 3600);
+                let duration = crate::prefs::get(cx).calendar.duration_secs();
+                let mut model = crate::meeting::MeetingModel::new(crate::meeting::default_start(&now), duration);
                 model.attendees = format!("{}; ", address.display());
                 self.open_meeting(Some(model), cx);
                 return;

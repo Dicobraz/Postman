@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 use gpui_kit::{App, Global, Hsla, Pixels, Window};
 use pets_ui::theme::{AppRole, Color, Density, Metric, Role, Theme, ThemeConfig, ThemeSpec, Themes};
 use postman_core::palette::{self, Reserved};
+use postman_core::prefs::FreeColor;
 
 /// Роль Postman: имя `app.…` и цвета светлой и тёмной темы ([`FIXED`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -52,11 +53,10 @@ pub(crate) enum Pm {
     FbOof,
     FbUnknown,
     FbOff,
-    /// Общее свободное окно (помощник, S5-11): рамка, заливка, текст; занятость приглушённо; внешний участник.
-    FbFree,
-    FbFreeBg,
-    FbFreeFg,
+    /// Занятость приглушённо (общие окна, S5-11); внешний участник. Свободное время — по выбору в настройках,
+    /// [`Look::free`]; `FbFreeOn` — галочка на выбранном образце цвета.
     FbMute,
+    FbFreeOn,
     FbExt,
     /// Пересечение с моим календарём (карточка приглашения, подробности события): текст и подложка.
     ConflictFg,
@@ -98,10 +98,8 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::FbOof, "app.fb.oof", c(0x7B3FA0), c(0x9466B0), Role::TextPrimary),
     (Pm::FbUnknown, "app.fb.unknown", c(0xC8C8C8), c(0x5A5A5A), Role::TextDisabled),
     (Pm::FbOff, "app.fb.off", c(0xF0F0F0), c(0x2C2C2C), Role::BgBase),
-    (Pm::FbFree, "app.fb.free", c(0x5F983A), c(0x6FAF45), Role::SuccessFg),
-    (Pm::FbFreeBg, "app.fb.free.bg", c(0xE5F4DD), c(0x26361C), Role::SuccessBg),
-    (Pm::FbFreeFg, "app.fb.free.fg", c(0x34591B), c(0xB9E09E), Role::SuccessFg),
     (Pm::FbMute, "app.fb.mute", c(0xE3E3E3), c(0x3A3A3A), Role::TextDisabled),
+    (Pm::FbFreeOn, "app.fb.free.on", c(0xFFFFFF), c(0xFFFFFF), Role::AccentOn),
     (Pm::FbExt, "app.fb.ext", c(0x009F99), c(0x00837E), Role::TextSecondary),
     (Pm::ConflictFg, "app.conflict.fg", c(0x5C2E91), c(0xDFC1EE), Role::TextPrimary),
     (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
@@ -109,6 +107,45 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::Phish, "app.phish", c(0xCD605A), c(0xD47C76), Role::CriticalFg),
     (Pm::SearchHit, "app.search.hit", c(0xF9EDD5), c(0x413315), Role::AccentSubtle),
 ];
+
+/// Цвет свободного времени (S5-20): только цвета бренда (решение владельца 2026-10-21) — розовый, синий,
+/// серо-голубой. У каждого — рамка окна (и свечение, S5-23), подложка, подложка при наведении и текст; светлая и
+/// тёмная тема. Тёмная — приглушённая (DESIGN «Цвет»): розовый — вариант B макета встречи, синий и серо-голубой —
+/// в его духе. Роли `app.fb.free.<id>[.bg|.hover|.fg]`.
+/// Выбор, имена ролей (рамка, подложка, наведение, текст), цвета светлой и тёмной темы.
+type FreeRow = (FreeColor, [&'static str; 4], [u32; 4], [u32; 4]);
+
+pub(crate) const FREE: [FreeRow; 3] = [
+    (
+        FreeColor::Brand,
+        ["app.fb.free.brand", "app.fb.free.brand.bg", "app.fb.free.brand.hover", "app.fb.free.brand.fg"],
+        [0xE4107F, 0xFCE4EF, 0xF8CDE1, 0xA30B5B],
+        [0xD2569A, 0x3A1A2A, 0x4A2135, 0xF0A8CA],
+    ),
+    (
+        FreeColor::Blue,
+        ["app.fb.free.blue", "app.fb.free.blue.bg", "app.fb.free.blue.hover", "app.fb.free.blue.fg"],
+        [0x3A9BD5, 0xEDF6FC, 0xD9ECF8, 0x1F5F8A],
+        [0x4F94C4, 0x1A2B3A, 0x213648, 0xA8D2F0],
+    ),
+    (
+        FreeColor::Slate,
+        ["app.fb.free.slate", "app.fb.free.slate.bg", "app.fb.free.slate.hover", "app.fb.free.slate.fg"],
+        [0x7A8FA6, 0xF2F5F8, 0xE3E9EF, 0x4F6378],
+        [0x8494A8, 0x262C34, 0x2F3741, 0xC2CCD8],
+    ),
+];
+
+/// Цвета свободного времени в теме.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Free {
+    /// Рамка окна, точка «свободен» у участника, образец в настройках.
+    pub(crate) line: Hsla,
+    pub(crate) bg: Hsla,
+    /// Подложка окна под указателем.
+    pub(crate) hover: Hsla,
+    pub(crate) fg: Hsla,
+}
 
 /// Части цвета категории: точка и полоса, текст и подложка метки.
 const CAT_PARTS: [&str; 3] = ["dot", "text", "bg"];
@@ -134,6 +171,12 @@ fn roles() -> Vec<AppRole> {
         AppRole { name: "app.threat.dot", light: c(tl.dot), dark: c(td.dot), hc: Role::CriticalFg },
         AppRole { name: "app.deadline.fg", light: c(dl.text), dark: c(dd.text), hc: Role::CautionFg },
     ]);
+    for (_, names, light, dark) in FREE {
+        let hc = [Role::AccentFill, Role::LayerPanel, Role::FillSubtleHover, Role::TextPrimary];
+        for i in 0..4 {
+            out.push(AppRole { name: names[i], light: c(light[i]), dark: c(dark[i]), hc: hc[i] });
+        }
+    }
     for (color, names) in palette::PALETTE.iter().zip(CAT_NAMES.iter()) {
         let (l, d) = (color.swatch(palette::Theme::Light), color.swatch(palette::Theme::Dark));
         let hc = [Role::TextPrimary, Role::TextPrimary, Role::LayerPanel];
@@ -178,10 +221,8 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::FbOof,
     Pm::FbUnknown,
     Pm::FbOff,
-    Pm::FbFree,
-    Pm::FbFreeBg,
-    Pm::FbFreeFg,
     Pm::FbMute,
+    Pm::FbFreeOn,
     Pm::FbExt,
     Pm::ConflictFg,
     Pm::ConflictBg,
@@ -205,6 +246,7 @@ pub(crate) struct Look {
     theme: Theme,
     pm: [Hsla; Pm::COUNT],
     cats: Vec<Cat>,
+    free: [Free; 3],
 }
 
 impl Look {
@@ -214,7 +256,14 @@ impl Look {
             .iter()
             .map(|n| Cat { dot: theme.app(&n[0]), text: theme.app(&n[1]), bg: theme.app(&n[2]) })
             .collect();
-        Look { theme: theme.clone(), pm, cats }
+        let free = FREE.map(|(_, n, _, _)| Free { line: theme.app(n[0]), bg: theme.app(n[1]), hover: theme.app(n[2]), fg: theme.app(n[3]) });
+        Look { theme: theme.clone(), pm, cats, free }
+    }
+
+    /// Цвета свободного времени по выбору «Настройки → Календарь».
+    pub(crate) fn free(&self, color: FreeColor) -> Free {
+        let i = FREE.iter().position(|f| f.0 == color).unwrap_or(0);
+        self.free[i]
     }
 
     pub(crate) fn theme(&self) -> &Theme {
@@ -487,6 +536,51 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), before, "имена ролей повторяются");
         assert!(names.iter().all(|n| n.starts_with("app.")));
+    }
+
+    /// Цвет свободного времени (S5-20), все три выбора в обеих темах: текст на подложке и на подложке наведения
+    /// ≥ 4,5:1, рамка на панели (белая / #2B2B2B) ≥ 3:1 (не текст, WCAG 1.4.11), рамка далека от красного
+    /// безопасности и янтарного сроков (ΔE2000 ≥ 25). Исключение — розовый бренда (#E4107F, тёмная — #D2569A): до
+    /// красного ΔE ≈ 19 и 23,5 — решение владельца, DESIGN «Цвет» (строка «Исключение»: только свободное время, не
+    /// рядом с красным безопасности); держим ≥ 18.
+    #[test]
+    fn free_time_colors_contrast_and_distance() {
+        use postman_core::palette::{Reserved, Theme as T, delta_e, reserved};
+        use postman_core::prefs::FreeColor;
+        fn lum(v: u32) -> f64 {
+            let ch = |s: u32| {
+                let c = f64::from((v >> s) & 0xFF) / 255.0;
+                if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0)
+        }
+        fn contrast(a: u32, b: u32) -> f64 {
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        }
+        assert_eq!(super::FREE.map(|f| f.0), FreeColor::ALL, "по выбору, по порядку");
+        for (color, names, light, dark) in super::FREE {
+            for (theme, [line, bg, hover, fg], panel) in [(T::Light, light, 0xFFFFFF), (T::Dark, dark, 0x2B2B2B)] {
+                assert!(names[0].ends_with(color.id()), "{color:?}: {}", names[0]);
+                for under in [bg, hover] {
+                    let tc = contrast(fg, under);
+                    assert!(tc >= 4.5, "{color:?} {theme:?}: текст {tc:.2}");
+                }
+                let lc = contrast(line, panel);
+                assert!(lc >= 3.0, "{color:?} {theme:?}: рамка {lc:.2}");
+                for r in Reserved::ALL {
+                    let d = delta_e(line, reserved(r, theme).dot);
+                    let min = if (color, r) == (FreeColor::Brand, Reserved::Threat) { 18.0 } else { 25.0 };
+                    assert!(d >= min, "{color:?} {theme:?} ~ {r:?}: ΔE {d:.1}");
+                }
+            }
+        }
+        // Look отдаёт роли выбранного цвета; по умолчанию — розовый бренда.
+        let look = Look::new(&resolve(&ThemeSpec::default(), None, &OsLook::default(), FontSizes::default(), &ROLES));
+        let hex = |c| pets_ui::theme::Color::from_hsla(c).hex();
+        assert_eq!(hex(look.free(FreeColor::default()).line), "#E4107F");
+        assert_eq!(hex(look.free(FreeColor::Blue).line), "#3A9BD5");
+        assert_eq!(hex(look.free(FreeColor::Slate).fg), "#4F6378");
     }
 
     /// Тёмная тема: текст — по DESIGN, категории — тёмные варианты палитры.

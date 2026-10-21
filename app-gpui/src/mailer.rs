@@ -207,6 +207,7 @@ impl Mailer {
                 ReadingEvent::Open(row) => this.open_letter(row.clone(), cx),
                 ReadingEvent::Unsend(s) => this.unsend_scheduled(s.clone(), cx),
                 ReadingEvent::Respond(row, mode) => this.respond_to(row.clone(), *mode, cx),
+                ReadingEvent::TrashAnswered(row) => this.trash_answered(row.clone(), cx),
                 ReadingEvent::Sync(req) => {
                     if !this.backend.send(req.command()) {
                         this.needs_server(cx);
@@ -535,6 +536,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::settings::Open, window, cx| this.open_settings(None, window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
+            .on_action(cx.listener(|this, _: &commands::settings::Calendar, window, cx| {
+                this.open_settings(Some(crate::settings_tab::Section::Calendar), window, cx)
+            }))
             .on_action(cx.listener(|this, _: &commands::tab::New, window, cx| this.new_mail_tab(window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Next, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Prev, window, cx| this.step_tab(-1, window, cx)))

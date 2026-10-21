@@ -234,7 +234,9 @@ impl EventEmitter<CalendarAction> for CalendarView {}
 impl CalendarView {
     /// Демо-неделя; живой ящик переключает [`CalendarView::go_live`].
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tz = TimeZone::system();
+        // Пояс и рабочее время — «Настройки → Календарь» (S5-20); меняются на лету.
+        let cal = crate::prefs::get(cx).calendar;
+        let tz = cal.zone();
         let share = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("cal-share-placeholder")));
         let on_share = cx.subscribe_in(&share, window, |this: &mut Self, _, ev: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = ev {
@@ -243,8 +245,9 @@ impl CalendarView {
         });
         let monday = zoned(demo::week_start(), &tz).map(|z| z.date()).unwrap_or_else(|| jiff::Zoned::now().date());
         let monday = monday_of(monday);
+        let on_prefs = crate::prefs::observe_with(cx, |this: &mut Self, cx| this.prefs_changed(cx));
         Self {
-            hours: WorkHours::standard(tz.clone()),
+            hours: cal.work_hours(tz.clone()),
             tz,
             monday,
             month: monday.first_of_month(),
@@ -263,8 +266,25 @@ impl CalendarView {
             share_status: None,
             sharing: None,
             scroll: ScrollHandle::new(),
-            _subscriptions: vec![on_share],
+            _subscriptions: vec![on_share, on_prefs],
         }
+    }
+
+    /// «Настройки → Календарь» изменились: рабочее время — затенение сетки; пояс — неделя заново.
+    fn prefs_changed(&mut self, cx: &mut Context<Self>) {
+        let cal = crate::prefs::get(cx).calendar;
+        let tz = cal.zone();
+        let hours = cal.work_hours(tz.clone());
+        if hours == self.hours && tz == self.tz {
+            return;
+        }
+        let zone_changed = tz != self.tz;
+        self.tz = tz;
+        self.hours = hours;
+        if zone_changed {
+            self.refresh(cx);
+        }
+        cx.notify();
     }
 
     /// Живой ящик: неделя — с сервера, демо-события убираются.
@@ -833,8 +853,11 @@ impl CalendarView {
                         .child(hm(now, tz)),
                 )
             });
-        let work_start = (i64::from(self.hours.start.hour()) - FIRST_HOUR) as f32 * HOUR_PX;
-        let work_end = (i64::from(self.hours.end.hour()) - FIRST_HOUR) as f32 * HOUR_PX;
+        // Рабочее время — «Настройки → Календарь» (S5-20): часы до минуты, нерабочий день затенён целиком.
+        let y = |t: jiff::civil::Time| {
+            ((i64::from(t.hour()) * 60 + i64::from(t.minute()) - FIRST_HOUR * 60) as f32 / 60. * HOUR_PX).clamp(0., height)
+        };
+        let (work_start, work_end) = (y(self.hours.start), y(self.hours.end));
         let mut columns = Vec::new();
         for d in 0..DAYS {
             let date = add_days(self.monday, d as i64);
@@ -843,7 +866,8 @@ impl CalendarView {
             let (timed, _) = day_events(&self.events, self.monday, d, tz);
             let timed: Vec<usize> = timed.into_iter().filter(|&i| event_look(&self.events[i], me) != Shown::Hidden).collect();
             let placed = layout_day(&timed.iter().map(|&i| self.events[i].span).collect::<Vec<_>>());
-            let shade = [(0., work_start), (work_end, height)].map(|(a, b)| {
+            let (ws, we) = if self.hours.days.contains(&date.weekday()) { (work_start, work_end) } else { (height, height) };
+            let shade = [(0., ws), (we, height)].map(|(a, b)| {
                 div().absolute().left_0().right_0().top(px(a)).h(px(b - a)).bg(l.pm(Pm::CalOff))
             });
             let lines = (0..HOURS).flat_map(|h| {

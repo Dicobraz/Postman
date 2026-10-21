@@ -3,7 +3,7 @@
 //! (`settings`).
 //!
 //! - [`Prefs`] — общие для пользователя: тема, плотность, язык, быстрые фильтры, сроки и жизненный цикл, чтение,
-//!   свои клавиши. Файл [`FILE`] в каталоге данных (`%LOCALAPPDATA%\Postman`).
+//!   календарь ([`Calendar`], S5-20), свои клавиши. Файл [`FILE`] в каталоге данных (`%LOCALAPPDATA%\Postman`).
 //! - [`AccountPrefs`] — у учётной записи: подписи и шаблоны. Файл рядом с её кэшем ([`AccountPrefs::beside`]).
 //!   Хранение на сервере (FileNode, как таблица категорий) — [проверить].
 //!
@@ -44,6 +44,8 @@ pub struct Prefs {
     pub quick: QuickFilters,
     pub lifecycle: Lifecycle,
     pub reading: Reading,
+    /// «Настройки → Календарь» (S5-20).
+    pub calendar: Calendar,
     /// Свои клавиши: id команды → сочетания в записи gpui (`ctrl-shift-r`); пустой список — без клавиши. Нет id —
     /// клавиши по умолчанию из реестра команд.
     pub keys: BTreeMap<String, Vec<String>>,
@@ -76,6 +78,7 @@ impl Default for Prefs {
             quick: QuickFilters::default(),
             lifecycle: Lifecycle::default(),
             reading: Reading::default(),
+            calendar: Calendar::default(),
             keys: BTreeMap::new(),
             keys_rev: 0,
             key_scheme: KeyScheme::Outlook,
@@ -134,6 +137,7 @@ impl Prefs {
         }
         self.quick = std::mem::take(&mut self.quick).normalized();
         self.lifecycle = self.lifecycle.clamped();
+        self.calendar = std::mem::take(&mut self.calendar).normalized();
         self.keys.retain(|id, _| !id.is_empty());
         self.keys_single.retain(|id, _| !id.is_empty());
         // Адрес для фишинга: пробелы по краям — прочь, пустой и без «@» — нет адреса.
@@ -399,6 +403,226 @@ impl Reading {
                 self.folders.remove(mailbox);
             }
         }
+    }
+}
+
+// --- календарь (S5-20) ---
+
+/// С какого дня начинается неделя (неделя, месяц и мини-календарь — S5-21).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeekStart {
+    #[default]
+    Monday,
+    Sunday,
+}
+
+impl WeekStart {
+    pub const ALL: [WeekStart; 2] = [WeekStart::Monday, WeekStart::Sunday];
+}
+
+/// Вид календаря при переходе в раздел (виды — S5-21).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarView {
+    Day,
+    #[default]
+    WorkWeek,
+    Week,
+    Month,
+}
+
+impl CalendarView {
+    pub const ALL: [CalendarView; 4] = [CalendarView::Day, CalendarView::WorkWeek, CalendarView::Week, CalendarView::Month];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            CalendarView::Day => "day",
+            CalendarView::WorkWeek => "work-week",
+            CalendarView::Week => "week",
+            CalendarView::Month => "month",
+        }
+    }
+}
+
+/// Цвет свободного времени: общие свободные окна во встрече (DESIGN «Настройки → Календарь»). Только цвета бренда
+/// (решение владельца 2026-10-21): розовый, синий и серо-голубой; зелёный, синий Fluent и бирюзовый отменены —
+/// в файле прежних версий `green` и `teal` читаются розовым, `blue` — синим бренда. Цвета ролей —
+/// `app.fb.free.<id>.*` в интерфейсе.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreeColor {
+    /// Розовый бренда #E4107F.
+    #[default]
+    #[serde(alias = "green", alias = "teal")]
+    Brand,
+    /// Синий бренда #3A9BD5.
+    Blue,
+    /// Серо-голубой бренда #7A8FA6.
+    Slate,
+}
+
+impl FreeColor {
+    pub const ALL: [FreeColor; 3] = [FreeColor::Brand, FreeColor::Blue, FreeColor::Slate];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            FreeColor::Brand => "brand",
+            FreeColor::Blue => "blue",
+            FreeColor::Slate => "slate",
+        }
+    }
+}
+
+/// Шаг сетки, мин.
+pub const STEPS: [u16; 2] = [30, 15];
+/// Длительность новой встречи, мин (выбор встречи — 30 мин … 2 ч).
+pub const DURATIONS: [u16; 4] = [30, 60, 90, 120];
+/// Напоминание, мин до начала; 0 — без напоминания.
+pub const REMINDERS: [u16; 6] = [0, 5, 10, 15, 30, 60];
+/// Минут в сутках: конец рабочего дня — не позже.
+const DAY_MIN: u16 = 24 * 60;
+
+/// Часовые пояса выбора (IANA): Россия с запада на восток, затем Лондон и UTC. Другой пояс в файле — тоже
+/// действует, если jiff его знает.
+pub const ZONES: [&str; 14] = [
+    "Europe/Kaliningrad",
+    "Europe/Moscow",
+    "Europe/Samara",
+    "Asia/Yekaterinburg",
+    "Asia/Omsk",
+    "Asia/Novosibirsk",
+    "Asia/Krasnoyarsk",
+    "Asia/Irkutsk",
+    "Asia/Yakutsk",
+    "Asia/Vladivostok",
+    "Asia/Magadan",
+    "Asia/Kamchatka",
+    "Europe/London",
+    "UTC",
+];
+
+/// «Настройки → Календарь» (DESIGN, макет «Настройки → Календарь»). Действуют сразу: рабочие дни и часы, пояс,
+/// длительность новой встречи, «Учитывать необязательных», цвет свободного времени, удаление письма-приглашения
+/// после ответа. Хранятся до своих задач: вид и первый день недели, шаг, второй пояс (S5-21), напоминание,
+/// «Начинать на 5 мин позже» и «под вопросом» для новых приглашений, цвета и имена коллег (S5-22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Calendar {
+    /// Рабочие дни, Пн … Вс.
+    pub work_days: [bool; 7],
+    /// Рабочие часы: начало и конец, минуты от полуночи.
+    pub work_start: u16,
+    pub work_end: u16,
+    pub week_start: WeekStart,
+    pub view: CalendarView,
+    /// Шаг сетки, мин ([`STEPS`]).
+    pub step: u16,
+    /// Свой часовой пояс (IANA); `None` — пояс Windows.
+    pub zone: Option<String>,
+    /// Вторая шкала часов слева от сетки.
+    pub second_zone_on: bool,
+    pub second_zone: String,
+    /// Длительность новой встречи, мин ([`DURATIONS`]).
+    pub duration: u16,
+    /// Напоминание, мин ([`REMINDERS`]; 0 — нет).
+    pub reminder: u16,
+    /// Начинать встречи на 5 мин позже (перерыв между встречами подряд).
+    pub start_late: bool,
+    /// Необязательные участники закрывают общие окна.
+    pub with_optional: bool,
+    pub free_color: FreeColor,
+    /// События коллег — цветом календаря владельца; имя владельца в событии (S5-22).
+    pub owner_colors: bool,
+    pub owner_names: bool,
+    /// Новые приглашения — в календарь «под вопросом».
+    pub tentative_invites: bool,
+    /// Письмо-приглашение — в «Удалённые» после ответа.
+    pub delete_answered: bool,
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        Self {
+            work_days: [true, true, true, true, true, false, false],
+            work_start: 9 * 60,
+            work_end: 18 * 60,
+            week_start: WeekStart::Monday,
+            view: CalendarView::WorkWeek,
+            step: 30,
+            zone: None,
+            second_zone_on: false,
+            second_zone: "Asia/Yekaterinburg".into(),
+            duration: 30,
+            reminder: 15,
+            start_late: true,
+            with_optional: false,
+            free_color: FreeColor::Brand,
+            owner_colors: true,
+            owner_names: true,
+            tentative_invites: true,
+            delete_answered: true,
+        }
+    }
+}
+
+/// Пояс по имени IANA: известен ли jiff (база поясов в exe).
+fn known_zone(name: &str) -> bool {
+    jiff::tz::TimeZone::get(name).is_ok()
+}
+
+impl Calendar {
+    /// К допустимым значениям: без рабочих дней — Пн–Пт, часы — начало раньше конца в пределах суток, шаг,
+    /// длительность и напоминание — из списков, неизвестный пояс — пояс Windows.
+    pub fn normalized(mut self) -> Self {
+        let d = Calendar::default();
+        if !self.work_days.contains(&true) {
+            self.work_days = d.work_days;
+        }
+        if self.work_end > DAY_MIN || self.work_start >= self.work_end {
+            (self.work_start, self.work_end) = (d.work_start, d.work_end);
+        }
+        if !STEPS.contains(&self.step) {
+            self.step = d.step;
+        }
+        if !DURATIONS.contains(&self.duration) {
+            self.duration = d.duration;
+        }
+        if !REMINDERS.contains(&self.reminder) {
+            self.reminder = d.reminder;
+        }
+        self.zone = self.zone.take().map(|z| z.trim().to_owned()).filter(|z| known_zone(z));
+        if !known_zone(&self.second_zone) {
+            self.second_zone = d.second_zone;
+        }
+        self
+    }
+
+    /// Часовой пояс календаря и встреч: свой или Windows.
+    pub fn zone(&self) -> jiff::tz::TimeZone {
+        self.zone.as_deref().and_then(|z| jiff::tz::TimeZone::get(z).ok()).unwrap_or_else(jiff::tz::TimeZone::system)
+    }
+
+    /// Рабочее время для сетки и подбора окон (вместо `WorkHours::standard`).
+    pub fn work_hours(&self, tz: jiff::tz::TimeZone) -> postman_calendar::WorkHours {
+        use jiff::civil::{Time, Weekday};
+        let at = |m: u16| {
+            if m >= DAY_MIN {
+                Time::MAX
+            } else {
+                Time::new((m / 60) as i8, (m % 60) as i8, 0, 0).unwrap_or(Time::midnight())
+            }
+        };
+        let days = (0..7)
+            .filter(|&i| self.work_days[i as usize])
+            .filter_map(|i| Weekday::from_monday_zero_offset(i).ok())
+            .collect();
+        postman_calendar::WorkHours { tz, start: at(self.work_start), end: at(self.work_end), days }
+    }
+
+    /// Длительность новой встречи, с.
+    pub fn duration_secs(&self) -> i64 {
+        i64::from(self.duration) * 60
     }
 }
 
@@ -673,6 +897,82 @@ mod tests {
         assert!(matches!(Prefs::load(&path), Err(Error::Version(99))));
         std::fs::write(&path, "{ not json").unwrap();
         assert!(Prefs::load(&path).is_err());
+    }
+
+    /// «Настройки → Календарь» (S5-20): по умолчанию — по макету, правка читается той же, неверное — к допустимому.
+    #[test]
+    fn calendar_prefs_default_round_trip_and_bad_values() {
+        let c = Calendar::default();
+        assert_eq!(c.free_color, FreeColor::Brand, "розовый бренда по умолчанию");
+        assert_eq!((c.work_start, c.work_end, c.duration, c.step, c.reminder), (540, 1080, 30, 30, 15));
+        assert_eq!(c.work_days, [true, true, true, true, true, false, false]);
+        assert!(c.start_late && !c.with_optional && c.tentative_invites && c.delete_answered && c.zone.is_none());
+        assert_eq!(c.view, CalendarView::WorkWeek);
+        let h = c.work_hours(jiff::tz::TimeZone::UTC);
+        assert_eq!((h.start, h.end), (jiff::civil::time(9, 0, 0, 0), jiff::civil::time(18, 0, 0, 0)));
+        assert_eq!(h.days.len(), 5);
+        assert_eq!(c.duration_secs(), 1800);
+
+        let d = dir();
+        let path = d.path().join(FILE);
+        let p = Prefs {
+            calendar: Calendar {
+            work_days: [true, true, true, true, false, false, true],
+            work_start: 8 * 60,
+            work_end: 17 * 60,
+            week_start: WeekStart::Sunday,
+            view: CalendarView::Month,
+            step: 15,
+            zone: Some("Asia/Novosibirsk".into()),
+            second_zone_on: true,
+            second_zone: "Europe/London".into(),
+            duration: 60,
+            reminder: 0,
+            start_late: false,
+            with_optional: true,
+            free_color: FreeColor::Slate,
+            owner_colors: false,
+            owner_names: false,
+            tentative_invites: false,
+            delete_answered: false,
+            },
+            ..Prefs::default()
+        };
+        p.save(&path).unwrap();
+        let back = Prefs::load(&path).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.calendar.zone().iana_name(), Some("Asia/Novosibirsk"));
+        let h = back.calendar.work_hours(back.calendar.zone());
+        assert_eq!(h.days, [jiff::civil::Weekday::Monday, jiff::civil::Weekday::Tuesday, jiff::civil::Weekday::Wednesday, jiff::civil::Weekday::Thursday, jiff::civil::Weekday::Sunday]);
+
+        // Старый файл без раздела — по умолчанию; неверное — к допустимому, остальное не теряется.
+        std::fs::write(&path, r#"{"version":1,"reading":{"pane":"bottom"}}"#).unwrap();
+        let old = Prefs::load(&path).unwrap();
+        assert_eq!((old.calendar, old.reading.pane), (Calendar::default(), Pane::Bottom));
+        let text = r#"{"version":1,"calendar":{"work_days":[false,false,false,false,false,false,false],
+            "work_start":1200,"work_end":600,"step":20,"duration":45,"reminder":7,"zone":"Mars/Olympus",
+            "second_zone":"","free_color":"green","with_optional":true}}"#;
+        std::fs::write(&path, text).unwrap();
+        let c = Prefs::load(&path).unwrap().calendar;
+        let def = Calendar::default();
+        assert_eq!(c.work_days, def.work_days, "без рабочих дней — Пн–Пт");
+        assert_eq!((c.work_start, c.work_end), (540, 1080), "начало после конца — по умолчанию");
+        assert_eq!((c.step, c.duration, c.reminder), (30, 30, 15));
+        assert_eq!(c.zone, None, "неизвестный пояс — пояс Windows");
+        assert_eq!(c.second_zone, def.second_zone);
+        assert_eq!((c.free_color, c.with_optional), (FreeColor::Brand, true), "отменённый зелёный — розовым");
+        // Отменённые цвета прежних версий: бирюзовый — розовым, синий — синим бренда.
+        for (old, now) in [("teal", FreeColor::Brand), ("blue", FreeColor::Blue), ("slate", FreeColor::Slate)] {
+            let text = format!(r#"{{"version":1,"calendar":{{"free_color":"{old}"}}}}"#);
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(Prefs::load(&path).unwrap().calendar.free_color, now, "{old}");
+        }
+        // Конец суток — допустим, позже — нет.
+        let edge = Calendar { work_start: 22 * 60, work_end: 24 * 60, ..Calendar::default() }.normalized();
+        assert_eq!((edge.work_start, edge.work_end), (1320, 1440));
+        assert_eq!(edge.work_hours(jiff::tz::TimeZone::UTC).end, jiff::civil::Time::MAX);
+        let over = Calendar { work_end: 24 * 60 + 1, ..Calendar::default() }.normalized();
+        assert_eq!(over.work_end, 1080);
     }
 
     #[test]

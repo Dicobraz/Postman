@@ -90,6 +90,7 @@ cmd-invite-tentative = Ответить «Под вопросом»
 cmd-invite-decline = Отклонить приглашение
 cmd-settings-vacation = Автоматические ответы
 cmd-settings-rules = Правила
+cmd-settings-calendar = Настройки календаря
 cmd-settings-open = Настройки
 cmd-view-filters = Фильтры: папки или фильтры слева
 cmd-view-quick-filters = Быстрые фильтры: показать или скрыть

@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_cache::{AttachmentRow, BodyRow, Cache, EmailRow};
@@ -130,6 +129,8 @@ pub(crate) enum ReadingEvent {
     Unsend(postman_core::send_later::Scheduled),
     /// «Ответить» или «Переслать» у письма стопки (S5-05б).
     Respond(EmailRow, postman_compose::Mode),
+    /// Ответ на приглашение ушёл, «Удалять письмо-приглашение после ответа» включено (S5-20): письмо — в «Удалённые».
+    TrashAnswered(EmailRow),
 }
 
 /// Запрос области чтения к серверу: клонируемая форма `Command` (событие gpui отдаётся по ссылке).
@@ -339,6 +340,11 @@ impl ReadingPane {
             Event::BlobReady { blob_id, data } => self.blob_ready(blob_id, data.clone(), cx),
             Event::BlobFailed { blob_id, error } => self.blob_failed(blob_id, error.clone(), cx),
             Event::InviteAnswered { uid, status, delivery } => {
+                let letter = self
+                    .reading
+                    .as_ref()
+                    .filter(|r| r.invite.as_ref().is_some_and(|c| c.uid() == Some(uid.as_str())))
+                    .map(|r| r.row.clone());
                 // Ответ запоминается с версией встречи из карточки (S5-11), без карточки — только статус.
                 let value = self.card_for(uid).map(|c| c.remember(*status)).unwrap_or_else(|| invite_card::encode(*status));
                 let (cache, key) = (self.cache.clone(), invite_card::state_key(uid));
@@ -354,6 +360,9 @@ impl ReadingPane {
                     Delivery::Mail { imported: false } => tr!("reading-invite-sent-mail"),
                 };
                 cx.emit(ReadingEvent::Toast(Toast::Success, text));
+                if let Some(row) = letter.filter(|_| crate::prefs::get(cx).calendar.delete_answered) {
+                    cx.emit(ReadingEvent::TrashAnswered(row));
+                }
                 cx.notify();
             }
             Event::InviteFailed { uid, error } => {
@@ -585,12 +594,13 @@ impl ReadingPane {
     /// `.ics` → приглашение в песочнице; запомненный ответ — из хранилища.
     fn parse_invite(&mut self, id: String, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         let (worker, cache) = (self.worker.clone(), self.cache.clone());
+        let tz = crate::prefs::get(cx).calendar.zone();
         let task = cx.background_spawn(async move {
             let parsed = {
                 let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
                 w.parse_calendar(&data)
             };
-            let inv = parsed.and_then(|v| Invitation::from_worker(&v, &TimeZone::system()))?;
+            let inv = parsed.and_then(|v| Invitation::from_worker(&v, &tz))?;
             let stored = cache.state(&invite_card::state_key(&inv.event.uid)).ok().flatten();
             let answer = stored.as_deref().and_then(invite_card::decode);
             Ok::<_, String>((inv, answer))
