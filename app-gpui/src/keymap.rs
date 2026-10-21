@@ -186,6 +186,63 @@ pub(crate) fn assign(commands: &[Command], overrides: &mut Overrides, id: &str, 
     Ok(())
 }
 
+/// Ревизия клавиш по умолчанию (`Prefs::keys_rev`): растёт, когда реестр снимает или переносит клавиши.
+/// 1 — S5-16, правило одного модификатора (`docs/DESIGN.md` «Хоткеи»).
+pub(crate) const KEYS_REV: u32 = 1;
+
+/// Клавиши по умолчанию, которые S5-16 сняла с команд: (команда, сочетание).
+const REMOVED_1: &[(&str, &str)] = &[
+    ("mail.next", "j"),
+    ("mail.prev", "k"),
+    ("mail.toggle_flag", "insert"),
+    ("mail.due", "ctrl-shift-g"),
+    ("calendar.prev_week", "alt-up"),
+    ("calendar.next_week", "alt-down"),
+    ("calendar.today", "alt-home"),
+    ("compose.send", "alt-s"),
+    ("meeting.send", "alt-s"),
+    ("view.filters", "ctrl-shift-f"),
+    ("invite.accept", "a"),
+    ("invite.tentative", "t"),
+    ("invite.decline", "n"),
+];
+
+/// Клавиши по умолчанию, которые S5-16 дала командам.
+const ADDED_1: &[(&str, &str)] = &[
+    ("mail.due", "insert"),
+    ("calendar.prev_week", "pageup"),
+    ("calendar.next_week", "pagedown"),
+    ("calendar.today", "home"),
+    ("tab.new", "ctrl-t"),
+];
+
+/// Свои клавиши ревизии `rev` — к [`KEYS_REV`]. Из прежних умолчаний в своих списках (остаются после «Заменить»)
+/// снятые клавиши уходят; своё, совпавшее с новым умолчанием, и назначения несуществующих команд не хранятся;
+/// новое умолчание, которое пользователь уже отдал другой команде там же, остаётся у его команды (у новой — без
+/// этой клавиши). Свои сочетания, выбранные пользователем, не трогаются — даже вне правила.
+pub(crate) fn migrate(commands: &[Command], overrides: &mut Overrides, rev: u32) {
+    if rev >= KEYS_REV {
+        return;
+    }
+    overrides.retain(|id, _| commands.iter().any(|c| c.id == id && editable(c)));
+    let ids: Vec<String> = overrides.keys().cloned().collect();
+    for id in ids {
+        let Some(c) = commands.iter().find(|c| c.id == id) else { continue };
+        let Some(keys) = overrides.get(&id) else { continue };
+        let kept: Vec<String> =
+            keys.iter().filter(|k| !REMOVED_1.iter().any(|(cid, r)| *cid == id && canon(k) == canon(r))).cloned().collect();
+        set(overrides, c, kept);
+    }
+    for &(id, key) in ADDED_1 {
+        let Some(c) = commands.iter().find(|c| c.id == id) else { continue };
+        if overrides.contains_key(id) || taken_by(commands, overrides, id, key).is_none() {
+            continue;
+        }
+        let rest: Vec<String> = c.keys.iter().filter(|k| canon(k) != canon(key)).map(|k| k.to_string()).collect();
+        set(overrides, c, rest);
+    }
+}
+
 /// Сбросить клавиши команды к умолчанию.
 pub(crate) fn reset(overrides: &mut Overrides, id: &str) {
     overrides.remove(id);
@@ -289,6 +346,46 @@ mod tests {
         assign(TABLE, &mut o, "mail.reply", "ctrl-r", false).unwrap();
         assert!(o.is_empty());
         assert!(assign(TABLE, &mut o, "mail.reply", "ctrl-шум", false).is_err());
+    }
+
+    /// S5-16: свои клавиши прежней ревизии — без снятых умолчаний; совпало с новым умолчанием — своего нет; новое
+    /// умолчание, занятое своим, — у своего; своё вне правила остаётся; ревизия уже новая — ничего.
+    #[test]
+    fn overrides_migrate_from_before_s5_16() {
+        let mut o = Overrides::new();
+        // «Заменить» отдал ↓ другой команде: у «Следующее» осталось прежнее J.
+        o.insert("mail.next".into(), vec!["j".into()]);
+        o.insert("mail.select_down".into(), vec!["down".into()]);
+        // «Заменить» отдал Insert «Напомнить»: у флага — пусто (теперь это и есть умолчание).
+        o.insert("mail.remind".into(), vec!["insert".into()]);
+        o.insert("mail.toggle_flag".into(), vec![]);
+        // Свой Alt+S к Ctrl+Enter у письма — только прежнее умолчание Alt+S уходит.
+        o.insert("compose.send".into(), vec!["ctrl-enter".into(), "alt-s".into(), "ctrl-s".into()]);
+        // Своё вне правила — выбор пользователя.
+        o.insert("mail.reply".into(), vec!["alt-r".into()]);
+        // Ctrl+T у пересылки — новая «Новая вкладка» без клавиши.
+        o.insert("mail.forward".into(), vec!["ctrl-t".into()]);
+        o.insert("no.such_command".into(), vec!["f9".into()]);
+        migrate(COMMANDS, &mut o, 0);
+        assert_eq!(o.get("mail.next"), Some(&vec![]), "J ушла, ↓ — у другой команды");
+        assert_eq!(o.get("mail.toggle_flag"), None, "пусто — уже умолчание");
+        assert_eq!(o.get("mail.remind"), Some(&vec!["insert".to_string()]));
+        assert_eq!(o.get("mail.due"), Some(&vec![]), "Insert — у «Напомнить», как выбрал пользователь");
+        assert_eq!(o.get("compose.send"), Some(&vec!["ctrl-enter".to_string(), "ctrl-s".to_string()]));
+        assert_eq!(o.get("mail.reply"), Some(&vec!["alt-r".to_string()]));
+        assert_eq!(o.get("tab.new"), Some(&vec![]));
+        assert_eq!(o.get("no.such_command"), None);
+        assert_eq!(conflicts(COMMANDS, &o), vec![], "перевод не добавил конфликтов");
+        // Только Alt+S было своим — после перевода своего нет.
+        let mut o = Overrides::new();
+        o.insert("meeting.send".into(), vec!["ctrl-enter".into(), "alt-s".into()]);
+        migrate(COMMANDS, &mut o, 0);
+        assert!(o.is_empty());
+        // Ревизия текущая: своё J — выбор пользователя после S5-16.
+        let mut o = Overrides::new();
+        o.insert("mail.next".into(), vec!["j".into()]);
+        migrate(COMMANDS, &mut o, KEYS_REV);
+        assert_eq!(o.get("mail.next"), Some(&vec!["j".to_string()]));
     }
 
     #[test]

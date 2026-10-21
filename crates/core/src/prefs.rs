@@ -47,6 +47,10 @@ pub struct Prefs {
     /// Свои клавиши: id команды → сочетания в записи gpui (`ctrl-shift-r`); пустой список — без клавиши. Нет id —
     /// клавиши по умолчанию из реестра команд.
     pub keys: BTreeMap<String, Vec<String>>,
+    /// Ревизия клавиш по умолчанию, к которой приведены `keys`: интерфейс переводит свои клавиши со старой ревизии
+    /// (S5-16 сняла Alt, J/K, A/T/N и др.). Нет в файле — 0 (до S5-16).
+    #[serde(default)]
+    pub keys_rev: u32,
 }
 
 impl Default for Prefs {
@@ -58,6 +62,7 @@ impl Default for Prefs {
             lifecycle: Lifecycle::default(),
             reading: Reading::default(),
             keys: BTreeMap::new(),
+            keys_rev: 0,
         }
     }
 }

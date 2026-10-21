@@ -70,20 +70,25 @@ function Press([byte[]]$mods, [byte]$vk, [string]$label) {
 }
 
 $CTRL = 0x11; $SHIFT = 0x10
-Press @() 0x4A "j"
-Press @() 0x4A "j"
-Press @() 0x4B "k"
+# Outlook scheme (S5-16): list navigation is arrows only; J/K belong to the single-key scheme (S5-17).
+Press @() 0x28 "down"
+Press @() 0x28 "down"
+Press @() 0x26 "up"
+Press @() 0x4A "j (no action)"
 Press @($CTRL) 0x51 "ctrl-q"
 Press @($CTRL) 0x55 "ctrl-u"
 Press @($CTRL) 0x32 "ctrl-2"
 Press @($CTRL, $SHIFT) 0x51 "ctrl-shift-q"
 Press @($CTRL) 0x31 "ctrl-1"
+# Ctrl+T - one more mail tab (Ctrl+Ye in the Russian layout), Ctrl+W closes it.
+Press @($CTRL) 0x54 "ctrl-t"
+Press @($CTRL) 0x57 "ctrl-w"
 Press @($CTRL) 0x45 "ctrl-e"
 # In the search field letters are text, not list navigation: expect no action for these two.
 Press @() 0x4A "j in search"
 Press @() 0x4B "k in search"
 Press @() 0x1B "escape"
-Press @() 0x2D "insert"
+Press @() 0x2D "insert (due date)"
 
 Start-Sleep -Milliseconds 500
 Stop-Process -Id $p.Id -Force

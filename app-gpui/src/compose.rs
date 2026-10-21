@@ -989,7 +989,7 @@ impl Mailer {
         let dirty = self.compose.get(id).is_some_and(|c| c.read(cx).model.is_dirty());
         if dirty {
             self.expand_composer(id, cx);
-            self.tabs.activate_kind(TabKind::Mail);
+            self.show_mail_tab(cx);
         } else {
             self.close_composer(id, cx);
         }

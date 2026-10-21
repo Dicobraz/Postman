@@ -72,6 +72,8 @@ pub(crate) struct Mailer {
     /// `--screens`: снимки экранов без человека (S2-05).
     pub(crate) screens: Option<screens::Driver>,
     pub(crate) section: Section,
+    /// Раздел главной вкладки, пока открыта вкладка почты (в ней раздел — всегда «Почта», S5-16).
+    pub(crate) main_section: Option<Section>,
     /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
     pub(crate) cal: Entity<calendar::CalendarView>,
     /// Командные строки календаря и контактов (S5-11) — на месте строки почты в своём разделе.
@@ -183,7 +185,7 @@ impl Mailer {
             cx.subscribe(&summary, |this, _, a: &crate::bulk::SummaryAsk, cx| this.on_summary(a, cx)),
             cx.subscribe(&folders, |this, _, ev: &FolderEvent, cx| match ev {
                 FolderEvent::Open(id) => {
-                    this.tabs.activate_kind(crate::tabs::TabKind::Mail);
+                    this.show_mail_tab(cx);
                     this.open_mailbox(id.clone(), cx)
                 }
                 FolderEvent::Menu { id, at } => this.open_folder_menu(id.clone(), *at, cx),
@@ -264,6 +266,7 @@ impl Mailer {
             bench,
             screens: None,
             section: Section::Mail,
+            main_section: None,
             cal,
             cal_bar,
             contacts_bar,
@@ -344,8 +347,14 @@ impl Mailer {
     }
 
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
-        // Модуль рейла — во вкладке «Почта» (вкладка настроек остаётся открытой).
-        self.tabs.activate_kind(crate::tabs::TabKind::Mail);
+        // Модуль рейла — во вкладке «Почта» (вкладка настроек остаётся открытой); «Почта» во вкладке почты (S5-16) —
+        // там же.
+        if section == Section::Mail {
+            self.show_mail_tab(cx);
+        } else {
+            self.tabs.activate_kind(crate::tabs::TabKind::Main);
+            self.sync_mail_tab(cx);
+        }
         if section == Section::Calendar {
             // Цвета событий — по таблице категорий своего аккаунта.
             let table = self.list.read(cx).labels.for_account(None).cloned().unwrap_or_else(crate::labels::default_table);
@@ -381,6 +390,8 @@ impl Render for Mailer {
         if !self.meetings.pending.is_empty() {
             cx.defer_in(window, |this, window, cx| this.create_meetings(window, cx));
         }
+        // Вкладку сменили мимо `sync_mail_tab` (закрыли письмо или встречу) — части почты по активной вкладке.
+        self.sync_mail_tab(cx);
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
         if std::mem::take(&mut self.refocus) {
@@ -513,6 +524,7 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::settings::Open, window, cx| this.open_settings(None, window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::New, window, cx| this.new_mail_tab(window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Next, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Prev, window, cx| this.step_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Close, window, cx| {

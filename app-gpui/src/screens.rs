@@ -123,6 +123,8 @@ enum Scene {
     /// Быстрые фильтры (S5-03): закладки «Угрозы» и «Срок» включены (ИЛИ), панель по наведению открыта,
     /// группы по датам.
     Quick,
+    /// Две вкладки почты (S5-16, Ctrl+T): главная на «Входящих», вторая — «Все папки» с «Непрочитанными», активна.
+    TabMail,
     /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
     Thread,
     /// Меню папки «Входящие» (S5-05б) с открытым подменю «Вид беседы».
@@ -162,7 +164,7 @@ enum Scene {
     Toasts,
 }
 
-const SCENES: [Scene; 58] = [
+const SCENES: [Scene; 59] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -209,6 +211,7 @@ const SCENES: [Scene; 58] = [
     Scene::Labels,
     Scene::Filters,
     Scene::Quick,
+    Scene::TabMail,
     Scene::Lifecycle,
     Scene::Overdue,
     Scene::Bulk,
@@ -287,6 +290,7 @@ impl Scene {
             Scene::Labels => "labels",
             Scene::Filters => "filters",
             Scene::Quick => "quick",
+            Scene::TabMail => "tab-mail",
             Scene::Thread => "thread",
             Scene::FolderMenu => "folder-menu",
             Scene::ThreadStack => "thread-stack",
@@ -415,6 +419,11 @@ fn set_phase(m: &mut Mailer, phase: Phase) {
 
 /// Состояние сцены — через те же методы, что вызывают действия пользователя.
 fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mailer>) -> Result<(), String> {
+    // Вкладка почты сцены `tab-mail` — только в ней: дальше — главная со своим состоянием (как Ctrl+W).
+    let mail_tab = m.tabs.iter().find(|t| t.kind == crate::tabs::TabKind::Mail).map(|t| t.id);
+    if let Some(id) = mail_tab.filter(|_| !matches!(scene, Scene::TabMail)) {
+        m.close_tab(id, window, cx);
+    }
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
         Scene::Letter => m.list.update(cx, |l, cx| l.select(0, cx)),
@@ -632,7 +641,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let i = if live { Some(0) } else { demo_row(m.list.read(cx), Scene::Attachments) };
             let Some(i) = i else { return Err("no message to reply to".into()) };
             remember_composer(m, cx);
-            m.tabs.activate_kind(crate::tabs::TabKind::Mail);
+            m.tabs.activate_kind(crate::tabs::TabKind::Main);
             m.set_section(Section::Mail, cx);
             m.list.update(cx, |l, cx| l.select(i, cx));
             // Как `mail.reply`: ответ — когда тело разобрано (ответ ждёт его сам), и не посреди отрисовки.
@@ -708,6 +717,24 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Панель закладок — как по наведению.
             m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = true));
         }
+        Scene::TabMail => {
+            use postman_core::filters::Check;
+            m.set_section(Section::Mail, cx);
+            m.reset_filters(cx);
+            m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = false));
+            let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes);
+            let Some(id) = inbox else { return Err("no inbox".into()) };
+            m.open_mailbox(id.clone(), cx);
+            // Как Ctrl+T: вторая вкладка на той же папке; в ней — «Все папки» и «Непрочитанные».
+            m.new_mail_tab(window, cx);
+            m.open_mailbox(id, cx);
+            m.filters.update(cx, |f, cx| {
+                f.change(cx, |q| {
+                    q.scope = crate::filters::Where::All;
+                    q.criteria.toggle_check(Check::Unread);
+                })
+            });
+        }
         Scene::Thread => {
             m.live.signin = None;
             m.set_section(Section::Mail, cx);
@@ -777,7 +804,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         Scene::SettingsKeys => {
             // Своё сочетание у «Флаг» и конфликт: «Сегодня в календаре» на Ctrl+2, как «Календарь».
             crate::prefs::update(cx, |p| {
-                p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-shift-k".into()]);
+                p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-g".into()]);
                 p.keys.insert("calendar.today".into(), vec!["ctrl-2".into()]);
             });
             m.open_settings(Some(SettingsSection::Keys), window, cx);
@@ -929,7 +956,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             // Ответ — в области чтения над письмом (вкладки прошлых сцен ещё открыты).
             let before = m.screens.as_ref().and_then(|d| d.composer);
             let reply = m.compose.inline_view().is_some_and(|c| Some(c.read(cx).id) != before && c.read(cx).drawn());
-            reply && m.tabs.is_active(crate::tabs::TabKind::Mail)
+            reply && m.tabs.active().kind.shows_mail()
         }
         Scene::Contacts => {
             // Живой ящик: контакты с сервера пришли — выделить первый (до ответа выделять нечего).
@@ -969,6 +996,16 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 && list.view.is_some()
                 && !list.computing
                 && f.counts.total > 0
+                && rows_loaded
+        }
+        Scene::TabMail => {
+            m.tabs.is_active(crate::tabs::TabKind::Mail)
+                && m.tabs.iter().filter(|t| t.kind == crate::tabs::TabKind::Mail).count() == 1
+                && m.section == Section::Mail
+                && list.query.scope == crate::filters::Where::All
+                && !list.query.criteria.is_empty()
+                && list.view.is_some()
+                && !list.computing
                 && rows_loaded
         }
         Scene::Quick => {

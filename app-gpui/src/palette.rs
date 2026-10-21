@@ -537,7 +537,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "mail.first" => CHEVRON_UP,
         "mail.last" => CHEVRON_DOWN,
         "mail.mark_read" => READ,
-        "mail.mark_unread" | "search.unread" | "view.mail" | "contacts.write" => MAIL,
+        "mail.mark_unread" | "search.unread" | "view.mail" | "contacts.write" | "tab.new" => MAIL,
         "mail.toggle_flag" => FLAG,
         "mail.categorize" => TAG,
         "mail.new" => NEW_MAIL,
@@ -716,7 +716,6 @@ impl Mailer {
 
     /// Папка, фильтр или письмо из палитры — во вкладке «Почта», без поиска.
     fn open_mail_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.activate_kind(crate::tabs::TabKind::Mail);
         self.set_section(crate::Section::Mail, cx);
         if self.find.active() {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));
