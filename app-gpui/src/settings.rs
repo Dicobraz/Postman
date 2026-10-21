@@ -149,6 +149,7 @@ impl Mailer {
                     });
                 }
             }
+            SettingsEvent::AccountPrefs(p) => self.compose.prefs = p.clone(),
             SettingsEvent::RemoveAccount => {
                 self.close_settings(window, cx);
                 self.remove_account(window, cx);

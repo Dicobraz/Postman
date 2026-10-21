@@ -127,6 +127,8 @@ pub(crate) enum SettingsEvent {
     AddAccount,
     /// «Удалить аккаунт» подтверждено.
     RemoveAccount,
+    /// Подписи и шаблоны учётной записи изменены: письму — новые подписи по умолчанию.
+    AccountPrefs(postman_core::prefs::AccountPrefs),
 }
 
 pub(crate) struct SettingsView {

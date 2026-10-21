@@ -76,6 +76,7 @@ impl SettingsView {
 
     fn sign_save(&mut self, cx: &mut Context<Self>) {
         self.sign.prefs = std::mem::take(&mut self.sign.prefs).normalized();
+        cx.emit(crate::settings_tab::SettingsEvent::AccountPrefs(self.sign.prefs.clone()));
         let Some(file) = self.sign.file() else { return };
         let (prefs, writer) = (self.sign.prefs.clone(), self.sign.writer.clone());
         let seq = writer.next();

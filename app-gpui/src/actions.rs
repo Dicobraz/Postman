@@ -1,6 +1,7 @@
 //! Ответ, пересылка и удаление (S3-02): команды `mail.reply`, `mail.reply_all`, `mail.forward`, `mail.delete`.
 //!
-//! Ответ — окно письма с черновиком из `postman_compose::respond`. Цитате нужно тело письма, разобранное воркером:
+//! Ответ — в области чтения над письмом (S5-06б) с черновиком из `postman_compose::respond`. Цитате нужно тело
+//! письма, разобранное воркером:
 //! его готовит область чтения (кэш или `Command::Body`). Тело ещё не готово — ждём область чтения (`observe`), поток
 //! интерфейса не блокируется. Вложения оригинала при пересылке — по `blob_id`: в демо байты сразу, в живом ящике
 //! их скачивает синхронизация перед отправкой.
@@ -165,7 +166,8 @@ impl Mailer {
             identity.unwrap_or_else(|| (Address::new("", reading.me.clone().unwrap_or_default()), String::new()));
         let local = |blob: &str| if live { None } else { postman_demo::blob(blob) };
         let d = draft(mode, &r.row, body, doc, &me, &signature, local);
-        self.open_compose(d, cx);
+        // Ответ и пересылка — в области чтения над письмом (S5-06б); «Развернуть» — во вкладку.
+        self.open_reply(d, id.to_owned(), cx);
         true
     }
 

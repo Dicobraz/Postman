@@ -49,6 +49,16 @@ pub(crate) mod glyph {
     pub(crate) const MAX: char = '\u{E922}';
     pub(crate) const RESTORE: char = '\u{E923}';
     pub(crate) const CAPTION_CLOSE: char = '\u{E8BB}';
+    // Письмо (S5-06б): панель форматирования, метка, категория, «Развернуть».
+    pub(crate) const CHEVRON: char = '\u{E70D}';
+    pub(crate) const BULLETS: char = '\u{E8FD}';
+    pub(crate) const LINK: char = '\u{E71B}';
+    pub(crate) const QUOTE: char = '\u{E9B2}';
+    pub(crate) const LOCK: char = '\u{E72E}';
+    pub(crate) const TAG: char = '\u{E8EC}';
+    pub(crate) const CHECK: char = '\u{E73E}';
+    pub(crate) const EXPAND: char = '\u{E8A7}';
+    pub(crate) const PREVIEW: char = '\u{E7B3}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).
@@ -110,11 +120,17 @@ impl MoreMenu {
 }
 
 impl Mailer {
-    /// Название вкладки.
-    fn tab_title(&self, t: &Tab) -> String {
+    /// Название вкладки и есть ли в ней несохранённое (письмо — точка после названия).
+    fn tab_title(&self, t: &Tab, cx: &App) -> (String, bool) {
         match t.kind {
-            TabKind::Mail => tr!("frame-tab-mail"),
-            TabKind::Settings => tr!("frame-tab-settings"),
+            TabKind::Mail => (tr!("frame-tab-mail"), false),
+            TabKind::Settings => (tr!("frame-tab-settings"), false),
+            TabKind::Compose(id) => {
+                let Some(c) = self.compose.get(id) else { return (tr!("compose-title-new"), false) };
+                let m = &c.read(cx).model;
+                let subject = m.subject.trim();
+                (if subject.is_empty() { tr!("compose-title-new") } else { subject.to_owned() }, m.is_dirty())
+            }
         }
     }
 
@@ -141,6 +157,8 @@ impl Mailer {
                         this.close_tab(id, window, cx);
                     }))
             });
+            let (title, dirty) = self.tab_title(t, cx);
+            let letter = matches!(t.kind, TabKind::Compose(_));
             div()
                 .id(("tab", id as usize))
                 .h(l.px(Metric::HTab))
@@ -154,9 +172,12 @@ impl Mailer {
                 .rounded_t(l.px(Metric::RadiusOverlay))
                 .when(on, |d| d.bg(l.panel()).text_color(l.text()))
                 .when(!on, |d| d.text_color(l.text2()).hover(|d| d.bg(l.hover())))
-                .child(div().flex_1().min_w_0().truncate().child(self.tab_title(t)))
+                .when(letter, |d| d.child(icon(glyph::NEW_MAIL, 12.)))
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                // Несохранённый черновик — точка (DESIGN «Новое письмо», макет вкладки).
+                .when(dirty, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(l.text2())))
                 .children(close)
-                .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(id, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(id, window, cx)))
         });
         let caption = |id: &'static str, g: char, area: WindowControlArea, close: bool| {
             div()
@@ -348,13 +369,26 @@ impl Mailer {
         true
     }
 
-    pub(crate) fn activate_tab(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
+            self.focus_active_tab(window, cx);
             cx.notify();
         }
     }
 
-    /// Закрыть вкладку (× или Ctrl+W): вкладка настроек закрывает панель.
+    /// Фокус — в активную вкладку: письмо — в его текст, иначе — экран (клавиши писем, вкладок).
+    pub(crate) fn focus_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tabs.active().kind {
+            TabKind::Compose(id) => {
+                if let Some(c) = self.compose.get(id).cloned() {
+                    c.update(cx, |c, cx| c.focus_body(window, cx));
+                }
+            }
+            _ => window.focus(&self.focus, cx),
+        }
+    }
+
+    /// Закрыть вкладку (× или Ctrl+W): вкладка настроек закрывает панель, письмо — с вопросом о черновике.
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == id).copied() else { return };
         match tab.kind {
@@ -362,13 +396,15 @@ impl Mailer {
             TabKind::Settings => {
                 self.close_settings(window, cx);
             }
+            TabKind::Compose(letter) => self.close_compose_tab(letter, window, cx),
         }
         cx.notify();
     }
 
     /// Ctrl+Tab / Ctrl+Shift+Tab.
-    pub(crate) fn step_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.step(delta);
+        self.focus_active_tab(window, cx);
         cx.notify();
     }
 }

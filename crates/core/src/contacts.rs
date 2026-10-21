@@ -128,6 +128,16 @@ impl AddressBook {
         self.entries.is_empty()
     }
 
+    /// Запись адреса (регистр не важен).
+    pub fn get(&self, email: &str) -> Option<&Entry> {
+        self.entries.get(&email.trim().to_lowercase())
+    }
+
+    /// Все записи — для проверок перед отправкой (`crate::checks`).
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.values()
+    }
+
     /// Подсказки для набранного; `now` — для учёта свежести.
     pub fn suggest(&self, query: &str, limit: usize, now: i64) -> Vec<&Entry> {
         let words: Vec<String> = normalize(query).split_whitespace().map(str::to_string).collect();

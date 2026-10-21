@@ -13,7 +13,7 @@ use crate::keymap::human;
 /// Где действует: по контексту команды.
 fn place(context: Option<&str>) -> &'static str {
     match context {
-        Some(c) if c.contains("Composer") => "окно письма",
+        Some(c) if c.starts_with("Composer") => "письмо",
         Some(c) if c.contains("Meeting") => "окно встречи",
         Some(c) if c.contains("CalendarView") => "календарь",
         Some(c) if c.contains("MailView") => "почта",

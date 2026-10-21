@@ -325,6 +325,7 @@ impl Mailer {
             }));
         }
         self.load_labels(cx);
+        self.load_account_prefs(cx);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             // Поток синхронизации закончился — отправитель пробуждений закрыт, задача завершается.
@@ -516,6 +517,24 @@ impl Mailer {
                     m.on_categories(reply, cx);
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Подписи и шаблоны учётной записи (S5-09) — из файла рядом с кэшем (в фоне), для письма.
+    fn load_account_prefs(&mut self, cx: &mut Context<Self>) {
+        use postman_core::prefs::AccountPrefs;
+        let Some(path) = self.live.path.clone() else { return };
+        let task = cx.background_spawn(async move { AccountPrefs::load(&AccountPrefs::beside(&path)) });
+        cx.spawn(async move |this, cx| {
+            let prefs = match task.await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |m, _| m.compose.prefs = prefs);
         })
         .detach();
     }

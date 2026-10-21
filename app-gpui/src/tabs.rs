@@ -1,6 +1,6 @@
 //! Вкладки окна (S5-01, DESIGN «Главное окно»): заголовок окна — только вкладки. «Почта» — первая, не закрывается;
 //! остальные открываются и закрываются (Ctrl+W), переключаются Ctrl+Tab / Ctrl+Shift+Tab. Модель общая:
-//! сейчас вторая вкладка — настройки ящика (автоответ, правила), дальше — письмо (S5-06) и настройки (S5-09).
+//! настройки ящика (автоответ, правила), письма (S5-06б: по вкладке на черновик), дальше — настройки (S5-09).
 
 /// Что во вкладке.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -9,6 +9,8 @@ pub(crate) enum TabKind {
     Mail,
     /// Вкладка «Настройки» (`settings_tab.rs`, S5-09).
     Settings,
+    /// Письмо (`composer::Composer` с этим `id`); черновиков — сколько угодно.
+    Compose(u64),
 }
 
 impl TabKind {
@@ -145,5 +147,19 @@ mod tests {
         assert_eq!(t.close(s + 1).map(|t| t.kind), Some(TabKind::Settings));
         assert!(t.is_active(TabKind::Mail));
         assert!(!t.activate(99));
+    }
+
+    /// S5-06б: у каждого черновика своя вкладка; закрыть одну — остальные на месте.
+    #[test]
+    fn every_draft_has_its_own_tab() {
+        let mut t = Tabs::default();
+        let a = t.open(TabKind::Compose(7));
+        let b = t.open(TabKind::Compose(8));
+        assert_ne!(a, b);
+        assert!(t.is_active(TabKind::Compose(8)));
+        assert_eq!(t.iter().count(), 3);
+        assert_eq!(t.close(b).map(|t| t.kind), Some(TabKind::Compose(8)));
+        assert!(t.is_active(TabKind::Compose(7)), "активна соседняя слева");
+        assert!(t.activate_kind(TabKind::Mail));
     }
 }
