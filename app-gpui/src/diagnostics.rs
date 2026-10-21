@@ -124,7 +124,7 @@ mod tests {
         let out = d.path().join("report.zip");
         build_report(d.path(), &prefs, &out).unwrap();
         let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
-        let mut names: Vec<String> = (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_owned()).collect();
+        let mut names: Vec<String> = (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().unwrap().to_string()).collect();
         names.sort();
         assert_eq!(names, ["logs/postman-2026-10-21.log", "settings.json", "version.txt"]);
         let mut settings = String::new();

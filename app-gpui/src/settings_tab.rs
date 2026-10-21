@@ -11,9 +11,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
-use pets_ui::theme::{Metric, Role, Themes};
+use pets_ui::theme::{Metric, Role};
 use postman_core::labels::Categories;
-use postman_core::prefs::{Conversation, DAYS, HOURS, LANGUAGES, Pane, Quick};
+use postman_core::prefs::{Conversation, DAYS, HOURS, Pane, Quick};
 
 use crate::chrome::{glyph, icon};
 use crate::roles::Look;

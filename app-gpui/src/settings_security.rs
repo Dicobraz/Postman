@@ -151,7 +151,7 @@ impl SettingsView {
                         .child(div().text_color(l.text2()).child(tr!("settings-sandbox-howto-after"))),
                 )
             })
-            .child(group(tr!("settings-security-group"), l))
+            .child(group(tr!("settings-phishing-group"), l))
             .child(row(
                 tr!("settings-phishing"),
                 Some(if self.phishing_error { tr!("settings-phishing-bad") } else { tr!("settings-phishing-hint") }),

@@ -146,6 +146,10 @@ enum Scene {
     Overdue,
     /// Вкладка «Настройки», раздел «Общие» (S5-09).
     SettingsGeneral,
+    /// «Настройки → Безопасность» (S5-30).
+    SettingsSecurity,
+    /// «Настройки → Внешний вид» (S5-30).
+    SettingsLook,
     /// «Настройки → Категории» с правкой новой категории: палитра с перечёркнутыми близкими цветами.
     SettingsCategories,
     /// «Настройки → Клавиатура»: своё сочетание у одной команды и конфликт у другой.
@@ -178,7 +182,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 66] = [
+const SCENES: [Scene; 68] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -218,6 +222,8 @@ const SCENES: [Scene; 66] = [
     Scene::Vacation,
     Scene::Rules,
     Scene::SettingsGeneral,
+    Scene::SettingsSecurity,
+    Scene::SettingsLook,
     Scene::SettingsCategories,
     Scene::SettingsKeys,
     Scene::SettingsAccounts,
@@ -322,6 +328,8 @@ impl Scene {
             Scene::Lifecycle => "lifecycle",
             Scene::Overdue => "overdue",
             Scene::SettingsGeneral => "settings-general",
+            Scene::SettingsSecurity => "settings-security",
+            Scene::SettingsLook => "settings-look",
             Scene::SettingsCategories => "settings-categories",
             Scene::SettingsKeys => "settings-keys",
             Scene::SettingsAccounts => "settings-accounts",
@@ -860,6 +868,8 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             }
         }
         Scene::SettingsGeneral => m.open_settings(Some(SettingsSection::General), window, cx),
+        Scene::SettingsSecurity => m.open_settings(Some(SettingsSection::Security), window, cx),
+        Scene::SettingsLook => m.open_settings(Some(SettingsSection::Look), window, cx),
         Scene::SettingsCategories => {
             m.open_settings(Some(SettingsSection::Categories), window, cx);
             if let Some(v) = m.settings.view.clone() {
@@ -1005,6 +1015,8 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::SignIn => m.live.signin.is_some() && !m.tabs.is_active(crate::tabs::TabKind::Settings),
         Scene::SettingsGeneral
+        | Scene::SettingsSecurity
+        | Scene::SettingsLook
         | Scene::SettingsCategories
         | Scene::SettingsKeys
         | Scene::SettingsAccounts
@@ -1015,6 +1027,8 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         | Scene::SettingsSign => {
             let want = match scene {
                 Scene::SettingsGeneral => SettingsSection::General,
+                Scene::SettingsSecurity => SettingsSection::Security,
+                Scene::SettingsLook => SettingsSection::Look,
                 Scene::SettingsCategories => SettingsSection::Categories,
                 Scene::SettingsKeys => SettingsSection::Keys,
                 Scene::SettingsQuick => SettingsSection::Quick,
