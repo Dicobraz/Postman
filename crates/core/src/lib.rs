@@ -6,6 +6,7 @@ pub mod categories;
 pub mod contacts;
 pub mod extract;
 pub mod files;
+pub mod filters;
 pub mod indexer;
 pub mod invite;
 pub mod labels;

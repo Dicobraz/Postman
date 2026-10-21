@@ -1,0 +1,47 @@
+# Фильтры и быстрые фильтры (S5-03).
+filters-title = Фильтры
+filters-back = К папкам
+filters-reset = Сбросить
+filters-where = Где искать
+filters-all-folders = Все папки
+filters-group-state = Состояние
+filters-group-sender = Отправитель
+filters-group-category = Категория
+filters-unread = Непрочитанные
+filters-mentions = Упоминания
+filters-attachments = С вложениями
+filters-flagged = С флагом
+filters-external = Внешние
+# Чип над списком: фильтры панели через запятую.
+filters-chip-unread = непрочитанные
+filters-chip-mentions = упоминания
+filters-chip-attachments = вложения
+filters-chip-flagged = флаг
+filters-chip-external = внешние
+filters-chip-reset = Сбросить фильтры
+filters-shown = { $n } из { $total }
+filters-funnel = Фильтры папки (Ctrl+Shift+F)
+filters-empty = Под эти фильтры писем нет.
+filters-sort-date = По дате
+filters-sort-sender = По отправителю
+filters-sort-size = По размеру
+filters-day-today = Сегодня
+filters-day-yesterday = Вчера
+filters-day-week = На этой неделе
+filters-day-last-week = На прошлой неделе
+filters-day-earlier = Ранее
+# Закладки: короткое имя — на закладке, полное — в панели по наведению.
+filters-quick-threats = Угрозы
+filters-quick-threats-long = Угрозы
+filters-quick-due = Срок
+filters-quick-due-long = Срок горит
+filters-quick-waiting = Ждём
+filters-quick-waiting-long = Ждём ответа
+filters-quick-to-me = Мне
+filters-quick-to-me-long = Мне лично
+filters-quick-expiring = Истекают
+filters-quick-expiring-long = Истекают
+filters-quick-hide = Скрыть быстрые фильтры
+filters-quick-hidden = Быстрые фильтры скрыты. Вернуть: Вид → Быстрые фильтры
+filters-menu-view = Вид
+filters-menu-quick = Быстрые фильтры

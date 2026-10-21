@@ -1,18 +1,27 @@
 //! Список писем: окно строк в фоне, выделение, флаги (S1-03, S1-06); полоса прокрутки и позиция в каждой
-//! папке, строка «Удалить навсегда?» (S3-02); полоса категории и метки, категории клавишами 1–9 (S5-02).
+//! папке, строка «Удалить навсегда?» (S3-02); полоса категории и метки, категории клавишами 1–9 (S5-02);
+//! фильтры, «Все папки», сортировка, группы по датам и папкам, быстрые фильтры (S5-03, `filters.rs`).
+//!
+//! Строки — `v_virtual_list` gpui-kit: высоты элементов известны заранее (письмо — по плотности, заголовок группы
+//! — 30 px), поэтому группы с заголовками ниже строк, а не строкой той же высоты, как было бы в `uniform_list`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::*;
 use gpui_kit::prelude::*;
 use pets_i18n::tr;
-use postman_cache::{Cache, EmailRow, MailboxRow, Rights};
+use postman_cache::{Cache, EmailRow, MailboxRow, Rights, Scan};
+use postman_core::filters::{Arranged, Counts, Days, Facts, Group, Hit, Me, Sort, arrange};
 use postman_core::labels::{self, Book};
 
 use pets_ui::theme::{Density, Metric};
 
+use crate::filters::{Changed, FilterModel, HEADER_H, Layout, QUICK_H, Query, Slot, Where};
 use crate::roles::{Look, Pm, look};
 use crate::*;
 
@@ -94,9 +103,10 @@ pub(crate) struct MailList {
     pub(crate) page_gen: u64,
     /// Письмо выбрано, а его строка ещё не прочитана — открыть, когда страница придёт.
     pub(crate) pending_open: Option<usize>,
+    /// Видимые письма (номера по порядку списка, без заголовков групп).
     pub(crate) visible: Range<usize>,
     pub(crate) selected: Option<usize>,
-    pub(crate) scroll: UniformListScrollHandle,
+    pub(crate) scroll: VirtualListScrollHandle,
     /// Прокрутка каждой папки: вернулись в папку — список там же, где был.
     pub(crate) positions: Positions,
     /// Строка «Удалить навсегда? Да / Нет» над списком: письмо из «Удалённых» и его номер.
@@ -113,6 +123,97 @@ pub(crate) struct MailList {
     pub(crate) names: HashMap<String, String>,
     /// Высота строки по плотности темы (последний кадр).
     pub(crate) row_h: f32,
+    /// Фильтры (S5-03): модель, общая с панелью папок; `query` — её условия, по которым посчитан список.
+    pub(crate) filters: Entity<FilterModel>,
+    pub(crate) query: Query,
+    /// Свой набор писем по фильтрам и порядку (`Query::own_list`), посчитанный в фоне; `None` — страницы папки.
+    pub(crate) view: Option<Arc<Vec<String>>>,
+    /// Группы подряд (даты или папки) с числом писем; свёрнутые группы; раскладка с заголовками.
+    pub(crate) groups: Vec<(Group, usize)>,
+    pub(crate) collapsed: HashSet<Group>,
+    pub(crate) layout: Layout,
+    /// Высоты элементов списка и для чего они посчитаны (высота строки, место под закладками).
+    sizes: Rc<Vec<Size<Pixels>>>,
+    sizes_for: Option<(f32, bool)>,
+    /// Пересчёт фильтров: номер запроса, устаревшие ответы отбрасываются; `computing` — ответа ещё нет.
+    compute_gen: u64,
+    pub(crate) computing: bool,
+    /// Кто я — упоминания, «Мне», внешние: демо — владелец демо-ящика; живой ящик — `Event::Me`, `Event::Senders`.
+    pub(crate) me: Me,
+    identity: Vec<(String, String)>,
+    /// Письма, которые нашёл сервер по фильтрам «Все папки» (живой ящик): в списке без проверки по кэшу.
+    pub(crate) server_hits: Arc<HashSet<String>>,
+    /// Папки по порядку дерева — группы «Все папки».
+    pub(crate) order: Vec<String>,
+    /// Меню сортировки открыто.
+    pub(crate) sort_open: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// Пересчёт фильтров в фоне: что перебрать и как.
+struct Job {
+    scan: Scan,
+    query: Query,
+    me: Me,
+    server_hits: Arc<HashSet<String>>,
+    order: Vec<String>,
+    /// Нужен свой набор писем (иначе — только счётчики).
+    own: bool,
+}
+
+/// Итог пересчёта: счётчики и, если нужен, список с группами.
+struct Computed {
+    counts: Counts,
+    list: Option<Arranged>,
+}
+
+impl Job {
+    fn run(self, cache: &Cache) -> Computed {
+        let days = Days::now();
+        let folders = matches!(self.scan, Scan::Account(_));
+        let index: HashMap<&str, usize> = self.order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+        let mut counts = Counts::default();
+        let mut hits = Vec::new();
+        let scanned = cache.scan(&self.scan, |row, to| {
+            let f = Facts::of(&self.me, &row, &to);
+            let mut pass = counts.add(&self.query.criteria, &f, &row.keywords);
+            if !pass && self.server_hits.contains(&row.id) {
+                pass = true;
+                counts.shown += 1;
+            }
+            if self.own && pass {
+                let folder = if folders { row.mailbox_ids.iter().filter_map(|m| index.get(m.as_str())).min().copied() } else { Some(0) };
+                if let Some(folder) = folder {
+                    hits.push(Hit::of(&row, folder));
+                }
+            }
+            true
+        });
+        if let Err(e) = scanned {
+            tracing::warn!("filters: {e}");
+        }
+        let list = self.own.then(|| arrange(hits, self.query.sort, folders.then_some(self.order.as_slice()), &days));
+        Computed { counts, list }
+    }
+}
+
+/// Откуда группы списка при перечитывании.
+enum Groups {
+    None,
+    /// Папка по дате: группы по датам из числа писем не раньше начала каждой (`count_since`).
+    Days(String),
+    /// Посчитаны вместе со своим набором писем.
+    Fixed(Vec<(Group, usize)>),
+}
+
+impl Groups {
+    fn read(&self, cache: &Cache, count: usize) -> Vec<(Group, usize)> {
+        match self {
+            Groups::None => Vec::new(),
+            Groups::Days(mb) => Days::now().groups(count, |t| cache.count_since(mb, t).unwrap_or(0)),
+            Groups::Fixed(g) => g.clone(),
+        }
+    }
 }
 
 /// Догрузка папки: в кэше первые страницы, остальное — с сервера, когда прокрутка подходит к концу.
@@ -245,8 +346,14 @@ pub(crate) fn reselect(id: Option<&str>, offset: usize, rows: &[EmailRow], count
 }
 
 impl MailList {
-    pub(crate) fn new(cache: Cache) -> Self {
-        Self {
+    pub(crate) fn new(cache: Cache, filters: Entity<FilterModel>, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![
+            cx.subscribe(&filters, |this, _, _: &Changed, cx| this.on_filters(cx)),
+            // Панель и закладки — из модели: её перерисовка — и списка (закладки, чип, «N из M»).
+            cx.observe(&filters, |_, _, cx| cx.notify()),
+        ];
+        let identity = vec![(postman_demo::ME.to_owned(), postman_demo::ME_NAME.to_owned())];
+        let mut list = Self {
             flags: FlagWriter::new(cache.clone()),
             cache,
             mailbox: None,
@@ -258,7 +365,7 @@ impl MailList {
             pending_open: None,
             visible: 0..30,
             selected: None,
-            scroll: UniformListScrollHandle::new(),
+            scroll: VirtualListScrollHandle::new(),
             positions: Positions::default(),
             confirm: None,
             more: More::default(),
@@ -267,7 +374,192 @@ impl MailList {
             scheduled: HashMap::new(),
             names: HashMap::new(),
             row_h: ROW_HEIGHT,
+            filters,
+            query: Query::default(),
+            view: None,
+            groups: Vec::new(),
+            collapsed: HashSet::new(),
+            layout: Layout::default(),
+            sizes: Rc::new(Vec::new()),
+            sizes_for: None,
+            compute_gen: 0,
+            computing: false,
+            me: Me::default(),
+            identity,
+            server_hits: Arc::new(HashSet::new()),
+            order: Vec::new(),
+            sort_open: false,
+            _subscriptions: subscriptions,
+        };
+        list.me = list.who_am_i();
+        list.share_categories(cx);
+        list
+    }
+
+    // --- фильтры (S5-03) ---
+
+    fn who_am_i(&self) -> Me {
+        Me::new(self.identity.iter().map(|(a, _)| a), self.identity.iter().map(|(_, n)| n))
+    }
+
+    /// Мой адрес и мои адреса отправителя (живой ящик): кто я для упоминаний, «Мне» и внешних.
+    pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
+        use postman_core::sync::Event;
+        match ev {
+            Event::Me { address, .. } => {
+                self.identity.retain(|(a, _)| !a.eq_ignore_ascii_case(&address.email));
+                self.identity.insert(0, (address.email.clone(), address.name.clone()));
+            }
+            Event::Senders(list) => {
+                for s in list.iter().filter(|s| s.account.is_none()) {
+                    if !self.identity.iter().any(|(a, _)| a.eq_ignore_ascii_case(&s.address.email)) {
+                        self.identity.push((s.address.email.clone(), s.address.name.clone()));
+                    }
+                }
+            }
+            _ => return,
         }
+        let me = self.who_am_i();
+        if me != self.me {
+            self.me = me;
+            self.recompute(cx);
+        }
+    }
+
+    /// Живой ящик: до `Event::Me` я неизвестен (демо-владелец — не я).
+    pub(crate) fn forget_me(&mut self, cx: &mut Context<Self>) {
+        self.identity.clear();
+        self.me = Me::default();
+        self.recompute(cx);
+    }
+
+    /// Сервер нашёл письма по фильтрам «Все папки» (они уже в кэше): пересчитать с ними.
+    pub(crate) fn set_server_hits(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        self.server_hits = Arc::new(ids.into_iter().collect());
+        self.recompute(cx);
+    }
+
+    /// Категории своей таблицы — панели фильтров.
+    fn share_categories(&self, cx: &mut Context<Self>) {
+        let cats: Vec<(String, String, String)> = self
+            .labels
+            .for_account(None)
+            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.color.clone())).collect())
+            .unwrap_or_default();
+        self.filters.update(cx, |m, cx| {
+            if m.categories != cats {
+                m.set(cx, |m| m.categories = cats);
+            }
+        });
+    }
+
+    /// Условия фильтров изменились: пересчитать, список — сверху.
+    fn on_filters(&mut self, cx: &mut Context<Self>) {
+        let query = self.filters.read(cx).query.clone();
+        if query == self.query {
+            return;
+        }
+        // Другие условия — другой набор: прежний не показывать как новый, прокрутка — сверху.
+        let own = query.own_list();
+        self.query = query;
+        self.server_hits = Arc::new(HashSet::new());
+        if !own {
+            self.view = None;
+        }
+        self.selected = None;
+        self.set_offset_y(0.);
+        self.visible = rows_at(0., self.visible.len(), self.row_h);
+        self.reload();
+        self.recompute(cx);
+        cx.notify();
+    }
+
+    /// Что перебирать для счётчиков: открытая папка или все папки её аккаунта.
+    fn scan_target(&self) -> Option<Scan> {
+        let mb = self.mailbox.as_deref()?;
+        Some(match self.query.scope {
+            Where::Folder => Scan::Mailbox(mb.to_owned()),
+            Where::All => Scan::Account(postman_cache::account_of(mb).map(str::to_owned)),
+        })
+    }
+
+    /// Пересчитать счётчики и (если нужен) свой набор писем — в фоне; поток интерфейса кэш не перебирает.
+    pub(crate) fn recompute(&mut self, cx: &mut Context<Self>) {
+        self.compute_gen += 1;
+        let generation = self.compute_gen;
+        let Some(scan) = self.scan_target() else {
+            self.computing = false;
+            return;
+        };
+        self.computing = true;
+        let job = Job {
+            scan,
+            query: self.query.clone(),
+            me: self.me.clone(),
+            server_hits: self.server_hits.clone(),
+            order: self.order.clone(),
+            own: self.query.own_list(),
+        };
+        let cache = self.cache.clone();
+        let task = cx.background_spawn(async move { job.run(&cache) });
+        cx.spawn(async move |this, cx| {
+            let out = task.await;
+            let _ = this.update(cx, |l, cx| l.computed(generation, out, cx));
+        })
+        .detach();
+    }
+
+    fn computed(&mut self, generation: u64, out: Computed, cx: &mut Context<Self>) {
+        if generation != self.compute_gen {
+            return;
+        }
+        self.computing = false;
+        let counts = out.counts;
+        self.filters.update(cx, |m, cx| {
+            if m.counts != counts {
+                m.set(cx, |m| m.counts = counts);
+            }
+        });
+        match out.list {
+            Some((ids, groups)) => {
+                self.view = Some(Arc::new(ids));
+                self.groups = groups;
+            }
+            None if self.view.is_some() => self.view = None,
+            None => return,
+        }
+        self.reread(None, cx);
+    }
+
+    /// Откуда группы: поиск — без групп; свой набор — посчитанные; папка по дате — по датам.
+    fn group_source(&self) -> Groups {
+        match (&self.search_ids, &self.view, &self.mailbox) {
+            (Some(_), _, _) => Groups::None,
+            (None, Some(_), _) => Groups::Fixed(self.groups.clone()),
+            (None, None, Some(mb)) if self.query.sort == Sort::Date => Groups::Days(mb.clone()),
+            _ => Groups::None,
+        }
+    }
+
+    /// Раскладка строк с заголовками групп — после смены числа писем, групп или свёрнутых.
+    fn relayout(&mut self) {
+        self.layout = Layout::new(&self.groups, self.count, &self.collapsed);
+        self.sizes_for = None;
+    }
+
+    /// Щелчок по заголовку группы: свернуть или развернуть.
+    pub(crate) fn toggle_group(&mut self, seg: usize, cx: &mut Context<Self>) {
+        let Some(g) = self.layout.segs().get(seg).and_then(|s| s.group.clone()) else { return };
+        if !self.collapsed.remove(&g) {
+            self.collapsed.insert(g);
+        }
+        self.relayout();
+        cx.notify();
+    }
+
+    /// Закладки быстрых фильтров видны (не скрыты, не поиск).
+    fn quick_shown(&self, cx: &App) -> bool {
+        !self.filters.read(cx).quick_hidden && self.search_ids.is_none()
     }
 
     /// Отложенные отправки с сервера (`Event::Scheduled`).
@@ -279,6 +571,7 @@ impl MailList {
     /// Таблицы категорий учётной записи (прочитаны из файла): строки — с их именами и цветами.
     pub(crate) fn set_labels(&mut self, book: Book, cx: &mut Context<Self>) {
         self.labels = book;
+        self.share_categories(cx);
         cx.notify();
     }
 
@@ -315,6 +608,7 @@ impl MailList {
     pub(crate) fn set_rights(&mut self, mailboxes: &[MailboxRow]) {
         self.names = mailboxes.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
         self.rights = mailboxes.iter().filter(|m| m.rights != Rights::ALL).map(|m| (m.id.clone(), m.rights)).collect();
+        self.order = mailboxes.iter().map(|m| m.id.clone()).collect();
     }
 
     pub(crate) fn show_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
@@ -322,9 +616,21 @@ impl MailList {
         if self.mailbox.as_deref() != Some(id.as_str()) {
             self.more = More::default();
         }
+        // Папка выбрана в дереве — искать в ней (не «Все папки»); фильтры остаются.
+        let name = self.names.get(&id).cloned().unwrap_or_default();
+        self.query.scope = Where::Folder;
+        self.filters.update(cx, |m, cx| {
+            m.set(cx, |m| {
+                m.folder = name;
+                m.query.scope = Where::Folder;
+            })
+        });
+        self.view = None;
+        self.server_hits = Arc::new(HashSet::new());
         self.switch_view(Some(id), None);
         self.selected = None;
         self.reload();
+        self.recompute(cx);
         cx.notify();
     }
 
@@ -360,13 +666,11 @@ impl MailList {
     }
 
     fn offset_y(&self) -> f32 {
-        f32::from(self.scroll.0.borrow().base_handle.offset().y)
+        f32::from(self.scroll.offset().y)
     }
 
     fn set_offset_y(&self, y: f32) {
-        let mut s = self.scroll.0.borrow_mut();
-        s.deferred_scroll_to_item = None;
-        s.base_handle.set_offset(point(px(0.), px(y)));
+        self.scroll.set_offset(point(px(0.), px(y)));
     }
 
     pub(crate) fn selected_row(&self) -> Option<EmailRow> {
@@ -395,27 +699,39 @@ impl MailList {
         if let Some(ids) = &mut self.search_ids {
             ids.retain(|x| x != id);
         }
+        // Свой набор (фильтры): письмо уходит из него и из своей группы.
+        if self.search_ids.is_none()
+            && let Some(view) = &mut self.view
+        {
+            if let Some(g) = self.layout.group_of(index).cloned()
+                && let Some((_, n)) = self.groups.iter_mut().find(|(x, _)| *x == g)
+            {
+                *n = n.saturating_sub(1);
+            }
+            Arc::make_mut(view).retain(|x| x != id);
+        }
         self.confirm = None;
         self.reread(Some(index), cx);
     }
 
     pub(crate) fn reload(&mut self) {
-        self.count = match (&self.search_ids, &self.mailbox) {
-            (Some(ids), _) => ids.len(),
-            (None, Some(mb)) => self.cache.count(mb).unwrap_or(0),
-            _ => 0,
-        };
+        let source = self.page_source();
+        self.count = source.count(&self.cache);
+        self.groups = self.group_source().read(&self.cache, self.count);
+        self.relayout();
         // Первое окно — сразу: первый кадр папки рисуется со строками, а не с заглушками.
         self.page_gen += 1;
         self.page_pending = None;
         self.pending_open = None;
         let (offset, limit) = page_window(&self.visible);
-        self.rows = (offset, self.page_source().read(&self.cache, offset, limit));
+        self.rows = (offset, source.read(&self.cache, offset, limit));
     }
 
     /// Данные изменились (синхронизация): число писем и окно строк — в фоне, выделение остаётся на том же письме.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reread(None, cx);
+        // Счётчики фильтров и свой набор — по новым данным.
+        self.recompute(cx);
     }
 
     /// Перечитать в фоне; `select` — затем выделить и открыть письмо с этим номером (иначе — то же письмо).
@@ -425,16 +741,21 @@ impl MailList {
         self.page_gen += 1;
         let generation = self.page_gen;
         self.page_pending = Some(offset..offset + limit);
-        let (source, cache) = (self.page_source(), self.cache.clone());
-        let task = cx.background_spawn(async move { (source.count(&cache), source.read(&cache, offset, limit)) });
+        let (source, groups, cache) = (self.page_source(), self.group_source(), self.cache.clone());
+        let task = cx.background_spawn(async move {
+            let count = source.count(&cache);
+            (count, groups.read(&cache, count), source.read(&cache, offset, limit))
+        });
         cx.spawn(async move |this, cx| {
-            let (count, rows) = task.await;
+            let (count, groups, rows) = task.await;
             let _ = this.update(cx, |m, cx| {
                 if m.page_gen != generation {
                     return;
                 }
                 m.page_pending = None;
                 m.count = count;
+                m.groups = groups;
+                m.relayout();
                 m.selected = reselect(selected.as_deref(), offset, &rows, count);
                 m.rows = (offset, rows);
                 if let Some(i) = select {
@@ -495,11 +816,14 @@ impl MailList {
         }
     }
 
-    /// Откуда читать строки списка: папка или результаты поиска.
+    /// Откуда читать строки списка: результаты поиска, свой набор по фильтрам или папка. Свой набор ещё
+    /// считается — пока страницы папки («Все папки» — пусто, чтобы не выдать папку за все).
     pub(crate) fn page_source(&self) -> PageSource {
-        match (&self.search_ids, &self.mailbox) {
-            (Some(ids), _) => PageSource::Ids(ids.clone()),
-            (None, Some(mb)) => PageSource::Mailbox(mb.clone()),
+        match (&self.search_ids, &self.view, &self.mailbox) {
+            (Some(ids), _, _) => PageSource::Ids(Arc::new(ids.clone())),
+            (None, Some(view), _) => PageSource::Ids(view.clone()),
+            (None, None, Some(_)) if self.query.scope == Where::All => PageSource::Empty,
+            (None, None, Some(mb)) => PageSource::Mailbox(mb.clone()),
             _ => PageSource::Empty,
         }
     }
@@ -517,8 +841,15 @@ impl MailList {
         if self.confirm.as_ref().is_some_and(|(c, _)| *c != i) {
             self.confirm = None;
         }
+        // Письмо в свёрнутой группе — развернуть её.
+        if self.layout.item_of(i).is_none()
+            && let Some(g) = self.layout.group_of(i).cloned()
+        {
+            self.collapsed.remove(&g);
+            self.relayout();
+        }
         self.selected = Some(i);
-        self.scroll.scroll_to_item(i, ScrollStrategy::Center);
+        self.scroll.scroll_to_item(self.layout.item_of(i).unwrap_or(i), ScrollStrategy::Center);
         self.ensure(i..i + 1, cx);
         cx.notify();
         let Some(row) = self.row(i).cloned() else {
@@ -550,6 +881,10 @@ impl MailList {
     pub(crate) fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let cur = self.selected.map_or(0, |i| i as isize);
         let next = if self.selected.is_none() { 0 } else { (cur + delta).max(0) as usize };
+        let next = next.min(self.count.saturating_sub(1));
+        // Свёрнутые группы пропускаются: дальше по ходу, а если там нет — назад.
+        let forward = delta >= 0;
+        let Some(next) = self.layout.visible(next, forward).or_else(|| self.layout.visible(next, !forward)) else { return };
         self.select(next, cx);
     }
 
@@ -582,8 +917,114 @@ impl MailList {
 
     /// Замер: строка `i` — первая видимая.
     pub(crate) fn scroll_to_top(&mut self, i: usize, cx: &mut Context<Self>) {
-        self.scroll.scroll_to_item(i, ScrollStrategy::Top);
+        self.scroll.scroll_to_item(self.layout.item_of(i).unwrap_or(i), ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// Высоты элементов: пересчёт, когда сменились раскладка, плотность или видимость закладок.
+    fn sizes(&mut self, tail: bool) -> Rc<Vec<Size<Pixels>>> {
+        let key = (self.row_h, tail);
+        if self.sizes_for != Some(key) {
+            self.sizes = Rc::new(self.layout.sizes(self.row_h, HEADER_H, if tail { QUICK_H } else { 0. }));
+            self.sizes_for = Some(key);
+        }
+        self.sizes.clone()
+    }
+
+    /// Строка над списком: папка или «Все папки», чип фильтров панели с «×», «N из M», сортировка.
+    fn header(&self, l: &Look, cx: &mut Context<Self>) -> Stateful<Div> {
+        let m = self.filters.read(cx);
+        let title = match (&self.search_ids, &self.mailbox) {
+            (Some(_), _) => tr!("frame-list-search"),
+            _ if self.query.scope == Where::All => tr!("filters-all-folders"),
+            (None, Some(id)) => self.names.get(id).cloned().unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let caption = |text: String| div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(text);
+        let filtered = self.search_ids.is_none() && !self.query.criteria.is_empty();
+        let summary = if filtered && m.counts.total > 0 {
+            tr!("filters-shown", n = self.count, total = m.counts.total)
+        } else {
+            tr!("frame-list-count", n = self.count)
+        };
+        let chip = m.chip_text().filter(|_| self.search_ids.is_none()).map(|text| {
+            let model = self.filters.clone();
+            div()
+                .flex()
+                .flex_initial()
+                .min_w_0()
+                .items_center()
+                .gap(px(4.))
+                .h(px(24.))
+                .pl(px(8.))
+                .pr(px(2.))
+                .rounded(px(12.))
+                .bg(l.fill())
+                .text_size(l.px(Metric::TypeCaption))
+                .child(div().min_w_0().truncate().child(text))
+                .child(
+                    div()
+                        .id("chip-reset")
+                        .size(px(20.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(10.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(l.hover()))
+                        .child(crate::chrome::icon(crate::chrome::glyph::CLOSE, 9.))
+                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("filters-chip-reset")).build(window, cx))
+                        .on_click(move |_, _, cx| model.update(cx, |m, cx| m.change(cx, |q| q.criteria.clear_panel()))),
+                )
+        });
+        let sort = div()
+            .id("sort-button")
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(6.))
+            .rounded(l.px(Metric::RadiusControl))
+            .text_size(l.px(Metric::TypeCaption))
+            .text_color(l.text2())
+            .cursor_pointer()
+            .when(self.sort_open, |d| d.bg(l.pressed()))
+            .hover(|d| d.bg(l.hover()))
+            .child(crate::chrome::icon(crate::chrome::glyph::SORT, 12.))
+            .child(tr!(crate::filters::sort_key(self.query.sort)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sort_open = !this.sort_open;
+                cx.notify();
+            }));
+        div()
+            .id("list-header")
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(14.))
+            .pr(px(6.))
+            .border_b_1()
+            .border_color(l.border())
+            .child(div().flex_none().max_w(px(160.)).truncate().font_weight(FontWeight::SEMIBOLD).child(title))
+            .children(chip)
+            .child(caption(summary))
+            .child(div().flex_1())
+            .child(sort)
+    }
+
+    /// Заголовок группы `seg` раскладки.
+    fn group_el(&self, seg: usize, l: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let Some(s) = self.layout.segs().get(seg) else { return div().into_any_element() };
+        let Some(g) = &s.group else { return div().into_any_element() };
+        let label = crate::filters::group_label(g, &self.names);
+        let folder = matches!(g, Group::Folder(_));
+        crate::filters::group_header(seg, label, s.rows.len(), folder, s.collapsed, l)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(seg, cx)))
+            .into_any_element()
     }
 }
 
@@ -618,61 +1059,106 @@ impl Render for MailList {
                 .child(button("purge-yes", tr!("actions-purge-yes"), true))
                 .child(button("purge-no", tr!("actions-purge-no"), false))
         });
-        let title = match (&self.search_ids, &self.mailbox) {
-            (Some(_), _) => tr!("frame-list-search"),
-            (None, Some(id)) => self.names.get(id).cloned().unwrap_or_default(),
-            (None, None) => String::new(),
-        };
-        let caption = |text: String| div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(text);
-        let header = div()
-            .h(px(40.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .pl(px(14.))
-            .pr(px(10.))
-            .border_b_1()
-            .border_color(l.border())
-            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(caption(tr!("frame-list-count", n = self.count)))
-            .child(div().flex_1())
-            .child(caption(tr!("frame-list-sort")));
-        let list = div().relative().flex_1().min_h_0().child(
-            uniform_list(
-                "messages",
-                self.count,
-                cx.processor(|this, range: Range<usize>, _window, cx| {
-                    // Одну строку gpui запрашивает, чтобы измерить высоту, — это не видимая область.
-                    if range.len() > 1 {
-                        this.visible = range.clone();
-                        this.ensure(range.clone(), cx);
-                        this.ask_more(range.end, cx);
-                    }
-                    let l = look(cx);
-                    range
-                        .map(|i| match this.row(i).cloned() {
-                            Some(r) => {
-                                let mut labels = crate::labels::row_labels(&this.labels, &r);
-                                // Ждёт отправки — первой меткой, нейтральной (DESIGN.md: служебные — серые).
-                                let now = jiff::Timestamp::now().as_second();
-                                if let Some(&at) = this.scheduled.get(&r.id).filter(|&&at| at > now) {
-                                    let text = tr!("send-scheduled-row", time = crate::send_later::short(at));
-                                    labels.chips.insert(0, (text, postman_core::palette::NEUTRAL));
-                                }
-                                list_row(i, &r, labels, this.selected == Some(i), &l, cx)
+        let header = self.header(&l, cx);
+        let quick = self.quick_shown(cx);
+        let sizes = self.sizes(quick);
+        let empty = self.count == 0 && self.search_ids.is_none() && self.view.is_some() && !self.query.criteria.is_empty();
+        let list = v_virtual_list(cx.entity(), "messages", sizes, |this, items: Range<usize>, _window, cx| {
+            // Один элемент gpui запрашивает, чтобы измерить ширину, — это не видимая область.
+            if items.len() > 1 {
+                let rows = this.layout.rows_in(items.clone());
+                this.visible = rows.clone();
+                if !rows.is_empty() {
+                    this.ensure(rows.clone(), cx);
+                }
+                this.ask_more(rows.end, cx);
+            }
+            let l = look(cx);
+            items
+                .map(|item| match this.layout.slot(item) {
+                    Some(Slot::Header(seg)) => this.group_el(seg, &l, cx),
+                    Some(Slot::Row(i)) => match this.row(i).cloned() {
+                        Some(r) => {
+                            let mut labels = crate::labels::row_labels(&this.labels, &r);
+                            // Ждёт отправки — первой меткой, нейтральной (DESIGN.md: служебные — серые).
+                            let now = jiff::Timestamp::now().as_second();
+                            if let Some(&at) = this.scheduled.get(&r.id).filter(|&&at| at > now) {
+                                let text = tr!("send-scheduled-row", time = crate::send_later::short(at));
+                                labels.chips.insert(0, (text, postman_core::palette::NEUTRAL));
                             }
-                            None => empty_row(i, &l),
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .track_scroll(&self.scroll)
-            .size_full(),
-        );
+                            list_row(i, &r, labels, this.selected == Some(i), &l, cx)
+                        }
+                        None => empty_row(i, &l),
+                    },
+                    // Место под закладками быстрых фильтров: последнее письмо прокручивается над ними.
+                    None => div().id(("tail", item)).w_full().h(px(QUICK_H)).into_any_element(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.scroll)
+        .size_full();
         // Полоса прокрутки видна всегда и перетаскивается; кадры — только пока её двигают.
-        let list = list.child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always));
-        div().size_full().flex().flex_col().text_color(l.text()).child(header).children(confirm).child(list)
+        // Закладки быстрых фильтров рисует экран почты поверх карточки (`Mailer::quick_overlay`): панель по
+        // наведению шире списка. Здесь — только место под ними в конце списка.
+        let mut body = div().relative().flex_1().min_h_0();
+        body = if empty {
+            let model = self.filters.clone();
+            body.child(
+                div()
+                    .pt(px(40.))
+                    .px(px(24.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_color(l.text2())
+                    .child(tr!("filters-empty"))
+                    .child(
+                        div()
+                            .id("empty-reset")
+                            .text_color(l.accent_text())
+                            .cursor_pointer()
+                            .child(tr!("filters-chip-reset"))
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |m, cx| {
+                                    m.change(cx, |q| {
+                                        q.criteria.clear_panel();
+                                        q.criteria.quick.clear();
+                                    })
+                                })
+                            }),
+                    ),
+            )
+        } else {
+            body.child(list).child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always))
+        };
+        let sort_menu = self.sort_open.then(|| {
+            let menu = crate::filters::sort_menu(self.query.sort, &l, |s| match s {
+                Sort::Date => Box::new(crate::commands::view::SortByDate),
+                Sort::Sender => Box::new(crate::commands::view::SortBySender),
+                Sort::Size => Box::new(crate::commands::view::SortBySize),
+            });
+            div()
+                .id("sort-menu")
+                .absolute()
+                .top(px(38.))
+                .right(px(6.))
+                .child(menu)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.sort_open = false;
+                    cx.notify();
+                }))
+        });
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .text_color(l.text())
+            .child(header)
+            .children(confirm)
+            .child(body)
+            .children(sort_menu)
     }
 }
 
@@ -683,7 +1169,7 @@ pub(crate) fn page_window(range: &Range<usize>) -> (usize, usize) {
 
 pub(crate) enum PageSource {
     Mailbox(String),
-    Ids(Vec<String>),
+    Ids(Arc<Vec<String>>),
     Empty,
 }
 

@@ -223,12 +223,27 @@ pub struct BodyRow {
     pub attachments: Vec<AttachmentRow>,
 }
 
+/// Получатели письма (S5-03): адреса To и Cc в нижнем регистре — быстрый фильтр «Мне». Отдельно от
+/// [`EmailRow`]: строке списка они не нужны, а фильтрам — без чтения тела.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Recipients {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+}
+
+/// Где перебирать письма ([`Cache::scan`]): одна папка (новые сверху) или все письма аккаунта (`None` — основного).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scan {
+    Mailbox(String),
+    Account(Option<String>),
+}
+
 /// Blob'ы больше этого не кэшируются (их скачивают заново по требованию).
 pub const MAX_CACHED_BLOB: usize = 16 * 1024 * 1024;
 
 /// Меняется при любом изменении формата значений или ключей. 2 — права папок и аккаунты (S4-06);
-/// 3 — ключевые слова писем и их индекс (S5-02).
-const FORMAT_VERSION: u64 = 3;
+/// 3 — ключевые слова писем и их индекс (S5-02); 4 — получатели писем (S5-03, [`Recipients`]).
+const FORMAT_VERSION: u64 = 4;
 
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const MAILBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("mailbox");
@@ -243,6 +258,8 @@ const TRUSTED: TableDefinition<&str, ()> = TableDefinition::new("trusted_sender"
 const STATE: TableDefinition<&str, &str> = TableDefinition::new("sync_state");
 /// Общие ящики: id аккаунта → [`AccountRow`].
 const ACCOUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("account");
+/// id письма → [`Recipients`] (S5-03).
+const RECIPIENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("recipients");
 /// (ключевое слово, папка или «все папки», -дата, id) → () — письма с меткой в папке, новые сверху (S5-02).
 const BY_KEYWORD: TableDefinition<(&str, &str, i64, &str), ()> = TableDefinition::new("by_keyword");
 /// (ключевое слово, папка или «все папки») → число писем: «N из M» без обхода диапазона.
@@ -353,6 +370,7 @@ impl Cache {
         tx.open_table(ACCOUNT)?;
         tx.open_table(BY_KEYWORD)?;
         tx.open_table(KEYWORD_COUNT)?;
+        tx.open_table(RECIPIENTS)?;
         if !threads_indexed {
             let email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_THREAD)?;
@@ -433,6 +451,7 @@ impl Cache {
             tx.open_table(COUNT)?.retain(|k, _| !mine(k))?;
             tx.open_table(STATE)?.retain(|k, _| !mine(k))?;
             tx.open_table(BLOB)?.retain(|k, _| !mine(k))?;
+            tx.open_table(RECIPIENTS)?.retain(|k, _| !mine(k))?;
         }
         tx.commit()?;
         Ok(())
@@ -525,7 +544,9 @@ impl Cache {
             let mut by_kw = tx.open_table(BY_KEYWORD)?;
             let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
             let mut threads = tx.open_table(BY_THREAD)?;
+            let mut recipients = tx.open_table(RECIPIENTS)?;
             for id in ids {
+                recipients.remove(id.as_str())?;
                 let old: Option<EmailRow> = email.remove(id.as_str())?.map(|v| dec(v.value())).transpose()?;
                 let Some(old) = old else { continue };
                 threads.remove((old.thread_id.as_str(), old.received_at, id.as_str()))?;
@@ -736,6 +757,75 @@ impl Cache {
         Ok(out)
     }
 
+    /// Получатели писем (`id`, [`Recipients`]) — синхронизация пишет их вместе со строками.
+    pub fn set_recipients(&self, rows: &[(String, Recipients)]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(RECIPIENTS)?;
+            for (id, r) in rows {
+                t.insert(id.as_str(), enc(r)?.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Получатели письма; не записаны — пусто.
+    pub fn recipients(&self, id: &str) -> Result<Recipients> {
+        let tx = self.db.begin_read()?;
+        Ok(tx.open_table(RECIPIENTS)?.get(id)?.map(|v| dec(v.value())).transpose()?.unwrap_or_default())
+    }
+
+    /// Перебрать письма папки (новые сверху) или аккаунта (в порядке ключей) с их получателями — одним чтением,
+    /// без списка в памяти (фильтры и их счётчики, S5-03). `f` вернула `false` — остановиться.
+    pub fn scan(&self, scan: &Scan, mut f: impl FnMut(EmailRow, Recipients) -> bool) -> Result<()> {
+        let tx = self.db.begin_read()?;
+        let email = tx.open_table(EMAIL)?;
+        let recipients = tx.open_table(RECIPIENTS)?;
+        let to = |id: &str| -> Result<Recipients> {
+            Ok(recipients.get(id)?.map(|v| dec(v.value())).transpose()?.unwrap_or_default())
+        };
+        match scan {
+            Scan::Mailbox(mb) => {
+                let by = tx.open_table(BY_MAILBOX)?;
+                for k in by.range((mb.as_str(), i64::MIN, "")..=(mb.as_str(), i64::MAX, MAX_ID))? {
+                    let (k, _) = k?;
+                    let id = k.value().2;
+                    let Some(v) = email.get(id)? else { continue };
+                    if !f(dec(v.value())?, to(id)?) {
+                        break;
+                    }
+                }
+            }
+            Scan::Account(account) => {
+                let prefix = scoped(account.as_deref(), "");
+                for r in email.range(prefix.as_str()..)? {
+                    let (k, v) = r?;
+                    let id = k.value();
+                    if account_of(id) != account.as_deref() {
+                        // Свои письма — без префикса, вперемешку с ключами общих ящиков: пропустить чужие;
+                        // общий ящик — подряд по префиксу: дальше чужие.
+                        if account.is_some() {
+                            break;
+                        }
+                        continue;
+                    }
+                    if !f(dec(v.value())?, to(id)?) {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Сколько писем папки получено не раньше `since` (Unix-секунды) — группы по датам без чтения строк.
+    pub fn count_since(&self, mailbox_id: &str, since: i64) -> Result<usize> {
+        let tx = self.db.begin_read()?;
+        let by = tx.open_table(BY_MAILBOX)?;
+        Ok(by.range((mailbox_id, i64::MIN, "")..=(mailbox_id, -since, MAX_ID))?.count())
+    }
+
     /// Окно писем с ключевым словом в папке (или во всех папках аккаунта), новые сверху.
     pub fn keyword_page(&self, keyword: &str, mailbox: &str, offset: usize, limit: usize) -> Result<Vec<EmailRow>> {
         let tx = self.db.begin_read()?;
@@ -841,6 +931,50 @@ mod tests {
 
     fn ids(rows: Vec<EmailRow>) -> Vec<String> {
         rows.into_iter().map(|e| e.id).collect()
+    }
+
+    /// Фильтры (S5-03): перебор папки и аккаунта с получателями, группы по датам без чтения строк.
+    #[test]
+    fn scan_with_recipients_and_count_since() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_emails(&[email("a", 10, &["in"]), email("b", 30, &["in"]), email("c", 20, &["x"]), email("j/d", 5, &["j/in"])])
+            .unwrap();
+        let me = Recipients { to: vec!["me@x".into()], cc: Vec::new() };
+        c.set_recipients(&[("b".into(), me.clone())]).unwrap();
+        assert_eq!(c.recipients("b").unwrap(), me);
+        assert_eq!(c.recipients("a").unwrap(), Recipients::default());
+        let mut got = Vec::new();
+        c.scan(&Scan::Mailbox("in".into()), |r, to| {
+            got.push((r.id, to.to.len()));
+            true
+        })
+        .unwrap();
+        assert_eq!(got, [("b".to_string(), 1), ("a".to_string(), 0)]);
+        let all = |acc: Option<&str>| {
+            let mut out = Vec::new();
+            c.scan(&Scan::Account(acc.map(String::from)), |r, _| {
+                out.push(r.id);
+                true
+            })
+            .unwrap();
+            out.sort();
+            out
+        };
+        assert_eq!(all(None), ["a", "b", "c"]);
+        assert_eq!(all(Some("j")), ["j/d"]);
+        // Остановка по `false`.
+        let mut n = 0;
+        c.scan(&Scan::Account(None), |_, _| {
+            n += 1;
+            false
+        })
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(c.count_since("in", 20).unwrap(), 1);
+        assert_eq!(c.count_since("in", 10).unwrap(), 2);
+        assert_eq!(c.count_since("in", 31).unwrap(), 0);
+        c.delete_emails(&["b".into()]).unwrap();
+        assert_eq!(c.recipients("b").unwrap(), Recipients::default());
     }
 
     #[test]

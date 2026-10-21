@@ -71,11 +71,17 @@ enum Scene {
     /// Свои «Входящие» с полосами категорий и метками (S5-02): первому письму без меток клавишами 1 и 3 (как
     /// `mail.categorize`) поставлены «Клиенты» и «Тендеры», оно открыто.
     Labels,
+    /// Фильтры (S5-03): панель фильтров на месте папок, «Все папки», «Непрочитанные» — чип, «N из M», группы
+    /// по папкам.
+    Filters,
+    /// Быстрые фильтры (S5-03): закладки «Угрозы» и «Срок» включены (ИЛИ), панель по наведению открыта,
+    /// группы по датам.
+    Quick,
     /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
     Thread,
 }
 
-const SCENES: [Scene; 19] = [
+const SCENES: [Scene; 21] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -94,6 +100,8 @@ const SCENES: [Scene; 19] = [
     Scene::Rules,
     Scene::Shared,
     Scene::Labels,
+    Scene::Filters,
+    Scene::Quick,
     // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
     Scene::Thread,
 ];
@@ -138,6 +146,8 @@ impl Scene {
             Scene::Rules => "rules",
             Scene::Shared => "shared",
             Scene::Labels => "labels",
+            Scene::Filters => "filters",
+            Scene::Quick => "quick",
             Scene::Thread => "thread",
         }
     }
@@ -338,8 +348,39 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 l.toggle_category(3, cx);
             });
         }
+        Scene::Filters => {
+            use postman_core::filters::Check;
+            m.set_section(Section::Mail, cx);
+            let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes);
+            let Some(id) = inbox else { return Err("no inbox".into()) };
+            m.open_mailbox(id, cx);
+            m.filters.update(cx, |f, cx| {
+                f.set(cx, |f| f.panel = true);
+                f.change(cx, |q| {
+                    q.scope = crate::filters::Where::All;
+                    q.criteria.toggle_check(Check::Unread);
+                });
+            });
+        }
+        Scene::Quick => {
+            use postman_core::filters::Quick;
+            m.filters.update(cx, |f, cx| {
+                f.set(cx, |f| f.panel = false);
+                f.change(cx, |q| {
+                    q.scope = crate::filters::Where::Folder;
+                    q.criteria.clear_panel();
+                    q.criteria.toggle_quick(Quick::Threats);
+                    q.criteria.toggle_quick(Quick::Due);
+                });
+            });
+            // Панель закладок — как по наведению.
+            m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = true));
+        }
         Scene::Thread => {
             m.set_section(Section::Mail, cx);
+            // Без фильтров прошлых сцен.
+            m.reset_filters(cx);
+            m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = false));
             m.open_mailbox("inbox".into(), cx);
             let row = m.cache.rows_by_ids(&[postman_demo::CHAIN_OPEN.into()]).map_err(|e| e.to_string())?.pop();
             let Some(row) = row else { return Err("no demo conversation in the cache".into()) };
@@ -463,6 +504,26 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             labeled
                 && list.mailbox == crate::live::inbox(&m.folders.read(cx).mailboxes)
                 && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == id)
+        }
+        Scene::Filters => {
+            let f = m.filters.read(cx);
+            f.panel
+                && list.query.scope == crate::filters::Where::All
+                && !list.query.criteria.is_empty()
+                && list.view.is_some()
+                && !list.computing
+                && f.counts.total > 0
+                && rows_loaded
+        }
+        Scene::Quick => {
+            let f = m.filters.read(cx);
+            !f.panel
+                && list.query.scope == crate::filters::Where::Folder
+                && list.query.criteria.quick.len() == 2
+                && list.view.is_some()
+                && !list.computing
+                && f.quick_open
+                && (rows_loaded || list.count == 0)
         }
         Scene::Thread => {
             let r = m.reading.read(cx);

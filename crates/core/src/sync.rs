@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use std::sync::Arc;
 
-use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Rights, scoped, unscoped};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, scoped, unscoped};
 use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
@@ -801,7 +801,7 @@ async fn initial_load(
     for mb in order {
         notify(Event::Status(Status::Loading { mailbox: mb.name.clone() }));
         let page = acc.client.email_page(&mb.id, 0, INITIAL_PAGE).await?;
-        save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+        save_summaries(cache, index, &page.emails, acc.scope(), notify)?;
         state = page.state;
         notify(Event::EmailsChanged);
     }
@@ -832,7 +832,7 @@ async fn refresh(
         let ids: Vec<String> = ch.created.into_iter().chain(ch.updated).collect();
         if !ids.is_empty() {
             let (emails, _) = acc.client.email_get(&ids).await?;
-            save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+            save_summaries(cache, index, &emails, acc.scope(), notify)?;
         }
         let destroyed: Vec<String> = ch.destroyed.iter().map(|id| acc.key(id)).collect();
         cache.delete_emails(&destroyed).map_err(db_err)?;
@@ -906,7 +906,7 @@ async fn handle(
         Command::Query { filter, mailbox, ticket } => {
             let (acc, mb) = query_scope(accounts, mailbox.as_deref())?;
             let page = acc.client.filtered(&in_mailbox(mb, filter), SEARCH_LIMIT).await?;
-            save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+            save_summaries(cache, index, &page.emails, acc.scope(), notify)?;
             let ids = page.ids.iter().map(|id| acc.key(id)).collect();
             notify(Event::SearchResults { ticket, ids, total: page.total });
         }
@@ -986,7 +986,7 @@ async fn handle(
                 None => (&accounts.own, None),
             };
             let page = acc.client.search(&query, mb, SEARCH_LIMIT).await?;
-            save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+            save_summaries(cache, index, &page.emails, acc.scope(), notify)?;
             let ids = page.ids.iter().map(|id| acc.key(id)).collect();
             notify(Event::SearchResults { ticket, ids, total: page.total });
         }
@@ -1110,7 +1110,7 @@ async fn load_thread(
     let (ids, emails) = acc.client.thread(thread).await?;
     let keys: Vec<String> = ids.iter().map(|id| acc.key(id)).collect();
     let known = cache.rows_by_ids(&keys).map_err(db_err)?.len();
-    save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+    save_summaries(cache, index, &emails, acc.scope(), notify)?;
     if known < emails.len() {
         notify(Event::EmailsChanged);
     }
@@ -1153,7 +1153,7 @@ async fn load_more(
         p => p?,
     };
     let added = page.emails.len();
-    save(cache, index, page.emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify)?;
+    save_summaries(cache, index, &page.emails, acc.scope(), notify)?;
     Ok(added)
 }
 
@@ -1189,7 +1189,7 @@ async fn load_cards(client: &Client, notify: &impl Fn(Event)) {
 async fn restore(accounts: &Accounts, cache: &mut Cache, index: &Index, key: &str, notify: &impl Fn(Event)) {
     let restored = match accounts.locate(key) {
         Ok((acc, id)) => match acc.client.email_get(&[id.to_owned()]).await {
-            Ok((emails, _)) => save(cache, index, emails.iter().map(|e| email_row(e, acc.scope())).collect(), notify),
+            Ok((emails, _)) => save_summaries(cache, index, &emails, acc.scope(), notify),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
@@ -1383,6 +1383,27 @@ fn save(cache: &mut Cache, index: &Index, rows: Vec<EmailRow>, notify: &impl Fn(
         }
     }
     Ok(())
+}
+
+/// Краткие записи писем с сервера — в кэш: строки и получатели (S5-03, быстрый фильтр «Мне»).
+fn save_summaries(
+    cache: &mut Cache,
+    index: &Index,
+    emails: &[EmailSummary],
+    scope: Option<&str>,
+    notify: &impl Fn(Event),
+) -> postman_jmap::Result<()> {
+    let recipients: Vec<(String, Recipients)> = emails.iter().map(|e| (scoped(scope, &e.id), recipients(e))).collect();
+    save(cache, index, emails.iter().map(|e| email_row(e, scope)).collect(), notify)?;
+    cache.set_recipients(&recipients).map_err(db_err)
+}
+
+/// Адреса To и Cc письма в нижнем регистре.
+fn recipients(e: &EmailSummary) -> Recipients {
+    let list = |a: &Option<Vec<EmailAddress>>| {
+        a.iter().flatten().filter_map(|a| a.email.as_deref()).map(str::to_lowercase).collect::<Vec<_>>()
+    };
+    Recipients { to: list(&e.to), cc: list(&e.cc) }
 }
 
 fn db_err(e: postman_cache::Error) -> postman_jmap::Error {

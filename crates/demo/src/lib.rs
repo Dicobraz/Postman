@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Rights, scoped};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, scoped};
 
 /// Отправители демо-писем (имя, адрес); их же берёт заполнение ящика стенда (`postman-core`, пример `fill_stand`).
 pub const SENDERS: &[(&str, &str)] = &[
@@ -19,6 +19,12 @@ pub const PREVIEW: &str = "Коллеги, добрый день! Направл
 
 /// Владелец демо-ящика: участник демо-приглашений и календаря.
 pub const ME: &str = "me@corp.example";
+
+/// Начало письма с упоминанием владельца (S5-03, фильтр «Упоминания»).
+pub const MENTION: &str = "@Анна, посмотрите, пожалуйста, раздел рисков до отправки заказчику.";
+
+/// Рассылка отдела: письма ей — не «Мне» (S5-03).
+const TEAM: &str = "team@corp.example";
 
 /// Темы демо-писем.
 pub const SUBJECTS: &[&str] = &[
@@ -92,6 +98,7 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     let now = jiff::Timestamp::now().as_second();
     let mut at = now;
     let mut batch = Vec::with_capacity(5000);
+    let mut to = Vec::with_capacity(5000);
     for i in 0..n {
         at -= (next() % 3600) as i64;
         let (name, addr) = SENDERS[next() as usize % SENDERS.len()];
@@ -109,19 +116,23 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             subject: format!("{subject} {}", i % 997),
             from_name: name.into(),
             from_addr: addr.into(),
-            preview: PREVIEW.into(),
+            preview: if i % 13 == 2 { MENTION } else { PREVIEW }.into(),
             seen: i > 40 && next() % 5 != 0,
             flagged: next() % 50 == 0,
             has_attachment: next() % 7 == 0,
             size: 4096 + next() % 100_000,
             keywords: demo_keywords(i),
         });
+        to.push((format!("demo{i}"), demo_recipients(i)));
         if batch.len() == batch.capacity() {
             cache.upsert_emails(&batch)?;
+            cache.set_recipients(&to)?;
             batch.clear();
+            to.clear();
         }
     }
     cache.upsert_emails(&batch)?;
+    cache.set_recipients(&to)?;
     shared(&cache, now)?;
     chain(&cache, now)
 }
@@ -146,10 +157,40 @@ fn demo_keywords(i: usize) -> Vec<String> {
     if i % 17 == 5 {
         out.push("$label2");
     }
+    // Быстрые фильтры (S5-03): угрозы и слова жизненного цикла (их поставит S5-04) — у немногих писем.
+    if i % 97 == 13 {
+        out.push(words::PHISHING);
+    }
+    if i % 23 == 4 {
+        out.push(words::DUE);
+    }
+    if i % 29 == 6 {
+        out.push(words::WAIT);
+    }
+    if i % 31 == 9 {
+        out.push(words::EXPIRE);
+    }
     let mut out: Vec<String> = out.into_iter().map(String::from).collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// Получатели демо-письма `i`: чаще мне, иногда — рассылке отдела (а мне копия).
+fn demo_recipients(i: usize) -> Recipients {
+    if i % 3 == 1 {
+        Recipients { to: vec![TEAM.into()], cc: vec![ME.into()] }
+    } else {
+        Recipients { to: vec![ME.into()], cc: Vec::new() }
+    }
+}
+
+/// Ключевые слова фильтров (`postman_core::filters`): демо от ядра не зависит (слои), слова — те же.
+mod words {
+    pub const PHISHING: &str = "$phishing";
+    pub const DUE: &str = "pm.due";
+    pub const WAIT: &str = "pm.wait";
+    pub const EXPIRE: &str = "pm.expire";
 }
 
 /// Письмо беседы демо (S5-05): цепочка ответов с цитатами разных клиентов, мои письма — в «Отправленных».
@@ -176,7 +217,7 @@ pub const CHAIN: &[ChainMessage] = &[
 pub const CHAIN_OPEN: &str = "chain3";
 
 /// Имя владельца демо-ящика (адрес — [`ME`]).
-const ME_NAME: &str = "Смирнова Анна";
+pub const ME_NAME: &str = "Смирнова Анна";
 
 fn chain(cache: &Cache, now: i64) -> postman_cache::Result<()> {
     let (name, addr) = SENDERS[1];
@@ -198,7 +239,9 @@ fn chain(cache: &Cache, now: i64) -> postman_cache::Result<()> {
             keywords: Vec::new(),
         })
         .collect();
-    cache.upsert_emails(&rows)
+    cache.upsert_emails(&rows)?;
+    let to = |m: &ChainMessage| if m.mine { addr } else { ME };
+    cache.set_recipients(&CHAIN.iter().map(|m| (m.id.to_string(), Recipients { to: vec![to(m).into()], cc: Vec::new() })).collect::<Vec<_>>())
 }
 
 fn chain_body(id: &str) -> Option<BodyRow> {
