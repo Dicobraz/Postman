@@ -844,9 +844,11 @@ impl Render for ReadingPane {
             postman_core::prefs::Conversation::Outlook => self.outlook_bar(cx),
             _ => self.feed_bar(cx),
         };
+        // Приглашение боковой панелью справа (S5-24, «Настройки → Чтение»): над письмом — строка, панель — рядом.
+        let side = r.invite.as_ref().and_then(|c| invite_card::render_side(c, self.me.as_deref(), cx));
         // Лента беседы — на месте письма (вложения и приглашение — у письма в обычном виде).
         if let Some(feed) = feed {
-            return div()
+            let main = div()
                 .id("reading")
                 .flex()
                 .flex_col()
@@ -859,8 +861,8 @@ impl Render for ReadingPane {
                 .children(seal_card)
                 .children(scheduled)
                 .children(bar)
-                .child(feed)
-                .into_any_element();
+                .child(feed);
+            return with_side(main, side);
         }
         let strip = self.ribbon(r, cx);
         // Открыт просмотр вложения — он на месте текста письма и карточки приглашения (DESIGN «Вложения»).
@@ -906,7 +908,7 @@ impl Render for ReadingPane {
         let n = hits.seen();
         self.hits.set(n);
         let matches = self.match_bar(n, &l);
-        div()
+        let main = div()
             .id("reading")
             .flex()
             .flex_col()
@@ -923,8 +925,16 @@ impl Render for ReadingPane {
             .children(strip)
             .children(card)
             .children(matches)
-            .child(body)
-            .into_any_element()
+            .child(body);
+        with_side(main, side)
+    }
+}
+
+/// Письмо и боковая панель приглашения справа (S5-24); без панели — письмо как есть.
+fn with_side(main: Stateful<Div>, side: Option<AnyElement>) -> AnyElement {
+    match side {
+        None => main.into_any_element(),
+        Some(side) => div().flex().size_full().child(main.flex_1().min_w_0()).child(side).into_any_element(),
     }
 }
 

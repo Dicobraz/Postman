@@ -50,6 +50,7 @@ pub(crate) mod g {
     pub(crate) const REPEAT: char = '\u{E8EE}';
     pub(crate) const PIN: char = '\u{E707}';
     pub(crate) const PEOPLE: char = '\u{E716}';
+    pub(crate) const PERSON: char = '\u{E77B}';
     pub(crate) const MAIL: char = '\u{E715}';
     pub(crate) const CHECK: char = '\u{E73E}';
     pub(crate) const CANCEL: char = '\u{E711}';
