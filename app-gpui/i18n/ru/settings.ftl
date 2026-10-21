@@ -291,6 +291,7 @@ settings-keys-where-meeting = вкладка встречи
 settings-keys-where-contacts = контакты
 settings-keys-area-mail = Письма
 settings-keys-area-thread = Беседы
+settings-keys-area-attach = Вложения
 settings-keys-area-view = Разделы
 settings-keys-area-tab = Вкладки
 settings-keys-area-search = Поиск

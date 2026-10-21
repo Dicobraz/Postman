@@ -4,10 +4,6 @@ reading-att-size = { $unit ->
     [kb] { $n } KB
    *[mb] { $n } MB
 }
-reading-att-open = Open
-reading-att-save = Save as…
-reading-att-only-save = save only
-reading-att-loading = downloading…
 reading-saved = Saved: { $path }
 reading-file-failed = “{ $name }”: { $error }
 reading-blob-failed = Attachment not downloaded: { $error }

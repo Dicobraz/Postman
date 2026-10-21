@@ -129,3 +129,66 @@ fn parses_invitation_under_seccomp() {
     assert_eq!(v["method"], "REQUEST");
     assert!(c.parse_calendar(b"not a calendar").is_err());
 }
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// Встроенный просмотр (S5-07): запрос и ответ через песочницу — картинка, страница PDF, оглавление, макросы,
+/// текст; после ошибок воркер жив.
+#[test]
+fn preview_round_trip() {
+    use postman_worker::{OfficeFormat, Preview, PreviewKind};
+    let mut c = client();
+    let (p, px) = c.preview(PreviewKind::Image, &fixture("img.png"), 0, 50).unwrap();
+    let Preview::Image { width, height, source, format } = p else { panic!("{p:?}") };
+    assert_eq!((source, format.as_str()), ((300, 200), "PNG"));
+    assert!(width <= 50 && height <= 50);
+    assert_eq!(px.unwrap().pixels.len(), (width * height * 4) as usize);
+
+    let pdf = fixture("report.pdf");
+    let (p, px) = c.preview(PreviewKind::Pdf, &pdf, 1, 800).unwrap();
+    let Preview::Pdf { width, height, page, pages, title } = p else { panic!("{p:?}") };
+    assert_eq!((page, pages, title.as_deref()), (1, 3, Some("Quarterly report Q3")));
+    assert_eq!(height, 800);
+    assert!(width > 500 && width < 600, "{width}");
+    let px = px.unwrap();
+    // Белый фон и тёмный текст: страница отрисована, а не пустая.
+    assert!(px.pixels.as_chunks::<4>().0.iter().any(|p| p[0] < 100));
+    assert!(px.pixels.as_chunks::<4>().0.iter().filter(|p| p[0] > 250).count() > px.pixels.len() / 8);
+    // Страница за концом — последняя.
+    let (p, _) = c.preview(PreviewKind::Pdf, &pdf, 99, 400).unwrap();
+    assert!(matches!(p, Preview::Pdf { page: 2, pages: 3, .. }), "{p:?}");
+
+    let (p, _) = c.preview(PreviewKind::Archive, &fixture("screens.zip"), 0, 0).unwrap();
+    let Preview::Archive(l) = p else { panic!("{p:?}") };
+    assert_eq!(l.files, 8);
+    assert!(l.entries.iter().any(|e| e.name == "tools/collect.bat" && e.modified.as_deref() == Some("2026-10-14 11:20")));
+
+    let (p, _) = c.preview(PreviewKind::Office, &fixture("budget.xlsm"), 0, 0).unwrap();
+    let Preview::Office(s) = p else { panic!("{p:?}") };
+    assert_eq!((s.format, s.macros), (OfficeFormat::Ooxml, true));
+    assert_eq!(s.modules, ["Module1", "Module2", "ThisWorkbook"]);
+
+    let (p, _) = c.preview(PreviewKind::Text, "Дата;Сумма\r\n21.10;100".as_bytes(), 0, 0).unwrap();
+    assert_eq!(p, Preview::Text { text: "Дата;Сумма\n21.10;100".into(), truncated: false });
+
+    assert!(c.preview(PreviewKind::Pdf, b"%PDF-1.7 broken", 0, 800).is_err());
+    assert!(c.preview(PreviewKind::Archive, b"PK\x03\x04", 0, 0).is_err());
+    assert!(c.preview(PreviewKind::Image, &vec![0; 60 * 1024 * 1024], 0, 0).is_err(), "больше предела — отказ до отправки");
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+}
+
+/// Сторож времени в самом воркере: запрос дольше предела завершает процесс с понятным кодом, клиент
+/// поднимает новый.
+#[test]
+fn watchdog_stops_a_long_request() {
+    let mut c = Client::new(PathBuf::from(env!("CARGO_BIN_EXE_postman-worker")), Duration::from_secs(20));
+    // Сначала обычный запрос: воркер отвечал, клиент не повторяет зависший запрос в ослабленной песочнице.
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+    let started = std::time::Instant::now();
+    let e = c.render(&Request::Probe(Probe::Hang)).unwrap_err();
+    assert!(e.contains("превышено время"), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+}
