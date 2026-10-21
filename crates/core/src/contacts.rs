@@ -176,6 +176,40 @@ impl AddressBook {
     }
 }
 
+/// Окно «Часто пишу» (S5-25, макет «Контакты»): переписка за последние 30 дней.
+pub const FREQUENT_DAYS: i64 = 30;
+
+impl AddressBook {
+    /// «Часто пишу» (S5-25): с кем была переписка за `days` дней — по частоте (отправленные весят больше, см.
+    /// [`AddressBook::from_cache`]) и давности; один адрес — одна строка (справочник и личные контакты — та же запись
+    /// по адресу). Не больше `limit`.
+    pub fn frequent(&self, now: i64, days: i64, limit: usize) -> Vec<&Entry> {
+        let since = now - days * 86_400;
+        let mut hits: Vec<(f32, &Entry)> = self
+            .entries
+            .values()
+            .filter(|e| e.count > 0 && e.last >= since)
+            .map(|e| {
+                let age = ((now - e.last).max(0) as f32) / 86_400.0;
+                let score = (1.0 + (1.0 + e.count as f32).ln()) * (1.0 + (-age / days.max(1) as f32).exp());
+                (score, e)
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            b.0.total_cmp(&a.0).then_with(|| b.1.last.cmp(&a.1.last)).then_with(|| a.1.email.cmp(&b.1.email))
+        });
+        hits.into_iter().take(limit).map(|(_, e)| e).collect()
+    }
+}
+
+/// Запрос подходит к имени и адресу так же, как в подсказках адреса: каждое слово — начало слова имени или адреса, в
+/// любой раскладке и транслитом (поиск в «Контактах», S5-25).
+pub fn matches(name: &str, email: &str, query: &str) -> bool {
+    let keys = keys(name, email);
+    let words: Vec<String> = normalize(query).split_whitespace().map(str::to_string).collect();
+    !words.is_empty() && words.iter().all(|w| variants(w).iter().any(|v| keys.iter().any(|k| k.starts_with(v.as_str()))))
+}
+
 impl Entry {
     /// `Имя <адрес>` для вставки в поле.
     pub fn display(&self) -> String {
@@ -286,6 +320,39 @@ mod tests {
         assert_eq!(emails(&b, "иван пет"), ["p.ivanov@corp.example"]);
         assert_eq!(emails(&b, "петр"), ["p.ivanov@corp.example"], "ё = е");
         assert_eq!(emails(&b, "gitlab"), ["noreply@gitlab.corp.example"]);
+    }
+
+    /// «Часто пишу»: частые и свежие выше; старше 30 дней и без переписки (только справочник) — нет; адрес — один раз.
+    #[test]
+    fn frequent_by_count_and_recency() {
+        let mut b = AddressBook::default();
+        let day = 86_400;
+        b.touch("Мария", "m@x.ru", Source::Recent, 9, NOW - day);
+        b.touch("Пётр", "p@x.ru", Source::Recent, 9, NOW - 20 * day);
+        b.touch("Анна", "a@x.ru", Source::Recent, 1, NOW - day);
+        b.touch("Старый", "old@x.ru", Source::Recent, 50, NOW - 40 * day);
+        b.add_directory([("Мария Иванова", "M@X.RU"), ("Сотрудник", "dir@x.ru")]);
+        b.add_contacts([("Анна Смирнова", "a@x.ru")]);
+        let f: Vec<&str> = b.frequent(NOW, FREQUENT_DAYS, 10).into_iter().map(|e| e.email.as_str()).collect();
+        assert_eq!(f, ["m@x.ru", "p@x.ru", "a@x.ru"]);
+        assert_eq!(b.frequent(NOW, FREQUENT_DAYS, 10)[0].name, "Мария Иванова", "имя — из справочника");
+        assert_eq!(b.frequent(NOW, FREQUENT_DAYS, 2).len(), 2);
+        // Равные счёт и срок — по адресу.
+        let mut b = AddressBook::default();
+        b.touch("", "b@x.ru", Source::Recent, 2, NOW);
+        b.touch("", "a@x.ru", Source::Recent, 2, NOW);
+        let f: Vec<&str> = b.frequent(NOW, FREQUENT_DAYS, 10).into_iter().map(|e| e.email.as_str()).collect();
+        assert_eq!(f, ["a@x.ru", "b@x.ru"]);
+    }
+
+    #[test]
+    fn query_matches_names_layout_and_translit() {
+        assert!(matches("Мария Иванова", "m.ivanova@corp.example", "иван"));
+        assert!(matches("Мария Иванова", "m.ivanova@corp.example", "bdfy"), "английская раскладка");
+        assert!(matches("Алексей Щукин", "a@x.ru", "shchuk"), "транслит");
+        assert!(matches("Мария Иванова", "m.ivanova@corp.example", "мар ива"));
+        assert!(!matches("Мария Иванова", "m.ivanova@corp.example", "петр"));
+        assert!(!matches("Мария", "m@x.ru", "  "));
     }
 
     #[test]

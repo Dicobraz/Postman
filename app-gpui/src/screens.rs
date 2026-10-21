@@ -112,6 +112,8 @@ enum Scene {
     Contacts,
     /// Форма правки первого контакта (демо).
     ContactEdit,
+    /// «Часто пишу» (S5-25): адресаты переписки по частоте, первая строка выбрана.
+    ContactsFrequent,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
@@ -176,7 +178,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 65] = [
+const SCENES: [Scene; 66] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -208,6 +210,7 @@ const SCENES: [Scene; 65] = [
     Scene::Assistant,
     Scene::Contacts,
     Scene::ContactEdit,
+    Scene::ContactsFrequent,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -304,6 +307,7 @@ impl Scene {
             Scene::MeetingBlue => "meeting-blue",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
+            Scene::ContactsFrequent => "contacts-frequent",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
@@ -718,6 +722,13 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
         }
         Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
+        Scene::ContactsFrequent => {
+            // Из правки — назад к карточке; «Часто пишу» — из адресной книги переписки (собирается в фоне).
+            m.contacts.update(cx, |c, cx| c.escape(window, cx));
+            m.load_address_book(cx);
+            m.contacts_frequent(cx);
+            m.contacts.update(cx, |c, cx| c.show_frequent(cx));
+        }
         Scene::Shared => {
             m.set_section(Section::Mail, cx);
             let Some(id) = shared_inbox(m, cx) else { return Err("no shared mailbox in the folder tree".into()) };
@@ -1044,6 +1055,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Contacts && c.ready()
         }
         Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
+        Scene::ContactsFrequent => m.contacts.read(cx).frequent_shown() && m.contacts.read(cx).ready(),
         Scene::Vacation => {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);
@@ -1152,6 +1164,12 @@ const THREAD_CHILD: &str = "chain1";
 
 /// Шаг ожидания сцены (перед проверкой готовности): то, что можно сделать только после фоновой работы.
 fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
+    if let Scene::ContactsFrequent = scene {
+        // Книга собирается в фоне: пока «Часто пишу» пуст — открыть снова, когда придёт.
+        if !m.contacts.read(cx).frequent_shown() {
+            m.contacts.update(cx, |c, cx| c.show_frequent(cx));
+        }
+    }
     if let Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted = scene {
         // Подпись проверена — раскрыть карточку, как щелчок по значку.
         m.reading.update(cx, |r, cx| {
