@@ -118,8 +118,8 @@ pub(crate) fn child_row(
     let last = matches!(state.thread, Mark::Child { last: true });
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let text = if r.preview.is_empty() { r.subject.clone() } else { r.preview.clone() };
-    let stripe = labels.stripe.map(|c| l.cat(c).dot);
     let lit = state.open || state.picked;
+    let stripe = if lit { Some(l.accent()) } else { labels.stripe.map(|c| l.cat(c).dot) };
     let line = |d: Div| d.absolute().left(px(GUIDE_X)).w(px(1.)).bg(l.stroke());
     div()
         .id(i)
@@ -133,7 +133,7 @@ pub(crate) fn child_row(
         .pr(px(12.))
         .text_size(px(12.))
         .when(last, |d| d.border_b_1().border_color(l.border()))
-        .when(lit, |d| d.bg(l.picked()))
+        .when(lit, |d| d.bg(l.selected()))
         .when(!lit, |d| d.hover(|d| d.bg(l.hover())))
         .when(state.menu, |d| d.border_1().border_color(l.accent_text()))
         .cursor_pointer()

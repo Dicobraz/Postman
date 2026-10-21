@@ -96,13 +96,13 @@ pub(crate) const CORE: &[(Role, Color, Color)] = &[
     (Role::AccentFillPressed, a(0xCC00_67C0), a(0xCC2B_6CA8)),
     (Role::AccentText, c(0x0067C0), c(0x7CC4F0)),
     (Role::AccentOn, c(0xFFFFFF), c(0xFFFFFF)),
-    // Синяя подложка: выделение, тонированные кнопки.
+    // Синяя подложка: метки «Клиенты», тонированные и выбранные кнопки; строки списка — «выбранное» (fill.cursor).
     (Role::AccentSubtle, c(0xDFF0FF), c(0x23364F)),
     // Текст основной / вторичный / подписи.
     (Role::TextPrimary, c(0x242424), c(0xD2D2D2)),
     (Role::TextSecondary, c(0x616161), c(0xA6A6A6)),
     (Role::TextTertiary, c(0x8A8A8A), c(0x8A8A8A)),
-    // Фон окна / карточка (и всплывающие — Fluent #F9F9F9 / #2C2C2C, ΔE ≤ 1,2) / наведение / выбранное.
+    // Фон окна / карточка (и всплывающие — Fluent #F9F9F9 / #2C2C2C, ΔE ≤ 1,2) / наведение / выбранное (строка списка).
     (Role::BgBase, c(0xF3F3F3), c(0x202020)),
     (Role::LayerPanel, c(0xFFFFFF), c(0x2B2B2B)),
     (Role::LayerOverlay, c(0xFFFFFF), c(0x2B2B2B)),
@@ -405,9 +405,14 @@ impl Look {
         self.c(Role::FillSubtlePressed)
     }
 
-    /// Выбранное в списке и выбранная кнопка-переключатель.
+    /// Синяя подложка: выбранная кнопка-переключатель, тонированные кнопки (DESIGN «Токены цвета»).
     pub(crate) fn picked(&self) -> Hsla {
         self.c(Role::AccentSubtle)
+    }
+
+    /// Выделенная строка списка: нейтральное «выбранное» (полоса акцента слева рисует строка), не синяя подложка.
+    pub(crate) fn selected(&self) -> Hsla {
+        self.c(Role::FillCursor)
     }
 
     pub(crate) fn accent(&self) -> Hsla {
@@ -723,8 +728,6 @@ mod tests {
         ("#262C34", "app.fb.free.slate.bg, тёмная"),
         ("#2F3741", "app.fb.free.slate.hover, тёмная"),
         ("#C2CCD8", "app.fb.free.slate.fg, тёмная"),
-        ("#CECCCB", "категория «серый»: подложка (светлая) и текст (тёмная) метки — в таблице только точка"),
-        ("#343231", "категория «серый»: текст (светлая) и подложка (тёмная) метки"),
         ("#D13438", "точка и полоса угрозы (palette::Reserved::Threat) — в таблице только подложка и текст"),
         ("#EAA300", "точка срока (palette::Reserved::Deadline) для проверки ΔE — в таблице только текст и подложка"),
     ];

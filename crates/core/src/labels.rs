@@ -116,6 +116,20 @@ pub struct Category {
     pub hidden: bool,
 }
 
+impl Category {
+    /// Цвет для отрисовки и проверок — имя цвета таблицы. Прежнее имя Fluent у категории по умолчанию — её цвет по
+    /// умолчанию (Тендеры — розовый, Пентест — графит, Сервисы — серый; решение 2026-10-22), у остальных — ближайший
+    /// по ΔE ([`palette::resolve`]); неизвестное — нейтральный.
+    pub fn shown_color(&self) -> &'static str {
+        let legacy = palette::LEGACY.iter().any(|(old, _)| *old == self.color);
+        let default = || DEFAULTS.iter().find(|(id, _, _)| category_keyword(id) == self.keyword).map(|d| d.1);
+        match legacy.then(default).flatten() {
+            Some(color) => color,
+            None => palette::resolve(&self.color),
+        }
+    }
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -240,10 +254,10 @@ impl Categories {
                     return Err(Problem::DuplicateKey(k));
                 }
             }
-            if let Some((clash, delta)) = palette::clash(&c.color, &colors) {
+            if let Some((clash, delta)) = palette::clash(c.shown_color(), &colors) {
                 return Err(Problem::Colour { name: c.name.clone(), clash, delta });
             }
-            colors.push(&c.color);
+            colors.push(c.shown_color());
         }
         Ok(())
     }
@@ -285,7 +299,7 @@ impl Categories {
             .iter()
             .enumerate()
             .filter(|&(i, c)| !c.hidden && Some(i) != except)
-            .map(|(_, c)| c.color.as_str())
+            .map(|(_, c)| c.shown_color())
             .collect()
     }
 
@@ -445,7 +459,7 @@ impl Label<'_> {
     /// Цвет метки (имя Fluent; неизвестный — нейтральный).
     pub fn color(&self) -> &'static str {
         match self {
-            Label::Category(c) => palette::resolve(&c.color),
+            Label::Category(c) => c.shown_color(),
             Label::Thunderbird(_) => palette::NEUTRAL,
         }
     }
@@ -718,6 +732,33 @@ mod tests {
         // Неизвестный цвет (таблица из новой версии) рисуется нейтральным.
         t.list[1].color = "chartreuse".into();
         assert_eq!(Label::Category(&t.list[1]).color(), palette::NEUTRAL);
+    }
+
+    /// Прежние цвета Fluent: категории по умолчанию — своим цветом по имени, остальные — ближайшим по ΔE.
+    #[test]
+    fn legacy_colors_of_defaults_follow_their_names() {
+        let mut t = defaults();
+        let set = |t: &mut Categories, kw: &str, color: &str| {
+            let i = t.find(kw).unwrap();
+            t.list[i].color = color.into();
+        };
+        set(&mut t, "pm.cat.tenders", "grape");
+        set(&mut t, "pm.cat.pentest", "lightTeal");
+        set(&mut t, "pm.cat.services", "mink");
+        set(&mut t, "pm.cat.team", "darkGreen");
+        let shown = |t: &Categories, kw: &str| t.by_keyword(kw).map(|(_, c)| c.shown_color());
+        assert_eq!(shown(&t, "pm.cat.tenders"), Some(palette::PINK));
+        assert_eq!(shown(&t, "pm.cat.pentest"), Some(palette::GRAPHITE), "по ΔE был бы серый");
+        assert_eq!(shown(&t, "pm.cat.services"), Some(palette::GREY), "по ΔE был бы графит");
+        assert_eq!(shown(&t, "pm.cat.team"), Some(palette::GREEN));
+        assert_eq!(t.check(), Ok(()));
+        // Своя категория с прежним цветом — ближайший по ΔE.
+        let k = t.new_keyword(1);
+        t.list.push(Category { keyword: k.clone(), name: "x".into(), color: "lightTeal".into(), key: None, changed: 1, hidden: false });
+        assert_eq!(shown(&t, &k), Some(palette::GREY));
+        // Неизвестный цвет у категории по умолчанию — нейтральный, не её цвет.
+        set(&mut t, "pm.cat.tenders", "chartreuse");
+        assert_eq!(shown(&t, "pm.cat.tenders"), Some(palette::NEUTRAL));
     }
 
     /// Правка в настройках: добавить, переименовать, перекрасить с запретом близких цветов, клавиша, удалить.

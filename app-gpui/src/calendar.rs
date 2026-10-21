@@ -492,7 +492,7 @@ impl CalendarView {
     fn colors(&self, e: &Event, l: &Look) -> (Hsla, Hsla, Hsla) {
         match self.categories.for_event(&e.keywords) {
             Some(c) => {
-                let c = l.cat(&c.color);
+                let c = l.cat(c.shown_color());
                 (c.dot, c.bg, c.text)
             }
             None => (l.pm(Pm::EventBorder), l.pm(Pm::EventBg), l.text()),
@@ -586,7 +586,7 @@ impl CalendarView {
             .child(icon(g::CHECK, 10.));
         let mine = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(10.)).child(check).child(tr!("cal-my-calendar"));
         let cats = self.categories.visible().map(|c| {
-            let color = l.cat(&c.color);
+            let color = l.cat(c.shown_color());
             div()
                 .h(px(28.))
                 .px(px(8.))
