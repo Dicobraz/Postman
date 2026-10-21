@@ -415,9 +415,10 @@ fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPan
             let primary = s == Partstat::Accepted;
             let b = if primary { accent_button(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { tinted_button(id, l) };
             let hint = tr!("invite-key-hint", name = tr!(key), key = hotkey);
+            let ink = if primary { l.on_accent() } else { l.pm(Pm::TintedFg) };
             b.when(!side, |d| d.w(px(160.)).min_w(px(88.)).px(px(8.)))
                 .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
-                .when(primary, |d| d.child(icon(g::CHECK, 12.)))
+                .child(status_mark(s, ink))
                 .child(tr!(key))
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -427,6 +428,16 @@ fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPan
                 }))
         })
         .collect()
+}
+
+/// Значок ответа в круге (DESIGN «Цвет», кнопки статуса): ✓ принять, ? под вопросом, ✕ отклонить.
+fn status_mark(s: Partstat, ink: Hsla) -> Div {
+    let mark = div().size(px(16.)).flex_none().flex().items_center().justify_center().rounded_full().border_1().border_color(ink).text_color(ink);
+    match s {
+        Partstat::Accepted => mark.child(icon(g::CHECK, 9.)),
+        Partstat::Declined => mark.child(icon(g::CANCEL, 8.)),
+        _ => mark.text_size(px(11.)).line_height(px(14.)).font_weight(FontWeight::BOLD).child("?"),
+    }
 }
 
 /// «Вы приняли» и «Изменить ответ».
@@ -843,7 +854,7 @@ fn conflict_line(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone,
             } else {
                 tr!("invite-conflict", title = h.title.clone(), time = time)
             };
-            row().child(div().size(px(8.)).flex_none().rounded_full().bg(l.pm(Pm::ConflictFill))).child(div().truncate().child(text))
+            row().child(div().size(px(8.)).flex_none().rounded_full().bg(l.pm(Pm::DayOverlap))).child(div().truncate().child(text))
         }
         None => row().child(icon(g::CHECK, 11.)).child(tr!("invite-no-conflict")),
     })
@@ -877,7 +888,7 @@ fn timeline(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, side
     let declined = matches!(card.state_for(me), Some(InviteState::Answered(Partstat::Declined)));
     let blocks = card.day.as_ref().map(|day| day_blocks(e, day, me, window)).unwrap_or_default().into_iter().map(|b| {
         let (top, bottom) = (y(b.span.start), y(b.span.end));
-        let invite = l.pm(Pm::InviteFill);
+        let invite = l.pm(Pm::DayAccepted);
         let gap = if b.columns > 1 { 2. } else { 0. };
         div()
             .absolute()
@@ -901,10 +912,10 @@ fn timeline(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, side
                     .text_size(px(if side { 11. } else { 12. }))
                     .line_height(px(14.))
                     .map(|d| match b.lane {
-                        Lane::Invite if accepted => d.bg(invite).text_color(l.pm(Pm::InviteOn)),
+                        Lane::Invite if accepted => d.bg(invite).text_color(l.pm(Pm::DayAcceptedOn)),
                         Lane::Invite if declined => d.border_1().border_dashed().border_color(invite).text_color(l.text2()),
                         Lane::Invite => d.bg(invite.opacity(0.35)).border_1().border_dashed().border_color(invite).text_color(l.pm(Pm::TintedFg)),
-                        Lane::Conflict => d.bg(l.pm(Pm::ConflictFill)).text_color(l.pm(Pm::ConflictOn)),
+                        Lane::Conflict => d.bg(l.pm(Pm::DayOverlap)).text_color(l.pm(Pm::DayOverlapOn)),
                         Lane::Own => d.bg(l.pm(Pm::DayOwn)).text_color(l.pm(Pm::DayOwnFg)),
                     })
                     .child(div().min_w_0().max_w_full().truncate().font_weight(FontWeight::SEMIBOLD).child(b.title.clone()))
