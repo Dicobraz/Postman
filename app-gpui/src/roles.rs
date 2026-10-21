@@ -134,7 +134,7 @@ pub(crate) const FREE: [FreeRow; 3] = [
     (
         FreeColor::Brand,
         ["app.fb.free.brand", "app.fb.free.brand.bg", "app.fb.free.brand.hover", "app.fb.free.brand.fg"],
-        [0xE4107F, 0xFCE4EF, 0xF8CDE1, 0xA30B5B],
+        [0xE4107F, 0xFCE4EF, 0xF8CDE1, 0x8C0B4E],
         [0xD2569A, 0x3A1A2A, 0x4A2135, 0xF0A8CA],
     ),
     (
