@@ -72,6 +72,8 @@ pub(crate) struct Mailer {
     /// `--screens`: снимки экранов без человека (S2-05).
     pub(crate) screens: Option<screens::Driver>,
     pub(crate) section: Section,
+    /// В области чтения — приглашение без ответа: у корня контекст `Invite` (S5-17).
+    pub(crate) invite_waiting: bool,
     /// Раздел главной вкладки, пока открыта вкладка почты (в ней раздел — всегда «Почта», S5-16).
     pub(crate) main_section: Option<Section>,
     /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
@@ -221,6 +223,12 @@ impl Mailer {
             // Скрытая панель чтения (S5-09) — письмо на месте списка: раскладка меняется вместе с письмом.
             cx.observe(&reading, |this, _, cx| {
                 this.inline_follows_letter(cx);
+                // Контекст `Invite` корня (клавиши A / T / N) — по области чтения.
+                let waiting = invite_waiting(this.reading.read(cx));
+                if waiting != this.invite_waiting {
+                    this.invite_waiting = waiting;
+                    cx.notify();
+                }
                 if crate::prefs::get(cx).reading.pane == postman_core::prefs::Pane::Hidden {
                     cx.notify();
                 }
@@ -267,6 +275,7 @@ impl Mailer {
             screens: None,
             section: Section::Mail,
             main_section: None,
+            invite_waiting: false,
             cal,
             cal_bar,
             contacts_bar,
@@ -423,6 +432,8 @@ impl Render for Mailer {
             _ if letter.is_some() => "Mailer ComposeView",
             _ if meeting.is_some() => "Mailer MeetingTab",
             _ if !free => "Mailer SettingsView",
+            // Приглашение без ответа в области чтения: A / T / N схемы «Одиночные клавиши» — ответ (`commands::INVITE`).
+            Section::Mail if self.invite_waiting => "Mailer MailView Invite",
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
             Section::Contacts => "Mailer ContactsView",
@@ -744,6 +755,12 @@ impl Mailer {
             self.reading.update(cx, |r, cx| r.invite_hotkey(status, cx));
         }
     }
+}
+
+/// Открыто приглашение, на которое можно ответить (как `ReadingPane::invite_hotkey`).
+fn invite_waiting(r: &ReadingPane) -> bool {
+    let me = r.me.as_deref();
+    r.reading.as_ref().and_then(|x| x.invite.as_ref()).is_some_and(|c| c.sending.is_none() && c.can_answer(me))
 }
 
 // --- замер: общий сценарий из postman_core::bench ---

@@ -3118,7 +3118,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
-source = "git+https://github.com/Dicobraz/pets?rev=7b10457a9ae7615f607de3910cdf5baec55d935d#7b10457a9ae7615f607de3910cdf5baec55d935d"
+source = "git+https://github.com/Dicobraz/pets?rev=7a450e49286553392fc3a494665670162e334793#7a450e49286553392fc3a494665670162e334793"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -5463,7 +5463,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pets-commands"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=7b10457a9ae7615f607de3910cdf5baec55d935d#7b10457a9ae7615f607de3910cdf5baec55d935d"
+source = "git+https://github.com/Dicobraz/pets?rev=7a450e49286553392fc3a494665670162e334793#7a450e49286553392fc3a494665670162e334793"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -5471,7 +5471,7 @@ dependencies = [
 [[package]]
 name = "pets-i18n"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=7b10457a9ae7615f607de3910cdf5baec55d935d#7b10457a9ae7615f607de3910cdf5baec55d935d"
+source = "git+https://github.com/Dicobraz/pets?rev=7a450e49286553392fc3a494665670162e334793#7a450e49286553392fc3a494665670162e334793"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -5484,7 +5484,7 @@ dependencies = [
 [[package]]
 name = "pets-shell"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=7b10457a9ae7615f607de3910cdf5baec55d935d#7b10457a9ae7615f607de3910cdf5baec55d935d"
+source = "git+https://github.com/Dicobraz/pets?rev=7a450e49286553392fc3a494665670162e334793#7a450e49286553392fc3a494665670162e334793"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -5495,7 +5495,7 @@ dependencies = [
 [[package]]
 name = "pets-ui"
 version = "0.1.0"
-source = "git+https://github.com/Dicobraz/pets?rev=7b10457a9ae7615f607de3910cdf5baec55d935d#7b10457a9ae7615f607de3910cdf5baec55d935d"
+source = "git+https://github.com/Dicobraz/pets?rev=7a450e49286553392fc3a494665670162e334793#7a450e49286553392fc3a494665670162e334793"
 dependencies = [
  "futures",
  "gpui-kit",

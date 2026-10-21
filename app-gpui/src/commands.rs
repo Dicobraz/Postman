@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use gpui_kit::*;
-use pets_commands::Command;
+use pets_commands::{Command, Scheme, SchemeKeys};
 
 pub mod mail {
     gpui_kit::actions!(
@@ -104,6 +104,11 @@ pub mod compose {
 /// настройках клавиши писем молчат. В открытом контекстном меню (S5-08, `ContextMenu`) — тоже: стрелки, Enter и
 /// цифры там — клавиши меню.
 const LIST: Option<&str> = Some("MailView && !Input && !Composer && !ContextMenu");
+/// Одиночная буква «Ответить всем» (A) — не над приглашением без ответа: там A — «Принять» (S5-17).
+const LIST_NO_INVITE: Option<&str> = Some("MailView && !Input && !Composer && !ContextMenu && !Invite");
+/// Приглашение без ответа в области чтения (корень экрана ставит `Invite`, `mailer.rs`): A / T / N схемы
+/// «Одиночные клавиши».
+const INVITE: Option<&str> = Some("MailView && Invite && !Input && !Composer && !ContextMenu");
 /// Раздел «Почта», включая поле поиска, но не письмо: в ответе в области чтения (S5-06б) Ctrl+R, Ctrl+F, Ctrl+U —
 /// клавиши письма, а не списка.
 const MAIL: Option<&str> = Some("MailView && !Composer && !ContextMenu");
@@ -273,10 +278,37 @@ pub const COMMANDS: &[Command] = &[
     cmd("filters.reset", &[], MAIL),
 ];
 
-/// Привязать клавиши всех команд с учётом своих (`overrides`, «Настройки → Клавиатура»): привязки команд
-/// собираются заново на лету, чужие (gpui-kit: поля ввода и т. п.) остаются. Действие или сочетание, которое не
-/// собралось, — в журнал (тесты ловят это раньше), остальные команды работают.
-pub fn bind(cx: &mut App, overrides: &crate::keymap::Overrides) {
+const fn single(command: &'static str, keys: &'static [&'static str], context: Option<&'static str>) -> SchemeKeys {
+    SchemeKeys { command, keys, context }
+}
+
+/// Схема «Одиночные клавиши» (S5-17, как Gmail; DESIGN «Хоткеи», макет `SettingsKeys`): слой букв поверх клавиш
+/// Outlook — только вне полей ввода; клавиши Outlook действуют и в ней. A / T / N — на приглашении без ответа (там A —
+/// «Принять», а не «Ответить всем»). Виды календаря 1…4 — с видами S5-21.
+pub const SINGLE: Scheme = Scheme {
+    id: "single",
+    keys: &[
+        single("mail.next", &["j"], LIST),
+        single("mail.prev", &["k"], LIST),
+        single("mail.new", &["c"], LIST),
+        single("mail.reply", &["r"], LIST),
+        single("mail.reply_all", &["a"], LIST_NO_INVITE),
+        single("mail.forward", &["f"], LIST),
+        single("mail.archive", &["e"], LIST),
+        single("mail.move", &["v"], LIST),
+        single("mail.mark_read", &["q"], LIST),
+        single("mail.mark_unread", &["u"], LIST),
+        single("search.focus", &["/"], LIST),
+        single("invite.accept", &["a"], INVITE),
+        single("invite.tentative", &["t"], INVITE),
+        single("invite.decline", &["n"], INVITE),
+    ],
+};
+
+/// Привязать клавиши всех команд по выбранной схеме со своими клавишами (`prefs`, «Настройки → Клавиатура»):
+/// привязки команд собираются заново на лету, чужие (gpui-kit: поля ввода и т. п.) остаются. Действие или сочетание,
+/// которое не собралось, — в журнал (тесты ловят это раньше), остальные команды работают.
+pub fn bind(cx: &mut App, prefs: &postman_core::prefs::Prefs) {
     let ours: Vec<String> = COMMANDS.iter().map(|c| c.action_name()).collect();
     let (others, had_ours) = {
         let keymap = cx.key_bindings();
@@ -290,24 +322,24 @@ pub fn bind(cx: &mut App, overrides: &crate::keymap::Overrides) {
         cx.bind_keys(others);
     }
     let mut bindings = Vec::new();
-    for c in COMMANDS {
-        let context = c.context.and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
-        for keys in crate::keymap::effective(c, overrides) {
-            let keys = keys.as_str();
-            let action = match keyed_action(c, keys) {
-                Some(a) => a,
-                None => match cx.build_action(&c.action_name(), None) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!("command {}: no action {} ({e})", c.id, c.action_name());
-                        continue;
-                    }
-                },
-            };
-            match KeyBinding::load(keys, action, context.clone(), false, None, &DummyKeyboardMapper) {
-                Ok(b) => bindings.push(b),
-                Err(e) => tracing::error!("command {}: keys {keys}: {e:?}", c.id),
-            }
+    let set = crate::keymap::KeySet::of(prefs);
+    for b in crate::keymap::bound(COMMANDS, &SINGLE, &set) {
+        let Some(c) = pets_commands::find(COMMANDS, b.id) else { continue };
+        let context = b.context.as_deref().and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
+        let keys = b.keys.as_str();
+        let action = match keyed_action(c, keys) {
+            Some(a) => a,
+            None => match cx.build_action(&c.action_name(), None) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!("command {}: no action {} ({e})", c.id, c.action_name());
+                    continue;
+                }
+            },
+        };
+        match KeyBinding::load(keys, action, context, false, None, &DummyKeyboardMapper) {
+            Ok(b) => bindings.push(b),
+            Err(e) => tracing::error!("command {}: keys {keys}: {e:?}", c.id),
         }
     }
     cx.bind_keys(bindings);
@@ -372,6 +404,20 @@ pub(crate) mod rule {
             return Err(format!("{keys}: a key without a modifier is not navigation"));
         }
         Ok(())
+    }
+
+    /// Сочетание слоя «Одиночные клавиши» (S5-17): буква или знак без модификатора — только вне полей ввода
+    /// (`!Input` в контексте); остальное — по правилу схемы «Outlook».
+    pub(crate) fn single_check(keys: &str, context: Option<&str>) -> Result<(), String> {
+        let canonical = pets_commands::parse_keys(keys)?;
+        let bare = !canonical.contains('-') || canonical == "-";
+        if bare && canonical.chars().count() == 1 && !canonical.chars().all(|c| c.is_ascii_digit()) {
+            return match context {
+                Some(c) if c.contains("!Input") => Ok(()),
+                _ => Err(format!("{keys}: a single key works only outside input fields")),
+            };
+        }
+        rule_check(keys)
     }
 }
 
@@ -482,6 +528,40 @@ mod tests {
         }
     }
 
+    /// Схема «Одиночные клавиши» (S5-17): слой разобран, команды есть; буквы — только вне полей ввода; Alt нет;
+    /// в слое — те буквы, что в DESIGN и макете (J/K, C, R, A, F, E, V, Q/U, `/`, A / T / N).
+    #[test]
+    fn single_scheme_follows_its_rule() {
+        let s = &super::SINGLE;
+        assert_eq!(pets_commands::validate_scheme(COMMANDS, s), vec![]);
+        for k in s.keys {
+            for keys in k.keys {
+                assert_eq!(super::rule::single_check(keys, k.context), Ok(()), "{}", k.command);
+            }
+        }
+        assert!(super::rule::single_check("j", Some("MailView")).is_err(), "в поле поиска J — текст");
+        assert!(super::rule::single_check("alt-j", Some("MailView && !Input")).is_err());
+        let layer = |id: &str| s.keys.iter().find(|k| k.command == id).map(|k| k.keys.to_vec()).unwrap_or_default();
+        for (id, key) in [
+            ("mail.next", "j"),
+            ("mail.prev", "k"),
+            ("mail.new", "c"),
+            ("mail.reply", "r"),
+            ("mail.reply_all", "a"),
+            ("mail.forward", "f"),
+            ("mail.archive", "e"),
+            ("mail.move", "v"),
+            ("mail.mark_read", "q"),
+            ("mail.mark_unread", "u"),
+            ("search.focus", "/"),
+            ("invite.accept", "a"),
+            ("invite.tentative", "t"),
+            ("invite.decline", "n"),
+        ] {
+            assert_eq!(layer(id), [key], "{id}");
+        }
+    }
+
     #[test]
     fn the_rule_rejects_what_the_design_forbids() {
         use super::rule::rule_check;
@@ -570,13 +650,16 @@ pub(crate) mod parity {
             COMMANDS.len(),
             done * 100 / COMMANDS.len().max(1)
         ));
-        s.push_str("| Функция | Команда | Хоткей | Статус |\n|---|---|---|---|\n");
+        s.push_str("Хоткей — схема «Outlook» (по умолчанию); «Одиночные» — буквы схемы «Одиночные клавиши» (S5-17) поверх неё.\n\n");
+        s.push_str("| Функция | Команда | Хоткей | Одиночные | Статус |\n|---|---|---|---|---|\n");
         for c in COMMANDS {
             let key = c.name_key();
             let name = names.iter().find(|(k, _)| *k == key).map_or(key.as_str(), |(_, v)| v);
             let keys: Vec<String> = c.keys.iter().map(|k| format!("`{k}`")).collect();
+            let single: Vec<String> =
+                super::SINGLE.keys.iter().filter(|k| k.command == c.id).flat_map(|k| k.keys).map(|k| format!("`{k}`")).collect();
             let status = if handled.contains(&c.action_name()) { "есть" } else { "нет" };
-            s.push_str(&format!("| {name} | `{}` | {} | {status} |\n", c.id, keys.join(", ")));
+            s.push_str(&format!("| {name} | `{}` | {} | {} | {status} |\n", c.id, keys.join(", "), single.join(", ")));
         }
         (s, done)
     }

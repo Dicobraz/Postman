@@ -640,11 +640,11 @@ pub(crate) fn mask(size: f32, l: &Look, behind: Hsla) -> Div {
 
 // --- действия экрана ---
 
-/// Клавиша команды для подсказки («Ctrl+Q»): своя или из реестра, первая.
+/// Клавиша команды для подсказки («Ctrl+Q»; в «Одиночных клавишах» — буква): своя или из реестра, первая.
 pub(crate) fn key_hint(id: &str, cx: &App) -> String {
-    let overrides = crate::prefs::get(cx).keys;
+    let set = crate::keymap::KeySet::of(&crate::prefs::get(cx));
     pets_commands::find(crate::commands::COMMANDS, id)
-        .and_then(|c| crate::keymap::effective(c, &overrides).into_iter().next())
+        .and_then(|c| crate::keymap::hint(&crate::commands::SINGLE, &set, c))
         .map(|k| crate::keymap::human(&k))
         .unwrap_or_default()
 }

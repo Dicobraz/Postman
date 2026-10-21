@@ -24,14 +24,20 @@ fn place(context: Option<&str>) -> &'static str {
     }
 }
 
+/// Буквы команды в схеме «Одиночные клавиши» (S5-17).
+fn single(c: &pets_commands::Command) -> Vec<String> {
+    crate::commands::SINGLE.keys.iter().filter(|k| k.command == c.id).flat_map(|k| k.keys).map(|k| human(k)).collect()
+}
+
 fn table() -> String {
     let names = crate::commands::parity::ftl_names(crate::commands::parity::RU_FTL);
-    let mut s = String::from("| Действие | Клавиши | Где |\n|---|---|---|\n");
-    for c in COMMANDS.iter().filter(|c| !c.keys.is_empty()) {
+    let mut s = String::from("| Действие | Outlook | Одиночные клавиши | Где |\n|---|---|---|---|\n");
+    for c in COMMANDS.iter().filter(|c| !c.keys.is_empty() || !single(c).is_empty()) {
         let key = c.name_key();
         let name = names.iter().find(|(k, _)| *k == key).map_or(key.as_str(), |(_, v)| v);
         let keys: Vec<String> = c.keys.iter().map(|k| human(k)).collect();
-        s.push_str(&format!("| {name} | {} | {} |\n", keys.join(", "), place(c.context)));
+        let outlook = if keys.is_empty() { "—".to_owned() } else { keys.join(", ") };
+        s.push_str(&format!("| {name} | {outlook} | {} | {} |\n", single(c).join(", "), place(c.context)));
     }
     s
 }
