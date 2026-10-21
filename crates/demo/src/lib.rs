@@ -385,7 +385,25 @@ pub mod calendar {
         week_start() + day * 86_400 + h * 3600 + m * 60
     }
 
-    fn event(id: &str, title: &str, day: i64, (h, m): (i64, i64), mins: i64, location: &str, tentative: bool) -> Event {
+    /// Кто я во встрече демо: организатор, приглашённый (с моим ответом) — организатор тогда коллега.
+    #[derive(Clone, Copy)]
+    enum Me {
+        Owner,
+        Invited(Partstat),
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event(id: &str, title: &str, day: i64, (h, m): (i64, i64), mins: i64, location: &str, tentative: bool, me: Me, category: &str) -> Event {
+        let mine = |status| Participant { name: "Я".into(), email: crate::ME.into(), owner: false, attendee: true, optional: false, status };
+        let participants = match me {
+            Me::Owner => vec![Participant { owner: true, ..mine(Partstat::Accepted) }],
+            Me::Invited(status) => vec![
+                Participant { name: "Петров Алексей".into(), email: "a.petrov@corp.example".into(), owner: true, attendee: true, optional: false, status: Partstat::Accepted },
+                mine(status),
+                Participant { name: "Иванова Мария".into(), email: "m.ivanova@corp.example".into(), owner: false, attendee: true, optional: false, status: Partstat::Accepted },
+                Participant { name: "Сидоров Игорь".into(), email: "i.sidorov@corp.example".into(), owner: false, attendee: true, optional: true, status: Partstat::NeedsAction },
+            ],
+        };
         Event {
             id: id.into(),
             uid: format!("{id}@corp.example"),
@@ -397,26 +415,43 @@ pub mod calendar {
             all_day: false,
             status: if tentative { EventStatus::Tentative } else { EventStatus::Confirmed },
             free_busy: FreeBusy::Busy,
-            participants: vec![Participant { name: "Я".into(), email: "me@corp.example".into(), owner: true, attendee: true, optional: false, status: Partstat::Accepted }],
+            participants,
             recurring: false,
+            keywords: if category.is_empty() { Vec::new() } else { vec![format!("pm.cat.{category}")] },
+            sequence: 0,
         }
     }
 
     pub fn my_events() -> Vec<Event> {
-        vec![
-            event("e1", "Планёрка отдела", 0, (9, 30), 30, "Переговорная 1", false),
-            event("e2", "Созвон с заказчиком", 0, (11, 0), 90, "Teams", false),
-            event("e3", "Обед с партнёром", 0, (13, 0), 60, "Кафе", true),
-            event("e4", "Разбор инцидента", 0, (11, 30), 60, "Переговорная 2", false),
-            event("e5", "Планёрка отдела", 1, (9, 30), 30, "Переговорная 1", false),
-            event("e6", "Пресейл: SIEM", 1, (14, 0), 120, "Переговорная 3", false),
-            event("e7", "1:1 с руководителем", 2, (10, 0), 60, "", false),
-            event("e8", "Демо продукта", 2, (15, 0), 60, "Переговорная 1", false),
-            event("e9", "Ревью архитектуры", 2, (15, 30), 90, "Переговорная 2", true),
-            event("e10", "Планёрка отдела", 3, (9, 30), 30, "Переговорная 1", false),
-            event("e11", "Обучение: Stalwart", 3, (12, 0), 180, "Учебный класс", false),
-            event("e12", "Итоги недели", 4, (16, 0), 60, "Переговорная 1", false),
-        ]
+        use Me::{Invited, Owner};
+        use Partstat::{Accepted, Declined, NeedsAction, Tentative};
+        let weekly = |id: &str, day| {
+            let mut e = event(id, "Планёрка отдела", day, (9, 30), 30, "Переговорная 1", false, Invited(Accepted), "team");
+            e.recurring = true;
+            e
+        };
+        let mut v = vec![
+            weekly("e1", 0),
+            event("e2", "Созвон с заказчиком", 0, (11, 0), 90, "Teams", false, Owner, "clients"),
+            event("e3", "Обед с партнёром", 0, (13, 0), 60, "Кафе", true, Owner, ""),
+            event("e4", "Разбор инцидента", 0, (11, 30), 60, "Переговорная 2", false, Invited(Accepted), "pentest"),
+            weekly("e5", 1),
+            event("e6", "Пресейл: SIEM", 1, (14, 0), 120, "Переговорная 3", false, Invited(NeedsAction), "tenders"),
+            event("e7", "1:1 с руководителем", 2, (10, 0), 60, "", false, Owner, ""),
+            event("e8", "Демо продукта", 2, (15, 0), 60, "Переговорная 1", false, Invited(Accepted), "clients"),
+            event("e9", "Ревью архитектуры", 2, (15, 30), 90, "Переговорная 2", true, Invited(Tentative), "services"),
+            event("e13", "Утренний стендап", 2, (11, 30), 30, "Teams", false, Invited(Accepted), "team"),
+            event("e14", "Вебинар вендора", 2, (12, 30), 60, "", false, Invited(Declined), ""),
+            weekly("e10", 3),
+            event("e11", "Обучение: Stalwart", 3, (12, 0), 180, "Учебный класс", false, Invited(Accepted), "team"),
+            event("e12", "Итоги недели", 4, (16, 0), 60, "Переговорная 1", false, Owner, ""),
+        ];
+        // На весь день, два дня: четверг и пятница.
+        let mut conference = event("e15", "Выездной семинар", 3, (0, 0), 2 * 24 * 60, "Конгресс-центр", false, Invited(Accepted), "clients");
+        conference.all_day = true;
+        v.push(conference);
+        v.sort_by_key(|e| e.span.start);
+        v
     }
 
     /// Коллеги для «Помощника планирования»: (имя, адрес, занятость).
@@ -431,10 +466,12 @@ pub mod calendar {
         ]
     }
 
-    /// Моя занятость из событий — для сетки помощника.
+    /// Моя занятость из событий — для сетки помощника (отклонённые не занимают время).
     pub fn my_busy() -> Vec<Busy> {
+        let declined = |e: &Event| e.participants.iter().any(|p| p.email == crate::ME && p.status == Partstat::Declined);
         my_events()
             .iter()
+            .filter(|e| !declined(e))
             .map(|e| Busy { span: e.span, kind: if e.status == EventStatus::Tentative { BusyKind::Tentative } else { BusyKind::Busy } })
             .collect()
     }

@@ -194,6 +194,14 @@ impl Categories {
         self.find(keyword).map(|i| (i, &self.list[i])).filter(|(_, c)| !c.hidden)
     }
 
+    /// Категория события календаря (S5-11) по его меткам — JSCalendar `keywords` и `categories`: ключевое слово
+    /// категории (`pm.cat.<id>`, `$labelN` из таблицы) или имя категории без учёта регистра (так их ставят Outlook и
+    /// другие клиенты). Несколько — первая по порядку таблицы; удалённые не считаются.
+    pub fn for_event(&self, keywords: &[String]) -> Option<&Category> {
+        let name = |c: &Category, k: &str| c.name.trim().to_lowercase() == k.trim().to_lowercase();
+        self.visible().find(|c| keywords.iter().any(|k| c.keyword.eq_ignore_ascii_case(k) || name(c, k)))
+    }
+
     /// Видимая категория на клавише `key`.
     pub fn by_key(&self, key: u8) -> Option<&Category> {
         self.visible().find(|c| c.key == Some(key))
@@ -871,5 +879,24 @@ mod tests {
         assert!(store.load().unwrap().is_none());
         std::fs::write(&store.0, "not json").unwrap();
         assert!(matches!(store.load(), Err(StoreError::Json(_))));
+    }
+
+    /// Цвет события календаря — по ключевому слову категории или по её имени; первая по таблице, удалённые — нет.
+    #[test]
+    fn event_category_by_keyword_or_name() {
+        let mut t = Categories::defaults(|id| match id {
+            "clients" => "Клиенты".to_owned(),
+            other => other.to_owned(),
+        });
+        let k = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let color = |t: &Categories, list: &[&str]| t.for_event(&k(list)).map(|c| c.color.clone());
+        assert_eq!(color(&t, &["pm.cat.clients"]), Some(palette::BLUE.to_owned()));
+        assert_eq!(color(&t, &["  КЛИЕНТЫ "]), Some(palette::BLUE.to_owned()), "имя категории, как в Outlook");
+        // Две категории — первая по таблице (clients раньше team).
+        assert_eq!(t.for_event(&k(&["pm.cat.team", "PM.CAT.CLIENTS"])).map(|c| c.keyword.as_str()), Some("pm.cat.clients"));
+        assert_eq!(color(&t, &["чужое", "$junk"]), None);
+        assert_eq!(color(&t, &[]), None);
+        t.delete("pm.cat.clients", 1).unwrap();
+        assert_eq!(t.for_event(&k(&["pm.cat.clients", "pm.cat.team"])).map(|c| c.keyword.as_str()), Some("pm.cat.team"));
     }
 }

@@ -52,10 +52,21 @@ pub(crate) enum Pm {
     FbOof,
     FbUnknown,
     FbOff,
+    /// Общее свободное окно (помощник, S5-11): рамка, заливка, текст; занятость приглушённо; внешний участник.
+    FbFree,
+    FbFreeBg,
+    FbFreeFg,
+    FbMute,
+    FbExt,
+    /// Пересечение с моим календарём (карточка приглашения, подробности события): текст и подложка.
+    ConflictFg,
+    ConflictBg,
+    /// Нерабочие часы в сетке недели.
+    CalOff,
 }
 
 impl Pm {
-    pub(crate) const COUNT: usize = Pm::FbOff as usize + 1;
+    pub(crate) const COUNT: usize = Pm::CalOff as usize + 1;
 }
 
 const fn c(v: u32) -> Color {
@@ -83,6 +94,14 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::FbOof, "app.fb.oof", c(0x7B3FA0), c(0x9466B0), Role::TextPrimary),
     (Pm::FbUnknown, "app.fb.unknown", c(0xC8C8C8), c(0x5A5A5A), Role::TextDisabled),
     (Pm::FbOff, "app.fb.off", c(0xF0F0F0), c(0x2C2C2C), Role::BgBase),
+    (Pm::FbFree, "app.fb.free", c(0x5F983A), c(0x6FAF45), Role::SuccessFg),
+    (Pm::FbFreeBg, "app.fb.free.bg", c(0xE5F4DD), c(0x26361C), Role::SuccessBg),
+    (Pm::FbFreeFg, "app.fb.free.fg", c(0x34591B), c(0xB9E09E), Role::SuccessFg),
+    (Pm::FbMute, "app.fb.mute", c(0xE3E3E3), c(0x3A3A3A), Role::TextDisabled),
+    (Pm::FbExt, "app.fb.ext", c(0x009F99), c(0x00837E), Role::TextSecondary),
+    (Pm::ConflictFg, "app.conflict.fg", c(0x5C2E91), c(0xDFC1EE), Role::TextPrimary),
+    (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
+    (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
 ];
 
 /// Части цвета категории: точка и полоса, текст и подложка метки.
@@ -153,6 +172,14 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::FbOof,
     Pm::FbUnknown,
     Pm::FbOff,
+    Pm::FbFree,
+    Pm::FbFreeBg,
+    Pm::FbFreeFg,
+    Pm::FbMute,
+    Pm::FbExt,
+    Pm::ConflictFg,
+    Pm::ConflictBg,
+    Pm::CalOff,
 ];
 
 /// Цвета категории в теме.
@@ -312,9 +339,6 @@ impl Look {
         self.c(Role::SuccessFg)
     }
 
-    pub(crate) fn success_bg(&self) -> Hsla {
-        self.c(Role::SuccessBg)
-    }
 
     /// Нейтральная заливка (код, полосы таблиц, подложки чипов).
     pub(crate) fn fill(&self) -> Hsla {

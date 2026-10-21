@@ -15,7 +15,7 @@ const USING: &[&str] = &[CORE, CALENDARS, PRINCIPALS];
 pub const EVENT_PROPERTIES: &[&str] = &[
     "id", "uid", "calendarIds", "title", "description", "start", "timeZone", "duration", "showWithoutTime",
     "status", "freeBusyStatus", "participants", "locations", "recurrenceRules", "recurrenceId", "utcStart",
-    "utcEnd",
+    "utcEnd", "keywords", "categories", "sequence",
 ];
 
 #[derive(Debug, Clone, Deserialize)]

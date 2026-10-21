@@ -258,6 +258,76 @@ async fn invitation_round_trip() {
     }
 }
 
+/// S5-11: метки события (`keywords`, `categories`) и номер версии (`sequence`) сервер хранит и отдаёт — по ним цвет
+/// блока в неделе и состояние карточки приглашения («изменено», «устарело»). Справочник: какие типы Principal есть
+/// (переговорные и ресурсы — строка «Переговорная» во вкладке встречи).
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn event_keywords_sequence_and_principal_kinds() {
+    let a = user(1).await;
+    let cal = first_calendar(&a.client).await;
+    let uid = format!("postman-s511-{}@itt.test", stamp());
+    let start = start_in(10);
+    let ev = NewEvent {
+        uid: &uid,
+        calendar_id: &cal,
+        title: "Postman: метки события",
+        description: "",
+        location: "",
+        start,
+        time_zone: "Europe/Moscow",
+        duration_secs: 1800,
+        organizer: ("User 1", &a.email),
+        attendees: &[],
+    };
+    let mut v = ev.to_jmap();
+    v["keywords"] = serde_json::json!({ "pm.cat.clients": true });
+    v["categories"] = serde_json::json!({ "http://example.com/categories/team": true });
+    let id = a.client.create_event(v, false).await.unwrap();
+    let got = a.client.event_by_uid(&uid).await.unwrap().expect("событие по uid");
+    let e = Event::from_jmap(&got, &jiff::tz::TimeZone::UTC).unwrap();
+    eprintln!("keywords={:?} sequence={} raw.keywords={} raw.categories={}", e.keywords, e.sequence, got["keywords"], got["categories"]);
+    assert!(e.keywords.iter().any(|k| k == "pm.cat.clients"), "keywords потеряны: {got}");
+    a.client.destroy_event(&id, false).await.unwrap();
+
+    // Номер версии: встреча с участником (user3), правка времени с рассылкой — у участника `sequence` больше.
+    let c = user(3).await;
+    let uid = format!("postman-s511-seq-{}@itt.test", stamp());
+    let attendees = [("User 3", c.email.as_str(), false)];
+    let ev = NewEvent { uid: &uid, attendees: &attendees, title: "Postman: версия встречи", ..ev };
+    let id = a.client.create_event(ev.to_jmap(), true).await.unwrap();
+    let first = eventually("приглашение у user3", || async { c.client.event_by_uid(&uid).await.ok().flatten() }).await;
+    let mut patch = serde_json::Map::new();
+    patch.insert("start".into(), Value::from(start.checked_add(jiff::Span::new().hours(1)).unwrap().to_string()));
+    a.client.update_event(&id, patch, true).await.unwrap();
+    let moved = eventually("перенос у user3", || async {
+        let e = c.client.event_by_uid(&uid).await.ok().flatten()?;
+        (e["start"] != first["start"]).then_some(e)
+    })
+    .await;
+    let mine = a.client.event_by_uid(&uid).await.unwrap().expect("у организатора");
+    eprintln!(
+        "sequence: organizer={} attendee before={} after={}",
+        mine["sequence"], first["sequence"], moved["sequence"]
+    );
+    // Перенос с рассылкой — новая версия у участника (без `sequence` в ответе — 0).
+    let seq = |e: &Value| e["sequence"].as_i64().unwrap_or(0);
+    assert!(seq(&moved) > seq(&first), "sequence не вырос: {} → {}", first["sequence"], moved["sequence"]);
+    let parsed = Event::from_jmap(&moved, &jiff::tz::TimeZone::UTC).unwrap();
+    assert_eq!(parsed.sequence, seq(&moved));
+    a.client.destroy_event(&id, true).await.unwrap();
+    if let Some(e) = c.client.event_by_uid(&uid).await.unwrap() {
+        c.client.destroy_event(e["id"].as_str().unwrap(), false).await.unwrap();
+    }
+
+    let people = a.client.directory(200).await.unwrap();
+    let mut kinds: Vec<&str> = people.iter().map(|p| p.kind.as_str()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    eprintln!("principal kinds: {kinds:?} ({} total)", people.len());
+    assert!(kinds.contains(&"individual"));
+}
+
 /// «Помощник планирования»: занятость коллеги видна только после того, как он открыл календарь.
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
@@ -473,6 +543,7 @@ async fn calendar_through_sync() {
         time_zone: tz.into(),
         duration_secs: 3600,
         attendees: Vec::new(),
+        optional: Vec::new(),
     };
     let identities3 = c.client.identities().await.unwrap();
     let busy_id = schedule::create(&c.client, &identities3, &busy).await.unwrap();
@@ -507,6 +578,7 @@ async fn calendar_through_sync() {
         time_zone: tz.into(),
         duration_secs: 1800,
         attendees: vec![("User 3".into(), c.email.clone())],
+        optional: Vec::new(),
     };
     assert!(commands.send(Command::CreateMeeting { meeting: Box::new(meeting), ticket: 1 }).is_ok());
     match wait("MeetingCreated", &|e| matches!(e, SyncEvent::MeetingCreated { .. } | SyncEvent::MeetingFailed { .. })) {
@@ -651,6 +723,7 @@ async fn calendar_change_arrives_by_push() {
         time_zone: "Europe/Moscow".into(),
         duration_secs: 1800,
         attendees: Vec::new(),
+        optional: Vec::new(),
     };
     let identities = u.client.identities().await.unwrap();
     let id = schedule::create(&u.client, &identities, &meeting).await.unwrap();

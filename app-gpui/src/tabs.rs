@@ -11,6 +11,8 @@ pub(crate) enum TabKind {
     Settings,
     /// Письмо (`composer::Composer` с этим `id`); черновиков — сколько угодно.
     Compose(u64),
+    /// Новая встреча (S5-11, `meeting.rs`): их может быть несколько.
+    Meeting,
 }
 
 impl TabKind {

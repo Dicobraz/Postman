@@ -14,7 +14,8 @@ use crate::keymap::human;
 fn place(context: Option<&str>) -> &'static str {
     match context {
         Some(c) if c.starts_with("Composer") => "письмо",
-        Some(c) if c.contains("Meeting") => "окно встречи",
+        Some(c) if c.contains("Meeting") => "вкладка встречи",
+        Some(c) if c.contains("ContactsView") => "контакты",
         Some(c) if c.contains("CalendarView") => "календарь",
         Some(c) if c.contains("MailView") => "почта",
         Some(c) if c.contains("Mailer") => "главное окно",

@@ -58,12 +58,14 @@ pub(crate) fn human(keys: &str) -> String {
 pub(crate) enum Place {
     /// Окно письма.
     Composer,
-    /// Окно встречи.
+    /// Вкладка встречи.
     Meeting,
     /// Раздел «Почта» главного окна.
     Mail,
     /// Раздел «Календарь».
     Calendar,
+    /// Раздел «Контакты» (S5-11).
+    Contacts,
     /// Всё главное окно.
     Main,
 }
@@ -76,6 +78,7 @@ impl Place {
             Some(c) if c.contains("Composer") => Place::Composer,
             Some(c) if c.contains("Meeting") => Place::Meeting,
             Some(c) if c.contains("CalendarView") => Place::Calendar,
+            Some(c) if c.contains("ContactsView") => Place::Contacts,
             Some(c) if c.contains("MailView") => Place::Mail,
             _ => Place::Main,
         }
@@ -88,6 +91,7 @@ impl Place {
             Place::Meeting => "settings-keys-where-meeting",
             Place::Mail => "settings-keys-where-mail",
             Place::Calendar => "settings-keys-where-calendar",
+            Place::Contacts => "settings-keys-where-contacts",
             Place::Main => "settings-keys-where-main",
         }
     }

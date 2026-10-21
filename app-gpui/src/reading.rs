@@ -96,6 +96,8 @@ pub(crate) enum SyncRequest {
     RespondInvite { invite: Box<Invitation>, status: Partstat, in_reply_to: Option<String> },
     /// Беседа с сервера (ключ цепочки).
     Thread(String),
+    /// Мои события в сутки встречи из приглашения (S5-11): пересечения и «Ваш день».
+    Events { from: i64, to: i64 },
 }
 
 impl SyncRequest {
@@ -106,6 +108,7 @@ impl SyncRequest {
                 Command::RespondInvite { invite: invite.clone(), status: *status, in_reply_to: in_reply_to.clone() }
             }
             SyncRequest::Thread(key) => Command::Thread(key.clone()),
+            SyncRequest::Events { from, to } => Command::Events { from: *from, to: *to },
         }
     }
 }
@@ -209,17 +212,15 @@ impl ReadingPane {
             Event::BlobReady { blob_id, data } => self.blob_ready(blob_id, data.clone(), cx),
             Event::BlobFailed { blob_id, error } => self.blob_failed(blob_id, error.clone(), cx),
             Event::InviteAnswered { uid, status, delivery } => {
-                let (cache, key, value) = (self.cache.clone(), invite_card::state_key(uid), invite_card::encode(*status));
+                // Ответ запоминается с версией встречи из карточки (S5-11), без карточки — только статус.
+                let value = self.card_for(uid).map(|c| c.remember(*status)).unwrap_or_else(|| invite_card::encode(*status));
+                let (cache, key) = (self.cache.clone(), invite_card::state_key(uid));
                 cx.background_spawn(async move {
-                    if let Err(e) = cache.set_state(&key, value) {
+                    if let Err(e) = cache.set_state(&key, &value) {
                         tracing::warn!("invite answer is not stored: {e}");
                     }
                 })
                 .detach();
-                if let Some(card) = self.card_for(uid) {
-                    card.answer = Some(*status);
-                    card.sending = None;
-                }
                 let text = match delivery {
                     Delivery::Server => tr!("reading-invite-sent-server"),
                     Delivery::Mail { imported: true } => tr!("reading-invite-sent-imported"),
@@ -241,6 +242,7 @@ impl ReadingPane {
             }
             Event::Senders(list) => self.mine = list.iter().map(|s| s.address.email.clone()).collect(),
             Event::ThreadReady { thread, .. } => self.thread_ready(thread, cx),
+            Event::EventsLoaded { .. } | Event::CalendarFailed(_) => self.invite_sync(ev, cx),
             _ => {}
         }
     }
@@ -261,6 +263,7 @@ impl ReadingPane {
                 }
             }
             SyncRequest::Thread(_) => self.thread_not_sent(),
+            SyncRequest::Events { .. } => self.invite_events_failed(),
         }
         cx.notify();
     }
@@ -452,6 +455,7 @@ impl ReadingPane {
                     }
                     Err(e) => card.state = State::Failed(e),
                 }
+                this.invite_ready(cx);
                 cx.notify();
             })
             .ok();
