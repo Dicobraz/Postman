@@ -9,6 +9,8 @@ pub(crate) enum TabKind {
     Mail,
     /// Панель настроек ящика на сервере (`settings::Panel`).
     Settings,
+    /// Новая встреча (S5-11, `meeting.rs`): их может быть несколько.
+    Meeting,
 }
 
 impl TabKind {

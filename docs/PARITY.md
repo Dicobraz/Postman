@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 40 из 40 (100 %).
+Сделано: 49 из 49 (100 %).
 
 | Функция | Команда | Хоткей | Статус |
 |---|---|---|---|
@@ -39,12 +39,21 @@
 | Новая встреча (помощник планирования) | `calendar.new_meeting` | `ctrl-shift-q` | есть |
 | Предыдущая неделя | `calendar.prev_week` | `alt-up` | есть |
 | Следующая неделя | `calendar.next_week` | `alt-down` | есть |
-| Сегодня в календаре | `calendar.today` |  | есть |
+| Сегодня в календаре | `calendar.today` | `alt-home` | есть |
 | Отправить письмо | `compose.send` | `ctrl-enter`, `alt-s` | есть |
 | Вложить файл | `compose.attach` |  | есть |
 | Предпросмотр письма | `compose.preview` | `ctrl-shift-p` | есть |
 | Закрыть окно письма | `compose.close` | `escape` | есть |
 | Отправить приглашения | `meeting.send` | `ctrl-enter`, `alt-s` | есть |
-| Закрыть окно встречи | `meeting.close` | `escape` | есть |
+| Закрыть вкладку встречи | `meeting.close` | `escape` | есть |
+| Новый контакт | `contacts.new` | `ctrl-shift-c` | есть |
+| Изменить контакт | `contacts.edit` | `f2` | есть |
+| Удалить контакт | `contacts.delete` | `delete` | есть |
+| Написать контакту | `contacts.write` |  | есть |
+| Встреча с контактом | `contacts.meeting` |  | есть |
+| Копировать адрес контакта | `contacts.copy_address` |  | есть |
+| Принять приглашение | `invite.accept` | `a` | есть |
+| Ответить «Под вопросом» | `invite.tentative` | `t` | есть |
+| Отклонить приглашение | `invite.decline` | `n` | есть |
 | Автоматические ответы | `settings.vacation` |  | есть |
 | Правила | `settings.rules` |  | есть |

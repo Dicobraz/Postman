@@ -1,48 +1,58 @@
-//! Окно новой встречи (S3-05): отдельное окно ОС, как окно письма (ADR 0002); основное окно работает.
+//! Новая встреча (S3-05; вид — S5-11 по макету «Новая встреча: подбор времени в одной форме»): вкладка окна
+//! (модель вкладок S5-01), а не отдельное окно. Сверху — поля (тема, обязательные и необязательные участники
+//! чипами с занятостью в выбранное время, переговорная, место, начало–конец, описание), ниже — помощник
+//! планирования в той же форме: день, «Только общее свободное время», длительность, «Учитывать необязательных»,
+//! строки участников с занятостью, общие окна — столбцами, выбранное время — рамкой.
 //!
 //! Модель ([`MeetingModel`]) — без gpui: поля → `postman_core::schedule::Meeting`, ошибки времени и адресов,
-//! итог отправки по тикету; её проверяют тесты. View ([`MeetingWindow`]) — поля, подсказки адресов (адресная
-//! книга окна письма), «Помощник планирования»: занятость участников с сервера (`Command::Availability` →
-//! `Principal/getAvailability`), «нет данных» отдельно от «свободен», общие окна (`find_slots`). Отправка —
-//! `Command::CreateMeeting` (сервер рассылает приглашения); итог — тостом в основном окне, встреча — в неделе.
-//! Демо: занятость — демо-коллеги, отправка — «нужен сервер».
+//! итог отправки по тикету; её проверяют тесты. View ([`MeetingView`]) — поля, подсказки адресов (адресная книга
+//! окна письма), занятость с сервера (`Command::Availability` → `Principal/getAvailability`), «нет данных» отдельно
+//! от «свободен». Отправка — `Command::CreateMeeting` (сервер рассылает приглашения); итог — тостом, вкладка
+//! закрывается, встреча — в неделе. Демо: занятость — демо-коллеги, отправка — «нужен сервер».
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gpui_kit::component::input::{Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::input::{
+    Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
-use postman_calendar::{Busy, Span, WorkHours};
+use postman_calendar::{Busy, BusyKind, Cell, Span, WorkHours, grid};
 use postman_compose::parse_addresses;
 use postman_core::schedule::Meeting;
 use postman_core::sync::{Command, Event};
 use postman_demo::calendar as demo;
 
 use crate::calendar::{
-    FIRST_HOUR, HOURS, add_days, busy_grid, button, button_small, common_slots, day_name,
-    day_start, monday_of, slot_button, slot_label,
+    FIRST_HOUR, HOURS, STEP, accent_button, add_days, avatar, day_start, duration_text, g, hm, long_day, monday_of,
+    outline_button, zone_label,
 };
+use crate::chrome::icon;
 use crate::commands::meeting;
 use crate::compose::{Book, accept_suggestion, current_token};
-use crate::{Mailer, sys};
+use crate::roles::{Look, Pm};
+use crate::Mailer;
 
-const LABEL_W: f32 = 96.0;
+const LABEL_W: f32 = 120.0;
+const NAME_W: f32 = 244.0;
+const ROW_H: f32 = 36.0;
 const SUGGESTIONS: usize = 6;
 const SUGGEST_FROM: usize = 2;
 /// Занятость спрашиваем, когда участники перестали меняться.
 const QUERY_DELAY: Duration = Duration::from_millis(400);
 const DURATIONS: [i64; 4] = [1800, 3600, 5400, 7200];
-const DAYS: usize = 5;
+/// Переговорных в строке выбора — не больше.
+const ROOMS: usize = 6;
 
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
-/// Тикет команды окна встречи: итог синхронизации находит своё окно по нему.
+/// Тикет команды встречи: итог синхронизации находит свою вкладку по нему.
 fn next_ticket() -> u64 {
     NEXT_TICKET.fetch_add(1, Ordering::Relaxed)
 }
@@ -54,6 +64,8 @@ pub(crate) enum Field {
     Date,
     Start,
     Attendees,
+    Optional,
+    Description,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,7 +79,7 @@ pub(crate) enum Status {
     Failed(String),
 }
 
-/// Поля окна встречи и итог отправки — без gpui.
+/// Поля встречи и итог отправки — без gpui.
 #[derive(Debug)]
 pub(crate) struct MeetingModel {
     pub(crate) title: String,
@@ -77,7 +89,11 @@ pub(crate) struct MeetingModel {
     /// «чч:мм».
     pub(crate) start: String,
     pub(crate) duration: i64,
+    /// Обязательные участники: «Имя <адрес>; …».
     pub(crate) attendees: String,
+    /// Необязательные участники и переговорные.
+    pub(crate) optional: String,
+    pub(crate) description: String,
     pub(crate) status: Status,
     /// Тикет отправки, итог которой ждём.
     sending: Option<u64>,
@@ -133,6 +149,34 @@ pub(crate) fn default_start(now: &jiff::Zoned) -> DateTime {
     }
 }
 
+/// Общие свободные окна дня `range`: шаги `STEP`, где у всех с известной занятостью (`Some`) рабочее время и
+/// «свободно» («под вопросом» — занято), подряд не короче `duration`. «Нет данных» (`None`) окна не закрывает.
+pub(crate) fn free_runs(rows: &[Option<Vec<Busy>>], range: Span, hours: &WorkHours, duration: i64) -> Vec<Span> {
+    let known: Vec<Option<Vec<Busy>>> = rows.iter().filter(|r| r.is_some()).cloned().collect();
+    // Никого не известно — окна по рабочему времени (строка «никто не занят»).
+    let known = if known.is_empty() { vec![Some(Vec::new())] } else { known };
+    let cells = grid(&known, range, STEP, hours);
+    let n = cells.first().map_or(0, Vec::len);
+    let free = |i: usize| cells.iter().all(|row| row.get(i) == Some(&Cell::Free));
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if !free(i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && free(i) {
+            i += 1;
+        }
+        let span = Span::new(range.start + start as i64 * STEP, (range.start + i as i64 * STEP).min(range.end));
+        if span.len() >= duration {
+            out.push(span);
+        }
+    }
+    out
+}
+
 impl MeetingModel {
     pub(crate) fn new(start: DateTime, duration: i64) -> Self {
         Self {
@@ -142,6 +186,8 @@ impl MeetingModel {
             start: start.strftime("%H:%M").to_string(),
             duration,
             attendees: String::new(),
+            optional: String::new(),
+            description: String::new(),
             status: Status::None,
             sending: None,
         }
@@ -154,6 +200,8 @@ impl MeetingModel {
             Field::Date => &self.date,
             Field::Start => &self.start,
             Field::Attendees => &self.attendees,
+            Field::Optional => &self.optional,
+            Field::Description => &self.description,
         }
     }
 
@@ -164,6 +212,8 @@ impl MeetingModel {
             Field::Date => &mut self.date,
             Field::Start => &mut self.start,
             Field::Attendees => &mut self.attendees,
+            Field::Optional => &mut self.optional,
+            Field::Description => &mut self.description,
         };
         *slot = value;
         if !self.busy() {
@@ -180,22 +230,29 @@ impl MeetingModel {
         Some(parse_date(&self.date, today)?.to_datetime(parse_time(&self.start)?))
     }
 
-    /// Время встречи в Unix-секундах (подсветка в помощнике).
+    /// Время встречи в Unix-секундах (рамка в помощнике).
     pub(crate) fn span(&self, tz: &TimeZone, today: Date) -> Option<Span> {
         let start = self.start_at(today)?.to_zoned(tz.clone()).ok()?.timestamp().as_second();
         Some(Span::new(start, start + self.duration))
     }
 
-    /// Распознанные участники: (имя, адрес).
+    /// Распознанные обязательные участники: (имя, адрес).
     pub(crate) fn people(&self) -> Vec<(String, String)> {
         parse_addresses(&self.attendees).0.into_iter().map(|a| (a.name, a.email)).collect()
     }
 
-    pub(crate) fn bad_addresses(&self) -> Vec<String> {
-        parse_addresses(&self.attendees).1
+    /// Распознанные необязательные участники и переговорные.
+    pub(crate) fn optional_people(&self) -> Vec<(String, String)> {
+        parse_addresses(&self.optional).0.into_iter().map(|a| (a.name, a.email)).collect()
     }
 
-    /// Встреча для синхронизации; ошибки — до отправки, строкой в окне.
+    pub(crate) fn bad_addresses(&self) -> Vec<String> {
+        let mut bad = parse_addresses(&self.attendees).1;
+        bad.extend(parse_addresses(&self.optional).1);
+        bad
+    }
+
+    /// Встреча для синхронизации; ошибки — до отправки, строкой во вкладке.
     pub(crate) fn meeting(&self, uid: String, tz: &TimeZone, today: Date) -> Result<Meeting, Status> {
         let bad = self.bad_addresses();
         if !bad.is_empty() {
@@ -212,15 +269,19 @@ impl MeetingModel {
                 (utc.with_time_zone(TimeZone::UTC).datetime(), "Etc/UTC".to_string())
             }
         };
+        let required = self.people();
+        let optional =
+            self.optional_people().into_iter().filter(|(_, e)| !required.iter().any(|(_, r)| r.eq_ignore_ascii_case(e))).collect();
         Ok(Meeting {
             uid,
             title: self.title.trim().to_string(),
             location: self.location.trim().to_string(),
-            description: String::new(),
+            description: self.description.trim().to_string(),
             start,
             time_zone,
             duration_secs: self.duration,
-            attendees: self.people(),
+            attendees: required,
+            optional,
         })
     }
 
@@ -245,7 +306,7 @@ impl MeetingModel {
         self.status = Status::NoServer;
     }
 
-    /// Встреча создана: окно закрывается.
+    /// Встреча создана: вкладка закрывается.
     pub(crate) fn on_created(&mut self, ticket: u64) -> bool {
         let mine = self.sending == Some(ticket);
         if mine {
@@ -264,7 +325,7 @@ impl MeetingModel {
         mine
     }
 
-    /// Выбрано предложенное окно: дата и начало — из него.
+    /// Выбрано окно: дата и начало — из него.
     pub(crate) fn set_slot(&mut self, s: Span, tz: &TimeZone) {
         if let Ok(t) = jiff::Timestamp::from_second(s.start) {
             let z = t.to_zoned(tz.clone());
@@ -274,103 +335,140 @@ impl MeetingModel {
         self.duration = s.len().max(1800);
     }
 
-    /// Другой день той же недели: время остаётся.
+    /// Другой день: время остаётся.
     pub(crate) fn set_day(&mut self, date: Date) {
         self.date = date.strftime("%d.%m.%Y").to_string();
     }
 }
 
-// --- окна встречи у экрана ---
+// --- вкладки встречи у экрана ---
 
-/// Встреча создана (итог для тоста в основном окне).
+/// Встреча создана (итог для тоста), вкладка `tab` закрывается.
 pub(crate) struct Created {
     pub(crate) title: String,
     pub(crate) invited: bool,
+    pub(crate) tab: u64,
 }
 
 #[derive(Default)]
 pub(crate) struct Meetings {
-    windows: Vec<WeakEntity<MeetingWindow>>,
+    /// Вкладки встреч: номер вкладки и её view.
+    tabs: Vec<(u64, Entity<MeetingView>)>,
+    /// Открыть, когда будет окно (следующий кадр экрана): модели новых вкладок.
+    pub(crate) pending: Vec<MeetingModel>,
 }
 
 impl Meetings {
-    /// Событие синхронизации — окнам (каждое ищет свой тикет); созданные встречи — экрану для тоста.
+    /// Событие синхронизации — вкладкам (каждая ищет свой тикет); созданные встречи — экрану.
     pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) -> Vec<Created> {
         let mut created = Vec::new();
-        self.windows.retain(|w| {
-            w.update(cx, |m, cx| {
-                if let Some(c) = m.on_sync(ev, cx) {
+        for (tab, view) in &self.tabs {
+            view.update(cx, |m, cx| {
+                if let Some(mut c) = m.on_sync(ev, cx) {
+                    c.tab = *tab;
                     created.push(c);
                 }
-            })
-            .is_ok()
-        });
+            });
+        }
         created
     }
 
-    /// Последнее открытое окно (снимки `--screens`).
-    pub(crate) fn last(&self) -> Option<Entity<MeetingWindow>> {
-        self.windows.iter().rev().find_map(WeakEntity::upgrade)
+    /// Последняя открытая вкладка (снимки `--screens`).
+    pub(crate) fn last(&self) -> Option<Entity<MeetingView>> {
+        self.tabs.last().map(|(_, v)| v.clone())
     }
-}
 
-impl Mailer {
-    /// Окно новой встречи; основное окно продолжает работать.
-    pub(crate) fn open_meeting(
-        &mut self,
-        model: Option<MeetingModel>,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<MeetingWindow>> {
-        self.load_address_book(cx);
-        let now = jiff::Zoned::now();
-        let model = model.unwrap_or_else(|| MeetingModel::new(default_start(&now), 3600));
-        let open = Open {
-            book: self.compose.book.clone(),
-            mailer: cx.entity().downgrade(),
-            live: self.backend.is_live(),
-            screens: self.screens.is_some(),
-        };
-        let bounds = Bounds::centered(None, size(px(1080.), px(700.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some(tr!("meeting-title-new").into()), ..Default::default() }),
-            window_min_size: Some(size(px(720.), px(480.))),
-            ..Default::default()
-        };
-        match gpui_kit::open_window(options, cx, |window, cx| {
-            crate::roles::observe_window(window);
-            cx.new(|cx| MeetingWindow::new(model, open, window, cx))
-        })
-        {
-            Ok((_, w)) => {
-                self.meetings.windows.retain(|w| w.upgrade().is_some());
-                self.meetings.windows.push(w.downgrade());
-                Some(w)
-            }
-            Err(e) => {
-                tracing::error!("meeting window: {e}");
-                let text = tr!("meeting-window-failed", error = e.to_string());
-                self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
-                None
-            }
+    pub(crate) fn view(&self, tab: u64) -> Option<&Entity<MeetingView>> {
+        self.tabs.iter().find(|(t, _)| *t == tab).map(|(_, v)| v)
+    }
+
+    /// Название вкладки: «Новая встреча · тема».
+    pub(crate) fn title(&self, tab: u64, cx: &App) -> String {
+        match self.view(tab).map(|v| v.read(cx).model.title.trim().to_string()) {
+            Some(t) if !t.is_empty() => tr!("meeting-tab-titled", title = t),
+            _ => tr!("meeting-title-new"),
         }
     }
 
-    /// Встречи созданы: тост и неделя заново.
+    pub(crate) fn remove(&mut self, tab: u64) {
+        self.tabs.retain(|(t, _)| *t != tab);
+    }
+}
+
+/// Что вкладка встречи просит у экрана.
+pub(crate) enum MeetingEvent {
+    /// Закрыть вкладку (Esc, встреча создана).
+    Close,
+    /// Обновить название вкладки.
+    Title,
+}
+
+impl Mailer {
+    /// Новая встреча — вкладкой; откроется на следующем кадре (полям ввода нужно окно).
+    pub(crate) fn open_meeting(&mut self, model: Option<MeetingModel>, cx: &mut Context<Self>) {
+        self.load_address_book(cx);
+        let now = jiff::Zoned::now();
+        self.meetings.pending.push(model.unwrap_or_else(|| MeetingModel::new(default_start(&now), 3600)));
+        cx.notify();
+    }
+
+    /// Вкладки ждущих встреч (из `render`, где есть окно).
+    pub(crate) fn create_meetings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for model in std::mem::take(&mut self.meetings.pending) {
+            let me = self.reading.read(cx).me.clone().or_else(|| (!self.backend.is_live()).then(|| postman_demo::ME.to_string()));
+            let open = Open {
+                book: self.compose.book.clone(),
+                mailer: cx.entity().downgrade(),
+                live: self.backend.is_live(),
+                rooms: self.contacts.read(cx).rooms(),
+                me,
+            };
+            let view = cx.new(|cx| MeetingView::new(model, open, window, cx));
+            let tab = self.tabs.open(crate::tabs::TabKind::Meeting);
+            let sub = cx.subscribe_in(&view, window, move |this: &mut Self, _, ev: &MeetingEvent, window, cx| match ev {
+                MeetingEvent::Close => this.close_meeting(tab, window, cx),
+                MeetingEvent::Title => cx.notify(),
+            });
+            self._subscriptions.push(sub);
+            self.meetings.tabs.push((tab, view));
+        }
+        cx.notify();
+    }
+
+    /// Закрыть все вкладки встреч (снимки `--screens`).
+    pub(crate) fn close_all_meetings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs: Vec<u64> = self.meetings.tabs.iter().map(|(t, _)| *t).collect();
+        for tab in tabs {
+            self.close_meeting(tab, window, cx);
+        }
+    }
+
+    /// Закрыть вкладку встречи.
+    pub(crate) fn close_meeting(&mut self, tab: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.meetings.remove(tab);
+        self.tabs.close(tab);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Встречи созданы: тост, вкладка закрывается, неделя заново.
     pub(crate) fn meetings_created(&mut self, created: Vec<Created>, cx: &mut Context<Self>) {
         for c in &created {
             let title = if c.title.is_empty() { tr!("meeting-untitled") } else { c.title.clone() };
             let text =
                 if c.invited { tr!("meeting-sent", title = title) } else { tr!("meeting-created", title = title) };
             self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
+            self.meetings.remove(c.tab);
+            self.tabs.close(c.tab);
         }
         if !created.is_empty() {
             self.cal.update(cx, |c, cx| c.refresh(cx));
+            cx.notify();
         }
     }
 
-    /// Сцена `meeting` для `--screens`: окно с участниками демо (один — без данных) и помощником. Живой ящик —
-    /// участники из `POSTMAN_SCREENS_ATTENDEES`, время по умолчанию, занятость с сервера.
+    /// Сцена `meeting` для `--screens`: участники демо (один — без данных, один — внешний), переговорная и
+    /// помощник. Живой ящик — участники из `POSTMAN_SCREENS_ATTENDEES`, время по умолчанию, занятость с сервера.
     pub(crate) fn open_meeting_screen(&mut self, cx: &mut Context<Self>) {
         if self.backend.is_live() {
             let mut model = MeetingModel::new(default_start(&jiff::Zoned::now()), 3600);
@@ -382,22 +480,25 @@ impl Mailer {
         let monday = jiff::Timestamp::from_second(demo::week_start())
             .map(|t| monday_of(t.to_zoned(tz).date()))
             .unwrap_or_else(|_| monday_of(jiff::Zoned::now().date()));
-        let mut model = MeetingModel::new(add_days(monday, 2).at(15, 0, 0, 0), 3600);
+        let mut model = MeetingModel::new(add_days(monday, 2).at(13, 0, 0, 0), 3600);
         model.title = "Обсуждение пилота".into(); // i18n-ok: образец встречи
-        model.location = "Переговорная 3".into(); // i18n-ok: образец встречи
-        let people: Vec<String> = demo::colleagues().iter().take(3).map(|(n, e, _)| format!("{n} <{e}>")).collect();
-        model.attendees = format!("{}; guest@partner.example; ", people.join("; "));
+        let colleagues = demo::colleagues();
+        let person = |i: usize| colleagues.get(i).map(|(n, e, _)| format!("{n} <{e}>; ")).unwrap_or_default();
+        model.attendees = format!("{}{}guest@partner.example; ", person(0), person(1));
+        model.optional = format!("{}{}", person(2), "n.fedorova@corp.example; ");
         self.open_meeting(Some(model), cx);
     }
 }
 
-// --- окно встречи ---
+// --- вкладка встречи ---
 
 struct Open {
     book: Book,
     mailer: WeakEntity<Mailer>,
     live: bool,
-    screens: bool,
+    /// Переговорные и ресурсы справочника: (имя, адрес).
+    rooms: Vec<(String, String)>,
+    me: Option<String>,
 }
 
 /// Занятость для помощника: неделя и адреса запроса, ответ.
@@ -413,88 +514,161 @@ struct Availability {
     armed: bool,
 }
 
-#[derive(Default)]
-struct Screen {
-    on: bool,
-    frames: u32,
-    hwnd: Option<isize>,
+/// Участник чипом: имя, адрес (у неразобранного — сам текст), разобран ли.
+#[derive(Clone, Debug, PartialEq)]
+struct Chip {
+    name: String,
+    email: String,
+    bad: bool,
 }
 
-pub(crate) struct MeetingWindow {
+impl Chip {
+    fn display(&self) -> String {
+        if self.bad || self.name.is_empty() { self.email.clone() } else { format!("{} <{}>", self.name, self.email) }
+    }
+
+    fn shown(&self) -> String {
+        if self.name.is_empty() { self.email.clone() } else { self.name.clone() }
+    }
+}
+
+/// Чипы из текста адресов: разобранные и неразобранные куски.
+fn chips_of(text: &str) -> Vec<Chip> {
+    let (ok, bad) = parse_addresses(text);
+    let mut out: Vec<Chip> = ok.into_iter().map(|a| Chip { name: a.name, email: a.email, bad: false }).collect();
+    out.extend(bad.into_iter().map(|b| Chip { name: String::new(), email: b, bad: true }));
+    out
+}
+
+/// Состояние участника в выбранное время.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    Free,
+    Busy,
+    Tentative,
+    Away,
+    Unknown,
+    External,
+}
+
+/// Список участников: обязательные (0) и необязательные (1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Required,
+    Optional,
+}
+
+impl Kind {
+    fn index(self) -> usize {
+        match self {
+            Kind::Required => 0,
+            Kind::Optional => 1,
+        }
+    }
+}
+
+pub(crate) struct MeetingView {
     pub(crate) model: MeetingModel,
     title: Entity<InputState>,
     location: Entity<InputState>,
     date: Entity<InputState>,
     start: Entity<InputState>,
-    attendees: Entity<InputState>,
+    /// Набираемый участник (не чип): обязательные и необязательные.
+    inputs: [Entity<InputState>; 2],
+    description: Entity<TextareaState>,
+    chips: [Vec<Chip>; 2],
     focus: FocusHandle,
     mailer: WeakEntity<Mailer>,
     book: Book,
     suggest: Vec<String>,
-    suggest_on: bool,
+    /// Подсказки — для этого списка.
+    suggest_for: Option<Kind>,
     selected: usize,
     tz: TimeZone,
     hours: WorkHours,
     live: bool,
+    rooms: Vec<(String, String)>,
+    me: Option<String>,
     busy: Availability,
     /// Поля модели поменялись не от ввода (выбрано окно, день) — переписать поля при отрисовке.
     sync_inputs: bool,
-    close: bool,
-    window_title: String,
-    screen: Screen,
+    /// Помощник: только общие окна (занятость приглушена) или занятость каждого.
+    pub(crate) only_free: bool,
+    with_optional: bool,
+    desc_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
-impl MeetingWindow {
+impl EventEmitter<MeetingEvent> for MeetingView {}
+
+impl MeetingView {
     fn new(model: MeetingModel, open: Open, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut line = |f: Field, placeholder: &str, cx: &mut Context<Self>| {
-            let (value, placeholder) = (model.field(f).to_string(), tr!(placeholder));
+        let mut line = |placeholder: &str, value: String, cx: &mut Context<Self>| {
+            let placeholder = tr!(placeholder);
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value))
         };
-        let title = line(Field::Title, "meeting-subject-placeholder", cx);
-        let location = line(Field::Location, "meeting-location-placeholder", cx);
-        let date = line(Field::Date, "meeting-date-placeholder", cx);
-        let start = line(Field::Start, "meeting-start-placeholder", cx);
-        let attendees = line(Field::Attendees, "meeting-attendees-placeholder", cx);
+        let title = line("meeting-subject-placeholder", model.title.clone(), cx);
+        let location = line("meeting-location-placeholder", model.location.clone(), cx);
+        let date = line("meeting-date-placeholder", model.date.clone(), cx);
+        let start = line("meeting-start-placeholder", model.start.clone(), cx);
+        let required = line("meeting-attendees-placeholder", String::new(), cx);
+        let optional = line("meeting-attendees-placeholder", String::new(), cx);
+        let desc_text = model.description.clone();
+        let description =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder(tr!("meeting-description-placeholder")).default_value(desc_text));
+        let chips = [chips_of(&model.attendees), chips_of(&model.optional)];
         let mut subscriptions = Vec::new();
         for (f, state) in [
             (Field::Title, &title),
             (Field::Location, &location),
             (Field::Date, &date),
             (Field::Start, &start),
-            (Field::Attendees, &attendees),
+            (Field::Attendees, &required),
+            (Field::Optional, &optional),
         ] {
-            subscriptions.push(cx.subscribe_in(state, window, move |this, state, ev: &InputEvent, _, cx| {
+            subscriptions.push(cx.subscribe_in(state, window, move |this, state, ev: &InputEvent, window, cx| {
                 let value = state.read(cx).value().to_string();
-                this.on_input(f, value, ev, cx);
+                this.on_input(f, value, ev, window, cx);
             }));
         }
+        subscriptions.push(cx.subscribe_in(&description, window, |this, state, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                let value = state.read(cx).value().to_string();
+                this.model.set(Field::Description, value);
+            }
+        }));
         title.update(cx, |s, cx| s.focus(window, cx));
         let tz = TimeZone::system();
-        let w = Self {
+        let desc_open = !model.description.trim().is_empty();
+        let mut w = Self {
             model,
             title,
             location,
             date,
             start,
-            attendees,
+            inputs: [required, optional],
+            description,
+            chips,
             focus: cx.focus_handle(),
             mailer: open.mailer,
             book: open.book,
             suggest: Vec::new(),
-            suggest_on: false,
+            suggest_for: None,
             selected: 0,
             hours: WorkHours::standard(tz.clone()),
             tz,
             live: open.live,
+            rooms: open.rooms,
+            me: open.me,
             busy: Availability::default(),
             sync_inputs: false,
-            close: false,
-            window_title: String::new(),
-            screen: Screen { on: open.screens, ..Default::default() },
+            only_free: true,
+            with_optional: true,
+            desc_open,
             _subscriptions: subscriptions,
         };
-        // Окно открывается посреди обновления экрана (`Mailer`): запрос к нему — следующим шагом.
+        w.sync_model(cx);
+        // Вкладка создаётся посреди обновления экрана (`Mailer`): запрос к нему — следующим шагом.
         cx.spawn(async move |this, cx| {
             let _ = this.update(cx, |w, cx| w.query(cx));
         })
@@ -502,48 +676,128 @@ impl MeetingWindow {
         w
     }
 
-    /// Дескриптор окна для снимка: окно нарисовано несколько раз и занятость получена.
-    pub(crate) fn screen_hwnd(&self) -> Option<isize> {
-        self.screen.hwnd.filter(|_| self.screen.frames >= 3 && self.busy.asked.is_some() && self.busy.ticket.is_none())
+    /// Занятость получена (снимки `--screens`).
+    pub(crate) fn ready(&self) -> bool {
+        self.busy.asked.is_some() && self.busy.ticket.is_none()
     }
 
     fn today(&self) -> Date {
         jiff::Zoned::now().with_time_zone(self.tz.clone()).date()
     }
 
-    /// Неделя встречи: понедельник по полю «Дата» (не разобрано — эта неделя).
-    fn monday(&self) -> Date {
+    /// День встречи (поле «Дата»; не разобрано — сегодня).
+    fn day(&self) -> Date {
         let today = self.today();
-        monday_of(parse_date(&self.model.date, today).unwrap_or(today))
+        parse_date(&self.model.date, today).unwrap_or(today)
     }
 
-    fn on_input(&mut self, f: Field, value: String, ev: &InputEvent, cx: &mut Context<Self>) {
+    /// Неделя встречи: понедельник по полю «Дата».
+    fn monday(&self) -> Date {
+        monday_of(self.day())
+    }
+
+    /// Текст участников модели = чипы + набираемое.
+    fn sync_model(&mut self, cx: &mut Context<Self>) {
+        for kind in [Kind::Required, Kind::Optional] {
+            let i = kind.index();
+            let pending = self.inputs[i].read(cx).value().to_string();
+            let mut text: String = self.chips[i].iter().map(|c| format!("{}; ", c.display())).collect();
+            text.push_str(&pending);
+            let f = if kind == Kind::Required { Field::Attendees } else { Field::Optional };
+            self.model.set(f, text);
+        }
+    }
+
+    fn on_input(&mut self, f: Field, value: String, ev: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = match f {
+            Field::Attendees => Some(Kind::Required),
+            Field::Optional => Some(Kind::Optional),
+            _ => None,
+        };
         match ev {
             InputEvent::Change => {
-                self.model.set(f, value);
-                if f == Field::Attendees {
-                    self.refresh_suggestions();
-                }
-                if matches!(f, Field::Attendees | Field::Date) {
+                if let Some(kind) = kind {
+                    // «;» или «,» — набранное до него становится чипами.
+                    if let Some(cut) = value.rfind([';', ',']) {
+                        let (head, tail) = value.split_at(cut);
+                        let tail = tail[1..].trim_start().to_string();
+                        self.chips[kind.index()].extend(chips_of(head));
+                        self.inputs[kind.index()].update(cx, |s, cx| s.set_value(tail, window, cx));
+                    }
+                    self.sync_model(cx);
+                    self.refresh_suggestions(cx);
                     self.schedule_query(cx);
+                } else {
+                    self.model.set(f, value);
+                    if f == Field::Date {
+                        self.schedule_query(cx);
+                    }
+                    if f == Field::Title {
+                        cx.emit(MeetingEvent::Title);
+                    }
                 }
             }
             InputEvent::Focus => {
-                self.suggest_on = f == Field::Attendees;
-                self.refresh_suggestions();
+                self.suggest_for = kind;
+                self.refresh_suggestions(cx);
+            }
+            InputEvent::PressEnter { .. } if kind.is_some() && !self.suggesting() => {
+                if let Some(kind) = kind {
+                    self.commit(kind, window, cx);
+                }
             }
             _ => return,
         }
         cx.notify();
     }
 
-    fn refresh_suggestions(&mut self) {
-        self.selected = 0;
-        self.suggest.clear();
-        if !self.suggest_on {
+    /// Набранное — чипом.
+    fn commit(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.inputs[kind.index()].read(cx).value().to_string();
+        if text.trim().is_empty() {
             return;
         }
-        let token = current_token(&self.model.attendees);
+        self.chips[kind.index()].extend(chips_of(&text));
+        self.inputs[kind.index()].update(cx, |s, cx| s.set_value("", window, cx));
+        self.sync_model(cx);
+        self.schedule_query(cx);
+    }
+
+    fn remove_chip(&mut self, kind: Kind, i: usize, cx: &mut Context<Self>) {
+        if i < self.chips[kind.index()].len() {
+            self.chips[kind.index()].remove(i);
+            self.sync_model(cx);
+            self.schedule_query(cx);
+            cx.notify();
+        }
+    }
+
+    /// Переговорная: выбрать — в необязательные (место — её имя, если пусто), снять — убрать.
+    fn toggle_room(&mut self, room: (String, String), window: &mut Window, cx: &mut Context<Self>) {
+        let list = &mut self.chips[Kind::Optional.index()];
+        match list.iter().position(|c| c.email.eq_ignore_ascii_case(&room.1)) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => {
+                list.push(Chip { name: room.0.clone(), email: room.1.clone(), bad: false });
+                if self.model.location.trim().is_empty() {
+                    self.model.location = room.0.clone();
+                    self.location.update(cx, |s, cx| s.set_value(room.0, window, cx));
+                }
+            }
+        }
+        self.sync_model(cx);
+        self.schedule_query(cx);
+        cx.notify();
+    }
+
+    fn refresh_suggestions(&mut self, cx: &App) {
+        self.selected = 0;
+        self.suggest.clear();
+        let Some(kind) = self.suggest_for else { return };
+        let token = self.inputs[kind.index()].read(cx).value().to_string();
+        let token = current_token(&token);
         if token.chars().count() < SUGGEST_FROM || token.contains('<') {
             return;
         }
@@ -552,19 +806,19 @@ impl MeetingWindow {
     }
 
     fn suggesting(&self) -> bool {
-        self.suggest_on && !self.suggest.is_empty()
+        self.suggest_for.is_some() && !self.suggest.is_empty()
     }
 
     fn accept(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.suggest.get(i) else { return };
-        let value = accept_suggestion(&self.model.attendees, item);
-        self.attendees.update(cx, |s, cx| {
-            s.set_value(value.clone(), window, cx);
-            s.set_selected_range(value.len()..value.len(), cx);
+        let (Some(item), Some(kind)) = (self.suggest.get(i).cloned(), self.suggest_for) else { return };
+        let value = accept_suggestion("", &item);
+        self.chips[kind.index()].extend(chips_of(&value));
+        self.inputs[kind.index()].update(cx, |s, cx| {
+            s.set_value("", window, cx);
             s.focus(window, cx);
         });
-        self.model.set(Field::Attendees, value);
-        self.refresh_suggestions();
+        self.suggest.clear();
+        self.sync_model(cx);
         self.schedule_query(cx);
         cx.notify();
     }
@@ -593,10 +847,28 @@ impl MeetingWindow {
         .detach();
     }
 
-    /// Занятость недели встречи для участников. Сервер — `Command::Availability`; демо — демо-коллеги.
+    /// Все адреса участников (обязательные и необязательные, без неразобранных), без повторов.
+    fn emails(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.chips.iter().flatten().filter(|c| !c.bad) {
+            let e = c.email.to_lowercase();
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        out
+    }
+
+    /// Занятость недели встречи для участников и переговорных. Сервер — `Command::Availability`; демо — демо-коллеги.
     fn query(&mut self, cx: &mut Context<Self>) {
         let monday = self.monday();
-        let emails: Vec<String> = self.model.people().into_iter().map(|(_, e)| e.to_lowercase()).collect();
+        let mut emails = self.emails();
+        for (_, e) in self.rooms.iter().take(ROOMS) {
+            let e = e.to_lowercase();
+            if !emails.contains(&e) {
+                emails.push(e);
+            }
+        }
         let want = (monday, emails.clone());
         if self.busy.asked.as_ref() == Some(&want) {
             return;
@@ -628,20 +900,13 @@ impl MeetingWindow {
         cx.notify();
     }
 
-    /// Строки помощника: я и участники по порядку полей; ответа ещё нет — «нет данных».
-    fn rows(&self) -> Vec<(String, Option<Vec<Busy>>)> {
-        let mut rows = vec![(tr!("cal-me"), self.busy.me.clone())];
-        for (name, email) in self.model.people() {
-            let busy = self.busy.people.get(&email.to_lowercase()).cloned().flatten();
-            rows.push((if name.is_empty() { email } else { name }, busy));
-        }
-        rows
-    }
-
-    fn send(&mut self, cx: &mut Context<Self>) {
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.busy() {
             return;
         }
+        // Набранное, но не ставшее чипом, — тоже участник.
+        self.commit(Kind::Required, window, cx);
+        self.commit(Kind::Optional, window, cx);
         let ticket = next_ticket();
         let uid = format!("postman-{}-{ticket}", jiff::Timestamp::now().as_nanosecond());
         let today = self.today();
@@ -665,7 +930,7 @@ impl MeetingWindow {
         cx.notify();
     }
 
-    /// Итог по тикету: встреча создана — окно закрывается, экран показывает тост.
+    /// Итог по тикету: занятость; встреча создана — экран закроет вкладку и покажет тост.
     fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) -> Option<Created> {
         match ev {
             Event::Availability { ticket, me, people, error } if self.busy.ticket == Some(*ticket) => {
@@ -676,10 +941,14 @@ impl MeetingWindow {
                 cx.notify();
                 None
             }
+            Event::Me { address, .. } => {
+                self.me = Some(address.email.clone());
+                None
+            }
             Event::MeetingCreated { ticket, .. } if self.model.on_created(*ticket) => {
-                self.close = true;
                 cx.notify();
-                Some(Created { title: self.model.title.trim().to_string(), invited: !self.model.people().is_empty() })
+                let invited = !self.model.people().is_empty() || !self.model.optional_people().is_empty();
+                Some(Created { title: self.model.title.trim().to_string(), invited, tab: 0 })
             }
             Event::MeetingFailed { ticket, error } => {
                 if self.model.on_failed(*ticket, error.clone()) {
@@ -691,12 +960,12 @@ impl MeetingWindow {
         }
     }
 
-    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn escape(&mut self, cx: &mut Context<Self>) {
         if self.suggesting() {
             self.suggest.clear();
             cx.notify();
         } else {
-            window.remove_window();
+            cx.emit(MeetingEvent::Close);
         }
     }
 
@@ -706,8 +975,8 @@ impl MeetingWindow {
         cx.notify();
     }
 
-    fn pick_day(&mut self, d: usize, cx: &mut Context<Self>) {
-        self.model.set_day(add_days(self.monday(), d as i64));
+    fn pick_day(&mut self, date: Date, cx: &mut Context<Self>) {
+        self.model.set_day(date);
         self.sync_inputs = true;
         cx.notify();
     }
@@ -723,21 +992,93 @@ impl MeetingWindow {
         })
     }
 
-    fn label(text: String) -> Div {
-        let l = crate::roles::now();
-        div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(text)
+    fn my_domain(&self) -> Option<String> {
+        self.me.as_deref().and_then(|m| m.split_once('@')).map(|(_, d)| d.to_lowercase())
     }
 
-    fn attendees_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn external(&self, email: &str) -> bool {
+        match (self.my_domain(), email.split_once('@')) {
+            (Some(mine), Some((_, d))) => !d.eq_ignore_ascii_case(&mine),
+            _ => false,
+        }
+    }
+
+    fn is_room(&self, email: &str) -> bool {
+        self.rooms.iter().any(|(_, e)| e.eq_ignore_ascii_case(email))
+    }
+
+    /// Занятость участника: `None` — нет данных.
+    fn busy_of(&self, email: &str) -> Option<Vec<Busy>> {
+        self.busy.people.get(&email.to_lowercase()).cloned().flatten()
+    }
+
+    fn presence(&self, busy: Option<&Vec<Busy>>, email: Option<&str>, at: Option<Span>) -> Presence {
+        let Some(busy) = busy else {
+            return if email.is_some_and(|e| self.external(e)) { Presence::External } else { Presence::Unknown };
+        };
+        let Some(at) = at else { return Presence::Free };
+        match busy.iter().filter(|b| b.span.overlaps(&at)).map(|b| b.kind).max() {
+            Some(BusyKind::Unavailable) => Presence::Away,
+            Some(BusyKind::Busy) => Presence::Busy,
+            Some(BusyKind::Tentative) => Presence::Tentative,
+            None => Presence::Free,
+        }
+    }
+
+    fn label(text: String) -> Div {
+        let l = crate::roles::now();
+        div().w(px(LABEL_W)).flex_none().text_color(l.pm(Pm::LabelAccent)).child(text)
+    }
+
+    fn field_row(l: &Look) -> Div {
+        div().min_h(px(40.)).flex().items_center().gap(px(8.)).border_b_1().border_color(l.border())
+    }
+
+    /// Строка участников: чипы с занятостью в выбранное время и поле для нового.
+    fn people_row(&self, kind: Kind, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
-        let bad = self.model.bad_addresses();
-        let field = div()
+        let at = self.model.span(&self.tz, self.today());
+        let chips = self.chips[kind.index()].iter().enumerate().map(|(i, c)| {
+            let p = if c.bad { Presence::Unknown } else { self.presence(self.busy_of(&c.email).as_ref(), Some(&c.email), at) };
+            div()
+                .id(("chip", kind.index() * 1000 + i))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(8.))
+                .pr(px(4.))
+                .rounded(px(12.))
+                .bg(if c.bad { l.error_bg() } else { l.fill() })
+                .when(c.bad, |d| d.text_color(l.error()))
+                .child(presence_dot(p, 8., &l))
+                .child(c.shown())
+                .when(!c.bad && self.external(&c.email), |d| {
+                    d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("meeting-external-short")))
+                })
+                .when(self.is_room(&c.email), |d| d.child(icon(g::PIN, 11.).text_color(l.text2())))
+                .child(
+                    div()
+                        .id(("chip-x", kind.index() * 1000 + i))
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(l.hover()))
+                        .child(icon(g::CANCEL, 8.))
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_chip(kind, i, cx))),
+                )
+                .tooltip({
+                    let tip = tr!("meeting-presence-tip", name = c.shown(), state = presence_text(p));
+                    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+        });
+        let input = div()
             .flex_1()
-            .min_w_0()
-            .rounded_md()
-            .border_1()
-            .border_color(if bad.is_empty() { l.none() } else { l.error() })
-            .child(Input::new(&self.attendees))
+            .min_w(px(160.))
+            .child(Input::new(&self.inputs[kind.index()]).appearance(false))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
                 if this.move_suggestion(1, cx) {
                     cx.stop_propagation();
@@ -760,10 +1101,11 @@ impl MeetingWindow {
                     cx.stop_propagation();
                 }
             }));
-        let label = Self::label(tr!("meeting-attendees")).when(!bad.is_empty(), |d| d.text_color(l.error()));
-        let mut col =
-            div().flex().flex_col().gap_0p5().child(div().flex().items_center().gap_2().child(label).child(field));
-        if self.suggesting() {
+        let row = Self::field_row(&l)
+            .py(px(4.))
+            .child(Self::label(tr!(label)))
+            .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.)).children(chips).child(input));
+        let suggest = (self.suggest_for == Some(kind) && self.suggesting()).then(|| {
             let items = self.suggest.iter().enumerate().map(|(i, s)| {
                 div()
                     .id(("suggest", i))
@@ -776,93 +1118,640 @@ impl MeetingWindow {
                     .child(s.clone())
                     .on_click(cx.listener(move |this, _, window, cx| this.accept(i, window, cx)))
             });
-            col = col.child(
-                div()
-                    .ml(px(LABEL_W + 8.))
-                    .p_1()
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(l.border())
-                    .rounded_md()
-                    .bg(l.panel())
-                    .children(items),
-            );
+            div()
+                .ml(px(LABEL_W + 8.))
+                .my(px(4.))
+                .p_1()
+                .flex()
+                .flex_col()
+                .border_1()
+                .border_color(l.border())
+                .rounded_md()
+                .bg(l.c(pets_ui::theme::Role::LayerOverlay))
+                .shadow_md()
+                .children(items)
+        });
+        div().flex().flex_col().child(row).children(suggest)
+    }
+
+    fn rooms_row(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.rooms.is_empty() {
+            return None;
         }
-        col
+        let l = crate::roles::look(cx);
+        let at = self.model.span(&self.tz, self.today());
+        let picked = |e: &str| self.chips[Kind::Optional.index()].iter().any(|c| c.email.eq_ignore_ascii_case(e));
+        let items = self.rooms.iter().take(ROOMS).enumerate().map(|(i, (name, email))| {
+            let on = picked(email);
+            let p = self.presence(self.busy_of(email).as_ref(), None, at);
+            let room = (name.clone(), email.clone());
+            div()
+                .id(("room", i))
+                .h(px(26.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(13.))
+                .border_1()
+                .cursor_pointer()
+                .when(on, |d| d.bg(l.picked()).border_color(l.accent()))
+                .when(!on, |d| d.border_color(l.stroke()).hover(|d| d.bg(l.hover())))
+                .child(presence_dot(p, 8., &l))
+                .child(name.clone())
+                .on_click(cx.listener(move |this, _, window, cx| this.toggle_room(room.clone(), window, cx)))
+        });
+        Some(
+            Self::field_row(&l)
+                .py(px(6.))
+                .child(Self::label(tr!("meeting-rooms")))
+                .child(div().flex_1().min_w_0().flex().flex_wrap().gap(px(6.)).children(items)),
+        )
+    }
+
+    fn time_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
+        let end = self
+            .model
+            .span(&self.tz, self.today())
+            .map(|s| hm(s.end, &self.tz))
+            .unwrap_or_else(|| "—".to_string());
+        let boxed = |w: f32| div().w(px(w)).flex_none();
+        Self::field_row(&l)
+            .child(Self::label(tr!("meeting-when")))
+            .child(boxed(124.).child(Input::new(&self.date)))
+            .child(boxed(72.).child(Input::new(&self.start)))
+            .child(div().text_color(l.text2()).child("–"))
+            .child(
+                boxed(64.)
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(l.stroke())
+                    .text_color(l.text2())
+                    .child(end),
+            )
+            .child(div().ml(px(4.)).text_size(px(12.)).text_color(l.text2()).child(duration_text(self.model.duration)))
+    }
+
+    fn description_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
+        let open = self.desc_open;
+        let toggle = div()
+            .id("desc-toggle")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_color(l.accent_text())
+            .cursor_pointer()
+            .child(icon(if open { g::DOWN } else { g::NEXT }, 10.))
+            .child(tr!(if open { "meeting-desc-hide" } else { "meeting-desc-add" }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.desc_open = !this.desc_open;
+                cx.notify();
+            }));
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                Self::field_row(&l)
+                    .child(Self::label(tr!("meeting-description")))
+                    .child(toggle)
+                    .when(!open, |d| d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("meeting-desc-hint")))),
+            )
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(l.border())
+                        .child(div().w(px(LABEL_W + 8.)).flex_none())
+                        .child(div().flex_1().h(px(72.)).child(Textarea::new(&self.description).h(relative(1.)))),
+                )
+            })
+    }
+
+    /// Строки помощника: я, обязательные, необязательные.
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = vec![Row {
+            name: tr!("meeting-me"),
+            sub: tr!("meeting-role-organizer"),
+            email: None,
+            busy: self.busy.me.clone(),
+        }];
+        for (kind, list) in [(Kind::Required, &self.chips[0]), (Kind::Optional, &self.chips[1])] {
+            for c in list.iter().filter(|c| !c.bad) {
+                let busy = self.busy_of(&c.email);
+                let mut sub = if self.is_room(&c.email) {
+                    tr!("meeting-role-room")
+                } else if kind == Kind::Required {
+                    tr!("meeting-role-required")
+                } else {
+                    tr!("meeting-role-optional")
+                };
+                if busy.is_none() {
+                    sub = tr!("meeting-not-counted", role = sub);
+                }
+                rows.push(Row { name: c.shown(), sub, email: Some(c.email.clone()), busy });
+            }
+        }
+        rows
     }
 
     fn assistant(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
         let today = self.today();
-        let monday = self.monday();
-        let date = parse_date(&self.model.date, today).unwrap_or(monday);
-        let day = (date.weekday().to_monday_zero_offset() as usize).min(DAYS - 1);
-        let start = day_start(add_days(monday, day as i64), &self.tz);
+        let day = self.day();
+        let start = day_start(day, &self.tz);
         let range = Span::new(start + FIRST_HOUR * 3600, start + (FIRST_HOUR + HOURS) * 3600);
+        let frac = |t: i64| ((t - range.start) as f32 / range.len() as f32).clamp(0., 1.);
         let rows = self.rows();
-        let no_data = rows.iter().any(|(_, b)| b.is_none());
-        // Окна — с этой минуты: прошедшие дни недели не предлагаем.
-        let now = jiff::Timestamp::now().as_second();
-        let week = Span::new(day_start(monday, &self.tz).max(now), day_start(add_days(monday, DAYS as i64), &self.tz));
-        let slots = common_slots(&rows, week, self.model.duration, &self.hours);
+        let optional_from = 1 + self.chips[0].iter().filter(|c| !c.bad).count();
+        // Общие окна: я и обязательные; необязательные — по флажку.
+        let counted: Vec<Option<Vec<Busy>>> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i < optional_from || self.with_optional)
+            .map(|(_, r)| r.busy.clone())
+            .collect();
+        let runs = free_runs(&counted, range, &self.hours, self.model.duration);
+        let unknown = rows.iter().filter(|r| r.busy.is_none()).count();
         let picked = self.model.span(&self.tz, today);
-        let day_tabs = div().flex().gap_1().children((0..DAYS).map(|d| {
-            let date = add_days(monday, d as i64);
-            button_small(("day", d), format!("{} {}", day_name(d), date.strftime("%d.%m")), d == day)
-                .on_click(cx.listener(move |this, _, _, cx| this.pick_day(d, cx)))
-        }));
-        let suggestions = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w(px(220.))
+        let at = picked;
+        // Шапка помощника: день, переключатели.
+        let day_nav = div()
+            .w(px(NAME_W + 84.))
             .flex_none()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-free-for-all")))
-            .when(slots.is_empty(), |d| d.child(div().text_color(l.text2()).child(tr!("cal-no-slots"))))
-            .children(slots.into_iter().enumerate().map(|(n, s)| {
-                slot_button(n, slot_label(s, &self.tz), picked == Some(s))
-                    .on_click(cx.listener(move |this, _, _, cx| this.pick_slot(s, cx)))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(outline_button("day-prev", &l).w(px(32.)).px_0().justify_center().child(icon(g::PREV, 12.)).on_click(
+                cx.listener(move |this, _, _, cx| this.pick_day(add_days(day, -1), cx)),
+            ))
+            .child(div().w(px(170.)).text_center().font_weight(FontWeight::SEMIBOLD).child(long_day(day)))
+            .child(outline_button("day-next", &l).w(px(32.)).px_0().justify_center().child(icon(g::NEXT, 12.)).on_click(
+                cx.listener(move |this, _, _, cx| this.pick_day(add_days(day, 1), cx)),
+            ))
+            .child(
+                outline_button("day-today", &l)
+                    .child(tr!("cal-today"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_day(today, cx))),
+            );
+        let toggle = |on: bool| {
+            div()
+                .w(px(40.))
+                .h(px(20.))
+                .flex_none()
+                .relative()
+                .rounded(px(10.))
+                .when(on, |d| d.bg(l.accent()))
+                .when(!on, |d| d.border_1().border_color(l.text2()))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(if on { 4. } else { 3. }))
+                        .left(px(if on { 24. } else { 3. }))
+                        .size(px(12.))
+                        .rounded_full()
+                        .bg(if on { l.on_accent() } else { l.text2() }),
+                )
+        };
+        let only = outline_button("only-free", &l)
+            .child(toggle(self.only_free))
+            .child(tr!("meeting-only-free"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.only_free = !this.only_free;
+                cx.notify();
             }));
+        let durations = div().flex().h(px(32.)).rounded(px(4.)).border_1().border_color(l.stroke()).overflow_hidden().children(
+            DURATIONS.map(|secs| {
+                let on = secs == self.model.duration;
+                div()
+                    .id(("duration", secs as usize))
+                    .h_full()
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(l.accent()).text_color(l.on_accent()))
+                    .when(!on, |d| d.hover(|d| d.bg(l.hover())))
+                    .child(duration_text(secs))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.duration = secs;
+                        cx.notify();
+                    }))
+            }),
+        );
+        let check = div()
+            .id("with-optional")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .ml(px(8.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(16.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(self.with_optional, |d| d.bg(l.accent()).text_color(l.on_accent()).child(icon(g::CHECK, 10.)))
+                    .when(!self.with_optional, |d| d.border_1().border_color(l.text2())),
+            )
+            .child(tr!("meeting-with-optional"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.with_optional = !this.with_optional;
+                cx.notify();
+            }));
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(24.))
+            .pt(px(10.))
+            .child(day_nav)
+            .child(only)
+            .child(div().ml(px(8.)).text_size(px(12.)).text_color(l.text2()).child(tr!("meeting-duration")))
+            .child(durations)
+            .child(check);
+        let swatch = |bg: Hsla, border: Option<Hsla>| {
+            div().w(px(16.)).h(px(8.)).rounded(px(2.)).bg(bg).when_some(border, |d, b| d.border_1().border_color(b))
+        };
+        let legend: Vec<(Div, String)> = if self.only_free {
+            vec![
+                (swatch(l.pm(Pm::FbFreeBg), Some(l.pm(Pm::FbFree))), tr!("meeting-legend-free")),
+                (swatch(l.pm(Pm::FbMute), None), tr!("meeting-legend-busy")),
+                (swatch(l.pm(Pm::FbUnknown), None), tr!("meeting-legend-unknown")),
+                (swatch(l.panel(), Some(l.pm(Pm::FbExt))), tr!("meeting-legend-external")),
+            ]
+        } else {
+            vec![
+                (swatch(l.pm(Pm::FbBusy), None), tr!("cal-busy")),
+                (swatch(l.pm(Pm::FbTentative), Some(l.pm(Pm::FbBusy))), tr!("cal-tentative")),
+                (swatch(l.pm(Pm::FbOof), None), tr!("cal-unavailable")),
+                (swatch(l.pm(Pm::FbUnknown), None), tr!("meeting-legend-unknown")),
+                (swatch(l.panel(), Some(l.pm(Pm::FbExt))), tr!("meeting-legend-external")),
+            ]
+        };
         let note = if self.busy.ticket.is_some() {
             Some((tr!("meeting-busy-loading"), false))
         } else if let Some(e) = &self.busy.error {
             Some((tr!("meeting-busy-failed", error = e.clone()), true))
         } else {
-            no_data.then(|| (tr!("meeting-no-data-note"), false))
+            (unknown > 0).then(|| (tr!("meeting-not-counted-n", n = unknown), false))
         };
-        div()
+        let legend_row = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(28.))
+            .px(px(24.))
+            .child(div().w(px(NAME_W + 84.)).flex_none())
+            .when_some(note, |d, (text, error)| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .text_color(if error { l.error() } else { l.text2() })
+                        .child(presence_dot(Presence::Unknown, 8., &l))
+                        .child(text),
+                )
+            })
+            .child(div().flex_1())
+            .children(legend.into_iter().map(|(sw, text)| {
+                div().flex().items_center().gap(px(8.)).ml(px(8.)).text_size(px(12.)).text_color(l.text2()).child(sw).child(text)
+            }));
+        // Сетка: имена слева, дорожки справа (позиции — доли дня 8–19).
+        let block = |b: &Busy, label: Option<String>| -> Option<AnyElement> {
+            let (s, e) = (b.span.start.max(range.start), b.span.end.min(range.end));
+            if e <= s {
+                return None;
+            }
+            let (bg, fg, border) = if self.only_free {
+                match b.kind {
+                    BusyKind::Tentative => (l.panel(), l.text3(), Some(l.pm(Pm::FbMute))),
+                    _ => (l.pm(Pm::FbMute), l.text3(), None),
+                }
+            } else {
+                match b.kind {
+                    BusyKind::Busy => (l.pm(Pm::FbBusy), l.on_accent(), None),
+                    BusyKind::Tentative => (l.pm(Pm::FbTentative), l.text(), Some(l.pm(Pm::FbBusy))),
+                    BusyKind::Unavailable => (l.pm(Pm::FbOof), l.on_accent(), None),
+                }
+            };
+            Some(
+                div()
+                    .absolute()
+                    .top(px(6.))
+                    .h(px(24.))
+                    .left(relative(frac(s)))
+                    .w(relative(frac(e) - frac(s)))
+                    .px(px(2.))
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded(px(4.))
+                            .bg(bg)
+                            .text_color(fg)
+                            .when_some(border, |d, c| d.border_1().border_color(c))
+                            .px(px(6.))
+                            .text_size(px(12.))
+                            .line_height(px(22.))
+                            .overflow_hidden()
+                            .truncate()
+                            .children(label),
+                    )
+                    .into_any_element(),
+            )
+        };
+        let summary: Vec<Busy> = postman_calendar::merge(counted.iter().flatten().flatten().copied().collect());
+        let names = div()
+            .w(px(NAME_W))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(24.))
+                    .text_size(px(12.))
+                    .text_color(l.text2())
+                    .child(tr!("meeting-participants-n", n = rows.len())),
+            )
+            .child(
+                div()
+                    .h(px(ROW_H))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(l.stroke())
+                    .child(div().size(px(24.)).rounded_full().flex().items_center().justify_center().bg(l.fill()).child(icon(g::PEOPLE, 13.)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .line_height(px(16.))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("meeting-everyone")))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(l.text2())
+                                    .child(tr!("meeting-known", known = rows.len() - unknown, n = rows.len())),
+                            ),
+                    ),
+            )
+            .children(rows.iter().enumerate().map(|(i, Row { name, sub, email, busy })| {
+                let p = self.presence(busy.as_ref(), email.as_deref(), at);
+                div()
+                    .h(px(ROW_H))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(l.border())
+                    .child(
+                        div()
+                            .relative()
+                            .child(avatar(name, 24., &l).when(i == 0, |d| d.bg(l.picked()).text_color(l.accent_text())))
+                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).child(presence_dot(p, 10., &l))),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .line_height(px(16.))
+                            .child(div().truncate().when(i == 0, |d| d.font_weight(FontWeight::SEMIBOLD)).child(name.clone()))
+                            .child(div().truncate().text_size(px(12.)).text_color(l.text2()).child(sub.clone())),
+                    )
+            }))
+            .child(
+                div().h(px(ROW_H)).flex().items_center().child(
+                    div()
+                        .id("add-person")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_color(l.accent_text())
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .size(px(24.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(l.stroke())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(g::ADD, 11.)),
+                        )
+                        .child(tr!("meeting-add-person"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.inputs[0].update(cx, |s, cx| s.focus(window, cx));
+                        })),
+                ),
+            );
+        let hour_labels = div().h(px(24.)).relative().children((0..HOURS).map(|h| {
+            div()
+                .absolute()
+                .top(px(5.))
+                .left(relative(h as f32 / HOURS as f32))
+                .pl(px(4.))
+                .text_size(px(11.))
+                .text_color(l.text2())
+                .child(format!("{:02}:00", FIRST_HOUR + h))
+        }));
+        let lines = (0..HOURS * 2).map(|i| {
+            div()
+                .absolute()
+                .top(px(24.))
+                .bottom_0()
+                .left(relative(i as f32 / (HOURS * 2) as f32))
+                .w(px(1.))
+                .bg(if i % 2 == 0 { l.stroke() } else { l.border() })
+        });
+        // Нерабочее время — подложкой.
+        let work = self.hours.spans(range);
+        let off: Vec<AnyElement> = {
+            let mut edges = vec![range.start];
+            for w in &work {
+                edges.push(w.start);
+                edges.push(w.end);
+            }
+            edges.push(range.end);
+            edges
+                .chunks(2)
+                .filter(|p| p.len() == 2 && p[1] > p[0])
+                .map(|p| {
+                    div()
+                        .absolute()
+                        .top(px(24.))
+                        .bottom_0()
+                        .left(relative(frac(p[0])))
+                        .w(relative(frac(p[1]) - frac(p[0])))
+                        .bg(l.pm(Pm::CalOff))
+                        .into_any_element()
+                })
+                .collect()
+        };
+        let summary_row = div()
+            .h(px(ROW_H))
+            .relative()
+            .border_b_1()
+            .border_color(l.stroke())
+            .children(summary.iter().filter_map(|b| block(b, None)));
+        let tracks = rows.iter().map(|Row { email, busy, .. }| {
+            let external = email.as_deref().is_some_and(|e| self.external(e));
+            let row = div().h(px(ROW_H)).relative().border_b_1().border_color(l.border());
+            match busy {
+                Some(list) => row.children(list.iter().filter_map(|b| block(b, None))),
+                None => row
+                    .bg(if external { l.pm(Pm::FbExt).opacity(0.08) } else { l.pm(Pm::FbUnknown).opacity(0.25) })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.))
+                            .top(px(6.))
+                            .h(px(24.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.))
+                            .bg(l.panel())
+                            .border_1()
+                            .border_color(l.border())
+                            .text_size(px(12.))
+                            .text_color(l.text2())
+                            .child(tr!(if external { "meeting-row-external" } else { "meeting-row-hidden" })),
+                    ),
+            }
+        });
+        let slots = if self.only_free { runs.clone() } else { Vec::new() };
+        let slot_cols = slots.iter().enumerate().map(|(n, s)| {
+            let s = *s;
+            let wide = s.len() >= 3600;
+            let label = if wide { format!("{}–{}", hm(s.start, &self.tz), hm(s.end, &self.tz)) } else { hm(s.start, &self.tz) };
+            let pick = Span::new(s.start, s.start + self.model.duration);
+            div()
+                .id(("free", n))
+                .absolute()
+                .top(px(24.))
+                .bottom_0()
+                .left(relative(frac(s.start)))
+                .w(relative(frac(s.end) - frac(s.start)))
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(ROW_H / 2. - 8.))
+                .bg(l.pm(Pm::FbFreeBg).opacity(0.85))
+                .border_l_1()
+                .border_r_1()
+                .border_color(l.pm(Pm::FbFree))
+                .text_size(px(12.))
+                .text_color(l.pm(Pm::FbFreeFg))
+                .cursor_pointer()
+                .hover(|d| d.bg(l.pm(Pm::FbFreeBg)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_slot(pick, cx)))
+        });
+        let frame = picked.filter(|p| p.overlaps(&range)).map(|p| {
+            div()
+                .absolute()
+                .top(px(24.))
+                .h(px(ROW_H * (rows.len() + 1) as f32))
+                .left(relative(frac(p.start)))
+                .w(relative(frac(p.end) - frac(p.start)))
+                .border_2()
+                .border_color(l.accent())
+                .rounded(px(4.))
+        });
+        let grid = div()
             .id("assistant")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .bg(l.panel())
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("meeting-assistant")))
-            .child(day_tabs)
+            .px(px(24.))
             .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .child(div().flex_1().min_w_0().child(busy_grid(&rows, range, &self.hours, picked)))
-                    .child(suggestions),
-            )
-            .when_some(note, |d, (text, error)| {
-                d.child(div().text_xs().text_color(if error { l.error() } else { l.text2() }).child(text))
-            })
+                div().flex().child(names).child(div().w(px(8.)).flex_none()).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .relative()
+                        .children(off)
+                        .children(lines)
+                        .child(hour_labels)
+                        // Общие окна — под строками: подписи «нет данных» поверх них читаются.
+                        .children(slot_cols)
+                        .child(summary_row)
+                        .children(tracks)
+                        .children(frame),
+                ),
+            );
+        div().flex().flex_col().flex_1().min_h_0().child(controls).child(legend_row).child(grid)
+    }
+
+    fn footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let l = crate::roles::look(cx);
+        let external: Vec<String> = self.chips.iter().flatten().filter(|c| !c.bad && self.external(&c.email)).map(Chip::shown).collect();
+        (!external.is_empty()).then(|| {
+            div()
+                .h(px(40.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(24.))
+                .border_t_1()
+                .border_color(l.border())
+                .child(icon(g::MAIL, 14.).text_color(l.text2()))
+                .child(tr!("meeting-external-note"))
+                .child(div().text_size(px(12.)).text_color(l.text2()).truncate().child(external.join(", ")))
+        })
     }
 }
 
-impl Render for MeetingWindow {
+/// Строка помощника: имя, подпись (роль), адрес (у меня — нет), занятость (`None` — нет данных).
+struct Row {
+    name: String,
+    sub: String,
+    email: Option<String>,
+    busy: Option<Vec<Busy>>,
+}
+
+/// Точка занятости участника.
+fn presence_dot(p: Presence, size: f32, l: &Look) -> Div {
+    let d = div().size(px(size)).flex_none().rounded_full();
+    match p {
+        Presence::Free => d.bg(l.pm(Pm::FbFree)),
+        Presence::Busy => d.bg(l.pm(Pm::FbBusy)),
+        Presence::Tentative => d.bg(l.pm(Pm::FbTentative)).border_1().border_color(l.pm(Pm::FbBusy)),
+        Presence::Away => d.bg(l.pm(Pm::FbOof)),
+        Presence::Unknown => d.bg(l.panel()).border_2().border_color(l.pm(Pm::FbUnknown)),
+        Presence::External => d.bg(l.panel()).border_2().border_color(l.pm(Pm::FbExt)),
+    }
+}
+
+fn presence_text(p: Presence) -> String {
+    tr!(match p {
+        Presence::Free => "meeting-presence-free",
+        Presence::Busy => "cal-busy",
+        Presence::Tentative => "cal-tentative",
+        Presence::Away => "cal-unavailable",
+        Presence::Unknown => "meeting-presence-unknown",
+        Presence::External => "meeting-presence-external",
+    })
+}
+
+impl Render for MeetingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
-        if self.close {
-            window.remove_window();
-        }
         if std::mem::take(&mut self.sync_inputs) {
             for (f, state) in [(Field::Date, self.date.clone()), (Field::Start, self.start.clone())] {
                 let value = self.model.field(f).to_string();
@@ -870,98 +1759,87 @@ impl Render for MeetingWindow {
             }
             self.schedule_query(cx);
         }
-        let title =
-            if self.model.title.trim().is_empty() { tr!("meeting-title-new") } else { self.model.title.clone() };
-        if title != self.window_title {
-            window.set_window_title(&title);
-            self.window_title = title;
-        }
-        if self.screen.on {
-            self.screen.frames += 1;
-            if self.screen.hwnd.is_none() {
-                self.screen.hwnd = sys::window_id(window).ok();
-            }
-            if self.screen.frames < 8 {
-                window.request_animation_frame();
-            }
-        }
         let busy = self.model.busy();
-        let durations = div().flex().gap_1().children(DURATIONS.map(|secs| {
-            button_small(("duration", secs as usize), tr!("cal-minutes", n = secs / 60), secs == self.model.duration)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.model.duration = secs;
-                    cx.notify();
-                }))
-        }));
-        let row = |label: String, input: &Entity<InputState>| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(Self::label(label))
-                .child(div().flex_1().min_w_0().child(Input::new(input)))
-        };
-        let fields = div()
+        let status = self.status_line().map(|(text, error)| {
+            div().text_size(px(12.)).text_color(if error { l.error() } else { l.text2() }).truncate().child(text)
+        });
+        let toolbar = div()
+            .h(px(48.))
+            .flex_none()
             .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
+            .items_center()
+            .gap(px(8.))
+            .px(px(16.))
             .border_b_1()
             .border_color(l.border())
-            .child(row(tr!("meeting-subject"), &self.title))
-            .child(row(tr!("meeting-location"), &self.location))
+            .child(
+                accent_button("send", &l)
+                    .px(px(16.))
+                    .child(icon(g::SEND, 14.))
+                    .child(tr!("meeting-send"))
+                    .when(busy, |d| d.opacity(0.5))
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("meeting-send-tip")).build(window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+            )
+            .child(div().w(px(1.)).h(px(20.)).mx(px(4.)).bg(l.border()))
             .child(
                 div()
+                    .h(px(32.))
+                    .px(px(12.))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Self::label(tr!("meeting-date")))
-                    .child(div().w(px(130.)).child(Input::new(&self.date)))
-                    .child(div().text_color(l.text2()).child(tr!("meeting-start")))
-                    .child(div().w(px(80.)).child(Input::new(&self.start)))
-                    .child(div().text_color(l.text2()).child(tr!("meeting-duration")))
-                    .child(durations),
+                    .gap(px(8.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(l.stroke())
+                    .child(icon(g::GLOBE, 14.))
+                    .child(zone_label(&self.tz)),
             )
-            .child(self.attendees_row(cx));
-        let status = self.status_line().map(|(text, error)| {
-            div()
-                .px_3()
-                .py_1()
-                .border_t_1()
-                .border_color(l.border())
-                .text_color(if error { l.error() } else { l.text2() })
-                .child(text)
-        });
+            .child(div().flex_1())
+            .children(status);
+        let fields = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(24.))
+            .child(
+                Self::field_row(&l)
+                    .child(Self::label(tr!("meeting-subject")))
+                    .child(div().flex_1().child(Input::new(&self.title).appearance(false))),
+            )
+            .child(self.people_row(Kind::Required, "meeting-required", cx))
+            .child(self.people_row(Kind::Optional, "meeting-optional", cx))
+            .children(self.rooms_row(cx))
+            .child(
+                Self::field_row(&l)
+                    .child(Self::label(tr!("meeting-location")))
+                    .child(div().flex_1().child(Input::new(&self.location).appearance(false))),
+            )
+            .child(self.time_row(cx))
+            .child(self.description_row(cx));
         div()
             .key_context("Meeting")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &meeting::Send, _, cx| this.send(cx)))
-            .on_action(cx.listener(|this, _: &meeting::Close, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &meeting::Send, window, cx| this.send(window, cx)))
+            .on_action(cx.listener(|this, _: &meeting::Close, _, cx| this.escape(cx)))
             .size_full()
             .flex()
             .flex_col()
-            .bg(l.base())
+            .bg(l.panel())
             .text_color(l.text())
             .text_size(px(13.))
-            .child(
-                div().flex().items_center().gap_2().px_3().py_2().border_b_1().border_color(l.border()).child(
-                    button("send", tr!("meeting-send"), true)
-                        .when(busy, |d| d.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
-                ),
-            )
+            .child(toolbar)
             .child(fields)
             .child(self.assistant(cx))
-            .children(status)
+            .children(self.footer(cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
-    use super::{Command, Date, MeetingModel, Status, TimeZone, default_start, parse_date, parse_time};
-    use postman_calendar::Span;
+    use super::{Command, Date, MeetingModel, Status, TimeZone, chips_of, default_start, free_runs, parse_date, parse_time};
+    use postman_calendar::{Busy, BusyKind, Span, WorkHours};
 
     fn today() -> Date {
         Date::constant(2026, 10, 20)
@@ -980,8 +1858,11 @@ mod tests {
         let tz = TimeZone::get("Europe/Moscow").unwrap();
         let mut m = filled();
         m.duration = 1800;
+        m.optional = "Переговорная 1 <room1@itt.test>; IVAN@corp.example; ".into();
+        m.description = " Повестка ".into();
         let meeting = m.meeting("u1".into(), &tz, today()).unwrap();
         assert_eq!(meeting.title, "Планёрка");
+        assert_eq!(meeting.description, "Повестка");
         assert_eq!(meeting.time_zone, "Europe/Moscow");
         assert_eq!(meeting.start, "2026-10-21T11:00:00".parse().unwrap());
         assert_eq!(
@@ -991,6 +1872,8 @@ mod tests {
                 (String::new(), "ivan@corp.example".to_string())
             ]
         );
+        // Необязательный, уже обязательный, не повторяется.
+        assert_eq!(meeting.optional, vec![("Переговорная 1".to_string(), "room1@itt.test".to_string())]);
         // Дальше — `NewEvent::to_jmap`, как его ждёт Stalwart.
         let attendees = meeting.attendee_refs();
         let v = meeting.new_event("cal", ("User 1", "user1@itt.test"), &attendees).to_jmap();
@@ -998,6 +1881,7 @@ mod tests {
         assert_eq!(v["timeZone"], "Europe/Moscow");
         assert_eq!(v["participants"]["a0"]["calendarAddress"], "mailto:user3@itt.test");
         assert_eq!(v["participants"]["a1"]["calendarAddress"], "mailto:ivan@corp.example");
+        assert_eq!(v["participants"]["a2"]["roles"]["optional"], true);
         assert_eq!(v["locations"]["l1"]["name"], "Переговорная 1");
         // 11:00 МСК — 08:00 UTC: так встреча стоит в помощнике.
         let start = "2026-10-21T08:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second();
@@ -1005,12 +1889,16 @@ mod tests {
     }
 
     #[test]
-    fn errors_stay_in_the_window() {
+    fn errors_stay_in_the_tab() {
         let tz = TimeZone::UTC;
         let mut m = filled();
         m.attendees.push_str("petr@corp");
         assert!(m.begin(1, "u".into(), &tz, today()).is_none());
         assert_eq!(m.status, Status::BadAddresses(vec!["petr@corp".into()]));
+        let mut m = filled();
+        m.optional = "bad@".into();
+        assert!(m.begin(1, "u".into(), &tz, today()).is_none());
+        assert_eq!(m.status, Status::BadAddresses(vec!["bad@".into()]));
         let mut m = filled();
         m.start = "25:00".into();
         assert!(m.begin(1, "u".into(), &tz, today()).is_none());
@@ -1032,7 +1920,7 @@ mod tests {
         assert_eq!(m.status, Status::Failed("offline".into()));
         assert!(m.begin(9, "u9".into(), &tz, today()).is_some());
         assert!(m.on_created(9) && !m.busy());
-        // Демо: сервера нет — поля остаются, строка в окне.
+        // Демо: сервера нет — поля остаются, строка во вкладке.
         assert!(m.begin(10, "u10".into(), &tz, today()).is_some());
         m.refused();
         assert_eq!(m.status, Status::NoServer);
@@ -1064,5 +1952,46 @@ mod tests {
         assert_eq!(default_start(&z("2026-10-20T07:00:00")), "2026-10-20T09:00:00".parse().unwrap());
         assert_eq!(default_start(&z("2026-10-20T18:00:00")), "2026-10-21T10:00:00".parse().unwrap());
         assert_eq!(default_start(&z("2026-10-23T17:45:00")), "2026-10-26T10:00:00".parse().unwrap());
+    }
+
+    #[test]
+    fn typed_addresses_become_chips() {
+        let chips = chips_of("Иван <ivan@corp.example>; petr@; anna@corp.example");
+        let shown: Vec<(String, bool)> = chips.iter().map(|c| (c.display(), c.bad)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("Иван <ivan@corp.example>".to_string(), false),
+                ("anna@corp.example".to_string(), false),
+                ("petr@".to_string(), true),
+            ]
+        );
+        assert!(chips_of("  ").is_empty());
+    }
+
+    /// Общее свободное время: «нет данных» не закрывает окно, «под вопросом» — закрывает, окно не короче
+    /// длительности, нерабочие часы — не окно; никого не известно — рабочее время дня.
+    #[test]
+    fn free_runs_edge_cases() {
+        let hours = WorkHours::standard(TimeZone::UTC);
+        let day = "2026-10-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second();
+        let h = |x: f64| day + (x * 3600.) as i64;
+        let range = Span::new(h(8.), h(19.));
+        let b = |a: f64, e: f64, kind| Busy { span: Span::new(h(a), h(e)), kind };
+        let me = Some(vec![b(9., 10., BusyKind::Busy), b(13., 14., BusyKind::Busy)]);
+        let colleague = Some(vec![b(10.5, 11., BusyKind::Tentative), b(15., 17.5, BusyKind::Unavailable)]);
+        let runs = free_runs(&[me.clone(), colleague.clone(), None], range, &hours, 3600);
+        assert_eq!(
+            runs,
+            [Span::new(h(11.), h(13.)), Span::new(h(14.), h(15.))],
+            "10:00–10:30 короче часа, 17:30–18:00 тоже; 8–9 и 18–19 — нерабочие"
+        );
+        let short = free_runs(&[me.clone(), colleague], range, &hours, 1800);
+        assert_eq!(short.first(), Some(&Span::new(h(10.), h(10.5))));
+        assert!(short.contains(&Span::new(h(17.5), h(18.))));
+        // Окно длиннее любого свободного — пусто; никого не известно — весь рабочий день.
+        assert_eq!(free_runs(std::slice::from_ref(&me), range, &hours, 4 * 3600), [Span::new(h(14.), h(18.))]);
+        assert!(free_runs(&[me], range, &hours, 5 * 3600).is_empty());
+        assert_eq!(free_runs(&[None], range, &hours, 3600), [Span::new(h(9.), h(18.))]);
     }
 }

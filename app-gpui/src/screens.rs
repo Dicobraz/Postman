@@ -38,15 +38,20 @@ enum Scene {
     Letter,
     /// Письмо с вложениями и картинкой `cid:` в тексте (S3-03).
     Attachments,
-    /// Письмо с приглашением: карточка встречи (S3-03).
+    /// Письмо с приглашением: карточка встречи (S3-03), новое — с пересечением с моим днём (S5-11).
     Invite,
+    /// Та же карточка: отвечено, изменено организатором, отменено, устарело (S5-11; подмена входов карточки).
+    InviteAnswered,
+    InviteUpdated,
+    InviteCancelled,
+    InviteOutdated,
     /// Результаты поиска.
     Search,
-    /// Раздел «Календарь».
+    /// Раздел «Календарь»: неделя и приглашение без ответа в подробностях (S5-11).
     Calendar,
-    /// Календарь с помощником планирования.
+    /// Вкладка встречи: помощник с занятостью каждого (без «Только общее свободное время»).
     Assistant,
-    /// Календарь с подробностями события сбоку (S3-05).
+    /// Календарь с подробностями самого людного события (S3-05).
     Event,
     /// Строка входа (нет учётной записи).
     SignIn,
@@ -56,7 +61,7 @@ enum Scene {
     SendLater,
     /// Ответ на письмо: окно письма с цитатой (S3-02).
     Reply,
-    /// Окно новой встречи с помощником планирования (своё окно, S3-05).
+    /// Вкладка новой встречи: поля и подбор времени в одной форме (S5-11).
     Meeting,
     /// Раздел «Контакты»: список и карточка первого контакта (S4-02).
     Contacts,
@@ -75,21 +80,25 @@ enum Scene {
     Thread,
 }
 
-const SCENES: [Scene; 19] = [
+const SCENES: [Scene; 23] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
     Scene::Invite,
+    Scene::InviteAnswered,
+    Scene::InviteUpdated,
+    Scene::InviteCancelled,
+    Scene::InviteOutdated,
     Scene::Search,
     Scene::Calendar,
-    Scene::Assistant,
     Scene::Event,
+    Scene::Meeting,
+    Scene::Assistant,
     Scene::Contacts,
     Scene::ContactEdit,
     Scene::Compose,
     Scene::SendLater,
     Scene::Reply,
-    Scene::Meeting,
     Scene::Vacation,
     Scene::Rules,
     Scene::Shared,
@@ -123,6 +132,10 @@ impl Scene {
             Scene::Letter => "letter",
             Scene::Attachments => "attachments",
             Scene::Invite => "invite",
+            Scene::InviteAnswered => "invite-answered",
+            Scene::InviteUpdated => "invite-updated",
+            Scene::InviteCancelled => "invite-cancelled",
+            Scene::InviteOutdated => "invite-outdated",
             Scene::Search => "search",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
@@ -245,6 +258,15 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             };
             m.list.update(cx, |l, cx| l.select(i, cx));
         }
+        Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
+            let which = scene.name().trim_start_matches("invite-");
+            m.reading.update(cx, |r, cx| {
+                if let Some(c) = r.reading.as_mut().and_then(|r| r.invite.as_mut()) {
+                    c.screen_state(which);
+                }
+                cx.notify();
+            });
+        }
         Scene::Search => {
             m.search.update(cx, |s, cx| s.set_value(SEARCH_QUERY, window, cx));
             m.run_search(SEARCH_QUERY, cx);
@@ -256,32 +278,29 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Как `search::Clear`: календарь снимается без следов поиска в папках.
             m.search.update(cx, |s, cx| s.set_value("", window, cx));
             m.run_search("", cx);
-            m.cal.update(cx, |c, cx| {
-                c.assistant = false;
-                cx.notify();
-            });
             m.set_section(Section::Calendar, cx);
+            // «Сейчас» — 14:20 сегодня: линия времени видна при любом часе съёмки.
+            let today = jiff::Zoned::now().date().at(14, 20, 0, 0);
+            let clock = today.to_zoned(jiff::tz::TimeZone::system()).ok().map(|z| z.timestamp().as_second());
+            m.cal.update(cx, |c, cx| {
+                c.clock = clock;
+                c.select_pending(cx);
+            });
         }
         Scene::Assistant => {
-            m.cal.update(cx, |c, cx| {
-                c.assistant = true;
+            let Some(v) = m.meetings.last() else { return Err("no meeting tab".into()) };
+            v.update(cx, |v, cx| {
+                v.only_free = false;
                 cx.notify();
             });
-            m.set_section(Section::Calendar, cx);
         }
         Scene::Event => {
-            m.cal.update(cx, |c, cx| {
-                c.assistant = false;
-                c.select_busiest(cx);
-            });
+            m.cal.update(cx, |c, cx| c.select_busiest(cx));
             m.set_section(Section::Calendar, cx);
         }
         Scene::SignIn => m.set_section(Section::Mail, cx),
         Scene::Compose => {
-            m.cal.update(cx, |c, cx| {
-                c.assistant = false;
-                c.close_details(cx);
-            });
+            m.cal.update(cx, |c, cx| c.close_details(cx));
             m.set_section(Section::Mail, cx);
             // Окно — после кадра основного: не открывать его посреди отрисовки.
             let mailer = cx.entity();
@@ -307,8 +326,16 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         }
         Scene::Contacts => {
             m.cal.update(cx, |c, cx| c.close_details(cx));
+            m.close_all_meetings(window, cx);
             m.set_section(Section::Contacts, cx);
-            m.contacts.update(cx, |c, cx| c.select_first(cx));
+            let live = m.screens.as_ref().is_some_and(|d| d.live);
+            m.contacts.update(cx, |c, cx| {
+                c.select_first(cx);
+                // Демо: коллега, чья занятость есть в демо-неделе, — видна полоса «Сегодня».
+                if !live {
+                    c.select_email("m.ivanova@corp.example", cx);
+                }
+            });
         }
         Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
         Scene::Shared => {
@@ -347,10 +374,8 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.open_letter(row, cx);
         }
         Scene::Meeting => {
-            // Окно письма прошлой сцены остаётся: снимается своё окно.
             m.set_section(Section::Calendar, cx);
-            let mailer = cx.entity();
-            cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_meeting_screen(cx)));
+            m.open_meeting_screen(cx);
         }
         Scene::Vacation => {
             m.set_section(Section::Mail, cx);
@@ -405,18 +430,27 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
             let shown = |r: &crate::reading::Reading| match scene {
                 Scene::Attachments => r.doc.is_some() && !r.images.is_empty(),
-                _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some()),
+                _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some() && c.day.is_some()),
             };
             target.is_some() && reading.is_some_and(|r| Some(r.row.id.as_str()) == target && shown(r))
+        }
+        Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
+            reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
         }
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => {
             let c = m.cal.read(cx);
             // Живой ящик: неделя пришла с сервера.
             let loaded = c.loaded || m.screens.as_ref().is_some_and(|d| !d.live);
-            m.section == Section::Calendar && !c.assistant && loaded
+            m.section == Section::Calendar && c.clock.is_some() && loaded
         }
-        Scene::Assistant => m.section == Section::Calendar && m.cal.read(cx).assistant,
+        Scene::Meeting | Scene::Assistant => {
+            let tab = m.tabs.is_active(crate::tabs::TabKind::Meeting);
+            tab && m.meetings.last().is_some_and(|v| {
+                let v = v.read(cx);
+                v.ready() && (v.only_free == matches!(scene, Scene::Meeting))
+            })
+        }
         Scene::Event => {
             // Живая неделя может быть пустой: тогда снимок — без подробностей.
             let c = m.cal.read(cx);
@@ -433,7 +467,6 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let reply = m.compose.last().is_some_and(|c| Some(c.entity_id()) != before);
             reply && compose_hwnd(m, cx).is_some()
         }
-        Scene::Meeting => meeting_hwnd(m, cx).is_some(),
         Scene::Contacts => {
             // Живой ящик: контакты с сервера пришли — выделить первый (до ответа выделять нечего).
             let c = m.contacts.read(cx);
@@ -510,7 +543,6 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     let path = d.dir.join(format!("{name}.png"));
     let hwnd = match scene {
         Scene::Compose | Scene::SendLater | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
-        Scene::Meeting => meeting_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no meeting window")),
         _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
     };
     let task = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) });
@@ -536,11 +568,6 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
 /// Окно письма открыто и нарисовано: его дескриптор.
 fn compose_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
     m.compose.last().and_then(|c| c.read(cx).screen_hwnd())
-}
-
-/// Окно встречи открыто, нарисовано, занятость получена: его дескриптор.
-fn meeting_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
-    m.meetings.last().and_then(|w| w.read(cx).screen_hwnd())
 }
 
 fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), String> {

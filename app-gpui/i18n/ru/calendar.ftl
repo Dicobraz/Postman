@@ -1,13 +1,12 @@
-# Календарь (S3-05): неделя, подробности события, открытие занятости, помощник планирования.
-cal-work-week = Рабочая неделя
-cal-week-range = { $from } – { $to }
-cal-prev-week = ‹ Пред.
-cal-next-week = След. ›
+# Календарь (S3-05, вид — S5-11): неделя, подробности события, открытие занятости.
+cal-work-week = Раб. неделя
 cal-today = Сегодня
-cal-new-meeting = ＋ Новая встреча (Ctrl+Shift+Q)
-cal-assistant = 👥 Помощник планирования
+cal-today-tip = Перейти к сегодня (Alt+Home)
+cal-prev-week-tip = Предыдущая неделя (Alt+↑)
+cal-next-week-tip = Следующая неделя (Alt+↓)
+cal-new-meeting = Создать встречу
+cal-new-meeting-tip = Создать встречу (Ctrl+Shift+Q)
 cal-loading = Загрузка недели…
-cal-me = Я
 cal-day = { $d ->
     [0] Пн
     [1] Вт
@@ -17,64 +16,193 @@ cal-day = { $d ->
     [5] Сб
    *[6] Вс
 }
+cal-weekday = { $d ->
+    [0] Понедельник
+    [1] Вторник
+    [2] Среда
+    [3] Четверг
+    [4] Пятница
+    [5] Суббота
+   *[6] Воскресенье
+}
+cal-month = { $m ->
+    [1] Январь
+    [2] Февраль
+    [3] Март
+    [4] Апрель
+    [5] Май
+    [6] Июнь
+    [7] Июль
+    [8] Август
+    [9] Сентябрь
+    [10] Октябрь
+    [11] Ноябрь
+   *[12] Декабрь
+}
+cal-month-of = { $m ->
+    [1] января
+    [2] февраля
+    [3] марта
+    [4] апреля
+    [5] мая
+    [6] июня
+    [7] июля
+    [8] августа
+    [9] сентября
+    [10] октября
+    [11] ноября
+   *[12] декабря
+}
+cal-month-title = { $month } { $year }
+cal-long-day = { $wd }, { $day } { $month }
 cal-minutes = { $n } мин
-cal-free-for-all = Свободно у всех:
-cal-no-slots = Общего окна на этой неделе нет.
+cal-hours = { $n } ч
 cal-busy = занят
 cal-tentative = под вопросом
-cal-unavailable = нет на месте
-cal-off-hours = нерабочее время
-cal-no-data = нет данных
+cal-unavailable = вне офиса
 cal-failed = Календарь: { $error }
 
-# Открыть свою занятость коллеге.
-cal-share-label = Открыть мою занятость:
+# Слева: мои календари, категории, занятость.
+cal-my-calendar = Мой календарь
+cal-group-mine = Мои календари
+cal-group-categories = Категории
+cal-group-share = Занятость
+cal-share-open = Открыть мою занятость
+cal-share-label = Открыть мою занятость коллеге
 cal-share-placeholder = адрес коллеги
 cal-share-button = Открыть
+cal-share-cancel = Отмена
 cal-share-note = Коллега видит вашу занятость, только если вы её открыли (без подробностей встреч). Пока коллега не открыл свою, в помощнике у него «нет данных», а не «свободен».
 cal-share-bad = Не адрес: { $email }
 cal-share-sending = Открываю занятость: { $email }…
 cal-share-done = Ваша занятость открыта: { $email }
 
-# Подробности события.
-cal-details-when = Когда
-cal-details-where = Где
-cal-details-organizer = Организатор
-cal-details-participants = Участники
-cal-details-recurring = Повторяющееся событие
-cal-details-close = Закрыть
+# Неделя.
+cal-all-day-1 = Весь
+cal-all-day-2 = день
 cal-all-day = весь день
-cal-optional = необязательный
-cal-status-accepted = принял
-cal-status-declined = отклонил
-cal-status-tentative = под вопросом
-cal-status-needs-action = нет ответа
-cal-status-delegated = передал
+cal-waits-answer = ждёт ответа
 
-# Окно встречи.
+# Подробности события.
+cal-details-empty = Выберите встречу — подробности появятся здесь.
+cal-details-recurring = Повторяющееся событие
+cal-chip-organizer = Вы организатор
+cal-chip-waits = Ждёт ответа
+cal-chip-tentative = Под вопросом
+cal-chip-declined = Отклонено
+cal-chip-accepted = Принято
+cal-invited-by = { $name } приглашает вас
+cal-accept = Принять
+cal-tentative-answer = Под вопросом
+cal-decline = Отклонить
+cal-answered-accepted = Вы приняли — ответ отправлен организатору
+cal-answered-tentative = Вы ответили «Под вопросом» — ответ отправлен
+cal-answered-declined = Вы отклонили — событие скрыто из сетки
+cal-change-answer = Изменить ответ
+cal-conflict = Пересекается с «{ $title }», { $time }
+cal-conflict-more = и ещё { $n }
+cal-participants-n = Участники · { $n }
+cal-sum-accepted = приняли: { $n }
+cal-sum-tentative = под вопросом: { $n }
+cal-sum-declined = отклонили: { $n }
+cal-sum-none = нет ответа: { $n }
+cal-you = { $name } (вы)
+cal-organizer = организатор
+cal-optional = необязательный
+cal-external = Внешний
+cal-write-participants = Написать участникам
+
+# Вкладка встречи.
 meeting-title-new = Новая встреча
-meeting-window-failed = Окно встречи не открылось: { $error }
-meeting-send = ➤ Отправить
+meeting-tab-titled = Новая встреча · { $title }
+meeting-send = Отправить
+meeting-send-tip = Отправить приглашения (Ctrl+Enter)
 meeting-subject = Тема
 meeting-subject-placeholder = Тема встречи
-meeting-location = Место
+meeting-required = Обязательные
+meeting-optional = Необязательные
+meeting-rooms = Переговорная
+meeting-location = Место / ссылка
 meeting-location-placeholder = Переговорная или ссылка
-meeting-date = Дата
+meeting-when = Начало – конец
 meeting-date-placeholder = дд.мм.гггг
-meeting-start = Начало
 meeting-start-placeholder = чч:мм
 meeting-duration = Длительность
-meeting-attendees = Участники
-meeting-attendees-placeholder = Адреса через «;»
-meeting-assistant = Помощник планирования
+meeting-description = Описание
+meeting-desc-add = Добавить описание
+meeting-desc-hide = Свернуть описание
+meeting-desc-hint = повестка, материалы, ссылки
+meeting-description-placeholder = Повестка встречи
+meeting-attendees-placeholder = Адрес или имя — Enter или «;»
+meeting-external-short = внешний
+meeting-presence-tip = { $name } — { $state } в выбранное время
+meeting-presence-free = свободен
+meeting-presence-unknown = занятость неизвестна
+meeting-presence-external = внешний, занятость неизвестна
+meeting-me = Вы
+meeting-role-organizer = Организатор
+meeting-role-required = Обязательный
+meeting-role-optional = Необязательный
+meeting-role-room = Переговорная
+meeting-not-counted = { $role } · не учтён
+meeting-only-free = Только общее свободное время
+meeting-with-optional = Учитывать необязательных
+meeting-legend-free = Все свободны
+meeting-legend-busy = Занято
+meeting-legend-unknown = Неизвестно
+meeting-legend-external = Внешний
+meeting-not-counted-n = Не учтены: { $n } — занятость неизвестна
+meeting-participants-n = Участники · { $n }
+meeting-everyone = Все участники
+meeting-known = { $known } из { $n } с данными о занятости
+meeting-add-person = Добавить участника
+meeting-row-hidden = Календарь вам не открыт — «нет данных», а не «свободен»
+meeting-row-external = Внешний адрес — приглашение уйдёт письмом
+meeting-external-note = Внешним участникам приглашение уйдёт письмом
 meeting-busy-loading = Запрашиваю занятость…
-meeting-no-data-note = «нет данных» — коллега не открыл вам свою занятость или не найден на сервере; это не «свободен». Общие окна — по тем, чья занятость известна.
+meeting-busy-failed = Занятость не получена: { $error }
 meeting-sending = Отправляю приглашения…
 meeting-bad-time = Дата или время не распознаны: { $text }
 meeting-bad-addresses = Не адреса: { $list }
 meeting-no-server = Нужен сервер: в демо-режиме приглашения не отправляются.
 meeting-failed = Не отправлено: { $error }
-meeting-busy-failed = Занятость не получена: { $error }
 meeting-sent = Приглашения отправлены: { $title }
 meeting-created = Встреча создана: { $title }
 meeting-untitled = (без темы)
+
+# Приглашение в письме (карточка, S5-11).
+invite-day = { $wd }, { $day } { $month }
+invite-month-short = { $m ->
+    [1] янв
+    [2] фев
+    [3] мар
+    [4] апр
+    [5] мая
+    [6] июн
+    [7] июл
+    [8] авг
+    [9] сен
+    [10] окт
+    [11] ноя
+   *[12] дек
+}
+invite-organizer = Организатор: { $name }
+invite-accepted-of = { $n } из { $total } приняли
+invite-updated = Организатор изменил: { $what }
+invite-changed-time = время
+invite-changed-place = место
+invite-changed-title = тему
+invite-done-accepted = Вы приняли
+invite-done-tentative = Вы ответили «Под вопросом»
+invite-done-declined = Вы отклонили
+invite-route = Ответ уйдёт через календарь сервера · из invite.ics, разобран в песочнице
+invite-route-done = Ответ записан в календарь сервера по UID события · из invite.ics, разобран в песочнице
+invite-cancelled = Встреча отменена организатором · { $organizer }
+invite-outdated-newer = Приглашение устарело: в календаре более новая версия встречи
+invite-outdated-past = Встреча уже прошла
+invite-your-day = Ваш день · { $day }
+invite-day-loading = Календарь загружается…
+invite-conflict = Пересекается: { $title } { $time }
+invite-conflict-many = Пересекается: { $title } { $time } и ещё { $n }
+invite-no-conflict = Пересечений нет
+invite-sample-old-place = Переговорная 2

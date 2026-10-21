@@ -21,6 +21,7 @@ fn human(keys: &str) -> String {
             "delete" => "Delete".to_string(),
             "insert" => "Insert".to_string(),
             "home" => "Home".to_string(),
+            "f2" => "F2".to_string(),
             "end" => "End".to_string(),
             "pagedown" => "PgDn".to_string(),
             "pageup" => "PgUp".to_string(),
@@ -36,7 +37,8 @@ fn human(keys: &str) -> String {
 fn place(context: Option<&str>) -> &'static str {
     match context {
         Some(c) if c.contains("Composer") => "окно письма",
-        Some(c) if c.contains("Meeting") => "окно встречи",
+        Some(c) if c.contains("Meeting") => "вкладка встречи",
+        Some(c) if c.contains("ContactsView") => "контакты",
         Some(c) if c.contains("CalendarView") => "календарь",
         Some(c) if c.contains("MailView") => "почта",
         Some(c) if c.contains("Mailer") => "главное окно",

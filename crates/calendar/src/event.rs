@@ -62,6 +62,11 @@ pub struct Event {
     pub participants: Vec<Participant>,
     /// Повторяющееся событие (сами экземпляры разворачивает сервер).
     pub recurring: bool,
+    /// Метки события: JSCalendar `keywords` и `categories` (ключи со значением `true`), по алфавиту. Postman
+    /// сопоставляет их с таблицей категорий (`pm.cat.<id>` или имя категории) — цвет блока в неделе.
+    pub keywords: Vec<String>,
+    /// Номер версии (`sequence`): организатор увеличивает его при изменении встречи.
+    pub sequence: i64,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +98,11 @@ struct Raw {
     locations: HashMap<String, Value>,
     recurrence_rules: Option<Value>,
     recurrence_id: Option<String>,
+    #[serde(default)]
+    keywords: HashMap<String, bool>,
+    #[serde(default)]
+    categories: HashMap<String, bool>,
+    sequence: Option<i64>,
 }
 
 impl Event {
@@ -142,6 +152,14 @@ impl Event {
             },
             participants,
             recurring: raw.recurrence_rules.is_some_and(|r| !r.is_null()) || raw.recurrence_id.is_some(),
+            keywords: {
+                let mut k: Vec<String> =
+                    raw.keywords.into_iter().chain(raw.categories).filter(|(_, on)| *on).map(|(k, _)| k).collect();
+                k.sort();
+                k.dedup();
+                k
+            },
+            sequence: raw.sequence.unwrap_or(0),
         })
     }
 
@@ -250,6 +268,21 @@ mod tests {
         assert_eq!(maria.email, "maria@corp.example");
         assert!(maria.optional);
         assert_eq!(maria.status, Partstat::Tentative);
+        assert!(e.keywords.is_empty());
+        assert_eq!(e.sequence, 0);
+    }
+
+    /// Метки события — `keywords` и `categories` вместе (выключенные — нет), версия — `sequence`.
+    #[test]
+    fn keywords_categories_and_sequence() {
+        let v = json!({
+            "start": "2026-10-20T10:00:00", "duration": "PT1H", "sequence": 3,
+            "keywords": { "pm.cat.clients": true, "old": false },
+            "categories": { "Клиенты": true, "pm.cat.clients": true }
+        });
+        let e = Event::from_jmap(&v, &TimeZone::UTC).unwrap();
+        assert_eq!(e.keywords, ["pm.cat.clients", "Клиенты"]);
+        assert_eq!(e.sequence, 3);
     }
 
     #[test]
