@@ -201,6 +201,22 @@ impl Mailer {
         }
     }
 
+    /// Письмо-приглашение после ответа — в «Удалённые» («Настройки → Календарь», S5-20). Только перемещение: из
+    /// «Удалённых» насовсем не удаляется, из папки общего ящика без права удаления — остаётся.
+    pub(crate) fn trash_answered(&mut self, row: EmailRow, cx: &mut Context<Self>) {
+        let list = self.list.read(cx);
+        let from =
+            list.mailbox.clone().filter(|m| row.mailbox_ids.contains(m)).or_else(|| row.mailbox_ids.first().cloned());
+        let Some(from) = from else { return };
+        if !crate::list::may(&list.rights, &row, |r| r.remove) {
+            return;
+        }
+        let index = list.rows.1.iter().position(|r| r.id == row.id).map(|j| list.rows.0 + j).or(list.selected).unwrap_or(0);
+        if let m @ Removal::Move { .. } = removal(&from, &self.folders.read(cx).mailboxes) {
+            self.remove(row, index, m, cx);
+        }
+    }
+
     /// Esc: снять строку «Удалить навсегда?». `true` — она была.
     pub(crate) fn cancel_purge(&mut self, cx: &mut Context<Self>) -> bool {
         let list = self.list.read(cx);

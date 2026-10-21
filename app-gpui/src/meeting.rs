@@ -25,6 +25,7 @@ use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use postman_calendar::{Busy, BusyKind, Cell, Span, WorkHours, grid};
 use postman_compose::parse_addresses;
+use postman_core::prefs::FreeColor;
 use postman_core::schedule::Meeting;
 use postman_core::sync::{Command, Event};
 use postman_demo::calendar as demo;
@@ -408,7 +409,9 @@ impl Mailer {
     pub(crate) fn open_meeting(&mut self, model: Option<MeetingModel>, cx: &mut Context<Self>) {
         self.load_address_book(cx);
         let now = jiff::Zoned::now();
-        self.meetings.pending.push(model.unwrap_or_else(|| MeetingModel::new(default_start(&now), 3600)));
+        // Длительность новой встречи — «Настройки → Календарь» (S5-20).
+        let duration = crate::prefs::get(cx).calendar.duration_secs();
+        self.meetings.pending.push(model.unwrap_or_else(|| MeetingModel::new(default_start(&now), duration)));
         cx.notify();
     }
 
@@ -471,12 +474,13 @@ impl Mailer {
     /// помощник. Живой ящик — участники из `POSTMAN_SCREENS_ATTENDEES`, время по умолчанию, занятость с сервера.
     pub(crate) fn open_meeting_screen(&mut self, cx: &mut Context<Self>) {
         if self.backend.is_live() {
-            let mut model = MeetingModel::new(default_start(&jiff::Zoned::now()), 3600);
+            let duration = crate::prefs::get(cx).calendar.duration_secs();
+            let mut model = MeetingModel::new(default_start(&jiff::Zoned::now()), duration);
             model.attendees = std::env::var("POSTMAN_SCREENS_ATTENDEES").unwrap_or_default();
             self.open_meeting(Some(model), cx);
             return;
         }
-        let tz = TimeZone::system();
+        let tz = crate::prefs::get(cx).calendar.zone();
         let monday = jiff::Timestamp::from_second(demo::week_start())
             .map(|t| monday_of(t.to_zoned(tz).date()))
             .unwrap_or_else(|_| monday_of(jiff::Zoned::now().date()));
@@ -595,6 +599,8 @@ pub(crate) struct MeetingView {
     /// Помощник: только общие окна (занятость приглушена) или занятость каждого.
     pub(crate) only_free: bool,
     with_optional: bool,
+    /// Цвет свободного времени (S5-20): окна, образец в легенде, точка «свободен».
+    free_color: FreeColor,
     desc_open: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -638,7 +644,16 @@ impl MeetingView {
             }
         }));
         title.update(cx, |s, cx| s.focus(window, cx));
-        let tz = TimeZone::system();
+        // «Настройки → Календарь» (S5-20): пояс, рабочее время, необязательные, цвет свободного времени; цвет и часы
+        // меняются на лету, пояс и флажок — у новой вкладки.
+        let cal = crate::prefs::get(cx).calendar;
+        subscriptions.push(crate::prefs::observe_with(cx, |this: &mut Self, cx| {
+            let cal = crate::prefs::get(cx).calendar;
+            this.free_color = cal.free_color;
+            this.hours = cal.work_hours(this.tz.clone());
+            cx.notify();
+        }));
+        let tz = cal.zone();
         let desc_open = !model.description.trim().is_empty();
         let mut w = Self {
             model,
@@ -655,7 +670,7 @@ impl MeetingView {
             suggest: Vec::new(),
             suggest_for: None,
             selected: 0,
-            hours: WorkHours::standard(tz.clone()),
+            hours: cal.work_hours(tz.clone()),
             tz,
             live: open.live,
             rooms: open.rooms,
@@ -663,7 +678,8 @@ impl MeetingView {
             busy: Availability::default(),
             sync_inputs: false,
             only_free: true,
-            with_optional: true,
+            with_optional: cal.with_optional,
+            free_color: cal.free_color,
             desc_open,
             _subscriptions: subscriptions,
         };
@@ -1037,6 +1053,7 @@ impl MeetingView {
     /// Строка участников: чипы с занятостью в выбранное время и поле для нового.
     fn people_row(&self, kind: Kind, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
+        let free = l.free(self.free_color);
         let at = self.model.span(&self.tz, self.today());
         let chips = self.chips[kind.index()].iter().enumerate().map(|(i, c)| {
             let p = if c.bad { Presence::Unknown } else { self.presence(self.busy_of(&c.email).as_ref(), Some(&c.email), at) };
@@ -1051,7 +1068,7 @@ impl MeetingView {
                 .rounded(px(12.))
                 .bg(if c.bad { l.error_bg() } else { l.fill() })
                 .when(c.bad, |d| d.text_color(l.error()))
-                .child(presence_dot(p, 8., &l))
+                .child(presence_dot(p, 8., &l, free.line))
                 .child(c.shown())
                 .when(!c.bad && self.external(&c.email), |d| {
                     d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("meeting-external-short")))
@@ -1139,6 +1156,7 @@ impl MeetingView {
             return None;
         }
         let l = crate::roles::look(cx);
+        let free = l.free(self.free_color);
         let at = self.model.span(&self.tz, self.today());
         let picked = |e: &str| self.chips[Kind::Optional.index()].iter().any(|c| c.email.eq_ignore_ascii_case(e));
         let items = self.rooms.iter().take(ROOMS).enumerate().map(|(i, (name, email))| {
@@ -1157,7 +1175,7 @@ impl MeetingView {
                 .cursor_pointer()
                 .when(on, |d| d.bg(l.picked()).border_color(l.accent()))
                 .when(!on, |d| d.border_color(l.stroke()).hover(|d| d.bg(l.hover())))
-                .child(presence_dot(p, 8., &l))
+                .child(presence_dot(p, 8., &l, free.line))
                 .child(name.clone())
                 .on_click(cx.listener(move |this, _, window, cx| this.toggle_room(room.clone(), window, cx)))
         });
@@ -1264,6 +1282,7 @@ impl MeetingView {
 
     fn assistant(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
+        let free = l.free(self.free_color);
         let today = self.today();
         let day = self.day();
         let start = day_start(day, &self.tz);
@@ -1384,7 +1403,7 @@ impl MeetingView {
         };
         let legend: Vec<(Div, String)> = if self.only_free {
             vec![
-                (swatch(l.pm(Pm::FbFreeBg), Some(l.pm(Pm::FbFree))), tr!("meeting-legend-free")),
+                (swatch(free.bg, Some(free.line)), tr!("meeting-legend-free")),
                 (swatch(l.pm(Pm::FbMute), None), tr!("meeting-legend-busy")),
                 (swatch(l.pm(Pm::FbUnknown), None), tr!("meeting-legend-unknown")),
                 (swatch(l.panel(), Some(l.pm(Pm::FbExt))), tr!("meeting-legend-external")),
@@ -1420,7 +1439,7 @@ impl MeetingView {
                         .gap(px(8.))
                         .text_size(px(12.))
                         .text_color(if error { l.error() } else { l.text2() })
-                        .child(presence_dot(Presence::Unknown, 8., &l))
+                        .child(presence_dot(Presence::Unknown, 8., &l, free.line))
                         .child(text),
                 )
             })
@@ -1520,7 +1539,7 @@ impl MeetingView {
                         div()
                             .relative()
                             .child(avatar(name, 24., &l).when(i == 0, |d| d.bg(l.picked()).text_color(l.accent_text())))
-                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).child(presence_dot(p, 10., &l))),
+                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).child(presence_dot(p, 10., &l, free.line))),
                     )
                     .child(
                         div()
@@ -1650,14 +1669,14 @@ impl MeetingView {
                 .items_start()
                 .justify_center()
                 .pt(px(ROW_H / 2. - 8.))
-                .bg(l.pm(Pm::FbFreeBg).opacity(0.85))
+                .bg(free.bg.opacity(0.85))
                 .border_l_1()
                 .border_r_1()
-                .border_color(l.pm(Pm::FbFree))
+                .border_color(free.line)
                 .text_size(px(12.))
-                .text_color(l.pm(Pm::FbFreeFg))
+                .text_color(free.fg)
                 .cursor_pointer()
-                .hover(|d| d.bg(l.pm(Pm::FbFreeBg)))
+                .hover(|d| d.bg(free.bg))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_slot(pick, cx)))
         });
@@ -1726,10 +1745,10 @@ struct Row {
 }
 
 /// Точка занятости участника.
-fn presence_dot(p: Presence, size: f32, l: &Look) -> Div {
+fn presence_dot(p: Presence, size: f32, l: &Look, free: Hsla) -> Div {
     let d = div().size(px(size)).flex_none().rounded_full();
     match p {
-        Presence::Free => d.bg(l.pm(Pm::FbFree)),
+        Presence::Free => d.bg(free),
         Presence::Busy => d.bg(l.pm(Pm::FbBusy)),
         Presence::Tentative => d.bg(l.pm(Pm::FbTentative)).border_1().border_color(l.pm(Pm::FbBusy)),
         Presence::Away => d.bg(l.pm(Pm::FbOof)),

@@ -89,6 +89,7 @@ cmd-invite-tentative = Answer tentative
 cmd-invite-decline = Decline invitation
 cmd-settings-vacation = Automatic replies
 cmd-settings-rules = Rules
+cmd-settings-calendar = Calendar settings
 cmd-settings-open = Settings
 cmd-view-filters = Filters: folders or filters on the left
 cmd-view-quick-filters = Quick filters: show or hide

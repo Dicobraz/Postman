@@ -49,6 +49,7 @@ mod prefs;
 mod keymap;
 mod settings_tab;
 mod settings_cats;
+mod settings_cal;
 mod settings_keys;
 mod settings_sign;
 mod settings_accounts;

@@ -87,7 +87,7 @@ pub mod invite {
 
 /// Вкладка «Настройки» (S5-09); автоответы и правила (S4-05, S4-07) — её разделы, в Outlook — меню «Файл».
 pub mod settings {
-    gpui_kit::actions!(settings, [Open, Vacation, Rules]);
+    gpui_kit::actions!(settings, [Open, Vacation, Rules, Calendar]);
 }
 
 /// Письмо — вкладка или ответ в области чтения (S3-01, S5-06б): отправка, разметка, «Развернуть», удалить черновик.
@@ -252,6 +252,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("settings.vacation", &[], None),
     // Outlook: «Файл → Правила и оповещения», без клавиши.
     cmd("settings.rules", &[], None),
+    // Outlook: «Файл → Параметры → Календарь», без клавиши (S5-20).
+    cmd("settings.calendar", &[], None),
     // Фильтры (S5-03). Ctrl+Shift+F — в Outlook «Расширенный поиск», здесь — панель фильтров на месте папок.
     cmd("view.filters", &["ctrl-shift-f"], MAIL),
     // Вид → Быстрые фильтры: вернуть скрытые закладки; сортировка — меню над списком; без клавиш.

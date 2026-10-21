@@ -34,7 +34,7 @@ pub enum Cell {
 }
 
 /// Рабочее время организации: дни недели и часы в часовом поясе пользователя.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkHours {
     pub tz: TimeZone,
     pub start: Time,

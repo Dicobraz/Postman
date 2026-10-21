@@ -324,3 +324,93 @@ settings-phishing = Phishing reports
 settings-phishing-hint = The message is forwarded as an attachment to this address. Empty — only moved to Junk and marked.
 settings-phishing-bad = Not an email address: nothing will be forwarded.
 settings-phishing-placeholder = security@company.example
+
+# Settings → Calendar (S5-20).
+settings-nav-calendar = Calendar
+settings-nav-calendar-keywords = calendar meeting work week days hours time zone view step duration reminder free time color invitations colleagues
+settings-hint-calendar = Working time, grid view, defaults for new meetings and colleagues' calendar colors.
+settings-cal-reset = Defaults
+settings-cal-stored = saved
+settings-cal-week-group = Work week
+settings-cal-days = Working days
+settings-cal-days-hint = Other days are shaded in the grid and left out of the work week.
+settings-cal-day = { $d ->
+    [0] Mon
+    [1] Tue
+    [2] Wed
+    [3] Thu
+    [4] Fri
+    [5] Sat
+   *[6] Sun
+}
+settings-cal-hours = Working hours
+settings-cal-hours-hint = Outside them the grid is shaded; common meeting slots are looked for only within them.
+settings-cal-first = First day of week
+settings-cal-first-hint = Weeks, months and the mini calendar start with it.
+settings-cal-first-monday = Monday
+settings-cal-first-sunday = Sunday
+settings-cal-view-group = View
+settings-cal-view = Default view
+settings-cal-view-hint = Opens when you switch to the calendar.
+settings-cal-view-day = Day
+settings-cal-view-work-week = Work week
+settings-cal-view-week = Week
+settings-cal-view-month = Month
+settings-cal-step = Grid step
+settings-cal-step-hint = Dragging and time selection snap to it.
+settings-cal-zone = Time zone
+settings-cal-zone-hint = Meetings from other zones are shown in it.
+settings-cal-zone-system = As in Windows · { $zone }
+settings-cal-zone-europe-kaliningrad = Kaliningrad
+settings-cal-zone-europe-moscow = Moscow
+settings-cal-zone-europe-samara = Samara
+settings-cal-zone-asia-yekaterinburg = Yekaterinburg
+settings-cal-zone-asia-omsk = Omsk
+settings-cal-zone-asia-novosibirsk = Novosibirsk
+settings-cal-zone-asia-krasnoyarsk = Krasnoyarsk
+settings-cal-zone-asia-irkutsk = Irkutsk
+settings-cal-zone-asia-yakutsk = Yakutsk
+settings-cal-zone-asia-vladivostok = Vladivostok
+settings-cal-zone-asia-magadan = Magadan
+settings-cal-zone-asia-kamchatka = Petropavlovsk-Kamchatsky
+settings-cal-zone-europe-london = London
+settings-cal-zone-utc = Coordinated Universal Time
+settings-cal-second = Show a second time zone
+settings-cal-second-hint = A second hour scale left of the grid — for business trips.
+settings-cal-meet-group = Meetings
+settings-cal-duration = Default duration
+settings-cal-duration-hint = For a new meeting and a one-click selection.
+settings-cal-reminder = Default reminder
+settings-cal-reminder-hint = A toast in the window corner; can be changed per event.
+settings-cal-reminder-none = none
+settings-cal-reminder-before = { $time } before
+settings-cal-late = Start meetings 5 min late
+settings-cal-recommended = recommended
+settings-cal-late-on = A meeting at 10:00 starts at 10:05 — a break between back-to-back meetings.
+settings-cal-late-off = Meetings start exactly on the grid, without a break between them.
+settings-cal-optional = Count optional attendees when finding a time
+settings-cal-optional-on = Common slots are looked for across all attendees, optional ones included.
+settings-cal-optional-off = Slots are looked for across required attendees; optional ones are shown but don't block.
+settings-cal-free = Free time color
+settings-cal-free-hint = Highlights common free slots in the meeting window when finding a time.
+settings-cal-free-brand = Brand
+settings-cal-free-green = Green
+settings-cal-free-blue = Blue
+settings-cal-free-teal = Teal
+settings-cal-free-note = Example: attendees busy 08–19, common slot 13:00–15:30 — color “{ $color }”.
+settings-cal-colleagues-group = Colleagues' calendars
+settings-cal-owner-colors = Colors by owner
+settings-cal-owner-colors-hint = A colleague's event takes the color of their calendar, not of its category.
+settings-cal-owner-names = Show owner name on events
+settings-cal-owner-names-hint = Shows whose event it is when calendars overlap.
+settings-cal-invites-group = Invitations
+settings-cal-tentative = Add invitations to the calendar as “Tentative” automatically
+settings-cal-tentative-hint = The time is held tentatively until you answer.
+settings-cal-delete = Delete the invitation letter after answering
+settings-cal-delete-hint = The event stays in the calendar, the letter goes to Deleted Items.
+settings-cal-preview = Preview
+settings-cal-preview-view = { $view } · step { $step }
+settings-cal-preview-days = Working days: { $n }, hours { $from }–{ $to }.
+settings-cal-preview-meeting = New meeting — { $duration }, reminder: { $reminder }.
+settings-cal-preview-zone = Time zone: { $zone }.
+settings-cal-preview-stored = “Saved” — the choice is remembered; it takes effect in the calendar with the new views and colleagues' calendars.

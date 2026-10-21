@@ -1,6 +1,6 @@
 //! Вкладка «Настройки» (S5-09, `docs/DESIGN.md` «Настройки»): слева — разделы с поиском, справа — раздел. Разделы:
 //! Общие (тема, плотность, язык), Аккаунты (`settings_accounts.rs`), Категории (`settings_cats.rs`), Быстрые фильтры
-//! и сроки, Чтение, Подписи и шаблоны (`settings_sign.rs`), Клавиатура (`settings_keys.rs`), Правила и Автоответы
+//! и сроки, Чтение, Календарь (`settings_cal.rs`, S5-20), Подписи и шаблоны (`settings_sign.rs`), Клавиатура (`settings_keys.rs`), Правила и Автоответы
 //! (панели `rules.rs` и `vacation.rs` — их держит экран почты, `settings.rs`).
 //!
 //! Своё — в `postman_core::prefs` через `crate::prefs` (файл пишется в фоне); категории, удаление аккаунта и панели
@@ -25,6 +25,7 @@ pub(crate) enum Section {
     Categories,
     Quick,
     Reading,
+    Calendar,
     Signatures,
     Keys,
     Rules,
@@ -32,12 +33,13 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 9] = [
+    pub(crate) const ALL: [Section; 10] = [
         Section::General,
         Section::Accounts,
         Section::Categories,
         Section::Quick,
         Section::Reading,
+        Section::Calendar,
         Section::Signatures,
         Section::Keys,
         Section::Rules,
@@ -51,6 +53,7 @@ impl Section {
             Section::Categories => "categories",
             Section::Quick => "quick",
             Section::Reading => "reading",
+            Section::Calendar => "calendar",
             Section::Signatures => "signatures",
             Section::Keys => "keys",
             Section::Rules => "rules",
@@ -77,6 +80,7 @@ impl Section {
             Section::Categories => '\u{E8EC}',
             Section::Quick => '\u{E8FD}',
             Section::Reading => '\u{E8A1}',
+            Section::Calendar => crate::calendar::g::CALENDAR,
             Section::Signatures => '\u{E8AC}',
             Section::Keys => '\u{E765}',
             Section::Rules => glyph::RULES,
@@ -153,6 +157,10 @@ pub(crate) struct SettingsView {
     /// «Общие → Безопасность» (S5-08): адрес для писем «Сообщить о фишинге»; ошибка — не адрес.
     pub(crate) phishing: Entity<InputState>,
     pub(crate) phishing_error: bool,
+    /// «Календарь»: открытый список выбора (часы, пояс, напоминание).
+    pub(crate) cal_menu: Option<crate::settings_cal::Menu>,
+    /// Прокрутка раздела: новый раздел — сверху; снимок `settings-calendar-free` — внизу.
+    pub(crate) scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -212,6 +220,8 @@ impl SettingsView {
             theme_error: None,
             phishing,
             phishing_error: false,
+            cal_menu: None,
+            scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
         v.sign_load(cx);
@@ -225,6 +235,8 @@ impl SettingsView {
             self.stop_recording(cx);
             self.cat_edit = None;
             self.remove_confirm = false;
+            self.cal_menu = None;
+            self.scroll.set_offset(point(px(0.), px(0.)));
         }
         self.section = section;
         cx.emit(SettingsEvent::Opened(section));
@@ -254,7 +266,11 @@ impl SettingsView {
             self.stop_recording(cx);
             return true;
         }
-        if self.cat_edit.take().is_some() || self.cat_purge.take().is_some() || std::mem::take(&mut self.remove_confirm) {
+        if self.cat_edit.take().is_some()
+            || self.cat_purge.take().is_some()
+            || std::mem::take(&mut self.remove_confirm)
+            || self.cal_menu.take().is_some()
+        {
             cx.notify();
             return true;
         }
@@ -833,6 +849,7 @@ impl SettingsView {
                 let aside = vec![aside_card(tr!("settings-reading-aside"), vec![tr!("settings-reading-aside-1"), tr!("settings-reading-aside-2")], l)];
                 (None, self.reading(l, cx).into_any_element(), aside)
             }
+            Section::Calendar => self.calendar(l, cx),
             Section::Categories => self.categories(l, window, cx),
             Section::Keys => self.keyboard(l, cx),
             Section::Signatures => self.signatures(l, window, cx),
@@ -872,7 +889,7 @@ impl Render for SettingsView {
                 div().flex_1().min_h_0().flex().child(body)
             } else {
                 div().flex_1().min_h_0().child(
-                    div().id("settings-content").size_full().overflow_y_scroll().px_6().pb_6().child(body),
+                    div().id("settings-content").size_full().overflow_y_scroll().track_scroll(&self.scroll).px_6().pb_6().child(body),
                 )
             });
         div()
