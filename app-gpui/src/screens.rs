@@ -180,7 +180,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 66] = [
+const SCENES: [Scene; 67] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
