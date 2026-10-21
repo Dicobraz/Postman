@@ -53,6 +53,21 @@ pub struct Prefs {
     /// (S5-16 сняла Alt, J/K, A/T/N и др.). Нет в файле — 0 (до S5-16).
     #[serde(default)]
     pub keys_rev: u32,
+    /// Схема клавиш (S5-17, «Настройки → Клавиатура»): «Outlook» по умолчанию или «Одиночные клавиши».
+    pub key_scheme: KeyScheme,
+    /// Свои клавиши столбца «Одиночные клавиши» (как `keys`, но для слоя схемы); действуют, когда она выбрана.
+    pub keys_single: BTreeMap<String, Vec<String>>,
+}
+
+/// Схема клавиш.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyScheme {
+    /// Как Outlook: Ctrl + буква — команды, без модификатора — навигация.
+    #[default]
+    Outlook,
+    /// Как Gmail: ещё одиночные буквы (J/K, R, A, F, E…) вне полей ввода; клавиши Outlook действуют и в ней.
+    Single,
 }
 
 impl Default for Prefs {
@@ -66,6 +81,8 @@ impl Default for Prefs {
             calendar: Calendar::default(),
             keys: BTreeMap::new(),
             keys_rev: 0,
+            key_scheme: KeyScheme::Outlook,
+            keys_single: BTreeMap::new(),
         }
     }
 }
@@ -122,6 +139,7 @@ impl Prefs {
         self.lifecycle = self.lifecycle.clamped();
         self.calendar = std::mem::take(&mut self.calendar).normalized();
         self.keys.retain(|id, _| !id.is_empty());
+        self.keys_single.retain(|id, _| !id.is_empty());
         // Адрес для фишинга: пробелы по краям — прочь, пустой и без «@» — нет адреса.
         self.general.phishing_report = phishing_address(self.general.phishing_report.as_deref());
         self
@@ -816,6 +834,8 @@ mod tests {
         p.reading.warn_link_mismatch = false;
         p.keys.insert("mail.reply".into(), vec!["ctrl-shift-y".into()]);
         p.keys.insert("tab.close".into(), vec![]);
+        p.key_scheme = KeyScheme::Single;
+        p.keys_single.insert("mail.archive".into(), vec!["y".into()]);
         p.save(&path).unwrap();
         let back = Prefs::load(&path).unwrap();
         assert_eq!(back, p);

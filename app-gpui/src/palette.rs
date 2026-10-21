@@ -624,14 +624,14 @@ impl Mailer {
         }
         // Команды — те, что сработали бы там, где сейчас фокус (письмо во вкладке, список, календарь).
         let back = window.focused(cx);
-        let overrides = crate::prefs::get(cx).keys.clone();
+        let set = crate::keymap::KeySet::of(&crate::prefs::get(cx));
         let mut items = Vec::new();
         for c in crate::commands::COMMANDS.iter().filter(|c| !hidden(c.id)) {
             let Ok(action) = cx.build_action(&c.action_name(), None) else { continue };
             if !window.is_action_available(action.as_ref(), cx) {
                 continue;
             }
-            let keys = crate::keymap::effective(c, &overrides).first().map(|k| crate::keymap::human(k)).into_iter().collect();
+            let keys = crate::keymap::hint(&crate::commands::SINGLE, &set, c).map(|k| crate::keymap::human(&k)).into_iter().collect();
             items.push(Item::command(c.id, tr!(&c.name_key()), keys));
         }
         items.extend(self.palette_folders(cx));

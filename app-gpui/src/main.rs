@@ -278,7 +278,7 @@ fn main() {
         // Тема (S5-01): «как в ОС» или `--theme`, на лету; до первого окна — чтение реестра, микросекунды.
         roles::init(&theme, density, cx);
         // Клавиши — из реестра команд (S2-02) и свои из настроек (S5-09); в поле ввода клавиши без модификаторов — текст.
-        commands::bind(cx, &user_prefs.keys);
+        commands::bind(cx, &user_prefs);
         prefs::init(user_prefs, prefs_path, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         // Свой заголовок окна (S5-01): вкладки, перетаскивание, «─ □ ✕» — `chrome.rs`.
