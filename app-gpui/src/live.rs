@@ -490,9 +490,11 @@ impl Mailer {
     /// «Элементов: N» в строке состояния; папка загружена не вся — «N из M» (M — на сервере).
     pub(crate) fn items_status(&self, cx: &App) -> String {
         let list = self.list.read(cx);
-        match list.more.total.filter(|&t| t > list.count && list.search_ids.is_none()) {
-            Some(total) => tr!("status-items-of", n = list.count, total = total),
-            None => tr!("status-items", n = list.count),
+        // Беседы в списке (S5-05б): писем, а не строк.
+        let n = list.threads().map_or(list.count, |o| o.total());
+        match list.more.total.filter(|&t| t > n && list.search_ids.is_none()) {
+            Some(total) => tr!("status-items-of", n = n, total = total),
+            None => tr!("status-items", n = n),
         }
     }
 

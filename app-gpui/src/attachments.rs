@@ -185,18 +185,18 @@ pub(crate) fn visible(total: usize, expanded: bool) -> (usize, usize) {
     }
 }
 
-/// Команды вложений — на корне экрана почты (`Mailer::render`). ← / → без открытого просмотра не нужны:
-/// действие уходит дальше (`propagate`).
+/// Команды вложений — на корне экрана почты (`Mailer::render`). ← / → без открытого просмотра — беседе в списке
+/// «как Outlook» (свернуть, развернуть; S5-05б), не нужны и ей — действие уходит дальше (`propagate`).
 pub(crate) fn handlers(root: Div, cx: &mut Context<Mailer>) -> Div {
     root.on_action(cx.listener(|this, _: &attach::Preview, _, cx| this.reading.update(cx, |r, cx| r.toggle_preview(None, cx))))
         .on_action(cx.listener(|this, _: &attach::SaveAll, _, cx| this.reading.update(cx, |r, cx| r.save_all(cx))))
         .on_action(cx.listener(|this, _: &attach::Next, _, cx| {
-            if !this.reading.update(cx, |r, cx| r.step_preview(1, cx)) {
+            if !this.reading.update(cx, |r, cx| r.step_preview(1, cx)) && !this.thread_arrow(crate::outline::Fold::Expand, cx) {
                 cx.propagate();
             }
         }))
         .on_action(cx.listener(|this, _: &attach::Prev, _, cx| {
-            if !this.reading.update(cx, |r, cx| r.step_preview(-1, cx)) {
+            if !this.reading.update(cx, |r, cx| r.step_preview(-1, cx)) && !this.thread_arrow(crate::outline::Fold::Collapse, cx) {
                 cx.propagate();
             }
         }))
