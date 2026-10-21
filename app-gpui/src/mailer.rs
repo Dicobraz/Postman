@@ -72,6 +72,9 @@ pub(crate) struct Mailer {
     /// `--screens`: снимки экранов без человека (S2-05).
     pub(crate) screens: Option<screens::Driver>,
     pub(crate) section: Section,
+    /// KeyTips (S5-18): удержание Ctrl и пробуждение через 0,4 с (только пока Ctrl нажат).
+    pub(crate) keytips: crate::keytips::Timer,
+    pub(crate) keytips_task: Option<Task<()>>,
     /// В области чтения — приглашение без ответа: у корня контекст `Invite` (S5-17).
     pub(crate) invite_waiting: bool,
     /// Раздел главной вкладки, пока открыта вкладка почты (в ней раздел — всегда «Почта», S5-16).
@@ -215,6 +218,8 @@ impl Mailer {
                     }
                 }
             }),
+            // Плашки KeyTips и клавиши кнопок (S5-18): части с кнопками — заново.
+            cx.observe_global::<crate::keytips::KeyTips>(|this: &mut Self, cx| this.keytips_changed(cx)),
             // Значок уведомлений в строке состояния.
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             // Настройки (S5-09): «Панель чтения» меняет раскладку; вид беседы (S5-05б) — область чтения.
@@ -277,6 +282,8 @@ impl Mailer {
             section: Section::Mail,
             main_section: None,
             invite_waiting: false,
+            keytips: Default::default(),
+            keytips_task: None,
             cal,
             cal_bar,
             contacts_bar,
@@ -301,6 +308,8 @@ impl Mailer {
             let k = &ev.keystroke;
             let action = ev.action.as_ref().map_or("—", |a| a.name());
             this.last_key = format!("{} ({}) → {action}", k.unparse(), k.key_char.as_deref().unwrap_or(""));
+            // Нажата клавиша — KeyTips не нужны (S5-18).
+            this.keytips_key(cx);
             if to_stdout {
                 println!("key {}", this.last_key);
             }
@@ -442,6 +451,8 @@ impl Render for Mailer {
         let root = crate::attachments::handlers(crate::actions::handlers(div(), cx), cx)
             .key_context(context)
             .track_focus(&self.focus)
+            // KeyTips (S5-18): удержание одного Ctrl.
+            .on_modifiers_changed(cx.listener(|this, ev: &ModifiersChangedEvent, _, cx| this.keytips_modifiers(ev.modifiers, cx)))
             .on_action(cx.listener(|this, _: &mail::Next, _, cx| this.step(|_| 1, cx)))
             .on_action(cx.listener(|this, _: &mail::Prev, _, cx| this.step(|_| -1, cx)))
             .on_action(cx.listener(|this, _: &mail::First, _, cx| this.step(|l| -(l.count as isize), cx)))
@@ -700,7 +711,7 @@ impl Mailer {
         if mail && let Some(s) = self.live.signin.clone() {
             return div().flex().flex_1().min_h_0().px(px(8.)).child(card(l).flex_1().child(s));
         }
-        let mut body = div().flex().flex_1().min_h_0().pr(px(8.)).child(self.rail(l));
+        let mut body = div().flex().flex_1().min_h_0().pr(px(8.)).child(self.rail(l, cx));
         if mail {
             body = body.child(self.folders.clone().cached(StyleRefinement::default().w(px(W_FOLDERS)).h_full().flex_none()));
             let list = || self.list.clone().cached(full());

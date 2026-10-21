@@ -11,7 +11,7 @@ search-summary-waiting = { $n ->
    *[many] { $n } результатов
 } · { $place } · ищем на сервере…
 search-where-all = все папки
-search-close = Закрыть поиск — к папке (Esc)
+search-close = Закрыть поиск — к папке
 search-refine = Уточнить
 search-refine-from = от: { $name }
 search-refine-to-me = кому: мне

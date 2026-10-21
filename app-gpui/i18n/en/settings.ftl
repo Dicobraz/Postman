@@ -265,6 +265,7 @@ settings-keys-reset-all = Reset all
 settings-keys-command = Command
 settings-keys-col-outlook = Outlook
 settings-keys-col-single = Single keys
+settings-keys-keytips = KeyTips: hold Ctrl to show keys over buttons
 settings-keys-scheme = Scheme
 settings-keys-scheme-outlook = Outlook (default)
 settings-keys-scheme-single = Single keys

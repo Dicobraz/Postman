@@ -461,38 +461,32 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
         }
         _ => {
             let sending = card.sending;
-            let button = |id: &'static str, key: &str, hotkey: &str, s: Partstat, primary: bool, cx: &mut Context<ReadingPane>| {
+            // Клавиши (A / T / N в схеме «Одиночные клавиши») — подсказкой и KeyTips, не в тексте кнопок (S5-18).
+            let button = |id: &'static str, key: &str, command: &'static str, s: Partstat, primary: bool, cx: &mut Context<ReadingPane>| {
                 let b = if primary { accent_button(id, &l) } else { outline_button(id, &l) };
-                b.h(px(28.))
+                let b = b
+                    .h(px(28.))
                     .px(px(9.))
                     .text_size(px(12.))
                     .when(primary, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
                     .when(primary, |d| d.child(icon(g::CHECK, 11.)))
                     .child(tr!(key))
-                    .child(
-                        div()
-                            .px(px(4.))
-                            .rounded(px(3.))
-                            .text_size(px(10.))
-                            .when(primary, |d| d.bg(l.on_accent().opacity(0.22)))
-                            .when(!primary, |d| d.border_1().border_color(l.stroke()).text_color(l.text2()))
-                            .child(hotkey.to_string()),
-                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if sending.is_none() {
                             this.answer_invite(s, cx);
                         }
-                    }))
+                    }));
+                crate::keytips::command(b, command, Some(tr!(key)), &l, cx)
             };
             div()
                 .flex()
                 .flex_wrap()
                 .items_center()
                 .gap(px(6.))
-                .child(button("invite-accept", "cal-accept", "A", Partstat::Accepted, true, cx))
-                .child(button("invite-tentative", "cal-tentative-answer", "T", Partstat::Tentative, false, cx))
-                .child(button("invite-decline", "cal-decline", "N", Partstat::Declined, false, cx))
+                .child(button("invite-accept", "cal-accept", "invite.accept", Partstat::Accepted, true, cx))
+                .child(button("invite-tentative", "cal-tentative-answer", "invite.tentative", Partstat::Tentative, false, cx))
+                .child(button("invite-decline", "cal-decline", "invite.decline", Partstat::Declined, false, cx))
                 .when(sending.is_some(), |d| {
                     d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-sending")))
                 })

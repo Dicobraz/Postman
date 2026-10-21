@@ -288,8 +288,7 @@ impl ReadingPane {
                 )
             })
             .when(f.waiting, |d| d.child(div().text_color(l.text2()).child(tr!("thread-loading"))))
-            .child(div().flex_1())
-            .child(div().text_color(l.text2()).child(tr!("thread-keys")));
+            .child(div().flex_1());
         Some(bar.into_any_element())
     }
 
