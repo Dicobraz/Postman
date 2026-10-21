@@ -163,6 +163,9 @@ pub(crate) struct MailList {
     pub(crate) offline_hidden: bool,
     /// Где список в окне (последний кадр): контекстное меню с клавиатуры — у выбранной строки.
     pub(crate) bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// Поиск (S5-10, `search.rs`): строка над списком, чипы, подсветка; группы найденного — по папкам или датам.
+    pub(crate) found: Option<crate::search::Found>,
+    search_groups: Vec<(Group, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -442,6 +445,8 @@ impl MailList {
             offline: None,
             offline_hidden: false,
             bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
+            found: None,
+            search_groups: Vec::new(),
             _subscriptions: subscriptions,
         };
         list.me = list.who_am_i();
@@ -585,10 +590,10 @@ impl MailList {
         self.reread(None, cx);
     }
 
-    /// Откуда группы: поиск — без групп; свой набор — посчитанные; папка по дате — по датам.
+    /// Откуда группы: поиск — расставленные поиском; свой набор — посчитанные; папка по дате — по датам.
     fn group_source(&self) -> Groups {
         match (&self.search_ids, &self.view, &self.mailbox) {
-            (Some(_), _, _) => Groups::None,
+            (Some(_), _, _) => Groups::Fixed(self.search_groups.clone()),
             (None, Some(_), _) => Groups::Fixed(self.groups.clone()),
             (None, None, Some(mb)) if self.query.sort == Sort::Date => Groups::Days(mb.clone()),
             _ => Groups::None,
@@ -681,6 +686,7 @@ impl MailList {
         });
         self.view = None;
         self.server_hits = Arc::new(HashSet::new());
+        self.found = None;
         self.switch_view(Some(id), None);
         self.selected = None;
         // Другая папка — выделение снято (S5-08).
@@ -699,13 +705,17 @@ impl MailList {
         cx.notify();
     }
 
-    /// Первые результаты поиска живого ящика (дальше они дополняются через `refresh`).
-    pub(crate) fn begin_search(&mut self, ids: Vec<String>) {
-        let mailbox = self.mailbox.clone();
-        self.switch_view(mailbox, Some(ids));
-        self.selected = None;
-        self.selection.clear();
-        self.summary = None;
+    /// Найденное поиском (S5-10): тот же запрос — дополнить (выделение остаётся), новый — сверху без выделения.
+    pub(crate) fn show_found(&mut self, ids: Vec<String>, groups: Vec<(Group, usize)>, found: crate::search::Found, cx: &mut Context<Self>) {
+        let same = self.search_ids.is_some() && self.found.as_ref().is_some_and(|f| f.text == found.text && f.all == found.all);
+        self.search_groups = groups;
+        self.found = Some(found);
+        if same {
+            self.search_ids = Some(ids);
+            self.reread(None, cx);
+        } else {
+            self.show_search(Some(ids), cx);
+        }
     }
 
     /// Другая папка или поиск: запомнить прокрутку прежнего вида, поставить прокрутку нового.
@@ -763,6 +773,12 @@ impl MailList {
     pub(crate) fn removed(&mut self, id: &str, index: usize, cx: &mut Context<Self>) {
         if let Some(ids) = &mut self.search_ids {
             ids.retain(|x| x != id);
+            // Найденное поиском (S5-10): письмо уходит и из своей группы.
+            if let Some(g) = self.layout.group_of(index).cloned()
+                && let Some((_, n)) = self.search_groups.iter_mut().find(|(x, _)| *x == g)
+            {
+                *n = n.saturating_sub(1);
+            }
         }
         // Свой набор (фильтры): письмо уходит из него и из своей группы.
         if self.search_ids.is_none()
@@ -1131,15 +1147,21 @@ impl Render for MailList {
                 .child(button("purge-yes", tr!("actions-purge-yes"), true))
                 .child(button("purge-no", tr!("actions-purge-no"), false))
         });
-        // Что-то выделено — панель массовых действий на месте строки над списком (S5-08).
-        let header =
-            if self.selection.is_empty() { self.header(&l, cx).into_any_element() } else { self.bulk_header(&l, cx).into_any_element() };
+        // Что-то выделено — панель массовых действий на месте строки над списком (S5-08); идёт поиск — строка поиска
+        // с чипами «Уточнить» (S5-10).
+        let header = match (self.selection.is_empty(), self.found.clone()) {
+            (false, _) => self.bulk_header(&l, cx).into_any_element(),
+            (true, Some(f)) => crate::search::header(&f, self.count, &l, cx).into_any_element(),
+            (true, None) => self.header(&l, cx).into_any_element(),
+        };
         let banner = self.offline_banner(&l, cx);
         let dropdown = self.bulk_dropdown(&l, cx);
         let quick = self.quick_shown(cx);
         let sizes = self.sizes(quick);
         let empty = self.count == 0 && self.search_ids.is_none() && self.view.is_some() && !self.query.criteria.is_empty();
-        let list = v_virtual_list(cx.entity(), "messages", sizes, |this, items: Range<usize>, _window, cx| {
+        let nothing = self.count == 0 && self.found.as_ref().is_some_and(|f| !f.waiting) && self.page_pending.is_none();
+        let marks = self.found.as_ref().map(|f| f.marks.clone());
+        let list = v_virtual_list(cx.entity(), "messages", sizes, move |this, items: Range<usize>, _window, cx| {
             // Один элемент gpui запрашивает, чтобы измерить ширину, — это не видимая область.
             if items.len() > 1 {
                 let rows = this.layout.rows_in(items.clone());
@@ -1173,7 +1195,7 @@ impl Render for MailList {
                                 boxes,
                                 menu: this.menu_row == Some(i),
                             };
-                            list_row(i, &r, labels, state, &l, cx)
+                            list_row(i, &r, labels, state, marks.as_deref().map(Vec::as_slice), &l, cx)
                         }
                         None => empty_row(i, &l),
                     },
@@ -1194,7 +1216,9 @@ impl Render for MailList {
             .min_h_0()
             // Где список в окне — для контекстного меню с клавиатуры (Shift+F10) у выбранной строки.
             .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
-        body = if empty {
+        body = if nothing {
+            body.child(div().pt(px(40.)).px(px(24.)).flex().justify_center().text_color(l.text2()).child(tr!("search-empty")))
+        } else if empty {
             let model = self.filters.clone();
             body.child(
                 div()
@@ -1337,6 +1361,7 @@ pub(crate) fn list_row(
     r: &EmailRow,
     labels: crate::labels::RowLabels,
     state: RowState,
+    marks: Option<&[String]>,
     l: &Look,
     cx: &mut Context<MailList>,
 ) -> AnyElement {
@@ -1406,7 +1431,7 @@ pub(crate) fn list_row(
                 .min_w(px(60.))
                 .truncate()
                 .when(!r.seen, |d| d.font_weight(FontWeight::SEMIBOLD))
-                .child(from.clone()),
+                .child(crate::search::marked(&from, marks, l)),
         )
         .child(chips)
         .when(r.has_attachment, |d| d.child(crate::chrome::icon(crate::chrome::glyph::ATTACH, 13.).text_color(l.text3())))
@@ -1416,9 +1441,10 @@ pub(crate) fn list_row(
         .truncate()
         .when(!r.seen, |d| d.text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD))
         .when(r.seen, |d| d.text_color(l.text()))
-        .child(r.subject.clone());
-    let preview = roomy
-        .then(|| div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(r.preview.clone()));
+        .child(crate::search::marked(&r.subject, marks, l));
+    let preview = roomy.then(|| {
+        div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(crate::search::marked(&r.preview, marks, l))
+    });
     let lit = state.open || state.picked;
     div()
         .id(i)

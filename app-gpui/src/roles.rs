@@ -65,10 +65,12 @@ pub(crate) enum Pm {
     CalOff,
     /// «Сообщить о фишинге» — красная маска (DESIGN «Действия и состояния», #CD605A): красный — безопасность.
     Phish,
+    /// Совпадение поиска (S5-10): янтарная подложка — янтарный только у сроков и совпадений (DESIGN «Цвет»).
+    SearchHit,
 }
 
 impl Pm {
-    pub(crate) const COUNT: usize = Pm::Phish as usize + 1;
+    pub(crate) const COUNT: usize = Pm::SearchHit as usize + 1;
 }
 
 const fn c(v: u32) -> Color {
@@ -105,6 +107,7 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
     (Pm::Phish, "app.phish", c(0xCD605A), c(0xD47C76), Role::CriticalFg),
+    (Pm::SearchHit, "app.search.hit", c(0xF9EDD5), c(0x413315), Role::AccentSubtle),
 ];
 
 /// Части цвета категории: точка и полоса, текст и подложка метки.
@@ -184,6 +187,7 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::ConflictBg,
     Pm::CalOff,
     Pm::Phish,
+    Pm::SearchHit,
 ];
 
 /// Цвета категории в теме.

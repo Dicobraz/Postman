@@ -123,7 +123,7 @@ fn chip_key(c: Check) -> &'static str {
 }
 
 /// Название закладки: короткое (на закладке) и полное (в панели).
-fn quick_keys(q: Quick) -> (&'static str, &'static str) {
+pub(crate) fn quick_keys(q: Quick) -> (&'static str, &'static str) {
     match q {
         Quick::Threats => ("filters-quick-threats", "filters-quick-threats-long"),
         Quick::Due => ("filters-quick-due", "filters-quick-due-long"),
@@ -134,7 +134,7 @@ fn quick_keys(q: Quick) -> (&'static str, &'static str) {
 }
 
 /// Цвет закладки: красный — только угрозы, янтарный — только сроки (DESIGN «Цвет»); остальные — из палитры.
-fn quick_color(q: Quick, l: &Look) -> Hsla {
+pub(crate) fn quick_color(q: Quick, l: &Look) -> Hsla {
     match q {
         Quick::Threats => l.pm(Pm::ThreatDot),
         Quick::Due => l.pm(Pm::DeadlineFg),

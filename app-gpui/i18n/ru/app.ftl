@@ -1,5 +1,4 @@
 # Экран почты.
-search-nothing = Ничего не найдено: «{ $query }»
 folders-results = 🔍 Результаты ({ $n })
 reading-empty = Выберите письмо
 reading-from = От:
