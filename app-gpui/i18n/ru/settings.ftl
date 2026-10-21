@@ -325,3 +325,92 @@ settings-phishing = Сообщения о фишинге
 settings-phishing-hint = Письмо уйдёт вложением на этот адрес. Пусто — только в «Нежелательные» с меткой.
 settings-phishing-bad = Это не адрес почты: пересылки не будет.
 settings-phishing-placeholder = security@company.example
+
+# «Настройки → Календарь» (S5-20).
+settings-nav-calendar = Календарь
+settings-nav-calendar-keywords = календарь встреча рабочая неделя дни часы пояс вид шаг длительность напоминание свободное время цвет приглашения коллеги
+settings-hint-calendar = Рабочее время, вид сетки, параметры новых встреч и цвета календарей коллег.
+settings-cal-reset = По умолчанию
+settings-cal-stored = сохраняется
+settings-cal-week-group = Рабочая неделя
+settings-cal-days = Рабочие дни
+settings-cal-days-hint = Остальные дни в сетке затенены и не попадают в «Раб. неделю».
+settings-cal-day = { $d ->
+    [0] Пн
+    [1] Вт
+    [2] Ср
+    [3] Чт
+    [4] Пт
+    [5] Сб
+   *[6] Вс
+}
+settings-cal-hours = Рабочие часы
+settings-cal-hours-hint = Вне их сетка затенена, общие окна встречи ищутся только в них.
+settings-cal-first = Первый день недели
+settings-cal-first-hint = С него начинаются неделя, месяц и мини-календарь.
+settings-cal-first-monday = Понедельник
+settings-cal-first-sunday = Воскресенье
+settings-cal-view-group = Вид
+settings-cal-view = Вид по умолчанию
+settings-cal-view-hint = Открывается при переходе в календарь.
+settings-cal-view-day = День
+settings-cal-view-work-week = Раб. неделя
+settings-cal-view-week = Неделя
+settings-cal-view-month = Месяц
+settings-cal-step = Шаг сетки
+settings-cal-step-hint = К нему привязываются перетаскивание и выделение времени.
+settings-cal-zone = Часовой пояс
+settings-cal-zone-hint = Встречи из других поясов пересчитываются в него.
+settings-cal-zone-system = Как в Windows · { $zone }
+settings-cal-zone-europe-kaliningrad = Калининград
+settings-cal-zone-europe-moscow = Москва
+settings-cal-zone-europe-samara = Самара
+settings-cal-zone-asia-yekaterinburg = Екатеринбург
+settings-cal-zone-asia-omsk = Омск
+settings-cal-zone-asia-novosibirsk = Новосибирск
+settings-cal-zone-asia-krasnoyarsk = Красноярск
+settings-cal-zone-asia-irkutsk = Иркутск
+settings-cal-zone-asia-yakutsk = Якутск
+settings-cal-zone-asia-vladivostok = Владивосток
+settings-cal-zone-asia-magadan = Магадан
+settings-cal-zone-asia-kamchatka = Петропавловск-Камчатский
+settings-cal-zone-europe-london = Лондон
+settings-cal-zone-utc = Всемирное время
+settings-cal-second = Показывать второй пояс
+settings-cal-second-hint = Вторая шкала часов слева от сетки — для командировок.
+settings-cal-meet-group = Встречи
+settings-cal-duration = Длительность по умолчанию
+settings-cal-duration-hint = Для новой встречи и выделения одним щелчком.
+settings-cal-reminder = Напоминание по умолчанию
+settings-cal-reminder-hint = Тостом в углу окна; у события можно поменять.
+settings-cal-reminder-none = нет
+settings-cal-reminder-before = за { $time }
+settings-cal-late = Начинать встречи на 5 мин позже
+settings-cal-recommended = рекомендуется
+settings-cal-late-on = Встреча с 10:00 начнётся в 10:05 — перерыв между встречами подряд.
+settings-cal-late-off = Встречи начинаются ровно по сетке, без перерыва между ними.
+settings-cal-optional = Учитывать необязательных в подборе времени
+settings-cal-optional-on = Общее окно ищется по всем участникам, включая необязательных.
+settings-cal-optional-off = Окно ищется по обязательным; занятость необязательных видна, но не мешает.
+settings-cal-free = Цвет свободного времени
+settings-cal-free-hint = Подсветка общих свободных окон в окне встречи при подборе времени.
+settings-cal-free-brand = Розовый
+settings-cal-free-blue = Синий
+settings-cal-free-slate = Серо-голубой
+settings-cal-free-note = Пример: занятость участников 08–19, общее окно 13:00–15:30 — цвет «{ $color }».
+settings-cal-colleagues-group = Календари коллег
+settings-cal-owner-colors = Цвета по владельцу
+settings-cal-owner-colors-hint = Событие коллеги окрашено в цвет его календаря, а не категории.
+settings-cal-owner-names = Показывать имя владельца в событиях
+settings-cal-owner-names-hint = Видно, чьё событие, когда календари наложены.
+settings-cal-invites-group = Приглашения
+settings-cal-tentative = Автоматически добавлять приглашения в календарь как «Под вопросом»
+settings-cal-tentative-hint = Время занято предварительно, пока вы не ответили.
+settings-cal-delete = Удалять письмо-приглашение после ответа
+settings-cal-delete-hint = Событие остаётся в календаре, письмо — в «Удалённых».
+settings-cal-preview = Предпросмотр
+settings-cal-preview-view = { $view } · шаг { $step }
+settings-cal-preview-days = Рабочих дней: { $n }, часы { $from }–{ $to }.
+settings-cal-preview-meeting = Новая встреча — { $duration }, напоминание: { $reminder }.
+settings-cal-preview-zone = Пояс: { $zone }.
+settings-cal-preview-stored = «Сохраняется» — выбор запомнен; в календаре он появится вместе с новыми видами и календарями коллег.

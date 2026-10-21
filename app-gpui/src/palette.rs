@@ -588,6 +588,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "mail.signature" => CERTIFICATE,
         "settings.vacation" => VACATION,
         "settings.rules" => RULES,
+        "settings.calendar" => crate::calendar::g::CALENDAR,
         "view.filters" | "view.quick_filters" => FILTER,
         "view.sort_by_date" | "view.sort_by_sender" | "view.sort_by_size" => SORT,
         _ => return None,

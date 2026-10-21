@@ -102,8 +102,10 @@ enum Scene {
     Checks,
     /// Ответ в области чтения над письмом с цитатой (S3-02, S5-06б).
     Reply,
-    /// Вкладка новой встречи: поля и подбор времени в одной форме (S5-11).
+    /// Вкладка новой встречи: поля и подбор времени в одной форме (S5-11); общие окна — розовым бренда (S5-20).
     Meeting,
+    /// Та же встреча, цвет свободного времени — синий бренда («Настройки → Календарь», S5-20).
+    MeetingBlue,
     /// Раздел «Контакты»: список и карточка первого контакта (S4-02).
     Contacts,
     /// Форма правки первого контакта (демо).
@@ -150,6 +152,10 @@ enum Scene {
     SettingsQuick,
     /// «Настройки → Чтение».
     SettingsReading,
+    /// «Настройки → Календарь» (S5-20).
+    SettingsCalendar,
+    /// Тот же раздел, прокручен вниз: цвет свободного времени с образцом, календари коллег, приглашения.
+    SettingsCalendarFree,
     /// «Настройки → Подписи и шаблоны» с образцом подписи и шаблона (демо — без файла).
     SettingsSign,
     /// Выделение (S5-08): три письма с флажками, панель массовых действий над списком, сводка в области чтения.
@@ -164,7 +170,7 @@ enum Scene {
     Toasts,
 }
 
-const SCENES: [Scene; 59] = [
+const SCENES: [Scene; 62] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -191,6 +197,7 @@ const SCENES: [Scene; 59] = [
     Scene::Calendar,
     Scene::Event,
     Scene::Meeting,
+    Scene::MeetingBlue,
     Scene::Assistant,
     Scene::Contacts,
     Scene::ContactEdit,
@@ -206,6 +213,8 @@ const SCENES: [Scene; 59] = [
     Scene::SettingsAccounts,
     Scene::SettingsQuick,
     Scene::SettingsReading,
+    Scene::SettingsCalendar,
+    Scene::SettingsCalendarFree,
     Scene::SettingsSign,
     Scene::Shared,
     Scene::Labels,
@@ -282,6 +291,7 @@ impl Scene {
             Scene::Checks => "checks",
             Scene::Reply => "reply-inline",
             Scene::Meeting => "meeting",
+            Scene::MeetingBlue => "meeting-blue",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
             Scene::Vacation => "vacation",
@@ -303,6 +313,8 @@ impl Scene {
             Scene::SettingsAccounts => "settings-accounts",
             Scene::SettingsQuick => "settings-quick",
             Scene::SettingsReading => "settings-reading",
+            Scene::SettingsCalendar => "settings-calendar",
+            Scene::SettingsCalendarFree => "settings-calendar-free",
             Scene::SettingsSign => "settings-sign",
             Scene::Bulk => "bulk",
             Scene::ContextMenu => "context-menu",
@@ -504,7 +516,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 c.select_pending(cx);
             });
         }
+        Scene::MeetingBlue => crate::prefs::update(cx, |p| p.calendar.free_color = postman_core::prefs::FreeColor::Blue),
         Scene::Assistant => {
+            // Цвет свободного времени — снова по умолчанию (после `meeting-blue`).
+            crate::prefs::update(cx, |p| p.calendar.free_color = postman_core::prefs::FreeColor::default());
             let Some(v) = m.meetings.last() else { return Err("no meeting tab".into()) };
             v.update(cx, |v, cx| {
                 v.only_free = false;
@@ -816,6 +831,16 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         }
         Scene::SettingsQuick => m.open_settings(Some(SettingsSection::Quick), window, cx),
         Scene::SettingsReading => m.open_settings(Some(SettingsSection::Reading), window, cx),
+        Scene::SettingsCalendar => m.open_settings(Some(SettingsSection::Calendar), window, cx),
+        Scene::SettingsCalendarFree => {
+            m.open_settings(Some(SettingsSection::Calendar), window, cx);
+            if let Some(v) = m.settings.view.clone() {
+                v.update(cx, |v, cx| {
+                    v.scroll.scroll_to_bottom();
+                    cx.notify();
+                });
+            }
+        }
         Scene::SettingsSign => {
             m.open_settings(Some(SettingsSection::Signatures), window, cx);
             if let Some(v) = m.settings.view.clone() {
@@ -902,12 +927,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let loaded = c.loaded || m.screens.as_ref().is_some_and(|d| !d.live);
             m.section == Section::Calendar && c.clock.is_some() && loaded
         }
-        Scene::Meeting | Scene::Assistant => {
+        Scene::Meeting | Scene::MeetingBlue | Scene::Assistant => {
             let tab = m.tabs.is_active(crate::tabs::TabKind::Meeting);
-            tab && m.meetings.last().is_some_and(|v| {
-                let v = v.read(cx);
-                v.ready() && (v.only_free == matches!(scene, Scene::Meeting))
-            })
+            let blue = crate::prefs::get(cx).calendar.free_color == postman_core::prefs::FreeColor::Blue;
+            tab && blue == matches!(scene, Scene::MeetingBlue)
+                && m.meetings.last().is_some_and(|v| {
+                    let v = v.read(cx);
+                    v.ready() && (v.only_free == matches!(scene, Scene::Meeting | Scene::MeetingBlue))
+                })
         }
         Scene::Event => {
             // Живая неделя может быть пустой: тогда снимок — без подробностей.
@@ -921,6 +948,8 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         | Scene::SettingsAccounts
         | Scene::SettingsQuick
         | Scene::SettingsReading
+        | Scene::SettingsCalendar
+        | Scene::SettingsCalendarFree
         | Scene::SettingsSign => {
             let want = match scene {
                 Scene::SettingsGeneral => SettingsSection::General,
@@ -928,6 +957,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 Scene::SettingsKeys => SettingsSection::Keys,
                 Scene::SettingsQuick => SettingsSection::Quick,
                 Scene::SettingsReading => SettingsSection::Reading,
+                Scene::SettingsCalendar | Scene::SettingsCalendarFree => SettingsSection::Calendar,
                 Scene::SettingsSign => SettingsSection::Signatures,
                 _ => SettingsSection::Accounts,
             };

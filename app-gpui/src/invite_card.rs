@@ -237,7 +237,7 @@ fn date_tile(span: Span, dim: bool, small: bool, tz: &TimeZone, l: &Look) -> Div
 /// Карточка; кнопки ответа зовут [`ReadingPane::answer_invite`].
 pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane>) -> AnyElement {
     let l = crate::roles::look(cx);
-    let tz = TimeZone::system();
+    let tz = crate::prefs::get(cx).calendar.zone();
     let frame = || div().rounded(px(6.)).border_1().border_color(l.c(pets_ui::theme::Role::StrokeCard)).text_size(px(13.));
     let inv = match &card.state {
         State::Loading { .. } => {
@@ -647,7 +647,7 @@ impl ReadingPane {
     /// Приглашение разобрано: мой день встречи — с сервера (`Command::Events` на сутки) или из демо-недели.
     pub(crate) fn invite_ready(&mut self, cx: &mut Context<Self>) {
         let live = self.live;
-        let tz = TimeZone::system();
+        let tz = crate::prefs::get(cx).calendar.zone();
         let Some(card) = self.reading.as_mut().and_then(|r| r.invite.as_mut()) else { return };
         let Some(inv) = card.invitation() else { return };
         let Some(date) = zoned(inv.event.span.start, &tz).map(|z| z.date()) else { return };
