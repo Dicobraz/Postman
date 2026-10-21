@@ -585,6 +585,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "invite.accept" => CHECK,
         "invite.tentative" => TENTATIVE,
         "settings.open" => SETTINGS,
+        "mail.signature" => CERTIFICATE,
         "settings.vacation" => VACATION,
         "settings.rules" => RULES,
         "view.filters" | "view.quick_filters" => FILTER,

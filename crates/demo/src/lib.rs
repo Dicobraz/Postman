@@ -1,5 +1,7 @@
 //! Синтетический ящик для замеров памяти/FPS без сервера.
 
+pub mod smime;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -102,8 +104,13 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     let mut to = Vec::with_capacity(5000);
     for i in 0..n {
         at -= (next() % 3600) as i64;
-        let (name, addr) = SENDERS[next() as usize % SENDERS.len()];
-        let subject = SUBJECTS[next() as usize % SUBJECTS.len()];
+        let (mut name, mut addr) = SENDERS[next() as usize % SENDERS.len()];
+        let mut subject = SUBJECTS[next() as usize % SUBJECTS.len()];
+        // Подписанные образцы (S5-12): отправитель и тема — как в подписанном письме.
+        let signed = smime::sample_for(i);
+        if let Some(s) = signed {
+            (name, addr, subject) = (s.from_name, s.from_addr, s.subject);
+        }
         let mailbox = match next() % 10 {
             0..=6 => "inbox",
             7 | 8 => "archive",
@@ -114,13 +121,17 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             thread_id: format!("t{}", i / 3),
             mailbox_ids: vec![mailbox.into()],
             received_at: at,
-            subject: format!("{subject} {}", i % 997),
+            subject: if signed.is_some() { subject.to_string() } else { format!("{subject} {}", i % 997) },
             from_name: name.into(),
             from_addr: addr.into(),
-            preview: if i % 13 == 2 { MENTION } else { PREVIEW }.into(),
+            preview: match signed {
+                Some(s) => smime::preview(s),
+                None if i % 13 == 2 => MENTION.into(),
+                None => PREVIEW.into(),
+            },
             seen: i > 40 && next() % 5 != 0,
             flagged: next() % 50 == 0,
-            has_attachment: next() % 7 == 0,
+            has_attachment: next() % 7 == 0 || signed.is_some(),
             size: 4096 + next() % 100_000,
             keywords: demo_keywords(i),
         });
@@ -342,11 +353,30 @@ const SHARED_SUBJECTS: &[&str] = &["Заявка клиента №", "Комм�
 /// чтобы видеть работу белого списка.
 pub fn body(id: &str) -> BodyRow {
     // Письма общих ящиков демо — с префиксом аккаунта, тела — те же.
-    let id = postman_cache::unscoped(id).1;
+    let (account, id) = postman_cache::unscoped(id);
     if let Some(b) = chain_body(id) {
         return b;
     }
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
+    // Подписанное письмо (S5-12): тело — как его разобрал бы сервер, `smime.p7s` во вложениях, письмо целиком —
+    // блоб `smime-<вид>`.
+    if let Some(s) = smime::sample_for(n).filter(|_| account.is_none()) {
+        return BodyRow {
+            to: vec![Addr { name: ME_NAME.into(), email: ME.into() }],
+            message_id: Some(format!("{id}@corp.example")),
+            html: Some(s.html.into()),
+            attachments: vec![AttachmentRow {
+                blob_id: format!("p7s-{}", s.kind),
+                name: "smime.p7s".into(),
+                mime: "application/pkcs7-signature".into(),
+                size: smime::P7S_SIZE,
+                cid: None,
+                inline: false,
+            }],
+            blob_id: Some(format!("smime-{}", s.kind)),
+            ..Default::default()
+        };
+    }
     let att = |blob: &str, name: &str, mime: &str, size: u64, cid: Option<&str>| AttachmentRow {
         blob_id: blob.into(),
         name: name.into(),
@@ -463,7 +493,7 @@ pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
         "xlsm" => Some(BUDGET.to_vec()),
         "photo" => Some(PHOTO.to_vec()),
         "xlsx" | "exe" | "rtlo" => Some(b"demo".to_vec()),
-        _ => None,
+        other => other.strip_prefix("smime-").and_then(smime::raw).map(<[u8]>::to_vec),
     }
 }
 

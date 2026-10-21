@@ -11,6 +11,7 @@ use std::process::Command;
 /// без UI, от него зависит только интерфейс.
 const LAYERS: &[(&str, u8)] = &[
     ("postman-ir", 0),
+    ("postman-smime", 1),
     ("postman-jmap", 1),
     ("postman-cache", 1),
     ("postman-compose", 1),

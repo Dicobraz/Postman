@@ -21,8 +21,17 @@ cpu-time = "1"
 memory-stats = "1"
 open = "5"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# Типы итога проверки S/MIME (S5-12); сам разбор и проверка — только в воркере.
+postman-smime.workspace = true
+tracing = "0.1"
+
+# S/MIME (S5-12): якоря из хранилищ Windows, подтверждение цепочки и отзыв (`smime/windows.rs`), поиск СКЗИ ГОСТ.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"]
 
 [dev-dependencies]
+postman-smime = { workspace = true, features = ["testkit"] }
 # Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
 postman-demo.workspace = true
 tempfile = "3"

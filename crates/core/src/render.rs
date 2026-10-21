@@ -26,7 +26,7 @@ pub enum Rendered {
 }
 
 enum Job {
-    Body(String, BodyRow),
+    Body(String, Box<BodyRow>),
     Image(String, Arc<Vec<u8>>),
     Calendar(String, Arc<Vec<u8>>),
 }
@@ -88,7 +88,7 @@ impl Renderer {
     }
 
     pub fn request(&self, id: String, body: BodyRow) {
-        let _ = self.tx.send(Job::Body(id, body));
+        let _ = self.tx.send(Job::Body(id, Box::new(body)));
     }
 
     pub fn decode(&self, key: String, bytes: Arc<Vec<u8>>) {

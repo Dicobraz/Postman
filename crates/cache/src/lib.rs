@@ -221,6 +221,8 @@ pub struct BodyRow {
     pub html: Option<String>,
     pub text: Option<String>,
     pub attachments: Vec<AttachmentRow>,
+    /// `Email.blobId` — письмо целиком (RFC 5322): проверка подписи S/MIME (S5-12) нужна точными байтами.
+    pub blob_id: Option<String>,
 }
 
 /// Получатели письма (S5-03): адреса To и Cc в нижнем регистре — быстрый фильтр «Мне». Отдельно от
@@ -277,8 +279,9 @@ pub enum Scan {
 pub const MAX_CACHED_BLOB: usize = 16 * 1024 * 1024;
 
 /// Меняется при любом изменении формата значений или ключей. 2 — права папок и аккаунты (S4-06);
-/// 3 — ключевые слова писем и их индекс (S5-02); 4 — получатели писем (S5-03, [`Recipients`]).
-const FORMAT_VERSION: u64 = 4;
+/// 3 — ключевые слова писем и их индекс (S5-02); 4 — получатели писем (S5-03, [`Recipients`]); 5 — S/MIME (S5-12):
+/// `blobId` письма в теле, итоги проверки подписи и сертификаты адресатов.
+const FORMAT_VERSION: u64 = 5;
 
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const MAILBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("mailbox");
@@ -295,6 +298,10 @@ const STATE: TableDefinition<&str, &str> = TableDefinition::new("sync_state");
 const ACCOUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("account");
 /// id письма → [`Recipients`] (S5-03).
 const RECIPIENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("recipients");
+/// id письма → итог проверки подписи S/MIME (S5-12; запись ядра, `postman_core::smime`).
+const SMIME: TableDefinition<&str, &[u8]> = TableDefinition::new("smime");
+/// Адрес (нижний регистр) → сертификаты адресата, собранные из проверенных подписей (S5-12, для шифрования — Ф4).
+const CERTS: TableDefinition<&str, &[u8]> = TableDefinition::new("smime_certs");
 /// (ключевое слово, папка или «все папки», -дата, id) → () — письма с меткой в папке, новые сверху (S5-02).
 const BY_KEYWORD: TableDefinition<(&str, &str, i64, &str), ()> = TableDefinition::new("by_keyword");
 /// (ключевое слово, папка или «все папки») → число писем: «N из M» без обхода диапазона.
@@ -406,6 +413,8 @@ impl Cache {
         tx.open_table(BY_KEYWORD)?;
         tx.open_table(KEYWORD_COUNT)?;
         tx.open_table(RECIPIENTS)?;
+        tx.open_table(SMIME)?;
+        tx.open_table(CERTS)?;
         if !threads_indexed {
             let email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_THREAD)?;
@@ -992,6 +1001,26 @@ impl Cache {
         Ok(())
     }
 
+    /// Итог проверки подписи S/MIME письма (S5-12): запись ядра в своём формате.
+    pub fn smime<T: DeserializeOwned>(&self, id: &str) -> Result<Option<T>> {
+        let tx = self.db.begin_read()?;
+        tx.open_table(SMIME)?.get(id)?.map(|v| dec(v.value())).transpose()
+    }
+
+    pub fn set_smime<T: Serialize>(&self, id: &str, record: &T) -> Result<()> {
+        self.put(SMIME, id, &enc(record)?)
+    }
+
+    /// Сертификаты адресата `address` (S5-12): список ядра в своём формате.
+    pub fn certs<T: DeserializeOwned>(&self, address: &str) -> Result<Option<T>> {
+        let tx = self.db.begin_read()?;
+        tx.open_table(CERTS)?.get(address.to_lowercase().as_str())?.map(|v| dec(v.value())).transpose()
+    }
+
+    pub fn set_certs<T: Serialize>(&self, address: &str, list: &T) -> Result<()> {
+        self.put(CERTS, &address.to_lowercase(), &enc(list)?)
+    }
+
     fn put(&self, table: TableDefinition<&str, &[u8]>, key: &str, value: &[u8]) -> Result<()> {
         let tx = self.db.begin_write()?;
         tx.open_table(table)?.insert(key, value)?;
@@ -1333,6 +1362,31 @@ mod tests {
             tx.commit().unwrap();
         }
         assert_eq!(thread(&Cache::open(&path).unwrap(), "t"), ["b", "a"]);
+    }
+
+    /// S/MIME (S5-12): записи ядра по письму и по адресу; кэш прежнего формата (4, без них) — пересоздаётся.
+    #[test]
+    fn smime_records_and_old_format() {
+        let c = Cache::open_in_memory().unwrap();
+        assert_eq!(c.smime::<(u32, String)>("m1").unwrap(), None);
+        c.set_smime("m1", &(7u32, "valid".to_string())).unwrap();
+        assert_eq!(c.smime::<(u32, String)>("m1").unwrap(), Some((7, "valid".into())));
+        c.set_certs("User1@ITT.test", &vec![vec![1u8, 2]]).unwrap();
+        assert_eq!(c.certs::<Vec<Vec<u8>>>("user1@itt.test").unwrap(), Some(vec![vec![1, 2]]));
+
+        let dir = tempfile::Builder::new().prefix("postman-cache-").tempdir().unwrap();
+        let path = dir.path().join("c.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(META).unwrap().insert("version", 4u64).unwrap();
+            let e = email("old", 1, &["in"]);
+            tx.open_table(EMAIL).unwrap().insert("old", enc(&e).unwrap().as_slice()).unwrap();
+            tx.commit().unwrap();
+        }
+        let c = Cache::open(&path).unwrap();
+        assert!(c.rows_by_ids(&["old".into()]).unwrap().is_empty(), "формат 4 пересоздан");
+        assert_eq!(c.smime::<(u32, String)>("old").unwrap(), None);
     }
 
     #[test]
