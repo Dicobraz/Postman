@@ -58,8 +58,16 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_send_later::held_submission_is_delivered_after_the_delay` | S5-06: `HOLDUNTIL` через 20 с → `sendAt` тот же; через 8 с у user3 ничего, затем письмо приходит, `receivedAt` ≥ `sendAt`; отмена после выпуска — `cannotUnsend` → убрано |
 | `stand_send_later::send_later_through_sync` | S5-06, через поток синхронизации: `Scheduled` при входе (`max_delay` 7 дней) → `Send` с `Release::At` (+2 мин) → `Sent` со сроком → `Scheduled` с ним → `Unsend` → `Unsent`, в `Scheduled` его нет → убрано |
 | `stand_threads::reply_chain_is_one_thread_with_new_text_only` | S5-05: user1 → user3 → user1 цепочкой ответов (In-Reply-To, цитата Postman) → у user3 `Command::Thread` (`Thread/get` + `Email/get`) — одна беседа из трёх писем, своё — из «Отправленных», по времени; «только новый текст» — в каждом письме только его строки → письма убраны |
+| `stand_tasks::tasks_capability_and_vtodo_in_calendar` | S6-01: `urn:ietf:params:jmap:tasks` не объявлен; у JMAP `Calendar` нет признака компонентов; календарь по умолчанию в CalDAV — VEVENT и VTODO (п. 37) |
+| `stand_tasks::jmap_task_fields_round_trip` | S6-01: `CalendarEvent` `@type: Task` со всеми полями карточки → `get` как есть → тот же VTODO в CalDAV (`X-POSTMAN-*` из `iCalendar.properties`) → выполнение патчем → `CalendarEvent/changes` у второго клиента (создание, правка, удаление); `recurrenceRules`, `progressUpdated`, свойство поставщика — `invalidProperties` (п. 38) |
+| `stand_tasks::task_query_by_due_and_status` | S6-01: три задачи → `after`/`before` по сроку, `title`; условий `progress`/`status`/`type` нет (`unsupportedFilter`), сортировки `due` — тоже (`unsupportedSort`); CalDAV `time-range` и `prop-filter STATUS` (и `negate-condition`) — на сервере (п. 39) |
+| `stand_tasks::caldav_vtodo_round_trip_and_sync` | S6-01: `PUT` VTODO с полями карточки → `GET` как есть → вид в JMAP (CATEGORIES → `keywords`, ATTACH → `links`, X- и COMMENT → `iCalendar`) → выполнение с `If-Match`, старый ETag — 412 → `sync-collection`: правка и удаление (п. 38, 39) |
+| `stand_tasks::filenode_task_list_round_trip` | S6-01, запасной путь: список задач JSON-файлом → чтение второй сессией → замена с `ifInState` (прежнее состояние — `stateMismatch`) → `FileNode/changes` → удаление (п. 42) |
+| `stand_tasks::delegation_round_trip` | S6-01: поручение user1 → user2, наблюдатель user3 (`sendSchedulingMessages`): копии у обоих → принять → в работе 50 % → готово (у поручившего PARTSTAT и процент) → новый срок (`SEQUENCE` 1) → COUNTER письмом (сервер не применяет) → отказ с COMMENT письмом (статус применён, COMMENT — нет) → «забрать»: CANCEL наблюдателю, отказавшемуся — нет (п. 40) |
+| `stand_tasks::imip_request_by_mail_lands_in_calendar` | S6-01: поручение своим письмом (iMIP REQUEST с VTODO через `EmailSubmission`, без `sendSchedulingMessages`) → сервер исполнителя сам кладёт VTODO в календарь, письмо — во «Входящих» с темой отправителя (п. 40) |
+| `stand_tasks::alerts_server_mails_only_start_relative_email` | S6-01: напоминания через минуту: письмо «Notification: …» — только `action: email` относительно начала (событие, задача с `start`); по сроку задачи и `display` — ничего (п. 41) |
 
-Последний прогон — 2026-10-21, напрямую по HTTPS: `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
+Последний прогон — 2026-10-21, напрямую по HTTPS: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
 ## Настройка сервера
@@ -277,6 +285,63 @@ cargo test -p postman-core --test stand -- --ignored
     определяет по его тексту: у письма в одну фразу словоформы не находятся и с языком (индекс — языком по умолчанию),
     тест берёт текст в несколько предложений. В теме с языком находится точная форма (`subject: "ru:договор"`), а
     словоформа — нет (`"ru:договора"`) [проверить]. Свой индекс (tantivy, Snowball) находит словоформы и без сервера.
+
+37. **Задачи — `CalendarEvent` с `"@type": "Task"`** (S6-01, тест `stand_tasks`). `urn:ietf:params:jmap:tasks`
+    (draft-ietf-jmap-tasks) не объявлен, но JMAP Calendars Stalwart хранит JSCalendar-задачи в обычном календаре: это
+    тот же VTODO, что видит CalDAV (`/dav/cal/<адрес>/default/`, `supported-calendar-component-set` — VEVENT, VTODO,
+    VJOURNAL…), и наоборот — VTODO, положенный по CalDAV, в JMAP — `@type: Task`. У JMAP `Calendar` признака
+    компонентов нет: задачи и события в одном календаре, и `CalendarEvent/query` с `after`/`before` отдаёт и те, и
+    другие — сетка календаря отбирает `@type: Event` сама.
+38. **Поля задачи** (JSCalendar 2.0, draft-ietf-calext-jscalendarbis, ↔ iCalendar). Хранятся и отдаются как есть:
+    `title` (SUMMARY), `description` (DESCRIPTION, Markdown — как текст), `start` (DTSTART), `due` (DUE), `timeZone`
+    (TZID), `estimatedDuration` (ESTIMATED-DURATION, «оценка»), `priority` (PRIORITY; «!» — 1), `percentComplete`
+    (PERCENT-COMPLETE), `progress` (STATUS: `needs-action`, `in-process`, `completed`, `failed`, `cancelled`),
+    `keywords` (CATEGORIES — категории Postman), `categories` (CONCEPT), `recurrenceRule` (RRULE), `alerts` (VALARM),
+    `relatedTo` с `parent` (RELATED-TO;RELTYPE=PARENT — подзадача), `links` (`rel: describedby` → URL; ATTACH →
+    `rel: enclosure`; ссылка на письмо — `mid:<Message-ID>`), `showWithoutTime`. Чего у JSCalendar нет — в
+    `iCalendar.properties` (jCal: `["x-postman-project", {}, "unknown", "vec"]`; туда же COMMENT и дата COMPLETED):
+    отдаётся, только если назвать его в `properties`, пишется из JMAP (X-POSTMAN-* в VTODO), патч `iCalendar` заменяет
+    весь список. **Не принимаются** (`invalidProperties`): `recurrenceRules` (массив RFC 8984; в JSCalendar 2.0 —
+    `recurrenceRule`), `progressUpdated`, свойства поставщика (`example.com:project`, RFC 8984 §3.3). Дату выполнения
+    (COMPLETED) сервер не ставит и в JMAP не переводит — клиент пишет её сам (`iCalendar`). VTODO, созданный через
+    JMAP, в CalDAV — с `TZID`, но без VTIMEZONE, как и события из JMAP (у копии из iTIP VTIMEZONE есть; GAPS 44).
+39. **Изменения и отбор задач.** `CalendarEvent/changes` отдаёт создание, правку и удаление задачи второму клиенту
+    (push — тип `CalendarEvent`, п. 10); CalDAV — `sync-collection` (удаление — 404 в ответе), ETag и `If-Match`
+    (старый — 412). Отбор на сервере: по сроку — `after`/`before` (у задачи без `start` `utcStart` — срок, `utcEnd` —
+    конец того же дня по её поясу), `title`/`text`; **по статусу и типу записи — нет** (`progress`, `status`, `type` —
+    `unsupportedFilter`), сортировки по сроку тоже (`due` — `unsupportedSort`; по `start` — есть). CalDAV
+    `calendar-query` умеет и то и другое: `time-range` по VTODO и `prop-filter STATUS` (с `negate-condition`). Фильтр
+    JMAP `uid` по префиксу ничего не находит (остатки тестов ищутся CalDAV `text-match`) [проверить: в
+    `Client::event_by_uid` он описан как подстрока].
+40. **Поручение — iTIP силами сервера** (`sendSchedulingMessages: true`, тест `delegation_round_trip`). Задача с
+    `organizerCalendarAddress` и `participants` (исполнитель — `expectReply`, наблюдатель — `roles: informational` →
+    `ATTENDEE;ROLE=NON-PARTICIPANT`) доходит за миллисекунды: копия сама ложится в календарь исполнителя **и
+    наблюдателя** (как VEVENT, п. 4), письмо сервера «Invitation: …» с `text/calendar` и `event.ics`; X-POSTMAN-*
+    приходят в копию. Ответы исполнителя — патч своей копии с рассылкой: `participationStatus: accepted` → у
+    поручившего «принято»; `participants/<я>/progress` `in-process` / `completed` вместе с `progress` и
+    `percentComplete` задачи → у поручившего PARTSTAT=IN-PROCESS / COMPLETED, STATUS и PERCENT-COMPLETE. Каждый такой
+    патч — отдельное письмо поручившему («Accepted: …», «Reply: …»), в пороге входящих (п. 17). Процент участника
+    (`participants/<я>/percentComplete`, компонент PARTICIPANT) остаётся у исполнителя. Правка поручившим (срок) —
+    REQUEST с `SEQUENCE` 1 и письмо «Updated invitation: …» исполнителю и наблюдателю. **Наблюдатель получает всё**
+    (каждый REQUEST и CANCEL): «только итоги» (решение 9) сервер не умеет. Явный `roles: { attendee: true }` сервер
+    пишет лишним `JSPROP;JSPTR=…` — роль по умолчанию лучше не указывать. Письмом (iMIP, `EmailSubmission`):
+    **COUNTER** («предложить срок») доходит как письмо, копию поручившего сервер не меняет; **REPLY** `DECLINED` сервер
+    применяет, но **COMMENT** («причина отказа») теряет. «Забрать» — удаление с рассылкой: CANCEL наблюдателю (у него
+    `progress: cancelled`, запись остаётся), отказавшемуся исполнителю — нет. **Удаление копии участником** по CalDAV (`DELETE`) сервер считает отказом: поручившему
+    уходит REPLY «Declined: …» (так и у наблюдателя); JMAP `destroy` с `sendSchedulingMessages: false` — молча. Клиенту:
+    «удалить у себя» поручение без отказа — только JMAP без рассылки. Письма-приглашения сервера — его шаблон
+    (тема «Invitation: …», логотип), не HTML Postman (решение 3). Но и **своё письмо** (iMIP REQUEST с VTODO через
+    `EmailSubmission`, без `sendSchedulingMessages`; тест `imip_request_by_mail_lands_in_calendar`) сервер исполнителя
+    разбирает так же: VTODO ложится в его календарь сам, письмо — во «Входящих» с темой и текстом отправителя.
+41. **Напоминания.** VALARM / `alerts` хранятся как есть (и у задач). Сервер сам шлёт письмо «Notification: <тема>
+    @ <время>» от `calendar-notification@<домен>` только для `action: email` относительно начала — у события и у
+    задачи со `start`; в тесте — через ~55 с после создания (срабатывание через 60 с). По сроку задачи
+    (`relativeTo: end`) и для `display` — ничего. Значит, напоминание по сроку — только клиентом (решение 7); письмо
+    сервера — разве что дополнительным каналом, если у задачи есть начало [проверить: настройки писем напоминаний].
+42. **Задачи в FileNode** (запасной путь): JSON-файл пишется, читается второй сессией, заменяется с `ifInState`,
+    `FileNode/changes` отдаёт его второму клиенту (как таблица категорий, п. 29–31). Но это файл, видимый и удаляемый
+    пользователем (п. 29), без отбора на сервере, без iTIP и без показа в других клиентах — только если календарь
+    недоступен.
 
 ## Общие ящики на стенде (S4-06)
 

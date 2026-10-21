@@ -5822,6 +5822,7 @@ dependencies = [
  "postman-search",
  "postman-smime",
  "postman-worker",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
