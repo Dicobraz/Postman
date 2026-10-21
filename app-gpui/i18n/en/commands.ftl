@@ -48,3 +48,4 @@ cmd-meeting-send = Send invitations
 cmd-meeting-close = Close the meeting window
 cmd-settings-vacation = Automatic replies
 cmd-settings-rules = Rules
+cmd-settings-open = Settings

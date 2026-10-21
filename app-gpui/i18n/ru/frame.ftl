@@ -1,7 +1,5 @@
 # Каркас окна (S5-01): вкладки в заголовке, командная строка, рейл модулей, строка состояния.
 frame-tab-mail = Почта
-frame-tab-vacation = Автоответы
-frame-tab-rules = Правила
 frame-tab-close = Закрыть (Ctrl+W)
 frame-new = Новое письмо
 frame-reply = Ответить
@@ -27,3 +25,5 @@ frame-list-count = { $n ->
 frame-list-search = Результаты поиска
 frame-list-sort = По дате
 frame-reading-to = Кому: { $to } · { $date }
+frame-tab-settings = Настройки
+frame-settings = Все настройки

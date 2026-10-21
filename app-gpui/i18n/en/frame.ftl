@@ -1,7 +1,5 @@
 # Window frame (S5-01): tabs in the title bar, command line, module rail, status bar.
 frame-tab-mail = Mail
-frame-tab-vacation = Automatic replies
-frame-tab-rules = Rules
 frame-tab-close = Close (Ctrl+W)
 frame-new = New mail
 frame-reply = Reply
@@ -26,3 +24,5 @@ frame-list-count = { $n ->
 frame-list-search = Search results
 frame-list-sort = By date
 frame-reading-to = To: { $to } · { $date }
+frame-tab-settings = Settings
+frame-settings = All settings
