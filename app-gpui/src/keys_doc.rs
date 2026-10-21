@@ -8,34 +8,12 @@ use crate::commands::COMMANDS;
 const BEGIN: &str = "<!-- keys:begin -->";
 const END: &str = "<!-- keys:end -->";
 
-/// `ctrl-shift-r` → `Ctrl+Shift+R`, `pagedown` → `PgDn`.
-fn human(keys: &str) -> String {
-    keys.split('-')
-        .map(|k| match k {
-            "ctrl" => "Ctrl".to_string(),
-            "shift" => "Shift".to_string(),
-            "alt" => "Alt".to_string(),
-            "escape" => "Esc".to_string(),
-            "enter" => "Enter".to_string(),
-            "tab" => "Tab".to_string(),
-            "delete" => "Delete".to_string(),
-            "insert" => "Insert".to_string(),
-            "home" => "Home".to_string(),
-            "end" => "End".to_string(),
-            "pagedown" => "PgDn".to_string(),
-            "pageup" => "PgUp".to_string(),
-            "up" => "↑".to_string(),
-            "down" => "↓".to_string(),
-            k => k.to_uppercase(),
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
+use crate::keymap::human;
 
 /// Где действует: по контексту команды.
 fn place(context: Option<&str>) -> &'static str {
     match context {
-        Some(c) if c.contains("Composer") => "окно письма",
+        Some(c) if c.starts_with("Composer") => "письмо",
         Some(c) if c.contains("Meeting") => "окно встречи",
         Some(c) if c.contains("CalendarView") => "календарь",
         Some(c) if c.contains("MailView") => "почта",
@@ -68,11 +46,4 @@ fn user_guide_keys_are_current() {
     } else {
         assert!(old == doc, "docs/USER-GUIDE.md устарел: POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui user_guide");
     }
-}
-
-#[test]
-fn keys_read_like_windows() {
-    assert_eq!(human("ctrl-shift-r"), "Ctrl+Shift+R");
-    assert_eq!(human("alt-down"), "Alt+↓");
-    assert_eq!(human("j"), "J");
 }

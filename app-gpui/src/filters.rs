@@ -13,7 +13,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::{Metric, Role};
-use postman_core::filters::{CHECKS, Check, Counts, Criteria, Day, Group, QUICK, Quick, Sort};
+use postman_core::filters::{CHECKS, Check, Counts, Criteria, Day, Group, Quick, Sort};
 use postman_core::palette;
 
 use crate::chrome::{glyph, icon};
@@ -47,8 +47,6 @@ pub(crate) struct FilterModel {
     pub(crate) query: Query,
     /// Панель слева — фильтры (воронка), иначе папки.
     pub(crate) panel: bool,
-    /// Закладки быстрых фильтров скрыты («×»; вернуть — Вид → Быстрые фильтры).
-    pub(crate) quick_hidden: bool,
     /// Панель быстрых фильтров открыта (наведение на закладки).
     pub(crate) quick_open: bool,
     /// Счётчики панели и закладок (пишет список после пересчёта).
@@ -69,7 +67,6 @@ impl FilterModel {
         Self {
             query: Query::default(),
             panel: false,
-            quick_hidden: false,
             quick_open: false,
             counts: Counts::default(),
             categories: Vec::new(),
@@ -528,8 +525,8 @@ pub(crate) fn group_header(id: usize, label: String, n: usize, folder: bool, col
 /// Закладки быстрых фильтров поверх нижнего края карточки списка (ширина `strip_w`) и панель по наведению — над
 /// ними, во всю ширину списка и области чтения, ничего не сдвигая (рисует экран почты поверх частей). Панель
 /// открывает наведение на закладки, закрывает — уход мыши с закладок и панели. Щелчок по закладке или ячейке —
-/// включить или выключить.
-pub(crate) fn quick(model: &Entity<FilterModel>, m: &FilterModel, l: &Look, strip_w: f32) -> Stateful<Div> {
+/// включить или выключить. Какие закладки и в каком порядке — `tabs` (Настройки → Быстрые фильтры).
+pub(crate) fn quick(model: &Entity<FilterModel>, m: &FilterModel, tabs: &[Quick], l: &Look, strip_w: f32) -> Stateful<Div> {
     let on = |q: Quick| m.query.criteria.quick.contains(&q);
     let toggle = |q: Quick| {
         let model = model.clone();
@@ -537,7 +534,8 @@ pub(crate) fn quick(model: &Entity<FilterModel>, m: &FilterModel, l: &Look, stri
             model.update(cx, |m, cx| m.change(cx, |x| x.criteria.toggle_quick(q)));
         }
     };
-    let tabs = QUICK.map(|q| {
+    let cells_of = tabs;
+    let tabs = tabs.iter().map(|&q| {
         let (n, active) = (m.counts.quick(q), on(q));
         let (short, _) = quick_keys(q);
         div()
@@ -612,7 +610,7 @@ pub(crate) fn quick(model: &Entity<FilterModel>, m: &FilterModel, l: &Look, stri
             })
     };
     let panel = m.quick_open.then(|| {
-        let cells = QUICK.map(|q| {
+        let cells = cells_of.iter().map(|&q| {
             let (n, active) = (m.counts.quick(q), on(q));
             let (_, long) = quick_keys(q);
             let faded = n == 0 && !active;
@@ -744,32 +742,53 @@ impl crate::Mailer {
         self.filters.update(cx, |m, cx| m.set(cx, |m| m.panel = !m.panel));
     }
 
-    /// `view.quick_filters` («×» закладок, Вид → Быстрые фильтры): скрыть или вернуть; скрыли — сказать, как вернуть.
+    /// `view.quick_filters` («×» закладок, Вид → Быстрые фильтры): скрыть или вернуть — настройка
+    /// `QuickFilters::hidden` (та же, что в Настройки → Быстрые фильтры); скрыли — сказать, как вернуть.
     pub(crate) fn toggle_quick_filters(&mut self, cx: &mut Context<Self>) {
-        let hidden = !self.filters.read(cx).quick_hidden;
-        self.filters.update(cx, |m, cx| m.set(cx, |m| m.quick_hidden = hidden));
+        let hidden = !crate::prefs::get(cx).quick.hidden;
+        crate::prefs::update(cx, |p| p.quick.hidden = hidden);
         if hidden {
             self.toasts.update(cx, |t, cx| t.push(pets_ui::Level::Info, tr!("filters-quick-hidden"), cx));
+        }
+    }
+
+    /// Закладки в списке по настройкам: показанные, по порядку; полоса скрыта — нет.
+    pub(crate) fn quick_tabs(cx: &App) -> Vec<Quick> {
+        crate::prefs::get(cx).quick.tabs().map(Quick::from).collect()
+    }
+
+    /// Настройки изменились: закладка скрыта (или все) — её фильтр снимается, невидимых условий нет.
+    pub(crate) fn prune_quick(&mut self, cx: &mut Context<Self>) {
+        let tabs = Self::quick_tabs(cx);
+        let gone = self.filters.read(cx).query.criteria.quick.iter().any(|q| !tabs.contains(q));
+        if gone {
+            self.filters.update(cx, |m, cx| m.change(cx, |q| q.criteria.quick.retain(|x| tabs.contains(x))));
+        }
+        if tabs.is_empty() && self.filters.read(cx).quick_open {
+            self.filters.update(cx, |m, cx| m.set(cx, |m| m.quick_open = false));
         }
     }
 
     /// Закладки быстрых фильтров и панель по наведению — поверх нижнего края карточки списка (`body` экрана
     /// почты); закладки скрыты, поиск, не «Почта» — нет.
     pub(crate) fn quick_overlay(&self, l: &Look, cx: &App) -> Option<AnyElement> {
+        use postman_core::prefs::Pane;
         let m = self.filters.read(cx);
-        let mail = self.section == crate::Section::Mail && !self.tabs.is_active(crate::tabs::TabKind::Settings);
-        if !mail || m.quick_hidden || self.live.signin.is_some() || self.list.read(cx).search_ids.is_some() {
+        let tabs = Self::quick_tabs(cx);
+        let mail = self.section == crate::Section::Mail && self.tabs.is_active(crate::tabs::TabKind::Mail);
+        if !mail || tabs.is_empty() || self.live.signin.is_some() || self.list.read(cx).search_ids.is_some() {
+            return None;
+        }
+        // Панель чтения (Настройки → Чтение): справа и скрыта — список до низа, снизу — список сверху на 45 %.
+        let pane = crate::prefs::get(cx).reading.pane;
+        if pane == Pane::Hidden && self.reading_instead_of_list(cx) {
             return None;
         }
         let left = crate::chrome::W_RAIL + crate::mailer::W_FOLDERS;
-        let overlay = div()
-            .absolute()
-            .left(px(left))
-            .right(px(8.))
-            .bottom_0()
-            // Ширина закладок — карточка списка без рамки.
-            .child(quick(&self.filters, m, l, crate::mailer::W_LIST - 2.));
-        Some(overlay.into_any_element())
+        let overlay = div().absolute().left(px(left)).right(px(8.));
+        let overlay = if pane == Pane::Bottom { overlay.bottom(relative(0.55)) } else { overlay.bottom_0() };
+        // Ширина закладок — карточка списка без рамки.
+        Some(overlay.child(quick(&self.filters, m, &tabs, l, crate::mailer::W_LIST - 2.)).into_any_element())
     }
 
     /// Меню сортировки над списком.

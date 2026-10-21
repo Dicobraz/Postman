@@ -152,6 +152,20 @@ pub enum Quick {
 /// Закладки по срочности (DESIGN): Угрозы → Срок → Ждём → Мне → Истекают.
 pub const QUICK: [Quick; 5] = [Quick::Threats, Quick::Due, Quick::Waiting, Quick::ToMe, Quick::Expiring];
 
+/// Закладка из настроек (`prefs::QuickFilters` — порядок и видимость, S5-09).
+impl From<crate::prefs::Quick> for Quick {
+    fn from(q: crate::prefs::Quick) -> Quick {
+        use crate::prefs::Quick as P;
+        match q {
+            P::Threats => Quick::Threats,
+            P::Deadline => Quick::Due,
+            P::Waiting => Quick::Waiting,
+            P::Mine => Quick::ToMe,
+            P::Expiring => Quick::Expiring,
+        }
+    }
+}
+
 /// Что известно о письме для фильтров.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Facts {
@@ -716,6 +730,19 @@ mod tests {
         assert_eq!((ids, groups), (vec!["b".to_string(), "d".into(), "a".into(), "c".into()], vec![]));
         let (ids, _) = arrange(hits, Sort::Size, None, &d);
         assert_eq!(ids, ["c", "a", "b", "d"]);
+    }
+
+    /// Закладки по настройкам (S5-09): тот же порядок по срочности; скрытая полоса — без закладок.
+    #[test]
+    fn prefs_quick_maps_to_filters() {
+        let order: Vec<Quick> = crate::prefs::Quick::ALL.iter().map(|&q| q.into()).collect();
+        assert_eq!(order, QUICK);
+        let mut p = crate::prefs::QuickFilters::default();
+        p.toggle(crate::prefs::Quick::Mine);
+        assert_eq!(p.tabs().map(Quick::from).collect::<Vec<_>>(), [Quick::Threats, Quick::Due, Quick::Waiting, Quick::Expiring]);
+        p.hidden = true;
+        assert_eq!(p.tabs().count(), 0);
+        assert_eq!(p.shown().count(), 4, "выбор закладок остаётся");
     }
 
     #[test]

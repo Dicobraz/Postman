@@ -1,47 +1,40 @@
-//! Окно письма (S3-01): отдельное окно ОС, как в classic Outlook (ADR 0002); основное окно работает.
+//! Новое письмо и ответ (S3-01, S5-06б, DESIGN «Главное окно», «Новое письмо»): новое письмо — вкладка в заголовке
+//! окна, ответ — в области чтения над письмом («Развернуть» переносит его во вкладку с тем же черновиком). Окон и
+//! модальных диалогов нет: подтверждения — строкой в самом письме.
 //!
-//! Модель окна ([`Model`]) — без gpui: поля, вложения, грязное/чистое, автосохранение, закрытие; её проверяют
-//! тесты. View ([`Composer`]) — поля ввода, подсказки адресов, предпросмотр через воркер-песочницу, вложения
-//! (диалог ОС и перетаскивание, файлы читаются в фоне). Сервер — только через шов `Backend::send` с тикетом;
-//! итог (`Sent`, `DraftSaved`, `ComposeFailed`) приходит событием синхронизации через `Mailer::on_sync`.
+//! Модель ([`Model`]) — без gpui: поля, вложения, метки письма, грязное/чистое, автосохранение, закрытие, замечания
+//! «Перед отправкой» (`postman_core::checks`); её проверяют тесты. View — [`crate::composer::Composer`]. Сервер —
+//! только через шов `Backend::send` с тикетом; итог (`Sent`, `DraftSaved`, `ComposeFailed`) приходит событием
+//! синхронизации через `Mailer::on_sync`.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{
-    Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
-};
-use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
-use pets_ui::Level as Toast;
 use postman_compose::{Address, Attachment, Draft, parse_addresses};
+use postman_core::checks::{self, Check};
 use postman_core::contacts::AddressBook;
-use postman_core::send_later::{self, Choice, Reject};
+use postman_core::labels::{self, Keyword};
+use postman_core::marks;
+use postman_core::send_later;
 use postman_core::sync::{Command, Event, Release, Sender};
-use postman_ir::Document;
-use postman_worker::{Client as Worker, Request};
 
-use crate::commands::compose;
-use crate::{Mailer, ir_view, sys};
+use crate::Mailer;
+use crate::composer::{Composer, ComposerEvent, Open, Place};
+use crate::tabs::TabKind;
 
 /// Автосохранение изменённого черновика — не чаще этого.
 pub(crate) const AUTOSAVE: Duration = Duration::from_secs(60);
 /// Предупреждение о размере вложений: типичный предел серверов — 25–35 МБ.
 const LARGE_TOTAL: u64 = 25 * 1024 * 1024;
-/// Подсказок адреса под полем.
-const SUGGESTIONS: usize = 6;
-/// Подсказки — с этого числа набранных букв.
-const SUGGEST_FROM: usize = 2;
 
-const LABEL_W: f32 = 64.0;
-
-// --- модель окна (без gpui) ---
+// --- модель письма (без gpui) ---
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Field {
@@ -53,7 +46,8 @@ pub(crate) enum Field {
 }
 
 impl Field {
-    fn is_address(self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_address(self) -> bool {
         matches!(self, Field::To | Field::Cc | Field::Bcc)
     }
 }
@@ -70,12 +64,12 @@ pub(crate) enum Purpose {
 }
 
 impl Purpose {
-    fn sends(self) -> bool {
+    pub(crate) fn sends(self) -> bool {
         matches!(self, Purpose::Send | Purpose::SendLater(_))
     }
 }
 
-/// Строка состояния окна; текст — в view (Fluent).
+/// Строка состояния письма; текст — в view (Fluent).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Status {
     None,
@@ -85,7 +79,9 @@ pub(crate) enum Status {
     },
     BadAddresses(Vec<String>),
     NoRecipients,
-    /// Сервера нет (демо) или поток синхронизации остановился: текст остаётся в окне.
+    /// Отправка остановлена замечанием DLP «Перед отправкой».
+    Blocked,
+    /// Сервера нет (демо) или поток синхронизации остановился: текст остаётся в письме.
     NoServer(Purpose),
     Failed(String),
     Attach {
@@ -103,7 +99,7 @@ pub(crate) enum CloseAnswer {
     Cancel,
 }
 
-/// Что делает окно после ответа.
+/// Что делает письмо после ответа.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CloseStep {
     Close,
@@ -119,13 +115,21 @@ struct Pending {
 }
 
 pub(crate) struct Model {
-    /// Отправитель, ответ (In-Reply-To, References), вложения.
+    /// Отправитель, ответ (In-Reply-To, References), вложения, чужие ключевые слова.
     base: Draft,
     pub(crate) to: String,
     pub(crate) cc: String,
     pub(crate) bcc: String,
     pub(crate) subject: String,
     pub(crate) body: String,
+    /// Метка «Конфиденциально» (`marks::CONFIDENTIAL`; шифрования нет — S5-12).
+    pub(crate) confidential: bool,
+    /// «Ждать ответа · N дней»: ключевое слово со сроком (`marks::wait_keyword`).
+    pub(crate) wait: Option<u8>,
+    /// Категория письма — её ключевое слово (`pm.cat.<id>`).
+    pub(crate) category: Option<String>,
+    /// Подпись, стоящая в тексте (смена подписи заменяет её).
+    pub(crate) signature: String,
     /// id сохранённой на сервере версии черновика (её заменит следующее сохранение или отправка).
     server_id: Option<String>,
     /// Слепок содержимого, совпадающий с сохранённой (или исходной) версией.
@@ -137,13 +141,21 @@ pub(crate) struct Model {
     pub(crate) status: Status,
     /// Показана строка «Сохранить черновик?».
     pub(crate) confirm_close: bool,
-    /// Закрыть окно, когда сервер подтвердит сохранение.
+    /// Показана строка «Удалить черновик?».
+    pub(crate) confirm_delete: bool,
+    /// Закрыть письмо, когда сервер подтвердит сохранение.
     close_after_save: bool,
+    /// Замечания «Перед отправкой» по тексту и по адресатам; снятые — ключами `Check::key`.
+    text_checks: Vec<Check>,
+    recipient_checks: Vec<Check>,
+    dismissed: HashSet<String>,
 }
 
-/// Адреса для поля ввода; имена с запятыми — в кавычках, чтобы разбор вернул то же.
+/// Адреса для поля ввода; имена с запятыми — в кавычках, чтобы разбор вернул то же. Непустое поле кончается
+/// разделителем: все адреса — готовые (чипы), набирать — следующий.
 fn join(list: &[Address]) -> String {
-    list.iter()
+    let mut s = list
+        .iter()
         .map(|a| {
             if a.name.contains([',', ';', '"']) {
                 format!("\"{}\" <{}>", a.name.replace('"', ""), a.email)
@@ -152,7 +164,11 @@ fn join(list: &[Address]) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; ");
+    if !s.is_empty() {
+        s.push_str("; ");
+    }
+    s
 }
 
 /// Подпись нового письма: под пустыми строками для текста, как в Outlook.
@@ -166,12 +182,33 @@ impl Model {
         if let Some(from) = from.filter(|_| base.from.email.is_empty()) {
             base.from = from;
         }
+        // Метки письма (вернулось после отмены отправки или открыт черновик): свои — в поля, чужие — как были.
+        let today = jiff::Zoned::now().date();
+        let (mut confidential, mut wait, mut category) = (false, None, None);
+        base.keywords.retain(|k| {
+            if k.eq_ignore_ascii_case(marks::CONFIDENTIAL) {
+                confidential = true;
+            } else if let Some(due) = marks::parse_wait(k) {
+                let days = today.until(due).ok().map_or(1, |s| s.get_days()).clamp(1, 99);
+                wait = u8::try_from(days).ok();
+            } else if matches!(labels::classify(k), Keyword::Category(_) | Keyword::Thunderbird(_)) {
+                category.get_or_insert_with(|| labels::normalize(k));
+            } else {
+                return true;
+            }
+            false
+        });
+        let body = if base.markdown.is_empty() { signature_block(signature) } else { base.markdown.clone() };
         let mut m = Self {
             to: join(&base.to),
             cc: join(&base.cc),
             bcc: join(&base.bcc),
             subject: base.subject.clone(),
-            body: if base.markdown.is_empty() { signature_block(signature) } else { base.markdown.clone() },
+            body,
+            confidential,
+            wait,
+            category,
+            signature: signature.trim_end().to_owned(),
             base,
             server_id: None,
             saved: 0,
@@ -180,10 +217,15 @@ impl Model {
             last_save: now,
             status: Status::None,
             confirm_close: false,
+            confirm_delete: false,
             close_after_save: false,
+            text_checks: Vec::new(),
+            recipient_checks: Vec::new(),
+            dismissed: HashSet::new(),
         };
         // Нетронутое новое письмо — не «изменения»: закрывается без вопроса.
         m.saved = m.snapshot();
+        m.refresh_text_checks();
         m
     }
 
@@ -196,6 +238,7 @@ impl Model {
             return false;
         }
         self.body = block;
+        self.signature = signature.trim_end().to_owned();
         self.saved = self.snapshot();
         true
     }
@@ -208,6 +251,11 @@ impl Model {
     /// Другой отправитель из списка «От» (свой адрес или общий ящик, S4-06). Текст письма не меняется.
     pub(crate) fn set_from(&mut self, from: Address) {
         self.base.from = from;
+    }
+
+    /// Письмо — ответ или пересылка (есть In-Reply-To): в области чтения тема не показывается.
+    pub(crate) fn is_reply(&self) -> bool {
+        self.base.in_reply_to.is_some()
     }
 
     pub(crate) fn field(&self, f: Field) -> &str {
@@ -228,11 +276,15 @@ impl Model {
             Field::Subject => self.subject = value,
             Field::Body => self.body = value,
         }
+        if f == Field::Body {
+            self.refresh_text_checks();
+        }
     }
 
     fn snapshot(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.to, &self.cc, &self.bcc, &self.subject, &self.body).hash(&mut h);
+        (self.confidential, self.wait, &self.category).hash(&mut h);
         for a in &self.base.attachments {
             (&a.name, a.data.len(), &a.blob_id).hash(&mut h);
         }
@@ -247,9 +299,28 @@ impl Model {
         self.pending.is_some()
     }
 
-    /// Нераспознанные адреса поля — подсвечиваются.
+    /// Нераспознанные адреса поля (в письме — красные чипы).
+    #[cfg(test)]
     pub(crate) fn bad(&self, f: Field) -> Vec<String> {
         if f.is_address() { parse_addresses(self.field(f)).1 } else { Vec::new() }
+    }
+
+    /// Получатели (Кому, Копия, Скрытая), которые разобрались.
+    pub(crate) fn recipients(&self) -> Vec<Address> {
+        [&self.to, &self.cc, &self.bcc].into_iter().flat_map(|t| parse_addresses(t).0).collect()
+    }
+
+    /// Ключевые слова письма на сервере: чужие, категория, «Конфиденциально», «Ждать ответа» (срок от `today`).
+    pub(crate) fn keywords(&self, today: jiff::civil::Date) -> Vec<String> {
+        let mut out = self.base.keywords.clone();
+        out.extend(self.category.clone());
+        if self.confidential {
+            out.push(marks::CONFIDENTIAL.to_owned());
+        }
+        if let Some(due) = self.wait.and_then(|d| marks::wait_due(today, d)) {
+            out.push(marks::wait_keyword(due));
+        }
+        out
     }
 
     /// Черновик из полей; ошибки адресов — до отправки, а не от сервера.
@@ -269,6 +340,7 @@ impl Model {
         }
         d.subject = self.subject.clone();
         d.markdown = self.body.clone();
+        d.keywords = self.keywords(jiff::Zoned::now().date());
         Ok(d)
     }
 
@@ -276,6 +348,10 @@ impl Model {
     pub(crate) fn begin(&mut self, purpose: Purpose, ticket: u64, now: Instant) -> Option<Command> {
         if !purpose.sends() {
             self.last_save = now;
+        }
+        if purpose.sends() && self.blocked() {
+            self.status = Status::Blocked;
+            return None;
         }
         match self.draft(purpose.sends()) {
             Ok(d) => {
@@ -301,7 +377,7 @@ impl Model {
         }
     }
 
-    /// Шов не принял команду (демо, синхронизация остановилась): черновик остаётся в окне.
+    /// Шов не принял команду (демо, синхронизация остановилась): черновик остаётся в письме.
     pub(crate) fn refused(&mut self) {
         if let Some(p) = self.pending.take() {
             // Без сервера тот же текст сохранять снова бессмысленно — ждём изменений.
@@ -311,7 +387,7 @@ impl Model {
         self.close_after_save = false;
     }
 
-    /// Черновик сохранён на сервере. `true` — закрыть окно (просили «Да» при закрытии).
+    /// Черновик сохранён на сервере. `true` — закрыть письмо (просили «Да» при закрытии).
     pub(crate) fn on_saved(&mut self, ticket: u64, id: String, at: String) -> bool {
         let Some(p) = self.pending.take_if(|p| p.ticket == ticket) else { return false };
         self.server_id = Some(id);
@@ -325,12 +401,17 @@ impl Model {
         self.server_id = Some(id);
     }
 
+    /// Версия черновика на сервере — удалить вместе с письмом («Удалить черновик»).
+    pub(crate) fn server_id(&self) -> Option<&str> {
+        self.server_id.as_deref()
+    }
+
     /// Идёт «Отправить позже» (а не обычная отправка с окном «Отменить»).
     pub(crate) fn sending_later(&self) -> bool {
         self.pending.as_ref().is_some_and(|p| matches!(p.purpose, Purpose::SendLater(_)))
     }
 
-    /// Письмо ушло. `true` — это наша отправка, окно закрывается.
+    /// Письмо ушло. `true` — это наша отправка, письмо закрывается.
     pub(crate) fn on_sent(&mut self, ticket: u64) -> bool {
         let Some(p) = self.pending.take_if(|p| p.ticket == ticket) else { return false };
         self.saved = p.snapshot;
@@ -338,7 +419,7 @@ impl Model {
         true
     }
 
-    /// Отправка или сохранение не удались: строка в окне, окно не закрывается.
+    /// Отправка или сохранение не удались: строка в письме, письмо не закрывается.
     pub(crate) fn on_failed(&mut self, ticket: u64, error: String) -> bool {
         let Some(p) = self.pending.take_if(|p| p.ticket == ticket) else { return false };
         if p.purpose == Purpose::Autosave {
@@ -355,6 +436,7 @@ impl Model {
         if snapshot == self.saved
             || self.pending.is_some()
             || self.confirm_close
+            || self.confirm_delete
             || self.autosave_failed == Some(snapshot)
         {
             return None;
@@ -371,6 +453,7 @@ impl Model {
         if !self.is_dirty() {
             return true;
         }
+        self.confirm_delete = false;
         self.confirm_close = true;
         false
     }
@@ -387,7 +470,7 @@ impl Model {
         }
     }
 
-    /// Вложения в списке окна (картинки внутри текста — `cid:` — не показываем).
+    /// Вложения в списке письма (картинки внутри текста — `cid:` — не показываем).
     pub(crate) fn attachments(&self) -> impl Iterator<Item = (usize, &Attachment)> {
         self.base.attachments.iter().enumerate().filter(|(_, a)| a.inline_cid.is_none())
     }
@@ -398,13 +481,239 @@ impl Model {
         if total > LARGE_TOTAL {
             self.status = Status::Large(total);
         }
+        self.refresh_text_checks();
     }
 
     pub(crate) fn remove_attachment(&mut self, i: usize) {
         if i < self.base.attachments.len() {
             self.base.attachments.remove(i);
         }
+        self.refresh_text_checks();
     }
+
+    // --- «Перед отправкой» ---
+
+    fn refresh_text_checks(&mut self) {
+        self.text_checks = checks::text(&self.body, self.attachments().count());
+    }
+
+    /// Замечания по адресатам: при смене адресатов и метки. `own` — свои домены, `book` — адресная книга.
+    pub(crate) fn refresh_recipient_checks(&mut self, own: &[String], book: &AddressBook) {
+        self.recipient_checks = checks::recipients(&self.recipients(), self.confidential, own, book);
+    }
+
+    /// Замечания, которые не сняли.
+    pub(crate) fn checks(&self) -> impl Iterator<Item = &Check> {
+        self.text_checks.iter().chain(&self.recipient_checks).filter(|c| !self.dismissed.contains(&c.key()))
+    }
+
+    /// Отправку держит замечание DLP.
+    pub(crate) fn blocked(&self) -> bool {
+        self.checks().any(Check::blocks_send)
+    }
+
+    /// «Это не карта», «Игнорировать», «ОК», «Оставить».
+    pub(crate) fn dismiss(&mut self, check: &Check) {
+        self.dismissed.insert(check.key());
+        if self.status == Status::Blocked && !self.blocked() {
+            self.status = Status::None;
+        }
+    }
+
+    /// «Замаскировать»: `true` — текст изменился (его надо показать в поле).
+    pub(crate) fn mask(&mut self, check: &Check) -> bool {
+        let next = checks::mask(&self.body, check);
+        if next == self.body {
+            return false;
+        }
+        self.set(Field::Body, next);
+        if self.status == Status::Blocked && !self.blocked() {
+            self.status = Status::None;
+        }
+        true
+    }
+
+    /// «Заменить адрес»: `from` → `to` в полях адресов (имя остаётся). `true` — поля изменились.
+    pub(crate) fn replace_address(&mut self, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for f in [Field::To, Field::Cc, Field::Bcc] {
+            let (closed, open) = segments(self.field(f));
+            let mut hit = false;
+            let closed: Vec<String> = closed
+                .into_iter()
+                .map(|s| match parse_addresses(&s).0.first() {
+                    Some(a) if a.email.eq_ignore_ascii_case(from) => {
+                        hit = true;
+                        Address::new(a.name.clone(), to).display()
+                    }
+                    _ => s,
+                })
+                .collect();
+            if hit {
+                self.set(f, compose_field(&closed, &open));
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Сменить подпись в тексте: прежняя заменяется, нет её — новая встаёт в конец своего текста.
+    pub(crate) fn set_signature(&mut self, signature: &str) {
+        let next = swap_signature(&self.body, &self.signature, signature);
+        self.signature = signature.trim_end().to_owned();
+        self.set(Field::Body, next);
+    }
+}
+
+// --- текст письма: подпись, разметка, адреса ---
+
+/// Где кончается свой текст: строка перед цитатой (`… пишет:`) или пересланное сообщение; нет их — конец текста.
+pub(crate) fn own_end(body: &str) -> usize {
+    let mut offset = 0;
+    let mut prev: Option<usize> = None;
+    for line in body.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("-------- ") {
+            return offset;
+        }
+        if t.starts_with('>') {
+            return prev.unwrap_or(offset);
+        }
+        prev = (!line.trim().is_empty()).then_some(offset);
+        offset += line.len();
+    }
+    body.len()
+}
+
+/// Текст с другой подписью: прежняя (последняя в своём тексте) заменяется; без прежней — новая в конец своего
+/// текста (перед цитатой ответа). Пустая новая — прежняя убирается вместе с пустыми строками перед ней.
+pub(crate) fn swap_signature(body: &str, old: &str, new: &str) -> String {
+    let (old, new) = (old.trim_end(), new.trim_end());
+    let end = own_end(body);
+    let own = &body[..end];
+    if !old.is_empty()
+        && let Some(at) = own.rfind(old)
+    {
+        let mut head = own[..at].to_owned();
+        if new.is_empty() {
+            head.truncate(head.trim_end_matches('\n').len());
+        }
+        return format!("{head}{new}{}{}", &own[at + old.len()..], &body[end..]);
+    }
+    if new.is_empty() {
+        return body.to_owned();
+    }
+    let head = own.trim_end_matches('\n');
+    let tail = &body[end..];
+    let sep = if tail.is_empty() { "" } else { "\n\n" };
+    format!("{head}\n\n{new}{sep}{tail}")
+}
+
+/// Кнопка панели форматирования: разметка Markdown (подчёркивание — `<u>`, его в Markdown нет).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Format {
+    Bold,
+    Italic,
+    Underline,
+    Bullets,
+    Numbers,
+    Link,
+    Quote,
+}
+
+/// Граница символа не дальше `i`.
+fn floor_char(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Разметка вокруг выделения (байты `sel`) или в начале его строк: новый текст и что выделить после.
+/// Пустое выделение — пустая пара разметки с курсором внутри; строки с разметкой — разметку снять.
+pub(crate) fn apply_format(text: &str, sel: Range<usize>, f: Format) -> (String, Range<usize>) {
+    let (a, b) = (floor_char(text, sel.start.min(sel.end)), floor_char(text, sel.start.max(sel.end)));
+    let wrap = |open: &str, close: &str| {
+        let out = format!("{}{open}{}{close}{}", &text[..a], &text[a..b], &text[b..]);
+        (out, a + open.len()..b + open.len())
+    };
+    match f {
+        Format::Bold => wrap("**", "**"),
+        Format::Italic => wrap("*", "*"),
+        Format::Underline => wrap("<u>", "</u>"),
+        Format::Link => {
+            const URL: &str = "https://";
+            if a == b {
+                let out = format!("{}<{URL}>{}", &text[..a], &text[a..]);
+                (out, a + 1..a + 1 + URL.len())
+            } else {
+                let out = format!("{}[{}]({URL}){}", &text[..a], &text[a..b], &text[b..]);
+                let start = b + 3;
+                (out, start..start + URL.len())
+            }
+        }
+        Format::Bullets | Format::Numbers | Format::Quote => {
+            let start = text[..a].rfind('\n').map_or(0, |i| i + 1);
+            let end = text[b..].find('\n').map_or(text.len(), |i| b + i);
+            let lines: Vec<&str> = text[start..end].split('\n').collect();
+            let prefix = |i: usize| match f {
+                Format::Bullets => "- ".to_owned(),
+                Format::Quote => "> ".to_owned(),
+                _ => format!("{}. ", i + 1),
+            };
+            let marked = |i: usize, l: &str| match f {
+                Format::Numbers => l.strip_prefix(&prefix(i)).is_some(),
+                _ => l.starts_with(&prefix(i)),
+            };
+            let all = lines.iter().enumerate().all(|(i, l)| marked(i, l));
+            let block: Vec<String> = lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| if all { l[prefix(i).len()..].to_owned() } else { format!("{}{l}", prefix(i)) })
+                .collect();
+            let block = block.join("\n");
+            let out = format!("{}{block}{}", &text[..start], &text[end..]);
+            let range = if a == b && lines.len() == 1 && lines[0].is_empty() {
+                let at = start + block.len();
+                at..at
+            } else {
+                start..start + block.len()
+            };
+            (out, range)
+        }
+    }
+}
+
+/// Поле адресов: готовые адреса (до последнего разделителя `;` или `,`, вне кавычек и `<…>`) и набираемый.
+pub(crate) fn segments(text: &str) -> (Vec<String>, String) {
+    let (mut closed, mut cur) = (Vec::new(), String::new());
+    let (mut quoted, mut angle) = (false, false);
+    for c in text.chars() {
+        match c {
+            '"' if !angle => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            ',' | ';' | '\n' if !quoted && !angle => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    closed.push(t.to_owned());
+                }
+                cur.clear();
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    (closed, cur.trim_start().to_owned())
+}
+
+/// Поле из готовых адресов и набираемого.
+pub(crate) fn compose_field(closed: &[String], open: &str) -> String {
+    let mut s: String = closed.iter().map(|c| format!("{c}; ")).collect();
+    s.push_str(open);
+    s
 }
 
 /// Набираемый адрес — после последнего `,` или `;`.
@@ -423,12 +732,12 @@ pub(crate) fn accept_suggestion(text: &str, suggestion: &str) -> String {
 
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
-/// Тикет команды окна письма: итог синхронизации находит своё окно по нему.
-fn next_ticket() -> u64 {
+/// Тикет команды письма: итог синхронизации находит своё письмо по нему.
+pub(crate) fn next_ticket() -> u64 {
     NEXT_TICKET.fetch_add(1, Ordering::Relaxed)
 }
 
-fn size_text(n: u64) -> String {
+pub(crate) fn size_text(n: u64) -> String {
     match n {
         n if n < 1024 => tr!("compose-size-b", n = n.to_string()),
         n if n < 1024 * 1024 => tr!("compose-size-kb", n = format!("{:.0}", n as f64 / 1024.0)),
@@ -436,15 +745,29 @@ fn size_text(n: u64) -> String {
     }
 }
 
-// --- окна письма у экрана ---
+// --- письма у экрана ---
 
-/// Адресная книга для подсказок: строится в фоне при первом окне письма, пополняется контактами с сервера.
+/// Адресная книга для подсказок: строится в фоне при первом письме, пополняется контактами с сервера.
 pub(crate) type Book = Rc<RefCell<AddressBook>>;
 
-/// Открытые окна письма и то, что им нужно от экрана: отправитель и подпись (Identity), адресная книга.
+/// Открытое письмо: во вкладке или ответом в области чтения.
+pub(crate) struct Opened {
+    pub(crate) id: u64,
+    pub(crate) view: Entity<Composer>,
+    _events: Subscription,
+}
+
+/// Ответ в области чтения: какое письмо и на какое письмо списка.
+pub(crate) struct Inline {
+    pub(crate) id: u64,
+    pub(crate) letter: String,
+}
+
+/// Открытые письма и то, что им нужно от экрана: отправитель и подпись (Identity), адресная книга.
 #[derive(Default)]
 pub(crate) struct Composers {
-    windows: Vec<WeakEntity<Composer>>,
+    pub(crate) open: Vec<Opened>,
+    pub(crate) inline: Option<Inline>,
     me: Option<(Address, String)>,
     /// Адреса, от которых можно отправить (S4-06): свои и общих ящиков.
     senders: Vec<Sender>,
@@ -453,9 +776,11 @@ pub(crate) struct Composers {
     book_started: bool,
     /// Сколько сервер держит письма (`Event::Scheduled`); 0 — «Отправить позже» нет.
     max_delay: u64,
+    /// Подписи учётной записи и подписи по умолчанию (Настройки → Подписи и шаблоны, S5-09).
+    pub(crate) prefs: postman_core::prefs::AccountPrefs,
 }
 
-/// Отправленное окном письмо: что вернуть в окно, если отправку отменят (S5-06).
+/// Отправленное письмо: что вернуть в композер, если отправку отменят (S5-06).
 pub(crate) struct SentDraft {
     pub(crate) draft: Draft,
     /// «Отправить позже», а не обычная отправка с окном «Отменить».
@@ -463,8 +788,8 @@ pub(crate) struct SentDraft {
 }
 
 impl Composers {
-    /// Событие синхронизации: Identity и контакты — себе, итоги отправки — окнам (каждое ищет свой тикет).
-    /// Отправленное окном письмо — экрану (окно «Отменить»).
+    /// Событие синхронизации: Identity и контакты — себе, итоги отправки — письмам (каждое ищет свой тикет).
+    /// Отправленное письмо — экрану (окно «Отменить»).
     pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) -> Option<SentDraft> {
         match ev {
             Event::Scheduled { max_delay, .. } => self.max_delay = *max_delay,
@@ -484,20 +809,30 @@ impl Composers {
             _ => {}
         }
         let mut sent = None;
-        self.windows.retain(|w| {
-            w.update(cx, |c, cx| {
+        for o in &self.open {
+            o.view.update(cx, |c, cx| {
                 if let Some(s) = c.on_sync(ev, cx) {
                     sent = Some(s);
                 }
-            })
-            .is_ok()
-        });
+            });
+        }
         sent
     }
 
     /// Мой адрес и подпись из Identity (живой ящик), если сервер их уже прислал.
     pub(crate) fn me(&self) -> Option<&(Address, String)> {
         self.me.as_ref()
+    }
+
+    /// Адреса, от которых можно отправить (свой и общих ящиков), без повторов — для подписей в настройках (S5-09).
+    pub(crate) fn sender_addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.me.iter().map(|(a, _)| a.email.clone()).collect();
+        for s in &self.senders {
+            if !out.iter().any(|e| e.eq_ignore_ascii_case(&s.address.email)) {
+                out.push(s.address.email.clone());
+            }
+        }
+        out
     }
 
     /// Отправитель общего ящика `account` (ответ на письмо из него уходит от его имени), если сервер его дал.
@@ -509,19 +844,67 @@ impl Composers {
             .map(|s| (s.address.clone(), s.signature.clone()))
     }
 
-    /// Последнее открытое окно (снимки `--screens`).
-    pub(crate) fn last(&self) -> Option<Entity<Composer>> {
-        self.windows.iter().rev().find_map(WeakEntity::upgrade)
+    pub(crate) fn get(&self, id: u64) -> Option<&Entity<Composer>> {
+        self.open.iter().find(|o| o.id == id).map(|o| &o.view)
+    }
+
+    /// Ответ в области чтения.
+    pub(crate) fn inline_view(&self) -> Option<&Entity<Composer>> {
+        self.inline.as_ref().and_then(|i| self.get(i.id))
+    }
+
+    /// Последнее открытое письмо (снимки `--screens`).
+    pub(crate) fn last(&self) -> Option<&Entity<Composer>> {
+        self.open.last().map(|o| &o.view)
     }
 }
 
+/// Откуда открыто письмо и что с ним сделать при открытии.
+#[derive(Default)]
+pub(crate) struct OpenAs {
+    /// Ответ в области чтения на это письмо списка; `None` — вкладка.
+    pub(crate) letter: Option<String>,
+    /// Черновик уже на сервере (вернулся после отмены отправки).
+    pub(crate) server_id: Option<String>,
+}
+
 impl Mailer {
-    /// Окно письма с черновиком (`mail.new` — пустой); основное окно продолжает работать.
-    pub(crate) fn open_compose(&mut self, draft: Draft, cx: &mut Context<Self>) -> Option<Entity<Composer>> {
+    /// Новое письмо во вкладке (`mail.new`, «Написать» в контактах).
+    pub(crate) fn open_compose(&mut self, draft: Draft, cx: &mut Context<Self>) {
+        self.open_draft(draft, OpenAs::default(), cx);
+    }
+
+    /// Ответ или пересылка в области чтения над письмом `letter`. Прежний ответ с текстом уходит во вкладку,
+    /// без текста — закрывается; ответ на то же письмо с текстом остаётся (курсор — в него).
+    pub(crate) fn open_reply(&mut self, draft: Draft, letter: String, cx: &mut Context<Self>) {
+        if let Some(i) = &self.compose.inline {
+            let (id, same) = (i.id, i.letter == letter);
+            let dirty = self.compose.get(id).is_some_and(|c| c.read(cx).model.is_dirty());
+            if same && dirty {
+                self.focus_composer(id, cx);
+                return;
+            }
+            self.detach_inline(cx);
+        }
+        self.open_draft(draft, OpenAs { letter: Some(letter), server_id: None }, cx);
+    }
+
+    /// Письмо — во вкладке или в области чтения. Полям ввода нужно окно: создаём после текущего обновления.
+    pub(crate) fn open_draft(&mut self, draft: Draft, how: OpenAs, cx: &mut Context<Self>) {
         self.load_address_book(cx);
-        let senders = if self.backend.is_live() { self.compose.senders.clone() } else { demo_senders() };
+        let live = self.backend.is_live();
+        let senders = if live { self.compose.senders.clone() } else { demo_senders() };
         // Демо: меню «Отправить позже» видно (отправка всё равно скажет «нет сервера»).
-        let max_delay = if self.backend.is_live() { self.compose.max_delay } else { send_later::SERVER_HOLD_MAX };
+        let max_delay = if live { self.compose.max_delay } else { send_later::SERVER_HOLD_MAX };
+        let account = postman_cache::account_of(how.letter.as_deref().unwrap_or(""));
+        let categories = self
+            .list
+            .read(cx)
+            .labels
+            .for_account(account)
+            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), postman_core::palette::resolve(&c.color))).collect())
+            .unwrap_or_default();
+        let place = if how.letter.is_some() { Place::Inline } else { Place::Tab };
         let open = Open {
             senders,
             max_delay,
@@ -529,46 +912,135 @@ impl Mailer {
             book: self.compose.book.clone(),
             worker: self.reading.read(cx).worker.clone(),
             mailer: cx.entity().downgrade(),
+            categories,
+            place,
             screens: self.screens.is_some(),
+            prefs: self.compose.prefs.clone(),
         };
-        let bounds = Bounds::centered(None, size(px(820.), px(680.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some(tr!("compose-title-new").into()), ..Default::default() }),
-            window_min_size: Some(size(px(520.), px(380.))),
-            ..Default::default()
-        };
-        match gpui_kit::open_window(options, cx, |window, cx| {
-            crate::roles::observe_window(window);
-            cx.new(|cx| Composer::new(draft, open, window, cx))
-        }) {
-            Ok((_, composer)) => {
-                self.compose.windows.retain(|w| w.upgrade().is_some());
-                self.compose.windows.push(composer.downgrade());
-                Some(composer)
+        let (handle, mailer) = (self.window, cx.entity());
+        cx.defer(move |cx| {
+            let made = handle.update(cx, |_, window, cx| cx.new(|cx| Composer::new(draft, open, window, cx)));
+            let Ok(view) = made else { return };
+            mailer.update(cx, |m, cx| m.add_composer(view, how, cx));
+        });
+    }
+
+    fn add_composer(&mut self, view: Entity<Composer>, how: OpenAs, cx: &mut Context<Self>) {
+        let id = view.read(cx).id;
+        if let Some(server_id) = how.server_id {
+            view.update(cx, |c, _| c.model.set_server_id(server_id));
+        }
+        let events = cx.subscribe(&view, move |this, _, ev: &ComposerEvent, cx| match ev {
+            ComposerEvent::Close => this.close_composer(id, cx),
+            ComposerEvent::Expand => this.expand_composer(id, cx),
+        });
+        self.compose.open.push(Opened { id, view, _events: events });
+        match how.letter {
+            Some(letter) => self.compose.inline = Some(Inline { id, letter }),
+            None => {
+                self.tabs.open(TabKind::Compose(id));
             }
-            Err(e) => {
-                tracing::error!("compose window: {e}");
-                let text = tr!("compose-window-failed", error = e.to_string());
-                self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
-                None
-            }
+        }
+        cx.notify();
+    }
+
+    /// Письмо закрылось (отправлено, «Нет» в строке закрытия, удалён черновик): убрать вкладку или ответ.
+    pub(crate) fn close_composer(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.compose.open.retain(|o| o.id != id);
+        if self.compose.inline.as_ref().is_some_and(|i| i.id == id) {
+            self.compose.inline = None;
+        }
+        let tab = self.tabs.iter().find(|t| t.kind == TabKind::Compose(id)).map(|t| t.id);
+        if let Some(tab) = tab {
+            self.tabs.close(tab);
+        }
+        self.refocus(cx);
+        cx.notify();
+    }
+
+    /// Фокус — в активную вкладку после её смены не от щелчка (письмо закрылось, ответ развернули).
+    fn refocus(&mut self, cx: &mut Context<Self>) {
+        let (handle, mailer) = (self.window, cx.entity());
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| mailer.update(cx, |m, cx| m.focus_active_tab(window, cx)));
+        });
+    }
+
+    /// «Развернуть»: ответ из области чтения — во вкладку, с тем же черновиком.
+    pub(crate) fn expand_composer(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.compose.inline.as_ref().is_none_or(|i| i.id != id) {
+            return;
+        }
+        self.compose.inline = None;
+        if let Some(view) = self.compose.get(id) {
+            view.update(cx, |c, cx| c.set_place(Place::Tab, cx));
+        }
+        self.tabs.open(TabKind::Compose(id));
+        self.refocus(cx);
+        cx.notify();
+    }
+
+    /// Ответ уходит из области чтения (открыли другое письмо): с текстом — во вкладку, без — закрывается.
+    fn detach_inline(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.compose.inline.as_ref().map(|i| i.id) else { return };
+        let dirty = self.compose.get(id).is_some_and(|c| c.read(cx).model.is_dirty());
+        if dirty {
+            self.expand_composer(id, cx);
+            self.tabs.activate_kind(TabKind::Mail);
+        } else {
+            self.close_composer(id, cx);
         }
     }
 
-    /// Книга адресов из хранилища — в фоне, один раз; окна видят её, как только она готова.
+    /// Область чтения показывает другое письмо — ответ на прежнее не остаётся над ним.
+    pub(crate) fn inline_follows_letter(&mut self, cx: &mut Context<Self>) {
+        let Some(letter) = self.compose.inline.as_ref().map(|i| i.letter.clone()) else { return };
+        let shown = self.reading.read(cx).reading.as_ref().map(|r| r.row.id.clone());
+        if shown.as_deref() != Some(letter.as_str()) {
+            self.detach_inline(cx);
+        }
+    }
+
+    /// Ctrl+W или «×» на вкладке письма: без изменений — закрыть, иначе строка «Сохранить черновик?».
+    pub(crate) fn close_compose_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.compose.get(id).cloned() else {
+            self.close_composer(id, cx);
+            return;
+        };
+        let tab = self.tabs.iter().find(|t| t.kind == TabKind::Compose(id)).map(|t| t.id);
+        if let Some(tab) = tab {
+            self.tabs.activate(tab);
+        }
+        view.update(cx, |c, cx| c.close_or_ask(window, cx));
+        cx.notify();
+    }
+
+    fn focus_composer(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(view) = self.compose.get(id).cloned() else { return };
+        let handle = self.window;
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| view.update(cx, |c, cx| c.focus_body(window, cx)));
+        });
+    }
+
+    /// Книга адресов из хранилища — в фоне, один раз; письма видят её, как только она готова.
     pub(crate) fn load_address_book(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.compose.book_started, true) {
             return;
         }
         let cache = self.cache.clone();
-        let me = self.compose.me.as_ref().map(|(a, _)| a.email.clone()).unwrap_or_default();
-        // Демо: контакты и справочник демо-набора (у живого ящика они придут с сервера).
+        // Демо: контакты и справочник демо-набора (у живого ящика они придут с сервера); я — владелец демо-ящика.
         let demo = !self.backend.is_live();
+        let me = match &self.compose.me {
+            Some((a, _)) => a.email.clone(),
+            None if demo => postman_demo::ME.to_owned(),
+            None => String::new(),
+        };
         let task = cx.background_spawn(async move {
             let mut book = AddressBook::from_cache(&cache, &me);
             if demo {
                 crate::contacts::add_demo(&mut book);
+                book.remove(&me);
             }
             book
         });
@@ -582,34 +1054,7 @@ impl Mailer {
         })
         .detach();
     }
-
-    /// Сцена `compose` для `--screens`: окно с заполненными полями и вложением.
-    pub(crate) fn open_compose_screen(&mut self, cx: &mut Context<Self>) {
-        let draft = Draft {
-            to: vec![Address::new("Анна Смирнова", "anna.smirnova@corp.example")], // i18n-ok: образец письма
-            cc: vec![Address::new("Иван Петров", "ivan.petrov@corp.example")], // i18n-ok: образец письма
-            subject: "Отчёт за третий квартал".into(), // i18n-ok: образец письма
-            markdown: "Анна, добрый день!\n\nОтчёт за **третий квартал** во вложении. Коротко:\n\n- выручка +12 %\n- расходы без изменений\n\nС уважением,\nПётр".into(), // i18n-ok: образец письма
-            ..Default::default()
-        };
-        let Some(composer) = self.open_compose(draft, cx) else { return };
-        composer.update(cx, |c, cx| {
-            // Ошибочный адрес — чтобы снимок показал подсветку.
-            c.model.to.push_str("; petr@corp");
-            c.sync_inputs = true;
-            c.model.add_attachment(Attachment {
-                name: "otchet-q3.xlsx".into(),
-                mime: postman_core::files::mime_for("otchet-q3.xlsx").into(),
-                data: vec![0; 48 * 1024],
-                inline_cid: None,
-                blob_id: None,
-            });
-            cx.notify();
-        });
-    }
 }
-
-// --- окно письма ---
 
 /// Демо: свой адрес и общий ящик отдела (`postman_demo::SHARED`) — выбор «От» виден и без сервера.
 fn demo_senders() -> Vec<Sender> {
@@ -622,956 +1067,15 @@ fn demo_senders() -> Vec<Sender> {
     std::iter::once(own).chain(shared).collect()
 }
 
-/// Что окну нужно от экрана при открытии.
-pub(crate) struct Open {
-    me: Option<(Address, String)>,
-    senders: Vec<Sender>,
-    max_delay: u64,
-    book: Book,
-    worker: Arc<Mutex<Worker>>,
-    mailer: WeakEntity<Mailer>,
-    screens: bool,
-}
-
-enum Preview {
-    Off,
-    Rendering,
-    Shown(Document),
-}
-
-/// Подсказки адреса под активным полем.
-#[derive(Default)]
-struct Suggest {
-    field: Option<Field>,
-    items: Vec<String>,
-    selected: usize,
-}
-
-/// «Отправить позже» (S5-06): меню у кнопки «Отправить» и строка выбора даты и времени в окне.
-struct Later {
-    /// Сколько сервер держит письма (секунды); 0 — меню нет.
-    max_delay: u64,
-    menu: bool,
-    picking: bool,
-    date: Entity<InputState>,
-    time: Entity<InputState>,
-    error: Option<Reject>,
-}
-
-/// Снимок окна для `--screens`: кадры и дескриптор окна.
-#[derive(Default)]
-struct Screen {
-    on: bool,
-    frames: u32,
-    hwnd: Option<isize>,
-}
-
-pub(crate) struct Composer {
-    pub(crate) model: Model,
-    /// Выбор «От» (S4-06): показывается, когда адресов больше одного.
-    senders: Vec<Sender>,
-    to: Entity<InputState>,
-    cc: Entity<InputState>,
-    bcc: Entity<InputState>,
-    subject: Entity<InputState>,
-    body: Entity<TextareaState>,
-    focus: FocusHandle,
-    mailer: WeakEntity<Mailer>,
-    book: Book,
-    worker: Arc<Mutex<Worker>>,
-    preview: Preview,
-    preview_gen: u64,
-    suggest: Suggest,
-    /// Таймер автосохранения запущен.
-    autosave_armed: bool,
-    /// Текст модели поменялся не от ввода (подпись, сцена снимка) — переписать поля при отрисовке.
-    sync_inputs: bool,
-    /// Закрыть окно при следующей отрисовке (итог пришёл событием, без `Window`).
-    close: bool,
-    title: String,
-    screen: Screen,
-    later: Later,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl Composer {
-    fn new(draft: Draft, open: Open, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (from, signature) = open.me.map_or((None, String::new()), |(a, s)| (Some(a), s));
-        let mut model = Model::new(draft, from, &signature, Instant::now());
-        // Демо: Identity нет — «От» — первый адрес списка.
-        if model.from().email.is_empty()
-            && let Some(first) = open.senders.first()
-        {
-            model.set_from(first.address.clone());
-        }
-        let mut line = |f: Field, placeholder: &str, cx: &mut Context<Self>| {
-            let value = model.field(f).to_string();
-            let placeholder = tr!(placeholder);
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value))
-        };
-        let to = line(Field::To, "compose-to-placeholder", cx);
-        let cc = line(Field::Cc, "compose-cc-placeholder", cx);
-        let bcc = line(Field::Bcc, "compose-bcc-placeholder", cx);
-        let subject = line(Field::Subject, "compose-subject-placeholder", cx);
-        let date = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("send-later-date-placeholder")));
-        let time = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("send-later-time-placeholder")));
-        let later = Later { max_delay: open.max_delay, menu: false, picking: false, date, time, error: None };
-        let body_text = model.body.clone();
-        let body = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(tr!("compose-body-placeholder")).default_value(body_text)
-        });
-        let mut subscriptions = Vec::new();
-        for (f, state) in [(Field::To, &to), (Field::Cc, &cc), (Field::Bcc, &bcc), (Field::Subject, &subject)] {
-            subscriptions.push(cx.subscribe_in(state, window, move |this, state, ev: &InputEvent, _, cx| {
-                let value = state.read(cx).value().to_string();
-                this.on_input(f, value, ev, cx);
-            }));
-        }
-        subscriptions.push(cx.subscribe_in(&body, window, |this, state, ev: &InputEvent, _, cx| {
-            let value = state.read(cx).value().to_string();
-            this.on_input(Field::Body, value, ev, cx);
-        }));
-        // Enter в строке «Отправить позже» — «Запланировать».
-        for state in [&later.date, &later.time] {
-            subscriptions.push(cx.subscribe_in(state, window, |this, _, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
-                    this.schedule_picked(window, cx);
-                }
-            }));
-        }
-        // Крестик окна: с несохранённым — строка в окне, окно остаётся.
-        let weak = cx.weak_entity();
-        window.on_window_should_close(cx, move |_, cx| {
-            weak.update(cx, |c, cx| {
-                let close = c.model.request_close();
-                cx.notify();
-                close
-            })
-            .unwrap_or(true)
-        });
-        // Новое письмо — курсор в «Кому», ответ (адресаты уже есть) — в текст.
-        if model.to.is_empty() {
-            to.update(cx, |s, cx| s.focus(window, cx));
-        } else {
-            body.update(cx, |s, cx| s.focus(window, cx));
-        }
-        Self {
-            model,
-            senders: open.senders,
-            to,
-            cc,
-            bcc,
-            subject,
-            body,
-            focus: cx.focus_handle(),
-            mailer: open.mailer,
-            book: open.book,
-            worker: open.worker,
-            preview: Preview::Off,
-            preview_gen: 0,
-            suggest: Suggest::default(),
-            autosave_armed: false,
-            sync_inputs: false,
-            close: false,
-            title: String::new(),
-            screen: Screen { on: open.screens, ..Default::default() },
-            later,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    /// Дескриптор окна для снимка, когда окно уже нарисовано несколько раз.
-    pub(crate) fn screen_hwnd(&self) -> Option<isize> {
-        self.screen.hwnd.filter(|_| self.screen.frames >= 3)
-    }
-
-    fn on_input(&mut self, f: Field, value: String, ev: &InputEvent, cx: &mut Context<Self>) {
-        match ev {
-            InputEvent::Change => {
-                self.model.set(f, value);
-                if self.suggest.field == Some(f) {
-                    self.refresh_suggestions();
-                }
-                self.schedule_autosave(cx);
-            }
-            InputEvent::Focus => {
-                self.suggest.field = f.is_address().then_some(f);
-                self.refresh_suggestions();
-            }
-            _ => return,
-        }
-        cx.notify();
-    }
-
-    fn refresh_suggestions(&mut self) {
-        self.suggest.selected = 0;
-        self.suggest.items.clear();
-        let Some(f) = self.suggest.field else { return };
-        let token = current_token(self.model.field(f));
-        if token.chars().count() < SUGGEST_FROM || token.contains('<') {
-            return;
-        }
-        let now = jiff::Timestamp::now().as_second();
-        self.suggest.items =
-            self.book.borrow().suggest(token, SUGGESTIONS, now).into_iter().map(|e| e.display()).collect();
-    }
-
-    fn suggesting(&self, f: Field) -> bool {
-        self.suggest.field == Some(f) && !self.suggest.items.is_empty()
-    }
-
-    fn input(&self, f: Field) -> Option<&Entity<InputState>> {
-        match f {
-            Field::To => Some(&self.to),
-            Field::Cc => Some(&self.cc),
-            Field::Bcc => Some(&self.bcc),
-            Field::Subject => Some(&self.subject),
-            Field::Body => None,
-        }
-    }
-
-    fn accept(&mut self, f: Field, i: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.suggest.items.get(i) else { return };
-        let value = accept_suggestion(self.model.field(f), item);
-        if let Some(state) = self.input(f) {
-            state.update(cx, |s, cx| {
-                s.set_value(value.clone(), window, cx);
-                s.set_selected_range(value.len()..value.len(), cx);
-                s.focus(window, cx);
-            });
-        }
-        self.model.set(f, value);
-        self.refresh_suggestions();
-        self.schedule_autosave(cx);
-        cx.notify();
-    }
-
-    fn move_suggestion(&mut self, f: Field, delta: isize, cx: &mut Context<Self>) -> bool {
-        if !self.suggesting(f) {
-            return false;
-        }
-        let last = self.suggest.items.len() - 1;
-        self.suggest.selected = self.suggest.selected.saturating_add_signed(delta).min(last);
-        cx.notify();
-        true
-    }
-
-    /// Таймер автосохранения — только при изменениях: в простое окно не просыпается.
-    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
-        if self.autosave_armed {
-            return;
-        }
-        let Some(wait) = self.model.autosave_wait(Instant::now()) else { return };
-        self.autosave_armed = true;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(wait).await;
-            let _ = this.update(cx, |c, cx| {
-                c.autosave_armed = false;
-                if c.model.should_autosave(Instant::now()) {
-                    c.dispatch(Purpose::Autosave, cx);
-                } else {
-                    c.schedule_autosave(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Черновик — в синхронизацию через шов экрана. Нет сервера — строка в окне (и тост, если просил
-    /// пользователь), текст остаётся.
-    fn dispatch(&mut self, purpose: Purpose, cx: &mut Context<Self>) {
-        if self.model.busy() {
-            return;
-        }
-        let Some(command) = self.model.begin(purpose, next_ticket(), Instant::now()) else {
-            cx.notify();
-            return;
-        };
-        let accepted = self
-            .mailer
-            .update(cx, |m, cx| {
-                let ok = m.backend.send(command);
-                if !ok && purpose != Purpose::Autosave {
-                    m.needs_server(cx);
-                }
-                ok
-            })
-            .unwrap_or(false);
-        if !accepted {
-            self.model.refused();
-        }
-        cx.notify();
-    }
-
-    /// Итог отправки или сохранения — по тикету. Своё отправленное письмо — экрану (окно «Отменить»).
-    fn on_sync(&mut self, ev: &Event, cx: &mut Context<Self>) -> Option<SentDraft> {
-        let mut sent = None;
-        match ev {
-            Event::Sent { ticket, .. } => {
-                let later = self.model.sending_later();
-                let draft = self.model.draft(false).ok();
-                if self.model.on_sent(*ticket) {
-                    self.close = true;
-                    sent = draft.map(|draft| SentDraft { draft, later });
-                }
-            }
-            Event::Scheduled { max_delay, .. } => self.later.max_delay = *max_delay,
-            Event::DraftSaved { ticket, id } => {
-                let at = jiff::Zoned::now().strftime("%H:%M").to_string();
-                self.close |= self.model.on_saved(*ticket, id.clone(), at);
-                // Пока сохранялось, могли набрать ещё.
-                self.schedule_autosave(cx);
-            }
-            Event::ComposeFailed { ticket, error } => {
-                self.model.on_failed(*ticket, error.clone());
-            }
-            Event::Me { address, signature } => self.sync_inputs |= self.model.set_identity(address.clone(), signature),
-            Event::Senders(list) => self.senders = list.clone(),
-            _ => return None,
-        }
-        cx.notify();
-        sent
-    }
-
-    /// Меню «Отправить позже» открыто (снимок `send-later`).
-    pub(crate) fn later_menu_open(&self) -> bool {
-        self.later.menu
-    }
-
-    /// Меню «Отправить позже» у кнопки «Отправить».
-    pub(crate) fn toggle_later_menu(&mut self, cx: &mut Context<Self>) {
-        self.later.menu = !self.later.menu && self.later.max_delay > 0;
-        cx.notify();
-    }
-
-    /// Вариант меню: проверить срок и отправить; срок не годится — строка выбора с этим временем и причиной.
-    fn send_at_choice(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
-        let now = jiff::Zoned::now();
-        self.later.menu = false;
-        if let Some(at) = choice.at(&now) {
-            self.schedule(at, &now, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// «Выбрать дату и время…»: строка в окне, поля — завтра 09:00.
-    fn pick_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = jiff::Zoned::now();
-        let start = Choice::TomorrowMorning.at(&now).unwrap_or_else(|| now.clone());
-        self.open_picker(&start, None, window, cx);
-    }
-
-    fn open_picker(&mut self, at: &jiff::Zoned, error: Option<Reject>, window: &mut Window, cx: &mut Context<Self>) {
-        let (date, time) = (at.strftime("%d.%m.%Y").to_string(), at.strftime("%H:%M").to_string());
-        self.later.date.update(cx, |s, cx| s.set_value(date, window, cx));
-        self.later.time.update(cx, |s, cx| s.set_value(time, window, cx));
-        self.later.time.update(cx, |s, cx| s.focus(window, cx));
-        self.later.menu = false;
-        self.later.picking = true;
-        self.later.error = error;
-        cx.notify();
-    }
-
-    /// «Запланировать» в строке выбора.
-    fn schedule_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = jiff::Zoned::now();
-        let (date, time) = (self.later.date.read(cx).value().to_string(), self.later.time.read(cx).value().to_string());
-        match send_later::parse(&date, &time, &now) {
-            Ok(at) => self.schedule(at, &now, window, cx),
-            Err(e) => self.later.error = Some(e),
-        }
-        cx.notify();
-    }
-
-    fn schedule(&mut self, at: jiff::Zoned, now: &jiff::Zoned, window: &mut Window, cx: &mut Context<Self>) {
-        match send_later::check(&at, now, self.later.max_delay) {
-            Ok(ts) => {
-                self.later.picking = false;
-                self.later.error = None;
-                self.dispatch(Purpose::SendLater(ts), cx);
-            }
-            Err(e) => self.open_picker(&at, Some(e), window, cx),
-        }
-    }
-
-    fn close_later(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.later.menu || self.later.picking;
-        self.later.menu = false;
-        self.later.picking = false;
-        self.later.error = None;
-        cx.notify();
-        open
-    }
-
-    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_later(cx) {
-            return;
-        }
-        if !self.suggest.items.is_empty() {
-            self.suggest.items.clear();
-        } else if self.model.confirm_close {
-            self.answer(CloseAnswer::Cancel, window, cx);
-        } else if self.model.request_close() {
-            window.remove_window();
-        }
-        cx.notify();
-    }
-
-    fn answer(&mut self, answer: CloseAnswer, window: &mut Window, cx: &mut Context<Self>) {
-        match self.model.answer_close(answer) {
-            CloseStep::Close => window.remove_window(),
-            CloseStep::Save => self.dispatch(Purpose::Save, cx),
-            CloseStep::Stay => {}
-        }
-        cx.notify();
-    }
-
-    fn pick_files(&mut self, cx: &mut Context<Self>) {
-        let paths =
-            cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
-                let _ = this.update(cx, |c, cx| c.attach(paths, cx));
-            }
-        })
-        .detach();
-    }
-
-    /// Файлы читаются в фоне: поток окна не ждёт диск.
-    fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let task = cx.background_spawn(async move {
-            paths
-                .into_iter()
-                .map(|p| {
-                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    (postman_core::files::safe_name(&name), std::fs::read(&p))
-                })
-                .collect::<Vec<_>>()
-        });
-        cx.spawn(async move |this, cx| {
-            let files = task.await;
-            let _ = this.update(cx, |c, cx| {
-                for (name, data) in files {
-                    match data {
-                        Ok(data) => c.model.add_attachment(Attachment {
-                            mime: postman_core::files::mime_for(&name).into(),
-                            name,
-                            data,
-                            inline_cid: None,
-                            blob_id: None,
-                        }),
-                        Err(e) => c.model.status = Status::Attach { name, error: e.to_string() },
-                    }
-                }
-                c.schedule_autosave(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn remove_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
-        self.model.remove_attachment(i);
-        self.schedule_autosave(cx);
-        cx.notify();
-    }
-
-    /// Предпросмотр: Markdown → HTML → IR в воркере-песочнице, как входящие письма.
-    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.preview_gen += 1;
-        if !matches!(self.preview, Preview::Off) {
-            self.preview = Preview::Off;
-            self.body.update(cx, |s, cx| s.focus(window, cx));
-            cx.notify();
-            return;
-        }
-        self.preview = Preview::Rendering;
-        window.focus(&self.focus, cx);
-        let generation = self.preview_gen;
-        let html = postman_ir::markdown_to_html(&self.model.body);
-        let worker = self.worker.clone();
-        let task = cx.background_spawn(async move {
-            let mut w = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            w.render(&Request::Html(html))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |c, cx| {
-                if c.preview_gen != generation {
-                    return;
-                }
-                let doc = result
-                    .unwrap_or_else(|e| postman_ir::from_plain(&tr!("compose-preview-error", error = e.to_string())));
-                c.preview = Preview::Shown(doc);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn status_line(&self) -> Option<(String, bool)> {
-        let busy = |p: Purpose| match p {
-            Purpose::Send => tr!("compose-sending"),
-            Purpose::SendLater(_) => tr!("send-later-scheduling"),
-            Purpose::Save => tr!("compose-saving"),
-            Purpose::Autosave => tr!("compose-autosaving"),
-        };
-        Some(match &self.model.status {
-            Status::None => return None,
-            Status::Busy(p) => (busy(*p), false),
-            Status::Saved { at } => (tr!("compose-saved", time = at.clone()), false),
-            Status::BadAddresses(bad) => (tr!("compose-bad-addresses", list = bad.join(", ")), true),
-            Status::NoRecipients => (tr!("compose-no-recipients"), true),
-            Status::NoServer(Purpose::Send | Purpose::SendLater(_)) => (tr!("compose-no-server-send"), true),
-            Status::NoServer(_) => (tr!("compose-no-server-save"), true),
-            Status::Failed(e) => (tr!("compose-failed", error = e.clone()), true),
-            Status::Attach { name, error } => {
-                (tr!("compose-attach-failed", name = name.clone(), error = error.clone()), true)
-            }
-            Status::Large(total) => (tr!("compose-large", size = size_text(*total)), true),
-        })
-    }
-
-    /// «От»: свой адрес и общие ящики (S4-06) — по нажатию; один адрес — строки нет.
-    fn sender_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let l = crate::roles::look(cx);
-        if self.senders.len() < 2 {
-            return None;
-        }
-        let current = self.model.from().email.to_lowercase();
-        let chips = self.senders.iter().enumerate().map(|(i, s)| {
-            let chosen = s.address.email.to_lowercase() == current;
-            let address = s.address.clone();
-            div()
-                .id(ElementId::NamedInteger("from".into(), i as u64))
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .cursor_pointer()
-                .border_1()
-                .border_color(if chosen { l.accent() } else { l.border() })
-                .when(chosen, |d| d.bg(l.picked()))
-                .hover(|d| d.bg(l.fill()))
-                .child(match &s.account {
-                    Some(_) => tr!("shared-compose-from-shared", address = s.address.display()),
-                    None => s.address.display(),
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.model.set_from(address.clone());
-                    cx.notify();
-                }))
-        });
-        Some(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("shared-compose-from")))
-                .children(chips)
-                .into_any_element(),
-        )
-    }
-
-    fn address_row(&self, f: Field, label: &str, cx: &mut Context<Self>) -> AnyElement {
-        let l = crate::roles::look(cx);
-        let Some(state) = self.input(f) else { return div().into_any_element() };
-        let bad = self.model.bad(f);
-        let label = div()
-            .w(px(LABEL_W))
-            .flex_none()
-            .text_color(if bad.is_empty() { l.pm(crate::roles::Pm::LabelAccent) } else { l.error() })
-            .child(tr!(label));
-        let field = div()
-            .flex_1()
-            .min_w_0()
-            .rounded_md()
-            .border_1()
-            .border_color(if bad.is_empty() { l.none() } else { l.error() })
-            .child(Input::new(state))
-            .capture_action(cx.listener(move |this, _: &MoveDown, _, cx| {
-                if this.move_suggestion(f, 1, cx) {
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(move |this, _: &MoveUp, _, cx| {
-                if this.move_suggestion(f, -1, cx) {
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(move |this, a: &Enter, window, cx| {
-                if !a.secondary && this.suggesting(f) {
-                    this.accept(f, this.suggest.selected, window, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(move |this, _: &IndentInline, window, cx| {
-                if this.suggesting(f) {
-                    this.accept(f, this.suggest.selected, window, cx);
-                    cx.stop_propagation();
-                }
-            }));
-        let mut col =
-            div().flex().flex_col().gap_0p5().child(div().flex().items_center().gap_2().child(label).child(field));
-        if !bad.is_empty() {
-            col = col.child(
-                div()
-                    .pl(px(LABEL_W + 8.))
-                    .text_size(px(12.))
-                    .text_color(l.error())
-                    .child(tr!("compose-bad-addresses", list = bad.join(", "))),
-            );
-        }
-        if self.suggesting(f) {
-            let items = self.suggest.items.iter().enumerate().map(|(i, s)| {
-                div()
-                    .id(ElementId::NamedInteger("suggest".into(), i as u64))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(i == self.suggest.selected, |d| d.bg(l.picked()))
-                    .hover(|d| d.bg(l.fill()))
-                    .child(s.clone())
-                    .on_click(cx.listener(move |this, _, window, cx| this.accept(f, i, window, cx)))
-            });
-            col = col.child(
-                div()
-                    .ml(px(LABEL_W + 8.))
-                    .p_1()
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(l.border())
-                    .rounded_md()
-                    .bg(l.panel())
-                    .children(items),
-            );
-        }
-        col.into_any_element()
-    }
-}
-
-impl Composer {
-    /// «Отправить» и рядом «▾» — меню «Отправить позже» (если сервер умеет отложенную отправку).
-    fn send_group(&self, busy: bool, cx: &mut Context<Self>) -> AnyElement {
-        let l = crate::roles::look(cx);
-        let send = button("send", tr!("compose-send"), true)
-            .when(busy, |d| d.opacity(0.5))
-            .on_click(cx.listener(|this, _, _, cx| this.dispatch(Purpose::Send, cx)));
-        let group = div().relative().flex().items_center().gap_px().child(send);
-        if self.later.max_delay == 0 {
-            return group.into_any_element();
-        }
-        let caret = button("send-later", "▾".into(), true)
-            .px_2()
-            .when(busy, |d| d.opacity(0.5))
-            .when(self.later.menu, |d| d.bg(l.accent_hover()))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_later_menu(cx)));
-        group.child(caret).when(self.later.menu, |d| d.child(deferred(self.later_menu(cx)).with_priority(1))).into_any_element()
-    }
-
-    /// Меню под кнопкой: завтра утром и днём, понедельник, выбор даты; справа — когда уйдёт письмо.
-    fn later_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let l = crate::roles::look(cx);
-        let now = jiff::Zoned::now();
-        let item = |id: ElementId, label: String, hint: String| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .py_1p5()
-                .cursor_pointer()
-                .hover(|d| d.bg(l.fill()))
-                .child(div().flex_1().child(label))
-                .child(div().text_color(l.text2()).child(hint))
-        };
-        let mut menu = div()
-            .id("later-menu")
-            .absolute()
-            .top(px(32.))
-            .left_0()
-            .w(px(300.))
-            .occlude()
-            .flex()
-            .flex_col()
-            .py_1()
-            .bg(l.panel())
-            .border_1()
-            .border_color(l.border())
-            .rounded_md()
-            .shadow_lg()
-            .child(div().px_3().py_1().text_xs().text_color(l.text2()).child(tr!("send-later-menu")));
-        for (i, choice) in Choice::ALL.into_iter().enumerate() {
-            let hint = choice.at(&now).map(|at| crate::send_later::menu_hint(choice, &at)).unwrap_or_default();
-            let id = ElementId::NamedInteger("later-choice".into(), i as u64);
-            menu = menu.child(
-                item(id, crate::send_later::choice_label(choice), hint)
-                    .on_click(cx.listener(move |this, _, window, cx| this.send_at_choice(choice, window, cx))),
-            );
-        }
-        menu.child(div().h_px().my_1().bg(l.border())).child(
-            item("later-pick".into(), tr!("send-later-pick"), String::new())
-                .on_click(cx.listener(|this, _, window, cx| this.pick_later(window, cx))),
-        )
-    }
-
-    /// Строка «Выбрать дату и время» в окне (без модального окна).
-    fn later_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let l = crate::roles::look(cx);
-        if !self.later.picking {
-            return None;
-        }
-        let label = |text: String| div().flex_none().text_color(l.text2()).child(text);
-        let error = self.later.error.map(|e| crate::send_later::reject_text(e, self.later.max_delay));
-        let row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .bg(l.hover())
-            .border_b_1()
-            .border_color(l.border())
-            .child(div().flex_none().text_color(l.accent_text()).child(tr!("send-later-menu")))
-            .child(label(tr!("send-later-date")))
-            .child(div().w(px(120.)).child(Input::new(&self.later.date)))
-            .child(label(tr!("send-later-time")))
-            .child(div().w(px(72.)).child(Input::new(&self.later.time)))
-            .child(
-                button("later-schedule", tr!("send-later-schedule"), true)
-                    .on_click(cx.listener(|this, _, window, cx| this.schedule_picked(window, cx))),
-            )
-            .child(button("later-cancel", tr!("send-later-cancel"), false).on_click(cx.listener(|this, _, _, cx| {
-                this.close_later(cx);
-            })))
-            .children(error.map(|e| div().text_color(l.error()).child(e)));
-        Some(row.into_any_element())
-    }
-}
-
-fn button(id: &'static str, text: String, primary: bool) -> Stateful<Div> {
-    let l = crate::roles::now();
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
-        .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
-        .child(text)
-}
-
-impl Render for Composer {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let l = crate::roles::look(cx);
-        if self.close {
-            window.remove_window();
-        }
-        if std::mem::take(&mut self.sync_inputs) {
-            for f in [Field::To, Field::Cc, Field::Bcc, Field::Subject] {
-                let value = self.model.field(f).to_string();
-                if let Some(state) = self.input(f) {
-                    state.update(cx, |s, cx| s.set_value(value, window, cx));
-                }
-            }
-            let body = self.model.body.clone();
-            self.body.update(cx, |s, cx| s.set_value(body, window, cx));
-        }
-        let title =
-            if self.model.subject.trim().is_empty() { tr!("compose-title-new") } else { self.model.subject.clone() };
-        if title != self.title {
-            window.set_window_title(&title);
-            self.title = title;
-        }
-        if self.screen.on {
-            self.screen.frames += 1;
-            if self.screen.hwnd.is_none() {
-                self.screen.hwnd = sys::window_id(window).ok();
-            }
-            if self.screen.frames < 8 {
-                window.request_animation_frame();
-            }
-        }
-
-        let busy = self.model.busy();
-        let previewing = !matches!(self.preview, Preview::Off);
-        let toolbar = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(l.border())
-            .child(self.send_group(busy, cx))
-            .child(
-                button("attach", tr!("compose-attach"), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx))),
-            )
-            .child(
-                button("preview", tr!("compose-preview"), false)
-                    .when(previewing, |d| d.bg(l.picked()))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))),
-            );
-
-        let attachments: Vec<AnyElement> = self
-            .model
-            .attachments()
-            .map(|(i, a)| {
-                let size =
-                    if a.data.is_empty() { String::new() } else { format!(" ({})", size_text(a.data.len() as u64)) };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .bg(l.fill())
-                    .child(format!("📎 {}{size}", postman_core::files::safe_name(&a.name)))
-                    .child(
-                        div()
-                            .id(ElementId::NamedInteger("remove-attachment".into(), i as u64))
-                            .px_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_color(l.text2())
-                            .hover(|d| d.bg(l.pressed()).text_color(l.error()))
-                            .child("✕")
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(i, cx))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
-        let fields = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(l.border())
-            .children(self.sender_row(cx))
-            .child(self.address_row(Field::To, "compose-to", cx))
-            .child(self.address_row(Field::Cc, "compose-cc", cx))
-            .child(self.address_row(Field::Bcc, "compose-bcc", cx))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("compose-subject")))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.subject))),
-            )
-            .when(!attachments.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div().w(px(LABEL_W)).flex_none().text_color(l.pm(crate::roles::Pm::LabelAccent)).child(tr!("compose-attachments")),
-                        )
-                        .children(attachments),
-                )
-            });
-
-        let content: AnyElement = match &self.preview {
-            Preview::Off => {
-                div().flex_1().min_h_0().p_2().child(Textarea::new(&self.body).h(relative(1.))).into_any_element()
-            }
-            Preview::Rendering => {
-                div().flex_1().p_3().text_color(l.text2()).child(tr!("compose-preview-rendering")).into_any_element()
-            }
-            Preview::Shown(doc) => div()
-                .id("preview")
-                .flex_1()
-                .min_h_0()
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .overflow_y_scroll()
-                .children(ir_view::blocks(&doc.blocks, "preview", &ir_view::Images::new(), cx))
-                .into_any_element(),
-        };
-
-        let confirm = self.model.confirm_close.then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1p5()
-                .bg(l.warning_bg())
-                .border_t_1()
-                .border_color(l.border())
-                .child(tr!("compose-confirm-close"))
-                .child(
-                    button("close-save", tr!("compose-confirm-yes"), true)
-                        .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Save, window, cx))),
-                )
-                .child(
-                    button("close-discard", tr!("compose-confirm-no"), false)
-                        .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Discard, window, cx))),
-                )
-                .child(
-                    button("close-cancel", tr!("compose-confirm-cancel"), false)
-                        .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Cancel, window, cx))),
-                )
-        });
-
-        let status = self.status_line().map(|(text, error)| {
-            div()
-                .px_3()
-                .py_1()
-                .border_t_1()
-                .border_color(l.border())
-                .text_color(if error { l.error() } else { l.text2() })
-                .child(text)
-        });
-
-        div()
-            .key_context("Composer")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &compose::Send, _, cx| this.dispatch(Purpose::Send, cx)))
-            .on_action(cx.listener(|this, _: &compose::Attach, _, cx| this.pick_files(cx)))
-            .on_action(cx.listener(|this, _: &compose::Preview, window, cx| this.toggle_preview(window, cx)))
-            .on_action(cx.listener(|this, _: &compose::Close, window, cx| this.escape(window, cx)))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
-            .drag_over::<ExternalPaths>({
-                let hover = l.hover();
-                move |s, _, _, _| s.bg(hover)
-            })
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(l.base())
-            .text_color(l.text())
-            .text_size(px(13.))
-            .child(toolbar)
-            .children(self.later_picker(cx))
-            .child(fields)
-            .child(content)
-            .children(confirm)
-            .children(status)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
     use super::{
-        AUTOSAVE, Address, Attachment, CloseAnswer, CloseStep, Command, Draft, Field, Instant, Model, Purpose, Release,
-        Status, accept_suggestion, current_token, send_later,
+        AUTOSAVE, Address, Attachment, Check, CloseAnswer, CloseStep, Command, Draft, Field, Format, Instant, Model,
+        Purpose, Release, Status, accept_suggestion, apply_format, compose_field, current_token, own_end, segments,
+        send_later, swap_signature,
     };
+    use postman_core::contacts::{AddressBook, Source};
 
     fn model() -> Model {
         Model::new(Draft::default(), Some(Address::new("Я", "me@corp.example")), "", Instant::now())
@@ -1655,12 +1159,12 @@ mod tests {
             panic!("save expected")
         };
         assert_eq!(id, "draft-1");
-        // Демо: сервера нет — текст остаётся, окно грязное.
+        // Демо: сервера нет — текст остаётся, письмо грязное.
         m.refused();
         assert!(m.is_dirty() && !m.busy());
         assert_eq!(m.status, Status::NoServer(Purpose::Save));
         assert_eq!(m.body, "текст");
-        // Вложение — тоже изменение.
+        // Вложение — тоже изменение; метка письма — тоже.
         let mut m = model();
         m.add_attachment(Attachment {
             name: "a.txt".into(),
@@ -1672,10 +1176,12 @@ mod tests {
         assert!(m.is_dirty());
         m.remove_attachment(0);
         assert!(!m.is_dirty());
+        m.confidential = true;
+        assert!(m.is_dirty());
     }
 
     #[test]
-    fn closing_with_changes_asks_in_the_window() {
+    fn closing_with_changes_asks_in_the_letter() {
         let mut m = model();
         m.set(Field::Body, "текст".into());
         assert!(!m.request_close() && m.confirm_close);
@@ -1684,7 +1190,7 @@ mod tests {
         m.request_close();
         assert_eq!(m.answer_close(CloseAnswer::Save), CloseStep::Save);
         m.begin(Purpose::Save, 3, Instant::now());
-        assert!(m.on_saved(3, "d".into(), "12:00".into()), "после «Да» окно закрывается, когда черновик сохранён");
+        assert!(m.on_saved(3, "d".into(), "12:00".into()), "после «Да» письмо закрывается, когда черновик сохранён");
         m.set(Field::Body, "ещё".into());
         m.request_close();
         assert_eq!(m.answer_close(CloseAnswer::Discard), CloseStep::Close);
@@ -1742,6 +1248,63 @@ mod tests {
         assert!(!m.set_identity(Address::new("Я", "me@corp.example"), "Подпись"), "набранный текст не трогаем");
     }
 
+    /// S5-06б: подпись меняется на месте; в ответе новая встаёт перед цитатой.
+    #[test]
+    fn signature_is_swapped_in_place() {
+        assert_eq!(swap_signature("Текст\n\nСтарая", "Старая", "Новая\nстрока"), "Текст\n\nНовая\nстрока");
+        assert_eq!(swap_signature("Текст\n\nСтарая", "Старая", ""), "Текст");
+        assert_eq!(swap_signature("Текст", "", "Новая"), "Текст\n\nНовая");
+        let reply = "Ответ\n\n17.10.2026, Анна пишет:\n> привет\n";
+        assert_eq!(own_end(reply), "Ответ\n\n".len());
+        assert_eq!(swap_signature(reply, "", "Подпись"), "Ответ\n\nПодпись\n\n17.10.2026, Анна пишет:\n> привет\n");
+        // Подпись в цитате не трогаем.
+        assert_eq!(swap_signature("Ок\n\nА пишет:\n> Старая\n", "Старая", "Новая"), "Ок\n\nНовая\n\nА пишет:\n> Старая\n");
+        let mut m = Model::new(Draft::default(), None, "Старая", Instant::now());
+        m.set_signature("Новая");
+        assert_eq!((m.body.as_str(), m.signature.as_str()), ("\n\nНовая", "Новая"));
+    }
+
+    /// S5-06б: кнопки панели форматирования вставляют разметку вокруг выделения или в начало строк.
+    #[test]
+    fn toolbar_inserts_markdown() {
+        let t = "раз два три";
+        let two = "раз ".len().."раз два".len();
+        assert_eq!(apply_format(t, two.clone(), Format::Bold), ("раз **два** три".into(), two.start + 2..two.end + 2));
+        assert_eq!(apply_format(t, two.clone(), Format::Italic).0, "раз *два* три");
+        assert_eq!(apply_format(t, two.clone(), Format::Underline).0, "раз <u>два</u> три");
+        let (s, sel) = apply_format(t, two.clone(), Format::Link);
+        assert_eq!(s, "раз [два](https://) три");
+        assert_eq!(&s[sel], "https://");
+        // Пустое выделение — пара разметки, курсор внутри.
+        assert_eq!(apply_format("ab", 1..1, Format::Bold), ("a****b".into(), 3..3));
+        let (s, sel) = apply_format("", 0..0, Format::Link);
+        assert_eq!((s.as_str(), &s[sel]), ("<https://>", "https://"));
+        // Строки: маркеры, номера, цитата; повторное нажатие снимает.
+        let lines = "один\nдва\nтри";
+        let all = 0..lines.len();
+        assert_eq!(apply_format(lines, all.clone(), Format::Bullets).0, "- один\n- два\n- три");
+        assert_eq!(apply_format(lines, all.clone(), Format::Numbers).0, "1. один\n2. два\n3. три");
+        assert_eq!(apply_format(lines, 0.."один\nд".len(), Format::Quote).0, "> один\n> два\nтри");
+        assert_eq!(apply_format("- один\n- два", 0..3, Format::Bullets).0, "один\n- два");
+        let (s, sel) = apply_format("x\n", 2..2, Format::Bullets);
+        assert_eq!((s.as_str(), sel), ("x\n- ", 4..4));
+    }
+
+    #[test]
+    fn address_field_splits_into_chips_and_the_typed_address() {
+        assert_eq!(segments("Анна <a@x.ru>; b@x.ru; ив"), (vec!["Анна <a@x.ru>".into(), "b@x.ru".into()], "ив".into()));
+        assert_eq!(segments("\"Петров, Иван\" <p@x.ru>, "), (vec!["\"Петров, Иван\" <p@x.ru>".into()], String::new()));
+        assert_eq!(segments(""), (vec![], String::new()));
+        assert_eq!(compose_field(&["a@x.ru".into(), "b@x.ru".into()], "в"), "a@x.ru; b@x.ru; в");
+        let m = Model::new(
+            Draft { to: vec![Address::new("Анна", "a@x.ru"), Address::new("", "b@x.ru")], ..Default::default() },
+            None,
+            "",
+            Instant::now(),
+        );
+        assert_eq!(segments(&m.to), (vec!["Анна <a@x.ru>".into(), "b@x.ru".into()], String::new()), "из черновика — всё чипы");
+    }
+
     #[test]
     fn suggestion_replaces_the_typed_address() {
         assert_eq!(current_token("anna@x.ru; ив"), "ив");
@@ -1751,5 +1314,73 @@ mod tests {
             "anna@x.ru; Иван <ivan@corp.example>; "
         );
         assert_eq!(accept_suggestion("ив", "Иван <ivan@corp.example>"), "Иван <ivan@corp.example>; ");
+    }
+
+    /// S5-06б: метка, ожидание ответа и категория — ключевыми словами черновика; вернувшийся черновик — те же поля.
+    #[test]
+    fn marks_become_draft_keywords_and_come_back() {
+        let mut m = model();
+        fill(&mut m);
+        m.confidential = true;
+        m.wait = Some(3);
+        m.category = Some("pm.cat.clients".into());
+        let today: jiff::civil::Date = "2026-10-21".parse().unwrap();
+        assert_eq!(m.keywords(today), ["pm.cat.clients", "pm.conf", "pm.wait.2026-10-24"]);
+        let d = m.draft(false).unwrap();
+        assert_eq!(d.keywords.len(), 3);
+        let back = Model::new(
+            Draft { keywords: [d.keywords.clone(), vec!["$label9".into(), "other".into()]].concat(), ..d },
+            None,
+            "",
+            Instant::now(),
+        );
+        assert!(back.confidential);
+        assert_eq!((back.wait, back.category.as_deref()), (Some(3), Some("pm.cat.clients")));
+        assert!(back.keywords(today).contains(&"other".to_string()), "чужие слова сохраняются");
+    }
+
+    /// S5-06б: DLP держит отправку, пока номер не замаскирован или замечание не снято; остальное — подсказки.
+    #[test]
+    fn dlp_blocks_sending_until_masked_or_dismissed() {
+        let mut m = model();
+        fill(&mut m);
+        m.set(Field::Body, "Карта 4111 1111 1111 1111. Договор во вложении.".into());
+        let kinds: Vec<bool> = m.checks().map(Check::blocks_send).collect();
+        assert_eq!(kinds, [true, false]);
+        assert!(m.begin(Purpose::Send, 1, Instant::now()).is_none());
+        assert_eq!(m.status, Status::Blocked);
+        assert!(m.begin(Purpose::Save, 2, Instant::now()).is_some(), "сохранять черновик можно");
+        m.refused();
+        let card = m.checks().next().cloned().unwrap();
+        assert!(m.mask(&card));
+        assert!(m.body.contains("4111 •••• •••• 1111"));
+        assert!(!m.blocked());
+        // «Это не карта» снимает замечание для того же номера.
+        m.set(Field::Body, "5500 0055 5555 5559".into());
+        assert!(m.blocked());
+        let card = m.checks().next().cloned().unwrap();
+        m.dismiss(&card);
+        assert!(!m.blocked());
+        assert!(m.begin(Purpose::Send, 3, Instant::now()).is_some());
+    }
+
+    #[test]
+    fn recipient_checks_and_address_replacement() {
+        let mut book = AddressBook::default();
+        book.touch("Ирина Смирнова", "i.smirnova@partner.example", Source::Recent, 1, 1_000);
+        book.touch("Ирина Смирнова", "irina.s@partner.example", Source::Recent, 1, 2_000);
+        let mut m = model();
+        m.set(Field::To, "Анна <anna@corp.example>; i.smirnova@partner.example; ".into());
+        let own = ["corp.example".to_string()];
+        m.refresh_recipient_checks(&own, &book);
+        let moved: Vec<&Check> = m.checks().collect();
+        assert!(matches!(moved.as_slice(), [Check::Moved { .. }]));
+        m.confidential = true;
+        m.refresh_recipient_checks(&own, &book);
+        assert!(matches!(m.checks().next(), Some(Check::External { count: 1, .. })));
+        assert!(m.replace_address("i.smirnova@partner.example", "irina.s@partner.example"));
+        assert_eq!(m.to, "Анна <anna@corp.example>; irina.s@partner.example; ");
+        m.refresh_recipient_checks(&own, &book);
+        assert_eq!(m.checks().count(), 1, "осталось только «внешние»");
     }
 }

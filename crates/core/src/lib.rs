@@ -3,6 +3,7 @@
 
 pub mod bench;
 pub mod categories;
+pub mod checks;
 pub mod contacts;
 pub mod extract;
 pub mod files;
@@ -10,7 +11,9 @@ pub mod filters;
 pub mod indexer;
 pub mod invite;
 pub mod labels;
+pub mod marks;
 pub mod palette;
+pub mod prefs;
 pub mod render;
 pub mod rules;
 pub mod schedule;

@@ -59,27 +59,31 @@ pub mod meeting {
     gpui_kit::actions!(meeting, [Send, Close]);
 }
 
-/// Настройки ящика на сервере (S4-05, S4-07): в Outlook — меню «Файл», клавиши нет.
+/// Вкладка «Настройки» (S5-09); автоответы и правила (S4-05, S4-07) — её разделы, в Outlook — меню «Файл».
 pub mod settings {
-    gpui_kit::actions!(settings, [Vacation, Rules]);
+    gpui_kit::actions!(settings, [Open, Vacation, Rules]);
 }
 
-/// Окно письма (S3-01).
+/// Письмо — вкладка или ответ в области чтения (S3-01, S5-06б): отправка, разметка, «Развернуть», удалить черновик.
 pub mod compose {
-    gpui_kit::actions!(compose, [Send, Attach, Preview, Close]);
+    gpui_kit::actions!(
+        compose,
+        [Send, Attach, Preview, Close, Bold, Italic, Underline, Bullets, Numbers, Link, Quote, Expand, Discard]
+    );
 }
 
 /// Раздел «Почта» вне полей ввода: клавиши без модификаторов в поиске — текст и курсор. Контекст раздела
 /// (`MailView`, `CalendarView`, `ContactsView`, `SettingsView`) ставит корень экрана: в календаре, контактах и
 /// настройках клавиши писем молчат.
-const LIST: Option<&str> = Some("MailView && !Input");
-/// Раздел «Почта», включая поле поиска.
-const MAIL: Option<&str> = Some("MailView");
+const LIST: Option<&str> = Some("MailView && !Input && !Composer");
+/// Раздел «Почта», включая поле поиска, но не письмо: в ответе в области чтения (S5-06б) Ctrl+R, Ctrl+F, Ctrl+U —
+/// клавиши письма, а не списка.
+const MAIL: Option<&str> = Some("MailView && !Composer");
 /// Раздел «Календарь».
 const CALENDAR: Option<&str> = Some("CalendarView");
 /// Весь экран почты (любой раздел), включая поле поиска.
 const MAILER: Option<&str> = Some("Mailer");
-/// Окно письма, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
+/// Письмо, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
 /// отправка, а не перевод строки), а при равной глубине побеждает привязка, заданная позже (`bind` — после
 /// `gpui_kit::init`).
 const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
@@ -135,8 +139,21 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.attach", &[], COMPOSER),
     cmd("compose.preview", &["ctrl-shift-p"], COMPOSER),
     cmd("compose.close", &["escape"], COMPOSER),
+    // Панель форматирования (S5-06б): как в Outlook — Ctrl+B, Ctrl+I, Ctrl+U; списки, ссылка и цитата — кнопками.
+    cmd("compose.bold", &["ctrl-b"], COMPOSER),
+    cmd("compose.italic", &["ctrl-i"], COMPOSER),
+    cmd("compose.underline", &["ctrl-u"], COMPOSER),
+    cmd("compose.bullets", &[], COMPOSER),
+    cmd("compose.numbers", &[], COMPOSER),
+    cmd("compose.link", &[], COMPOSER),
+    cmd("compose.quote", &[], COMPOSER),
+    // Не Outlook (там «Открыть в новом окне»): ответ из области чтения — во вкладку.
+    cmd("compose.expand", &[], COMPOSER),
+    cmd("compose.discard", &[], COMPOSER),
     cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Не Outlook (там «Файл → Параметры»): Ctrl+, — как в новом Outlook и редакторах (S5-09).
+    cmd("settings.open", &["ctrl-,"], None),
     // Outlook: «Файл → Автоматические ответы», без клавиши.
     cmd("settings.vacation", &[], None),
     // Outlook: «Файл → Правила и оповещения», без клавиши.
@@ -151,13 +168,27 @@ pub const COMMANDS: &[Command] = &[
     cmd("filters.reset", &[], MAIL),
 ];
 
-/// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал
-/// (тесты ловят это раньше), остальные команды работают.
-pub fn bind(cx: &mut App) {
+/// Привязать клавиши всех команд с учётом своих (`overrides`, «Настройки → Клавиатура»): привязки команд
+/// собираются заново на лету, чужие (gpui-kit: поля ввода и т. п.) остаются. Действие или сочетание, которое не
+/// собралось, — в журнал (тесты ловят это раньше), остальные команды работают.
+pub fn bind(cx: &mut App, overrides: &crate::keymap::Overrides) {
+    let ours: Vec<String> = COMMANDS.iter().map(|c| c.action_name()).collect();
+    let (others, had_ours) = {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let all: Vec<KeyBinding> = keymap.bindings().cloned().collect();
+        let had = all.iter().any(|b| ours.iter().any(|n| n == b.action().name()));
+        (all.into_iter().filter(|b| !ours.iter().any(|n| n == b.action().name())).collect::<Vec<_>>(), had)
+    };
+    if had_ours {
+        cx.clear_key_bindings();
+        cx.bind_keys(others);
+    }
     let mut bindings = Vec::new();
     for c in COMMANDS {
         let context = c.context.and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
-        for keys in c.keys {
+        for keys in crate::keymap::effective(c, overrides) {
+            let keys = keys.as_str();
             let action = match keyed_action(c, keys) {
                 Some(a) => a,
                 None => match cx.build_action(&c.action_name(), None) {

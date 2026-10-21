@@ -351,6 +351,8 @@ impl MailList {
             cx.subscribe(&filters, |this, _, _: &Changed, cx| this.on_filters(cx)),
             // Панель и закладки — из модели: её перерисовка — и списка (закладки, чип, «N из M»).
             cx.observe(&filters, |_, _, cx| cx.notify()),
+            // Закладки скрыты или показаны (настройки) — место под ними в конце списка.
+            crate::prefs::observe(cx),
         ];
         let identity = vec![(postman_demo::ME.to_owned(), postman_demo::ME_NAME.to_owned())];
         let mut list = Self {
@@ -559,7 +561,7 @@ impl MailList {
 
     /// Закладки быстрых фильтров видны (не скрыты, не поиск).
     fn quick_shown(&self, cx: &App) -> bool {
-        !self.filters.read(cx).quick_hidden && self.search_ids.is_none()
+        self.search_ids.is_none() && crate::prefs::get(cx).quick.tabs().next().is_some()
     }
 
     /// Отложенные отправки с сервера (`Event::Scheduled`).

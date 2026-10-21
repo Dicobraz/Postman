@@ -57,6 +57,9 @@ pub struct Draft {
     pub attachments: Vec<Attachment>,
     /// Часть `text/calendar` рядом с текстом (iMIP: ответ на приглашение).
     pub calendar: Option<CalendarPart>,
+    /// Ключевые слова письма на сервере сверх `$draft`/`$seen` (S5-06б): категория, «Конфиденциально», «Ждать
+    /// ответа» (`postman_core::marks`). В письмо (RFC 5322) не попадают.
+    pub keywords: Vec<String>,
 }
 
 /// Объект iCalendar в письме (RFC 6047): метод и текст VCALENDAR.

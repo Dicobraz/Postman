@@ -29,6 +29,7 @@ mod account;
 mod live;
 mod signin;
 mod compose;
+mod composer;
 mod actions;
 mod meeting;
 mod settings;
@@ -41,6 +42,13 @@ mod send_later;
 mod roles;
 mod tabs;
 mod chrome;
+mod prefs;
+mod keymap;
+mod settings_tab;
+mod settings_cats;
+mod settings_keys;
+mod settings_sign;
+mod settings_accounts;
 mod filters;
 
 pub(crate) use mailer::{Mailer, Section};
@@ -66,6 +74,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/commands.ftl")),
     ("ru", include_str!("../i18n/ru/reading.ftl")),
     ("ru", include_str!("../i18n/ru/compose.ftl")),
+    ("ru", include_str!("../i18n/ru/composetab.ftl")),
     ("ru", include_str!("../i18n/ru/account.ftl")),
     ("ru", include_str!("../i18n/ru/actions.ftl")),
     ("ru", include_str!("../i18n/ru/calendar.ftl")),
@@ -82,6 +91,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
     ("en", include_str!("../i18n/en/compose.ftl")),
+    ("en", include_str!("../i18n/en/composetab.ftl")),
     ("en", include_str!("../i18n/en/account.ftl")),
     ("en", include_str!("../i18n/en/actions.ftl")),
     ("en", include_str!("../i18n/en/calendar.ftl")),
@@ -185,12 +195,17 @@ fn main() {
     if bench {
         bench::on_idle(sys::bench_idle_fields);
     }
-    let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).map_or("auto", String::as_str);
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str);
-    let theme = roles::choice(value("--theme"));
-    let density = roles::density(value("--density"));
     pets_shell::init_logging("Postman", "POSTMAN_LOG");
-    for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], lang) {
+    // Настройки пользователя (S5-09): замер и снимки — без файла, повторяемо; аргументы сильнее файла.
+    let dir = data_dir();
+    let screening = args.iter().any(|a| a == "--screens");
+    let persist = !(bench || screening);
+    let user_prefs = if persist { prefs::load(&dir) } else { postman_core::prefs::Prefs::default() };
+    let lang = prefs::language_at_start(value("--lang"), &user_prefs);
+    let theme = prefs::theme_at_start(value("--theme"), &user_prefs);
+    let density = prefs::density_at_start(value("--density"), &user_prefs);
+    for p in pets_i18n::init(&[TEXTS, pets_ui::FTL], &lang) {
         tracing::warn!("i18n: {p}");
     }
     let mut screens = args.iter().position(|a| a == "--screens").and_then(|i| args.get(i + 1)).map(|d| {
@@ -210,8 +225,8 @@ fn main() {
             }
         }
     };
-    let dir = data_dir();
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| fatal("fatal-data-dir", e));
+    let prefs_path = persist.then(|| prefs::path(&dir));
     if args.iter().any(|a| a == "--sign-out") {
         account::forget(&dir);
     }
@@ -234,9 +249,10 @@ fn main() {
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // Тема (S5-01): «как в ОС» или `--theme`, на лету; до первого окна — чтение реестра, микросекунды.
-        roles::init(theme, density, cx);
-        // Клавиши — из реестра команд (S2-02); в поле ввода клавиши без модификаторов — текст.
-        commands::bind(cx);
+        roles::init(&theme, density, cx);
+        // Клавиши — из реестра команд (S2-02) и свои из настроек (S5-09); в поле ввода клавиши без модификаторов — текст.
+        commands::bind(cx, &user_prefs.keys);
+        prefs::init(user_prefs, prefs_path, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         // Свой заголовок окна (S5-01): вкладки, перетаскивание, «─ □ ✕» — `chrome.rs`.
         let options = WindowOptions {

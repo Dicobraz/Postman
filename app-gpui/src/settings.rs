@@ -1,12 +1,14 @@
-//! Настройки ящика на сервере в экране почты: автоответ (панель и полоса), заполненность ящика в строке
-//! состояния и тост при > 90 % (S4-05), правила почты (S4-07, `rules.rs`). Сервер — команды
-//! `sync::Command::Settings`, ответы — `sync::Event::Settings`.
+//! Вкладка «Настройки» в экране почты (S5-09, `settings_tab.rs`) и настройки ящика на сервере: автоответ (раздел
+//! и полоса), заполненность ящика в строке состояния и тост при > 90 % (S4-05), правила почты (S4-07, `rules.rs`).
+//! Сервер — команды `sync::Command::Settings` и `Command::Categories`, ответы — `sync::Event::Settings`.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
+use postman_core::categories;
+use postman_core::labels::Categories;
 use postman_core::rules::{Action, Field, Rule};
 use postman_core::settings::{Area, Foreign, Reply, Request, RulesState, Usage, WARN_PERCENT};
 use postman_core::sync::{Command, Event};
@@ -14,22 +16,9 @@ use postman_jmap::VacationResponse;
 
 use crate::Mailer;
 use crate::rules::{RulesEvent, RulesPanel};
+use crate::settings_tab::{Info, Section, SettingsEvent, SettingsView};
+use crate::signin::SignIn;
 use crate::vacation::{self, BarEvent, VacationBar, VacationEvent, VacationPanel};
-
-/// Панель настроек на месте содержимого окна.
-pub(crate) enum Panel {
-    Vacation(Entity<VacationPanel>),
-    Rules(Entity<RulesPanel>),
-}
-
-impl Panel {
-    pub(crate) fn view(&self) -> AnyView {
-        match self {
-            Panel::Vacation(p) => p.clone().into(),
-            Panel::Rules(p) => p.clone().into(),
-        }
-    }
-}
 
 #[derive(Default)]
 pub(crate) struct ServerSettings {
@@ -40,10 +29,18 @@ pub(crate) struct ServerSettings {
     pub(crate) rules: Option<RulesState>,
     /// Тост о заполненности уже показан (снова — после того, как место освободилось).
     quota_warned: bool,
-    pub(crate) panel: Option<Panel>,
+    /// Вкладка «Настройки» открыта.
+    pub(crate) view: Option<Entity<SettingsView>>,
+    /// Разделы «Автоответы» и «Правила» — панели, которые слушает экран почты.
+    pub(crate) vacation_panel: Option<Entity<VacationPanel>>,
+    pub(crate) rules_panel: Option<Entity<RulesPanel>>,
+    /// Карточка «Добавить аккаунт» в разделе «Аккаунты».
+    add: Option<Entity<SignIn>>,
     /// Полоса «Автоответ включён» — пока он включён.
     pub(crate) bar: Option<Entity<VacationBar>>,
     _subscriptions: Vec<Subscription>,
+    /// Подписки вкладки: уходят вместе с ней.
+    _tab: Vec<Subscription>,
 }
 
 impl ServerSettings {
@@ -66,63 +63,213 @@ fn quota_text(u: Usage) -> String {
 }
 
 impl Mailer {
-    /// `settings.vacation`: панель «Автоматические ответы» (повторно — та же панель).
-    pub(crate) fn open_vacation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Панель — во вкладке (S5-01): повторно — та же вкладка.
-        self.tabs.open(crate::tabs::TabKind::Settings);
-        if matches!(self.settings.panel, Some(Panel::Vacation(_))) {
-            cx.notify();
-            return;
+    /// Что вкладке нужно знать об экране: учётная запись, общие ящики, папки, адреса отправителя.
+    fn settings_info(&self, cx: &App) -> Info {
+        let folders = self.folders.read(cx);
+        let mut identities = self.compose.sender_addresses();
+        if identities.is_empty()
+            && let Some(me) = self.reading.read(cx).me.clone()
+        {
+            identities.push(me);
         }
-        let live = self.backend.is_live();
-        let state = self.settings.vacation.clone();
-        let warning = self.foreign_warning();
-        let panel = cx.new(|cx| {
-            let mut p = VacationPanel::new(state.as_ref(), live, window, cx);
-            p.warning = warning;
-            p
-        });
-        let sub = cx.subscribe_in(&panel, window, |this, _, ev: &VacationEvent, window, cx| match ev {
-            VacationEvent::Save(v) => this.save_vacation(v.clone(), cx),
-            VacationEvent::Close => {
-                this.close_settings(window, cx);
+        Info {
+            live: self.backend.is_live(),
+            account: self.live_account().cloned(),
+            status: self.live.status.clone(),
+            shared: folders.accounts.iter().map(|a| a.name.clone()).collect(),
+            folders: folders.of(None).map(|m| (m.id.clone(), m.name.clone())).collect(),
+            identities,
+            cache: self.account_cache(),
+        }
+    }
+
+    /// Таблица категорий своей учётной записи (как в списке писем).
+    fn own_categories(&self, cx: &App) -> Categories {
+        self.list.read(cx).labels.for_account(None).cloned().unwrap_or_else(crate::labels::default_table)
+    }
+
+    /// `settings.open` (рейл, Ctrl+,): вкладка «Настройки» на разделе `section`; открыта — тот же раздел или новый.
+    pub(crate) fn open_settings(&mut self, section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.open(crate::tabs::TabKind::Settings);
+        let info = self.settings_info(cx);
+        match self.settings.view.clone() {
+            Some(view) => {
+                view.update(cx, |v, cx| {
+                    v.set_info(info, cx);
+                    if let Some(s) = section {
+                        v.select(s, window, cx);
+                    }
+                });
+                // Панель раздела — сразу, не дожидаясь события вкладки.
+                if let Some(s) = section {
+                    self.section_opened(s, window, cx);
+                }
             }
-        });
-        self.settings._subscriptions.push(sub);
-        self.settings.panel = Some(Panel::Vacation(panel));
+            None => {
+                let cats = self.own_categories(cx);
+                let section = section.unwrap_or(Section::General);
+                let view = cx.new(|cx| SettingsView::new(section, info, cats, window, cx));
+                let sub = cx.subscribe_in(&view, window, |this, _, ev: &SettingsEvent, window, cx| this.on_settings(ev, window, cx));
+                self.settings._tab.push(sub);
+                self.settings.view = Some(view);
+                self.section_opened(section, window, cx);
+            }
+        }
         cx.notify();
     }
 
-    /// `settings.rules`: панель «Правила»; живой ящик — правила с сервера заново.
+    /// `settings.vacation`: раздел «Автоответы».
+    pub(crate) fn open_vacation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(Some(Section::Vacation), window, cx);
+    }
+
+    /// `settings.rules`: раздел «Правила»; живой ящик — правила с сервера заново.
     pub(crate) fn open_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.open(crate::tabs::TabKind::Settings);
-        if matches!(self.settings.panel, Some(Panel::Rules(_))) {
-            cx.notify();
-            return;
+        self.open_settings(Some(Section::Rules), window, cx);
+    }
+
+    pub(crate) fn on_settings(&mut self, ev: &SettingsEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match ev {
+            SettingsEvent::Opened(s) => self.section_opened(*s, window, cx),
+            SettingsEvent::Categories(table) => self.edit_categories(table.clone(), cx),
+            SettingsEvent::Purge(keyword) => {
+                let request = categories::Request::Purge { account: None, keyword: keyword.clone(), ticket: 0 };
+                if !self.backend.send(Command::Categories(request)) {
+                    self.not_sent(cx);
+                }
+            }
+            SettingsEvent::AddAccount => {
+                let panel = cx.new(|cx| SignIn::new(None, false, window, cx));
+                self.watch_signin(&panel, window, cx);
+                self.settings.add = Some(panel.clone());
+                if let Some(v) = &self.settings.view {
+                    v.update(cx, |v, cx| {
+                        v.add = Some(panel.into());
+                        cx.notify();
+                    });
+                }
+            }
+            SettingsEvent::AccountPrefs(p) => self.compose.prefs = p.clone(),
+            SettingsEvent::RemoveAccount => {
+                self.close_settings(window, cx);
+                self.remove_account(window, cx);
+            }
         }
-        let live = self.backend.is_live();
-        // Правила (Sieve) — своего ящика: папки общих ящиков (S4-06) в них не выбрать.
-        let mailboxes: Vec<(String, String)> =
-            self.folders.read(cx).of(None).map(|m| (m.id.clone(), m.name.clone())).collect();
-        let state = if live { self.settings.rules.clone() } else { Some(rules_sample(&mailboxes)) };
-        if live && !self.backend.send(Command::Settings(Request::Rules)) {
+    }
+
+    /// Раздел открыт: правилам и автоответам — их панели (правила — заново с сервера).
+    fn section_opened(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        match section {
+            Section::Vacation if self.settings.vacation_panel.is_none() => {
+                let live = self.backend.is_live();
+                let state = self.settings.vacation.clone();
+                let warning = self.foreign_warning();
+                let panel = cx.new(|cx| {
+                    let mut p = VacationPanel::new(state.as_ref(), live, window, cx);
+                    p.warning = warning;
+                    p
+                });
+                let sub = cx.subscribe_in(&panel, window, |this, _, ev: &VacationEvent, _, cx| match ev {
+                    VacationEvent::Save(v) => this.save_vacation(v.clone(), cx),
+                });
+                self.settings._tab.push(sub);
+                self.settings.vacation_panel = Some(panel.clone());
+                self.give_panel(section, panel.into(), cx);
+            }
+            Section::Rules if self.settings.rules_panel.is_none() => {
+                let live = self.backend.is_live();
+                // Правила (Sieve) — своего ящика: папки общих ящиков (S4-06) в них не выбрать.
+                let mailboxes: Vec<(String, String)> =
+                    self.folders.read(cx).of(None).map(|m| (m.id.clone(), m.name.clone())).collect();
+                let state = if live { self.settings.rules.clone() } else { Some(rules_sample(&mailboxes)) };
+                if live && !self.backend.send(Command::Settings(Request::Rules)) {
+                    self.sync_stopped(cx);
+                }
+                let panel = cx.new(|cx| RulesPanel::new(state, mailboxes, live, window, cx));
+                let sub = cx.subscribe_in(&panel, window, |this, _, ev: &RulesEvent, _, cx| match ev {
+                    RulesEvent::Save { rules, replace } => this.save_rules(rules.clone(), *replace, cx),
+                });
+                self.settings._tab.push(sub);
+                self.settings.rules_panel = Some(panel.clone());
+                self.give_panel(section, panel.into(), cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn give_panel(&mut self, section: Section, panel: AnyView, cx: &mut Context<Self>) {
+        let Some(v) = &self.settings.view else { return };
+        v.update(cx, |v, cx| {
+            match section {
+                Section::Vacation => v.vacation = Some(panel),
+                _ => v.rules = Some(panel),
+            }
+            cx.notify();
+        });
+    }
+
+    /// Правка таблицы категорий в настройках: в список и локальную копию сразу, на сервер — сведением (FileNode).
+    fn edit_categories(&mut self, table: Categories, cx: &mut Context<Self>) {
+        let mut book = self.list.read(cx).labels.clone();
+        book.edit(None, table.clone());
+        self.save_labels(&book, cx);
+        self.list.update(cx, |l, cx| l.set_labels(book, cx));
+        if self.backend.is_live() && !self.backend.send(Command::Categories(categories::Request::Save { account: None, table })) {
             self.sync_stopped(cx);
         }
-        let panel = cx.new(|cx| RulesPanel::new(state, mailboxes, live, window, cx));
-        let sub = cx.subscribe_in(&panel, window, |this, _, ev: &RulesEvent, window, cx| match ev {
-            RulesEvent::Save { rules, replace } => this.save_rules(rules.clone(), *replace, cx),
-            RulesEvent::Close => {
-                this.close_settings(window, cx);
-            }
-        });
-        self.settings._subscriptions.push(sub);
-        self.settings.panel = Some(Panel::Rules(panel));
+    }
+
+    /// Таблица категорий изменилась (сервер): вкладке — новую.
+    pub(crate) fn categories_changed(&mut self, cx: &mut Context<Self>) {
+        let cats = self.own_categories(cx);
+        if let Some(v) = &self.settings.view {
+            v.update(cx, |v, cx| v.set_categories(cats, cx));
+        }
+    }
+
+    /// Вход подтверждён сервером: карточка добавления в настройках больше не нужна.
+    pub(crate) fn signed_in(&mut self, cx: &mut Context<Self>) {
+        self.settings.add = None;
+        let info = self.settings_info(cx);
+        if let Some(v) = &self.settings.view {
+            v.update(cx, |v, cx| {
+                v.add = None;
+                v.set_info(info, cx);
+            });
+        }
+    }
+
+    /// «Отмена» в карточке добавления.
+    pub(crate) fn cancel_add_account(&mut self, cx: &mut Context<Self>) {
+        let panel = self.settings.add.take();
+        // Вход с этой карточки уже показан на месте экрана почты — убрать и там.
+        if panel.is_some() && self.live.signin.as_ref().map(|p| p.entity_id()) == panel.as_ref().map(|p| p.entity_id()) {
+            self.live.signin = None;
+        }
+        if let Some(v) = &self.settings.view {
+            v.update(cx, |v, cx| {
+                v.add = None;
+                cx.notify();
+            });
+        }
         cx.notify();
     }
 
-    /// Закрыть панель настроек; `false` — её не было (Esc идёт дальше).
+    /// Esc во вкладке: сначала — запись клавиши или правка на месте; `false` — закрывать вкладку.
+    pub(crate) fn settings_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        match &self.settings.view {
+            Some(v) if self.tabs.is_active(crate::tabs::TabKind::Settings) => v.update(cx, |v, cx| v.escape(cx)),
+            _ => false,
+        }
+    }
+
+    /// Закрыть вкладку «Настройки»; `false` — её не было (Esc идёт дальше).
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let open = self.settings.panel.take().is_some();
+        let open = self.settings.view.take().is_some();
+        self.settings.vacation_panel = None;
+        self.settings.rules_panel = None;
+        self.settings.add = None;
+        self.settings._tab.clear();
         self.tabs.close_kind(crate::tabs::TabKind::Settings);
         if open {
             // Клавиши — снова экрану почты.
@@ -137,7 +284,7 @@ impl Mailer {
             return;
         }
         self.not_sent(cx);
-        if let Some(Panel::Vacation(p)) = &self.settings.panel {
+        if let Some(p) = &self.settings.vacation_panel {
             p.update(cx, |p, cx| p.not_saved(cx));
         }
     }
@@ -147,7 +294,7 @@ impl Mailer {
             return;
         }
         self.not_sent(cx);
-        if let Some(Panel::Rules(p)) = &self.settings.panel {
+        if let Some(p) = &self.settings.rules_panel {
             p.update(cx, |p, cx| p.not_saved(cx));
         }
     }
@@ -172,19 +319,22 @@ impl Mailer {
     /// Событие синхронизации — своё берём (`Event::Settings`).
     pub(crate) fn on_settings_sync(&mut self, ev: &Event, cx: &mut Context<Self>) {
         let Event::Settings(reply) = ev else { return };
+        let vacation = self.settings.vacation_panel.clone();
+        let rules = self.settings.rules_panel.clone();
         match reply {
             Reply::Vacation(v) => {
-                if let Some(Panel::Vacation(p)) = &self.settings.panel {
+                if let Some(p) = &vacation {
                     p.update(cx, |p, cx| p.server_state(v, cx));
                 }
                 self.set_vacation_state(Some(v.clone()), cx);
             }
             Reply::VacationSaved(v) => {
-                if let Some(Panel::Vacation(p)) = &self.settings.panel {
-                    p.update(cx, |p, cx| p.saved(v, cx));
-                } else {
-                    let text = if v.is_enabled { tr!("vacation-saved") } else { tr!("vacation-saved-off") };
-                    self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
+                match &vacation {
+                    Some(p) => p.update(cx, |p, cx| p.saved(v, cx)),
+                    None => {
+                        let text = if v.is_enabled { tr!("vacation-saved") } else { tr!("vacation-saved-off") };
+                        self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
+                    }
                 }
                 self.set_vacation_state(Some(v.clone()), cx);
             }
@@ -198,7 +348,7 @@ impl Mailer {
             }
             Reply::RulesConflict { name, overwrite } => {
                 let (name, overwrite) = (name.clone(), *overwrite);
-                if let Some(Panel::Rules(p)) = &self.settings.panel {
+                if let Some(p) = &rules {
                     p.update(cx, |p, cx| {
                         let pending = p.pending().cloned().unwrap_or_default();
                         p.conflict(name, overwrite, pending, cx)
@@ -206,12 +356,12 @@ impl Mailer {
                 }
             }
             Reply::Unsupported(Area::Vacation) => {
-                if let Some(Panel::Vacation(p)) = &self.settings.panel {
+                if let Some(p) = &vacation {
                     p.update(cx, |p, cx| p.failed(tr!("vacation-unsupported"), cx));
                 }
             }
             Reply::Unsupported(Area::Rules) => {
-                if let Some(Panel::Rules(p)) = &self.settings.panel {
+                if let Some(p) = &rules {
                     p.update(cx, |p, cx| p.failed(tr!("rules-unsupported"), cx));
                 }
             }
@@ -219,9 +369,9 @@ impl Mailer {
             Reply::Failed { area: Area::Vacation, error } => {
                 tracing::warn!("vacation: {error}");
                 let text = tr!("vacation-failed", error = error.clone());
-                match &self.settings.panel {
-                    Some(Panel::Vacation(p)) => p.update(cx, |p, cx| p.failed(text, cx)),
-                    _ => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
+                match &vacation {
+                    Some(p) => p.update(cx, |p, cx| p.failed(text, cx)),
+                    None => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
                 }
             }
             Reply::Failed { area: Area::Rules, error } => {
@@ -237,23 +387,25 @@ impl Mailer {
     fn set_rules_state(&mut self, state: RulesState, saved: bool, cx: &mut Context<Self>) {
         self.settings.rules = Some(state.clone());
         let warning = self.foreign_warning();
-        match &self.settings.panel {
-            Some(Panel::Rules(p)) if saved => p.update(cx, |p, cx| p.saved(state, cx)),
-            Some(Panel::Rules(p)) => p.update(cx, |p, cx| p.server_state(state, cx)),
-            Some(Panel::Vacation(p)) => p.update(cx, |p, cx| {
+        if let Some(p) = &self.settings.vacation_panel {
+            p.update(cx, |p, cx| {
                 p.warning = warning;
                 cx.notify();
-            }),
+            });
+        }
+        match &self.settings.rules_panel {
+            Some(p) if saved => p.update(cx, |p, cx| p.saved(state, cx)),
+            Some(p) => p.update(cx, |p, cx| p.server_state(state, cx)),
             None if saved => self.toasts.update(cx, |t, cx| t.push(Toast::Success, tr!("rules-saved"), cx)),
             None => {}
         }
     }
 
-    /// Ошибка правил — в панели «Правила» (редактор остаётся), без неё — тостом.
+    /// Ошибка правил — в разделе «Правила» (редактор остаётся), без него — тостом.
     fn rules_problem(&mut self, text: String, cx: &mut Context<Self>) {
-        match &self.settings.panel {
-            Some(Panel::Rules(p)) => p.update(cx, |p, cx| p.failed(text, cx)),
-            _ => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
+        match &self.settings.rules_panel {
+            Some(p) => p.update(cx, |p, cx| p.failed(text, cx)),
+            None => self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx)),
         }
     }
 

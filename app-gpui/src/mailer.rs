@@ -45,8 +45,10 @@ pub(crate) struct Mailer {
     pub(crate) backend: Backend,
     /// Живой ящик: статус синхронизации, строка входа, поиск на сервере (`live.rs`).
     pub(crate) live: crate::live::Live,
-    /// Окна письма (S3-01).
+    /// Письма: вкладки и ответ в области чтения (S5-06б).
     pub(crate) compose: crate::compose::Composers,
+    /// Окно экрана: полям ввода нового письма нужно окно, а письмо открывается и из событий синхронизации.
+    pub(crate) window: AnyWindowHandle,
     /// Ответ, пересылка, удаление (S3-02).
     pub(crate) actions: crate::actions::Actions,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
@@ -158,10 +160,21 @@ impl Mailer {
             }),
             // Значок уведомлений в строке состояния.
             cx.observe(&toasts, |_, _, cx| cx.notify()),
+            // Настройки (S5-09): «Панель чтения» меняет раскладку.
+            crate::prefs::observe(cx),
+            // Ответ в области чтения — над своим письмом: открыли другое — ответ уходит во вкладку или закрывается.
+            // Скрытая панель чтения (S5-09) — письмо на месте списка: раскладка меняется вместе с письмом.
+            cx.observe(&reading, |this, _, cx| {
+                this.inline_follows_letter(cx);
+                if crate::prefs::get(cx).reading.pane == postman_core::prefs::Pane::Hidden {
+                    cx.notify();
+                }
+            }),
             // Фильтры «Все папки» живого ящика — ещё и на сервер (S5-03).
             cx.subscribe(&filters, |this, _, _: &crate::filters::Changed, cx| this.filters_changed(cx)),
-            // Закладки быстрых фильтров рисует экран почты.
+            // Закладки быстрых фильтров рисует экран почты; какие — по настройкам.
             cx.observe(&filters, |_, _, cx| cx.notify()),
+            crate::prefs::observe_with(cx, |this: &mut Self, cx| this.prune_quick(cx)),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -178,6 +191,7 @@ impl Mailer {
             backend: Backend::Demo,
             live: Default::default(),
             compose: Default::default(),
+            window: window.window_handle(),
             actions: Default::default(),
             sandbox: None,
             last_key: String::new(),
@@ -300,12 +314,21 @@ impl Render for Mailer {
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
         let l = crate::roles::look(cx);
-        // Вкладка настроек — панель на месте модуля.
+        // Вкладка «Настройки» (S5-09) — на месте рейла и модуля.
         let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
-        let settings = self.settings.panel.as_ref().filter(|_| settings_tab).map(|p| p.view());
+        let settings: Option<AnyView> = self.settings.view.clone().filter(|_| settings_tab).map(Into::into);
+        // Вкладка письма (S5-06б): письмо на всю ширину, без командной строки и рейла (макет «Новое письмо»).
+        let letter = match self.tabs.active().kind {
+            crate::tabs::TabKind::Compose(id) => self.compose.get(id).cloned(),
+            _ => None,
+        };
         let free = settings.is_none();
+        let first_run = self.section == Section::Mail && self.live.signin.is_some();
+        // Командная строка и полоса автоответа — у почты; во вкладках «Настройки», письма и при первом запуске их нет.
+        let bars = free && !first_run && letter.is_none();
         // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» без открытых настроек (`commands.rs`).
         let context = match self.section {
+            _ if letter.is_some() => "Mailer ComposeView",
             _ if !free => "Mailer SettingsView",
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
@@ -346,10 +369,11 @@ impl Render for Mailer {
                 }
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &commands::settings::Open, window, cx| this.open_settings(None, window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
-            .on_action(cx.listener(|this, _: &commands::tab::Next, _, cx| this.step_tab(1, cx)))
-            .on_action(cx.listener(|this, _: &commands::tab::Prev, _, cx| this.step_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Next, window, cx| this.step_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Prev, window, cx| this.step_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Close, window, cx| {
                 let id = this.tabs.active().id;
                 this.close_tab(id, window, cx);
@@ -381,8 +405,16 @@ impl Render for Mailer {
                 if this.cancel_purge(cx) {
                     return;
                 }
-                // …затем панель настроек.
-                if this.close_settings(window, cx) {
+                // …затем запись клавиши и правку на месте в настройках, затем саму вкладку.
+                if this.settings_escape(cx) {
+                    return;
+                }
+                if this.tabs.is_active(crate::tabs::TabKind::Settings) && this.close_settings(window, cx) {
+                    return;
+                }
+                // Панель чтения скрыта (Настройки → Чтение): письмо на месте списка — назад к списку.
+                if this.section == Section::Mail && this.reading_instead_of_list(cx) {
+                    this.reading.update(cx, |r, cx| r.clear(cx));
                     return;
                 }
                 // В контактах — строка «Удалить контакт?», форма, поиск контактов.
@@ -401,12 +433,22 @@ impl Render for Mailer {
             .text_color(l.text())
             .text_size(px(13.))
             .child(self.titlebar(&l, window, cx))
-            .child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
-            .when_some(self.settings.bar.clone(), |d, bar| {
+            .when(bars, |d| d.child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none())))
+            .when_some(self.settings.bar.clone().filter(|_| bars), |d, bar| {
                 d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
             })
-            // Закладки быстрых фильтров — поверх карточки списка (S5-03).
-            .child(self.body(&l, settings, free).relative().children(self.quick_overlay(&l, cx)))
+            .map(|d| match letter {
+                Some(view) => d.child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .px(px(8.))
+                        .child(view.cached(StyleRefinement::default().size_full())),
+                ),
+                // Закладки быстрых фильтров — поверх карточки списка (S5-03).
+                None => d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx))),
+            })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
             // Окно «Отменить» отправки — внизу, над строкой состояния.
@@ -425,6 +467,8 @@ impl Render for Mailer {
 /// Ширина панели папок и карточки списка (макет главного окна).
 pub(crate) const W_FOLDERS: f32 = 236.0;
 pub(crate) const W_LIST: f32 = 452.0;
+/// Доля высоты области чтения под ответом (остальное — письмо, на которое отвечают).
+const INLINE_SHARE: f32 = 0.6;
 
 /// Карточка на фоне каркаса: скругление сверху, рамка без нижней стороны.
 fn card(l: &crate::roles::Look) -> Div {
@@ -442,22 +486,54 @@ fn card(l: &crate::roles::Look) -> Div {
 }
 
 impl Mailer {
-    fn body(&self, l: &crate::roles::Look, settings: Option<AnyView>, free: bool) -> Div {
+    /// Панель чтения скрыта и письмо открыто: оно — на месте списка (Esc — назад).
+    pub(crate) fn reading_instead_of_list(&self, cx: &App) -> bool {
+        crate::prefs::get(cx).reading.pane == postman_core::prefs::Pane::Hidden && self.reading.read(cx).reading.is_some()
+    }
+
+    fn body(&self, l: &crate::roles::Look, settings: Option<AnyView>, free: bool, cx: &App) -> Div {
+        use postman_core::prefs::Pane;
         let full = || StyleRefinement::default().size_full();
         let mail = free && self.section == Section::Mail;
-        let mut body = div().flex().flex_1().min_h_0().pr(px(8.)).child(self.rail(l));
+        // Вкладка «Настройки» — на всю ширину: своя навигация вместо рейла (макет «Настройки»).
         if let Some(p) = settings {
-            return body.child(card(l).flex_1().child(p.cached(full())));
+            return div().flex().flex_1().min_h_0().px(px(8.)).child(p.cached(full()));
         }
+        // Нет учётной записи (первый запуск) — добавление аккаунта на месте всего экрана почты.
+        if mail && let Some(s) = self.live.signin.clone() {
+            return div().flex().flex_1().min_h_0().px(px(8.)).child(card(l).flex_1().child(s));
+        }
+        let mut body = div().flex().flex_1().min_h_0().pr(px(8.)).child(self.rail(l));
         if mail {
             body = body.child(self.folders.clone().cached(StyleRefinement::default().w(px(W_FOLDERS)).h_full().flex_none()));
-            // Нет учётной записи — строка входа на месте списка писем.
-            if let Some(s) = self.live.signin.clone() {
-                return body.child(card(l).flex_1().child(s));
-            }
-            return body
-                .child(card(l).w(px(W_LIST)).flex_none().mr(px(8.)).child(self.list.clone().cached(full())))
-                .child(card(l).flex_1().child(self.reading.clone().cached(full())));
+            let list = || self.list.clone().cached(full());
+            // Ответ — в области чтения над письмом (S5-06б): своя кэшируемая view сверху карточки.
+            let reading = || match self.compose.inline_view() {
+                Some(reply) => card(l)
+                    .flex_1()
+                    .child(reply.clone().cached(StyleRefinement::default().w_full().h(relative(INLINE_SHARE)).flex_none()))
+                    .child(self.reading.clone().cached(StyleRefinement::default().w_full().flex_1().min_h_0())),
+                None => card(l).flex_1().child(self.reading.clone().cached(full())),
+            };
+            // Панель чтения — справа, снизу или скрыта (Настройки → Чтение).
+            return match crate::prefs::get(cx).reading.pane {
+                Pane::Right => body
+                    .child(card(l).w(px(W_LIST)).flex_none().mr(px(8.)).child(list()))
+                    .child(reading()),
+                Pane::Bottom => body.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(card(l).h(relative(0.45)).flex_none().rounded_b(l.px(pets_ui::theme::Metric::RadiusOverlay)).border_b_1().child(list()))
+                        .child(reading()),
+                ),
+                Pane::Hidden if self.reading_instead_of_list(cx) => body.child(reading()),
+                Pane::Hidden => body.child(card(l).flex_1().child(list())),
+            };
         }
         match self.section {
             Section::Calendar => body.child(card(l).flex_1().child(self.cal.clone().cached(full()))),
