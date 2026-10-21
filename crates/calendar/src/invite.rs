@@ -151,7 +151,7 @@ pub fn imip_reply(inv: &Invitation, me: (&str, &str), status: Partstat, now: i64
 }
 
 /// Экранирование TEXT (RFC 5545 §3.3.11).
-fn text(s: &str) -> String {
+pub(crate) fn text(s: &str) -> String {
     s.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace("\r\n", "\\n").replace('\n', "\\n")
 }
 
@@ -162,7 +162,7 @@ fn cn(name: &str) -> String {
 }
 
 /// Перенос строк длиннее 75 октетов (RFC 5545 §3.1), не разрывая UTF-8.
-fn fold(line: &str) -> String {
+pub(crate) fn fold(line: &str) -> String {
     let mut out = String::new();
     let mut len = 0;
     for c in line.chars() {

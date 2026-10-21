@@ -211,6 +211,24 @@ pub struct AttachmentRow {
     pub inline: bool,
 }
 
+/// Задача (S6-02): объект JSCalendar `Task` как есть (модель — `postman_calendar::Task`, разбор — у ядра).
+/// Ключ — UID: у задачи, созданной без связи, id сервера ещё нет.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRow {
+    pub uid: String,
+    /// id на сервере (`CalendarEvent.id`); `None` — ещё не записана.
+    pub server_id: Option<String>,
+    /// JSCalendar (JSON).
+    pub json: String,
+    /// Версия с сервера, с которой начата неотправленная правка: на сервер уходят только поля, изменённые у себя
+    /// (правки другого клиента в других полях остаются).
+    pub base: Option<String>,
+    /// Правка не дошла до сервера (нет связи): уйдёт при следующей отправке.
+    pub dirty: bool,
+    /// Удалена у себя, на сервере ещё нет (вместе с `dirty`).
+    pub deleted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct BodyRow {
     pub to: Vec<Addr>,
@@ -333,6 +351,11 @@ fn index_keywords(by: &mut ByKeyword, count: &mut KeywordCount, row: &EmailRow, 
 /// (цепочка, дата, id) → () — письма беседы по времени, из всех папок (S5-05). Таблица новее формата 2: в кэше без
 /// неё она строится из писем при открытии ([`Cache::init`]), без пересоздания кэша.
 const BY_THREAD: TableDefinition<(&str, i64, &str), ()> = TableDefinition::new("by_thread");
+/// UID задачи → [`TaskRow`] (S6-02). Таблицы задач новее формата 5: в старом кэше создаются при открытии, письма
+/// остаются.
+const TASK: TableDefinition<&str, &[u8]> = TableDefinition::new("task");
+/// id задачи на сервере → UID: удаление из `CalendarEvent/changes` приходит по id.
+const TASK_ID: TableDefinition<&str, &str> = TableDefinition::new("task_id");
 
 /// Страничный кэш redb: памяти важнее, чем лишнее чтение с SSD. Листание демо-ящика на 50 тыс. заполняло 16 МБ
 /// целиком (куча процесса +16 МБ, S4-08, `docs/MEMORY.md`); 4 МБ хватает внутренним страницам деревьев, листовые
@@ -415,6 +438,8 @@ impl Cache {
         tx.open_table(RECIPIENTS)?;
         tx.open_table(SMIME)?;
         tx.open_table(CERTS)?;
+        tx.open_table(TASK)?;
+        tx.open_table(TASK_ID)?;
         if !threads_indexed {
             let email = tx.open_table(EMAIL)?;
             let mut by = tx.open_table(BY_THREAD)?;
@@ -1021,6 +1046,103 @@ impl Cache {
         self.put(CERTS, &address.to_lowercase(), &enc(list)?)
     }
 
+    /// Задачи (без удалённых у себя).
+    pub fn tasks(&self) -> Result<Vec<TaskRow>> {
+        Ok(self.all_tasks()?.into_iter().filter(|t| !t.deleted).collect())
+    }
+
+    /// Все строки задач, и удалённые у себя.
+    pub fn all_tasks(&self) -> Result<Vec<TaskRow>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(TASK)?;
+        let mut out = Vec::new();
+        for r in t.iter()? {
+            out.push(dec::<TaskRow>(r?.1.value())?);
+        }
+        Ok(out)
+    }
+
+    /// Правки задач, не дошедшие до сервера.
+    pub fn dirty_tasks(&self) -> Result<Vec<TaskRow>> {
+        Ok(self.all_tasks()?.into_iter().filter(|t| t.dirty).collect())
+    }
+
+    pub fn task(&self, uid: &str) -> Result<Option<TaskRow>> {
+        let tx = self.db.begin_read()?;
+        tx.open_table(TASK)?.get(uid)?.map(|v| dec(v.value())).transpose()
+    }
+
+    /// UID задачи по id сервера.
+    pub fn task_uid(&self, server_id: &str) -> Result<Option<String>> {
+        let tx = self.db.begin_read()?;
+        Ok(tx.open_table(TASK_ID)?.get(server_id)?.map(|v| v.value().to_owned()))
+    }
+
+    /// Записать задачи (новые и изменённые) одной транзакцией.
+    pub fn put_tasks(&self, rows: &[TaskRow]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(TASK)?;
+            let mut ids = tx.open_table(TASK_ID)?;
+            for row in rows {
+                let old: Option<TaskRow> = t.get(row.uid.as_str())?.map(|v| dec(v.value())).transpose()?;
+                if let Some(old_id) = old.and_then(|o| o.server_id).filter(|i| Some(i) != row.server_id.as_ref()) {
+                    ids.remove(old_id.as_str())?;
+                }
+                if let Some(id) = &row.server_id {
+                    ids.insert(id.as_str(), row.uid.as_str())?;
+                }
+                t.insert(row.uid.as_str(), enc(row)?.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Убрать задачи совсем (по UID).
+    pub fn remove_tasks(&self, uids: &[String]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(TASK)?;
+            let mut ids = tx.open_table(TASK_ID)?;
+            for uid in uids {
+                let old: Option<TaskRow> = t.remove(uid.as_str())?.map(|v| dec(v.value())).transpose()?;
+                if let Some(id) = old.and_then(|o| o.server_id) {
+                    ids.remove(id.as_str())?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Полная загрузка с сервера: задачи — как в `rows`, прежние без правок у себя — убраны; не дошедшие до
+    /// сервера правки (`dirty`) остаются поверх.
+    pub fn replace_tasks(&self, rows: &[TaskRow]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(TASK)?;
+            let mut ids = tx.open_table(TASK_ID)?;
+            let mut dirty: Vec<TaskRow> = Vec::new();
+            for r in t.iter()? {
+                let row: TaskRow = dec(r?.1.value())?;
+                if row.dirty {
+                    dirty.push(row);
+                }
+            }
+            t.retain(|_, _| false)?;
+            ids.retain(|_, _| false)?;
+            for row in rows.iter().filter(|r| !dirty.iter().any(|d| d.uid == r.uid)).chain(dirty.iter()) {
+                if let Some(id) = &row.server_id {
+                    ids.insert(id.as_str(), row.uid.as_str())?;
+                }
+                t.insert(row.uid.as_str(), enc(row)?.as_slice())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn put(&self, table: TableDefinition<&str, &[u8]>, key: &str, value: &[u8]) -> Result<()> {
         let tx = self.db.begin_write()?;
         tx.open_table(table)?.insert(key, value)?;
@@ -1387,6 +1509,69 @@ mod tests {
         let c = Cache::open(&path).unwrap();
         assert!(c.rows_by_ids(&["old".into()]).unwrap().is_empty(), "формат 4 пересоздан");
         assert_eq!(c.smime::<(u32, String)>("old").unwrap(), None);
+    }
+
+    fn task(uid: &str, id: Option<&str>, dirty: bool) -> TaskRow {
+        TaskRow { uid: uid.into(), server_id: id.map(Into::into), json: format!("{{\"uid\":\"{uid}\"}}"), base: None, dirty, deleted: false }
+    }
+
+    /// Задачи (S6-02): запись, поиск по id сервера, смена id, полная замена с сохранением правок без связи.
+    #[test]
+    fn tasks_put_find_replace() {
+        let c = Cache::open_in_memory().unwrap();
+        c.put_tasks(&[task("u1", Some("a"), false), task("u2", None, true)]).unwrap();
+        assert_eq!(c.task_uid("a").unwrap().as_deref(), Some("u1"));
+        assert_eq!(c.dirty_tasks().unwrap(), [task("u2", None, true)]);
+        // Записана на сервер — появился id.
+        c.put_tasks(&[task("u2", Some("b"), false)]).unwrap();
+        assert_eq!(c.task_uid("b").unwrap().as_deref(), Some("u2"));
+        // id сменился (пересоздана) — старый id больше не ведёт к ней.
+        c.put_tasks(&[task("u2", Some("c"), false)]).unwrap();
+        assert_eq!(c.task_uid("b").unwrap(), None);
+        // Удалена у себя без связи — в списке её нет, в правках — есть.
+        let mut gone = task("u1", Some("a"), true);
+        gone.deleted = true;
+        c.put_tasks(&[gone.clone(), task("u3", None, true)]).unwrap();
+        assert_eq!(c.tasks().unwrap().iter().map(|t| t.uid.as_str()).collect::<Vec<_>>(), ["u2", "u3"]);
+        // Полная загрузка: серверные заменяют, правки у себя остаются поверх.
+        c.replace_tasks(&[task("u1", Some("a"), false), task("u9", Some("z"), false)]).unwrap();
+        let mut uids: Vec<String> = c.all_tasks().unwrap().into_iter().map(|t| t.uid).collect();
+        uids.sort();
+        assert_eq!(uids, ["u1", "u3", "u9"]);
+        assert!(c.task("u1").unwrap().unwrap().deleted, "удаление у себя не потеряно");
+        assert_eq!(c.task_uid("c").unwrap(), None);
+        c.remove_tasks(&["u9".into()]).unwrap();
+        assert_eq!(c.task_uid("z").unwrap(), None);
+    }
+
+    /// Миграция: кэш формата 5 без таблиц задач открывается без пересоздания — письма на месте, задачи пишутся.
+    #[test]
+    fn old_cache_gets_task_tables() {
+        let dir = tempfile::Builder::new().prefix("postman-cache-").tempdir().unwrap();
+        let path = dir.path().join("c.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.open_table(META).unwrap().insert("version", FORMAT_VERSION).unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let c = Cache::open(&path).unwrap();
+            c.upsert_emails(&[email("keep", 1, &["in"])]).unwrap();
+        }
+        // Как в кэше до S6-02: таблиц задач нет.
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            tx.delete_table(TASK).unwrap();
+            tx.delete_table(TASK_ID).unwrap();
+            tx.commit().unwrap();
+        }
+        let c = Cache::open(&path).unwrap();
+        assert_eq!(c.rows_by_ids(&["keep".into()]).unwrap().len(), 1, "письма не потеряны");
+        assert!(c.tasks().unwrap().is_empty());
+        c.put_tasks(&[task("u1", Some("a"), false)]).unwrap();
+        assert_eq!(c.tasks().unwrap().len(), 1);
     }
 
     #[test]

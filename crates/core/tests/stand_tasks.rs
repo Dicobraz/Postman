@@ -989,3 +989,54 @@ async fn imip_request_by_mail_lands_in_calendar() {
     sweep(&a, prefix, subject).await;
     sweep(&b, prefix, subject).await;
 }
+
+/// S6-02: хранилище задач Postman (`postman_core::tasks`, `JmapStore`) — два клиента user1 со своими кэшами:
+/// создать → у второго по дельте (`CalendarEvent/changes`) → выполнить вторым → у первого → удалить → у второго нет.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn task_round_trip() {
+    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    let (a, b) = (user(1).await, user(1).await);
+    let prefix = "postman-s601-store-";
+    let subject = "Postman s601 store";
+    sweep(&a, prefix, subject).await;
+    let (ca, cb) = (postman_cache::Cache::open_in_memory().unwrap(), postman_cache::Cache::open_in_memory().unwrap());
+    let (sa, sb) = (JmapStore::new(&a.jmap), JmapStore::new(&b.jmap));
+    let quiet = |_: Reply| {};
+    let list = |c: &postman_cache::Cache| -> Vec<postman_calendar::Task> {
+        c.tasks().unwrap().iter().filter_map(tasks::from_row).filter(|t| t.uid.starts_with(prefix)).collect()
+    };
+    tasks::handle(&sa, &ca, Request::Load, &quiet).await.unwrap();
+    tasks::handle(&sb, &cb, Request::Load, &quiet).await.unwrap();
+
+    let uid = format!("{prefix}{}@itt.test", stamp());
+    let mut t = postman_calendar::Task::new(&uid, "", &format!("{subject} {}", stamp()));
+    t.project = Some("IV кв.".into());
+    t.important = true;
+    t.due = Some(postman_calendar::Moment::new("2027-03-02T16:00:00".parse().unwrap(), Some("Europe/Moscow")));
+    tasks::handle(&sa, &ca, Request::Save(Box::new(t)), &quiet).await.unwrap();
+    let mine = list(&ca);
+    assert_eq!(mine.len(), 1);
+    assert!(!mine[0].id.is_empty() && !mine[0].calendar_ids.is_empty(), "{:?}", mine[0]);
+    assert!(ca.dirty_tasks().unwrap().is_empty());
+
+    tasks::handle(&sb, &cb, Request::Refresh, &quiet).await.unwrap();
+    let theirs = list(&cb);
+    assert_eq!(theirs.len(), 1, "второй клиент не увидел задачу по дельте");
+    assert_eq!((theirs[0].project.as_deref(), theirs[0].important), (Some("IV кв."), true));
+    let mut done = theirs[0].clone();
+    done.set_done(true, jiff::Timestamp::now().as_second());
+    tasks::handle(&sb, &cb, Request::Save(Box::new(done)), &quiet).await.unwrap();
+
+    tasks::handle(&sa, &ca, Request::Refresh, &quiet).await.unwrap();
+    let mine = list(&ca);
+    assert_eq!(mine[0].progress, postman_calendar::Progress::Completed);
+    assert!(mine[0].completed_at.is_some(), "дата выполнения дошла через iCalendar");
+    assert_eq!(mine[0].project.as_deref(), Some("IV кв."), "свои поля не потеряны патчем");
+
+    tasks::handle(&sa, &ca, Request::Delete(uid.clone()), &quiet).await.unwrap();
+    tasks::handle(&sb, &cb, Request::Refresh, &quiet).await.unwrap();
+    assert!(list(&cb).is_empty(), "удаление не дошло до второго клиента");
+    assert!(by_uid(&a.jmap, &uid, &["id"]).await.is_none());
+    sweep(&a, prefix, subject).await;
+}

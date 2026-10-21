@@ -18,6 +18,7 @@ use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
 use crate::send_later::{self, Scheduled};
+use crate::tasks;
 use postman_search::SearchIndex;
 pub use postman_jmap::Release;
 use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Filter, Identity, Mailbox, utc_to_unix};
@@ -134,6 +135,9 @@ pub enum Command {
     ReportPhishing { ids: Vec<String>, to: Address, subject: String, text: String, ticket: u64 },
     /// «Повторить сейчас» (S5-08): без связи — попытка сразу, не дожидаясь паузы; со связью — ничего.
     Reconnect,
+    /// Задачи (S6-02, `tasks.rs`): загрузка, сверка, правки → `Event::Tasks`. Правка без связи — в кэше, уходит
+    /// по возвращении связи (`tasks::Request::Flush`).
+    Tasks(tasks::Request),
 }
 
 impl Command {
@@ -150,6 +154,7 @@ impl Command {
             Command::Patch { patches, archive_name } => {
                 Command::Patch { patches: patches.clone(), archive_name: archive_name.clone() }
             }
+            Command::Tasks(r) => Command::Tasks(r.replayable()?),
             Command::ReportPhishing { ids, to, subject, text, ticket } => Command::ReportPhishing {
                 ids: ids.clone(),
                 to: to.clone(),
@@ -325,6 +330,8 @@ pub enum Event {
     ContactFailed { ticket: u64, error: String },
     /// Таблица категорий: прочитана при входе или по push, записана, снята с писем (`categories.rs`).
     Categories(categories::Reply),
+    /// Задачи: из кэша и с сервера, правки (`tasks.rs`, S6-02).
+    Tasks(tasks::Reply),
     /// Рассылки перенесены в «Архив» (`Command::Newsletters`): сколько.
     Newsletters { archived: usize },
     /// Связь с сервером (S5-08, `link`): пропала (повтор через N с, правок в очереди) или вернулась.
@@ -660,6 +667,10 @@ async fn run(
     // Таблицы категорий (свои и общих ящиков) — до писем: полосы и метки списка — сразу с ними.
     let shared_ids: Vec<String> = shared.iter().map(|a| a.id.clone()).collect();
     categories::load_all(&client, &own_id, &shared_ids, &|r| notify(Event::Categories(r))).await;
+    // Задачи — из кэша сразу, с сервера — дельта; сбой не мешает почте (повтор — по push календаря).
+    if let Err(e) = tasks::handle(&tasks::JmapStore::new(&client), &cache, tasks::Request::Load, &|r| notify(Event::Tasks(r))).await {
+        tracing::warn!("tasks load failed: {e}");
+    }
 
     let mail = |id: &str, scope: Option<String>, client: Client| MailAccount { id: id.into(), scope, client, state: None };
     let mut accounts = Accounts {
@@ -800,6 +811,11 @@ async fn run(
             }
             () = calendar.wait() => {
                 if calendar.fire(tokio::time::Instant::now()) {
+                    // Задачи — те же записи календаря (`CalendarEvent`): сверить и их.
+                    let store = tasks::JmapStore::new(&accounts.own.client);
+                    if let Err(e) = tasks::handle(&store, &cache, tasks::Request::Refresh, &|r| notify(Event::Tasks(r))).await {
+                        tracing::warn!("tasks refresh failed: {e}");
+                    }
                     notify(Event::CalendarChanged);
                 }
             }
@@ -1332,6 +1348,9 @@ async fn handle(
         Command::Categories(request) => {
             let notify = |r| notify(Event::Categories(r));
             categories::handle(client, &accounts.own.id, Some(&*cache), request, &notify).await;
+        }
+        Command::Tasks(request) => {
+            tasks::handle(&tasks::JmapStore::new(client), cache, request, &|r| notify(Event::Tasks(r))).await?;
         }
         Command::Contacts => load_people(client, notify).await,
         Command::SaveContact { card, old, ticket } => {
@@ -1912,7 +1931,7 @@ fn recipients(e: &EmailSummary) -> Recipients {
     Recipients { to: list(&e.to), cc: list(&e.cc) }
 }
 
-fn db_err(e: postman_cache::Error) -> postman_jmap::Error {
+pub(crate) fn db_err(e: postman_cache::Error) -> postman_jmap::Error {
     postman_jmap::Error::Protocol(format!("{CACHE_ERROR}{e}"))
 }
 
