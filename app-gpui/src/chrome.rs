@@ -68,6 +68,16 @@ pub(crate) mod glyph {
     /// Срок и напоминание (S5-04): часы и звонок.
     pub(crate) const CLOCK: char = '\u{E121}';
     pub(crate) const RINGER: char = '\u{EA8F}';
+    // Выделение, меню и состояния (S5-08).
+    pub(crate) const READ: char = '\u{E8C3}';
+    pub(crate) const MOVE: char = '\u{E8DE}';
+    pub(crate) const MULTI: char = '\u{E762}';
+    pub(crate) const WAIT: char = '\u{E916}';
+    pub(crate) const EXPIRE: char = '\u{E823}';
+    pub(crate) const INFO: char = '\u{E946}';
+    pub(crate) const WARNING: char = '\u{E7BA}';
+    pub(crate) const ERROR: char = '\u{EA39}';
+    pub(crate) const OFFLINE: char = '\u{F384}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).
@@ -276,7 +286,20 @@ impl Mailer {
     /// Строка состояния: элементы, синхронизация, квота, последнее нажатие, песочница, уведомления.
     pub(crate) fn status_bar(&self, l: &Look, cx: &mut Context<Self>) -> Div {
         let status = self.items_status(cx);
-        let unread = self.toasts.read(cx).unread();
+        let (unread, open) = {
+            let t = self.toasts.read(cx);
+            (t.unread(), t.is_history_open())
+        };
+        // Без связи (S5-08): серая точка и «Нет связи · повтор через N с» вместо состояния синхронизации.
+        let sync = match crate::states::status_text(&self.offline, Instant::now()) {
+            Some(text) => div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().size(px(8.)).rounded_full().bg(l.text3()))
+                .child(text),
+            None => div().child(self.live.status.clone()),
+        };
         div()
             .h(px(STATUS_HEIGHT))
             .flex_none()
@@ -287,20 +310,29 @@ impl Mailer {
             .text_size(l.px(Metric::TypeCaption))
             .text_color(l.text2())
             .child(status)
-            .child(self.live.status.clone())
+            .child(sync)
             .child(self.settings.quota_text())
             .child(div().flex_1())
             .child(self.last_key.clone())
             .child(self.sandbox.map(crate::reading::sandbox_label).unwrap_or_default())
             .child(
+                // 🔔 — история уведомлений панелью справа (S5-08); нажата, пока панель открыта.
                 div()
                     .id("notifications")
-                    .px_1()
+                    .h(px(22.))
+                    .px(px(6.))
+                    .mr(px(-6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
                     .rounded(l.px(Metric::RadiusControl))
                     .cursor_pointer()
-                    .hover(|d| d.bg(l.hover()))
-                    .when(unread > 0, |d| d.text_color(l.accent_text()))
-                    .child(tr!("status-notifications", n = unread))
+                    .when(open, |d| d.bg(l.pressed()).text_color(l.text()))
+                    .when(!open, |d| d.hover(|d| d.bg(l.hover())))
+                    .when(unread > 0 && !open, |d| d.text_color(l.accent_text()))
+                    .child(icon(glyph::RINGER, 14.))
+                    .child(unread.to_string())
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("status-notifications-hint")).build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.toasts.update(cx, |t, cx| t.toggle_history(cx)))),
             )
     }

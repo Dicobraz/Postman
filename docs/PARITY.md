@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 79 из 83 (95 %).
+Сделано: 91 из 91 (100 %).
 
 | Функция | Команда | Хоткей | Статус |
 |---|---|---|---|
@@ -27,6 +27,14 @@
 | Напомнить… | `mail.remind` |  | есть |
 | Ждать ответа… | `mail.wait` |  | есть |
 | Исчезнет… | `mail.expire` |  | есть |
+| Выделить все | `mail.select_all` | `ctrl-a` | есть |
+| Снять выделение | `mail.clear_selection` |  | есть |
+| Расширить выделение вниз | `mail.select_down` | `shift-down` | есть |
+| Расширить выделение вверх | `mail.select_up` | `shift-up` | есть |
+| Контекстное меню | `mail.context_menu` | `shift-f10`, `menu` | есть |
+| Переместить в папку… | `mail.move` | `ctrl-shift-v` | есть |
+| Архив | `mail.archive` | `backspace` | есть |
+| Сообщить о фишинге | `mail.report_phishing` |  | есть |
 | Беседа: лента вместо письма | `thread.toggle` |  | есть |
 | Беседа: показать цитаты | `thread.quotes` |  | есть |
 | Следующее письмо беседы | `thread.next` | `ctrl-right` | есть |
@@ -50,10 +58,10 @@
 | Поиск: только непрочитанные | `search.unread` |  | есть |
 | Поиск: за 30 дней | `search.recent` |  | есть |
 | Палитра команд | `palette.open` | `ctrl-k` | есть |
-| Палитра: следующая строка | `palette.next` | `down` | нет |
-| Палитра: предыдущая строка | `palette.prev` | `up` | нет |
-| Палитра: выполнить | `palette.run` | `enter` | нет |
-| Палитра: закрыть | `palette.close` | `escape` | нет |
+| Палитра: следующая строка | `palette.next` | `down` | есть |
+| Палитра: предыдущая строка | `palette.prev` | `up` | есть |
+| Палитра: выполнить | `palette.run` | `enter` | есть |
+| Палитра: закрыть | `palette.close` | `escape` | есть |
 | Новая встреча (помощник планирования) | `calendar.new_meeting` | `ctrl-shift-q` | есть |
 | Предыдущая неделя | `calendar.prev_week` | `alt-up` | есть |
 | Следующая неделя | `calendar.next_week` | `alt-down` | есть |

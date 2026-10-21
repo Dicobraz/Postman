@@ -150,6 +150,9 @@ pub(crate) struct SettingsView {
     pub(crate) rules: Option<AnyView>,
     pub(crate) vacation: Option<AnyView>,
     pub(crate) theme_error: Option<String>,
+    /// «Общие → Безопасность» (S5-08): адрес для писем «Сообщить о фишинге»; ошибка — не адрес.
+    pub(crate) phishing: Entity<InputState>,
+    pub(crate) phishing_error: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -174,6 +177,23 @@ impl SettingsView {
         })];
         let keys = crate::settings_keys::KeysState::new(window, cx);
         let sign = crate::settings_sign::SignState::new(info.cache.clone(), window, cx);
+        let current = crate::prefs::get(cx).general.phishing_report.unwrap_or_default();
+        let phishing = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder(tr!("settings-phishing-placeholder"));
+            s.set_value(current, window, cx);
+            s
+        });
+        let mut subscriptions = subscriptions;
+        // Адрес — в настройки по мере ввода: пусто — без пересылки; не адрес — подсказка, настройка — пустая.
+        subscriptions.push(cx.subscribe_in(&phishing, window, |this: &mut Self, state, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                let text = state.read(cx).value().to_string();
+                let address = postman_core::prefs::phishing_address(Some(&text));
+                this.phishing_error = !text.trim().is_empty() && address.is_none();
+                crate::prefs::update(cx, |p| p.general.phishing_report = address);
+                cx.notify();
+            }
+        }));
         let mut v = Self {
             section,
             search,
@@ -190,6 +210,8 @@ impl SettingsView {
             rules: None,
             vacation: None,
             theme_error: None,
+            phishing,
+            phishing_error: false,
             _subscriptions: subscriptions,
         };
         v.sign_load(cx);
@@ -538,6 +560,14 @@ impl SettingsView {
             .child(row(tr!("settings-density"), Some(tr!("settings-density-hint")), seg_group(densities, l), l))
             .child(group(tr!("settings-language-group"), l))
             .child(row(tr!("settings-language"), Some(tr!("settings-language-hint")), seg_group(langs, l), l))
+            // Безопасность (S5-08): куда пересылать письма «Сообщить о фишинге»; пусто — только в «Нежелательные».
+            .child(group(tr!("settings-security-group"), l))
+            .child(row(
+                tr!("settings-phishing"),
+                Some(if self.phishing_error { tr!("settings-phishing-bad") } else { tr!("settings-phishing-hint") }),
+                div().w(px(280.)).child(Input::new(&self.phishing)),
+                l,
+            ))
     }
 
     fn quick(&mut self, l: &Look, cx: &mut Context<Self>) -> Div {

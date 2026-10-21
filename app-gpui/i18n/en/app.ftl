@@ -13,7 +13,7 @@ sandbox-partial = Sandbox: partial
 sandbox-none = Sandbox: none
 sandbox-weak = The message sandbox is weakened ({ $level }): messages open with less protection.
 status-items = Items: { $n }
-status-notifications = 🔔 { $n }
+status-notifications-hint = Notifications
 second-instance = Postman is already running — this window is shown.
 
 # Startup failure (Windows event log and stderr).

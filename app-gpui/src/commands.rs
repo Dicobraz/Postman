@@ -12,7 +12,8 @@ pub mod mail {
         mail,
         [
             Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete,
-            Due, Remind, Wait, Expire
+            Due, Remind, Wait, Expire, SelectAll, ClearSelection, SelectDown, SelectUp, ContextMenu, Move, Archive,
+            ReportPhishing
         ]
     );
 
@@ -98,11 +99,12 @@ pub mod compose {
 
 /// Раздел «Почта» вне полей ввода: клавиши без модификаторов в поиске — текст и курсор. Контекст раздела
 /// (`MailView`, `CalendarView`, `ContactsView`, `SettingsView`) ставит корень экрана: в календаре, контактах и
-/// настройках клавиши писем молчат.
-const LIST: Option<&str> = Some("MailView && !Input && !Composer");
+/// настройках клавиши писем молчат. В открытом контекстном меню (S5-08, `ContextMenu`) — тоже: стрелки, Enter и
+/// цифры там — клавиши меню.
+const LIST: Option<&str> = Some("MailView && !Input && !Composer && !ContextMenu");
 /// Раздел «Почта», включая поле поиска, но не письмо: в ответе в области чтения (S5-06б) Ctrl+R, Ctrl+F, Ctrl+U —
 /// клавиши письма, а не списка.
-const MAIL: Option<&str> = Some("MailView && !Composer");
+const MAIL: Option<&str> = Some("MailView && !Composer && !ContextMenu");
 /// Раздел «Календарь».
 const CALENDAR: Option<&str> = Some("CalendarView");
 /// Раздел «Контакты» вне полей ввода (Delete, F2 в поиске — правка текста).
@@ -149,6 +151,18 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.remind", &[], MAIL),
     cmd("mail.wait", &[], MAIL),
     cmd("mail.expire", &[], MAIL),
+    // Выделение и массовые действия (S5-08). Outlook: Ctrl+A — выделить все, Shift+↑/↓ — расширить выделение,
+    // Shift+F10 и клавиша «Меню» — контекстное меню, Ctrl+Shift+V — «Переместить в папку», Backspace — «Архив»
+    // (Outlook 2016+). Снять выделение — Esc (`search.clear` по цепочке) или командой; «Сообщить о фишинге» — без
+    // клавиши, как в Outlook (кнопка «Сообщить»).
+    cmd("mail.select_all", &["ctrl-a"], LIST),
+    cmd("mail.clear_selection", &[], LIST),
+    cmd("mail.select_down", &["shift-down"], LIST),
+    cmd("mail.select_up", &["shift-up"], LIST),
+    cmd("mail.context_menu", &["shift-f10", "menu"], LIST),
+    cmd("mail.move", &["ctrl-shift-v"], LIST),
+    cmd("mail.archive", &["backspace"], LIST),
+    cmd("mail.report_phishing", &[], MAIL),
     // Не Outlook (DESIGN, «Беседы»): лента беседы и цитаты — кнопками; по письмам беседы — Ctrl+→ / Ctrl+←
     // (в поле поиска эти клавиши — по словам).
     cmd("thread.toggle", &[], MAIL),

@@ -18,7 +18,7 @@ use postman_core::query::Query;
 
 use crate::Mailer;
 use crate::chrome::{glyph, icon};
-use crate::commands::palette as act;
+use crate::commands::palette;
 use crate::roles::{Look, look};
 
 /// Ширина палитры (макет).
@@ -511,13 +511,13 @@ impl Render for Palette {
             .shadow_lg()
             .text_size(px(13.))
             .text_color(l.text())
-            .on_action(cx.listener(|this, _: &act::Next, _, cx| this.step(1, cx)))
-            .on_action(cx.listener(|this, _: &act::Prev, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &act::Run, _, cx| {
+            .on_action(cx.listener(|this, _: &palette::Next, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &palette::Prev, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &palette::Run, _, cx| {
                 let i = this.selected;
                 this.run(i, cx);
             }))
-            .on_action(cx.listener(|_, _: &act::Close, _, cx| cx.emit(PaletteEvent::Close)))
+            .on_action(cx.listener(|_, _: &palette::Close, _, cx| cx.emit(PaletteEvent::Close)))
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Close)))
             .child(head)
             .child(list)

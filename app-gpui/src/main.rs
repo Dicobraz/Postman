@@ -52,6 +52,11 @@ mod settings_sign;
 mod settings_accounts;
 mod filters;
 mod lifecycle;
+mod select;
+mod bulk;
+mod menu;
+mod states;
+mod notices;
 mod palette;
 mod search;
 
@@ -93,6 +98,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/frame.ftl")),
     ("ru", include_str!("../i18n/ru/filters.ftl")),
     ("ru", include_str!("../i18n/ru/lifecycle.ftl")),
+    ("ru", include_str!("../i18n/ru/bulk.ftl")),
+    ("ru", include_str!("../i18n/ru/states.ftl")),
     ("ru", include_str!("../i18n/ru/palette.ftl")),
     ("ru", include_str!("../i18n/ru/search.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
@@ -114,6 +121,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/frame.ftl")),
     ("en", include_str!("../i18n/en/filters.ftl")),
     ("en", include_str!("../i18n/en/lifecycle.ftl")),
+    ("en", include_str!("../i18n/en/bulk.ftl")),
+    ("en", include_str!("../i18n/en/states.ftl")),
     ("en", include_str!("../i18n/en/palette.ftl")),
     ("en", include_str!("../i18n/en/search.ftl")),
 ];

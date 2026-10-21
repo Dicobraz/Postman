@@ -52,6 +52,8 @@ pub(crate) struct Lifecycle {
 pub(crate) struct Picker {
     pub(crate) kind: Kind,
     pub(crate) row: EmailRow,
+    /// Остальные письма выделения (S5-08): срок ставится всем.
+    pub(crate) rest: Vec<EmailRow>,
     /// «Выбрать дату…»: поле ввода и ошибка разбора.
     pub(crate) input: Option<Entity<InputState>>,
     pub(crate) error: Option<Bad>,
@@ -60,7 +62,7 @@ pub(crate) struct Picker {
 
 impl Picker {
     pub(crate) fn new(kind: Kind, row: EmailRow) -> Picker {
-        Picker { kind, row, input: None, error: None, _enter: None }
+        Picker { kind, row, rest: Vec::new(), input: None, error: None, _enter: None }
     }
 }
 
@@ -299,15 +301,30 @@ impl Mailer {
             cx.notify();
             return;
         }
+        // Выделено несколько писем — срок всем (S5-08).
+        if self.picking(cx) {
+            let ids = self.targets(cx);
+            return self.open_picker_for(kind, ids, cx);
+        }
         let Some(row) = self.lifecycle_target(cx) else {
             self.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("actions-select-letter"), cx));
             return;
         };
-        if !crate::list::may(&self.list.read(cx).rights, &row, |r| r.keywords) {
+        self.picker_on(kind, vec![row], cx);
+    }
+
+    /// Панель выбора над письмами `rows` (без права менять ключевые слова — пропускаются).
+    pub(crate) fn picker_on(&mut self, kind: Kind, rows: Vec<EmailRow>, cx: &mut Context<Self>) {
+        let rights = self.list.read(cx).rights.clone();
+        let mut rows: Vec<EmailRow> = rows.into_iter().filter(|r| crate::list::may(&rights, r, |x| x.keywords)).collect();
+        if rows.is_empty() {
             self.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("lifecycle-read-only"), cx));
             return;
         }
-        self.lifecycle.picker = Some(Picker::new(kind, row));
+        let row = rows.remove(0);
+        let mut p = Picker::new(kind, row);
+        p.rest = rows;
+        self.lifecycle.picker = Some(p);
         cx.notify();
     }
 
@@ -324,16 +341,19 @@ impl Mailer {
     fn choose(&mut self, when: Option<When>, cx: &mut Context<Self>) {
         let Some(p) = self.lifecycle.picker.take() else { return };
         let roles = self.roles(cx);
-        let patch = match (p.kind, when) {
-            (Kind::Remind, Some(w)) => lifecycle::snooze(&p.row, w, &roles),
-            (Kind::Expire, None) => lifecycle::keep(&p.row),
-            (kind, w) => lifecycle::set(&p.row, kind, w),
-        };
+        let patches: Vec<Patch> = std::iter::once(&p.row)
+            .chain(&p.rest)
+            .map(|row| match (p.kind, when) {
+                (Kind::Remind, Some(w)) => lifecycle::snooze(row, w, &roles),
+                (Kind::Expire, None) => lifecycle::keep(row),
+                (kind, w) => lifecycle::set(row, kind, w),
+            })
+            .collect();
         if let (Kind::Remind, Some(w)) = (p.kind, when) {
             let text = tr!("lifecycle-snoozed", when = when_hint(&w));
             self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
         }
-        self.apply_patches(vec![patch], cx);
+        self.apply_patches(patches, cx);
         cx.notify();
     }
 
@@ -570,7 +590,10 @@ impl Mailer {
                     .text_size(px(12.))
                     .text_color(l.text2())
                     .truncate()
-                    .child(format!("{} · {}", picker_title(kind), p.row.subject)),
+                    .child(match p.rest.len() {
+                        0 => format!("{} · {}", picker_title(kind), p.row.subject),
+                        n => format!("{} · {}", picker_title(kind), tr!("bulk-letters", n = n + 1)),
+                    }),
             );
         for (i, pick) in lifecycle::picks(kind).into_iter().enumerate() {
             let when = pick.when(kind, &now);
@@ -628,8 +651,9 @@ impl Mailer {
                 );
             }
         }
-        let has = postman_core::marks::has(&p.row.keywords, kind)
-            || (kind == Kind::Expire && !p.row.has_keyword(lifecycle::KEEP));
+        let has = std::iter::once(&p.row).chain(&p.rest).any(|r| {
+            postman_core::marks::has(&r.keywords, kind) || (kind == Kind::Expire && !r.has_keyword(lifecycle::KEEP))
+        });
         if has {
             panel = panel.child(div().h(px(1.)).my(px(4.)).bg(l.border())).child(
                 menu_item("lifecycle-remove".into(), l)

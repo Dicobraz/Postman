@@ -6,7 +6,9 @@ use gpui_kit::*;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::*;
 use pets_i18n::tr;
-use pets_ui::{Level as Toast, Toasts};
+use pets_ui::Level as Toast;
+
+use crate::notices::Notices;
 use postman_cache::Cache;
 use postman_core::bench::{self, Bench, Step};
 use postman_worker::Level;
@@ -40,7 +42,16 @@ pub(crate) struct Mailer {
     pub(crate) reading: Entity<ReadingPane>,
     pub(crate) bar: Entity<CommandBar>,
     pub(crate) search: Entity<InputState>,
-    pub(crate) toasts: Entity<Toasts>,
+    pub(crate) toasts: Entity<Notices>,
+    /// Сводка выделения на месте письма (S5-08, `bulk.rs`).
+    pub(crate) summary: Entity<crate::bulk::SummaryView>,
+    /// Контекстное меню письма (S5-08, `menu.rs`); после закрытия — фокус обратно экрану.
+    pub(crate) menu: Option<crate::menu::Menu>,
+    pub(crate) refocus: bool,
+    /// Связи с сервером нет (S5-08, `states.rs`): строка состояния, метка у аккаунта, полоса над списком.
+    pub(crate) offline: crate::states::Offline,
+    /// Таймер обратного отсчёта «повтор через N с» стоит.
+    pub(crate) offline_ticking: bool,
     /// Сервер или демо (S3-04 подключает живой ящик).
     pub(crate) backend: Backend,
     /// Живой ящик: статус синхронизации, строка входа, поиск на сервере (`live.rs`).
@@ -126,7 +137,8 @@ impl Mailer {
         let folders = cx.new(|cx| Folders::new(mailboxes, accounts, inbox).watch(filters.clone(), cx));
         let reading = cx.new(|_| ReadingPane::new(cache.clone()));
         let bar = cx.new(|_| CommandBar::new(search.clone()));
-        let toasts = cx.new(|_| Toasts::new());
+        let toasts = cx.new(|_| Notices::new());
+        let summary = cx.new(|_| crate::bulk::SummaryView::new());
         let cal = cx.new(|cx| calendar::CalendarView::new(window, cx));
         let contacts = cx.new(|cx| crate::contacts::ContactsView::new(window, cx));
         let cal_bar = cx.new(|cx| calendar::CalendarBar::new(cal.clone(), cx));
@@ -161,6 +173,8 @@ impl Mailer {
                 this.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
             }),
             crate::actions::watch_list(&list, cx),
+            // Сводка выделения: кнопки — как у панели; «В папку» и «Категория» — меню у кнопки.
+            cx.subscribe(&summary, |this, _, a: &crate::bulk::SummaryAsk, cx| this.on_summary(a, cx)),
             cx.subscribe(&folders, |this, _, FolderEvent::Open(id), cx| {
                 this.tabs.activate_kind(crate::tabs::TabKind::Mail);
                 this.open_mailbox(id.clone(), cx)
@@ -204,6 +218,8 @@ impl Mailer {
             cx.observe(&filters, |_, _, cx| cx.notify()),
             crate::prefs::observe_with(cx, |this: &mut Self, cx| this.prune_quick(cx)),
         ];
+        let mut subscriptions = subscriptions;
+        subscriptions.extend(Self::watch_bulk(&list, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         // Планировщик жизненного цикла — после создания экрана (снимки и замер ставят себя сразу после `new`).
@@ -221,6 +237,11 @@ impl Mailer {
             bar,
             search,
             toasts,
+            summary,
+            menu: None,
+            refocus: false,
+            offline: Default::default(),
+            offline_ticking: false,
             backend: Backend::Demo,
             live: Default::default(),
             compose: Default::default(),
@@ -275,6 +296,11 @@ impl Mailer {
         self.meetings_created(created, cx);
         self.on_settings_sync(ev, cx);
         self.on_lifecycle_sync(ev, cx);
+        match ev {
+            postman_core::sync::Event::Connection(c) => self.on_connection(*c, cx),
+            postman_core::sync::Event::Reported { error, .. } => self.on_reported(error.as_deref(), cx),
+            _ => {}
+        }
     }
 
     /// Действию нужен сервер, а его нет (демо): сказать тостом.
@@ -342,7 +368,11 @@ impl Render for Mailer {
         }
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus, cx);
+        }
         let l = crate::roles::look(cx);
+        let menu = self.context_menu(window, &l, cx);
         let picker = self.lifecycle_overlay(&l, cx);
         // Вкладка «Настройки» (S5-09) — на месте рейла и модуля.
         let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
@@ -379,10 +409,29 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::Last, _, cx| this.step(|l| l.count as isize, cx)))
             .on_action(cx.listener(|this, _: &mail::PageDown, _, cx| this.step(MailList::page, cx)))
             .on_action(cx.listener(|this, _: &mail::PageUp, _, cx| this.step(|l| -l.page(), cx)))
-            .on_action(cx.listener(|this, _: &mail::MarkRead, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(true), false, cx))))
-            .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.list.update(cx, |l, cx| l.set_flags(Some(false), false, cx))))
-            .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.list.update(cx, |l, cx| l.set_flags(None, true, cx))))
-            .on_action(cx.listener(|this, a: &mail::Categorize, _, cx| this.list.update(cx, |l, cx| l.toggle_category(a.key, cx))))
+            .on_action(cx.listener(|this, _: &mail::MarkRead, _, cx| this.mark(Some(true), cx)))
+            .on_action(cx.listener(|this, _: &mail::MarkUnread, _, cx| this.mark(Some(false), cx)))
+            .on_action(cx.listener(|this, _: &mail::ToggleFlag, _, cx| this.toggle_flag(cx)))
+            .on_action(cx.listener(|this, a: &mail::Categorize, _, cx| this.categorize(a.key, cx)))
+            // Выделение и массовые действия (S5-08).
+            .on_action(cx.listener(|this, _: &mail::SelectAll, _, cx| this.list.update(cx, |l, cx| l.select_all(cx))))
+            .on_action(cx.listener(|this, _: &mail::ClearSelection, _, cx| {
+                this.list.update(cx, |l, cx| {
+                    l.clear_selection(cx);
+                })
+            }))
+            .on_action(cx.listener(|this, _: &mail::SelectDown, _, cx| this.list.update(cx, |l, cx| l.extend(1, cx))))
+            .on_action(cx.listener(|this, _: &mail::SelectUp, _, cx| this.list.update(cx, |l, cx| l.extend(-1, cx))))
+            .on_action(cx.listener(|this, _: &mail::ContextMenu, _, cx| this.context_menu_key(cx)))
+            .on_action(cx.listener(|this, _: &mail::Move, _, cx| this.move_key(cx)))
+            .on_action(cx.listener(|this, _: &mail::Archive, _, cx| {
+                let ids = this.targets(cx);
+                this.ask(ids, crate::bulk::Ask::Archive, cx);
+            }))
+            .on_action(cx.listener(|this, _: &mail::ReportPhishing, _, cx| {
+                let ids = this.targets(cx);
+                this.ask(ids, crate::bulk::Ask::Phishing, cx);
+            }))
             .on_action(cx.listener(|this, _: &mail::Due, _, cx| this.open_picker(postman_core::marks::Kind::Due, cx)))
             .on_action(cx.listener(|this, _: &mail::Remind, _, cx| this.open_picker(postman_core::marks::Kind::Remind, cx)))
             .on_action(cx.listener(|this, _: &mail::Wait, _, cx| this.open_picker(postman_core::marks::Kind::Wait, cx)))
@@ -456,7 +505,11 @@ impl Render for Mailer {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))
             .on_action(cx.listener(|this, _: &search::Clear, window, cx| {
-                // Esc сначала закрывает историю уведомлений.
+                // Esc сначала закрывает контекстное меню (S5-08)…
+                if this.close_menu(cx) {
+                    return;
+                }
+                // …затем историю уведомлений.
                 if this.toasts.read(cx).is_history_open() {
                     this.toasts.update(cx, |t, cx| t.toggle_history(cx));
                     return;
@@ -475,6 +528,10 @@ impl Render for Mailer {
                 }
                 // …затем строку «Удалить навсегда?».
                 if this.cancel_purge(cx) {
+                    return;
+                }
+                // …затем выделение писем (S5-08).
+                if this.section == Section::Mail && this.list.update(cx, |l, cx| l.clear_selection(cx)) {
                     return;
                 }
                 // …затем запись клавиши и правку на месте в настройках, затем саму вкладку.
@@ -539,6 +596,8 @@ impl Render for Mailer {
             // Окно «Отменить» отправки — внизу, над строкой состояния; над ним — напоминания (S5-04).
             .children(self.undo_card(cx))
             .children(self.reminder_cards(cx))
+            // Контекстное меню письма (S5-08) — над всем, кроме тостов.
+            .children(menu)
             // Тосты — поверх всего, последним ребёнком.
             .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {
@@ -594,7 +653,10 @@ impl Mailer {
             body = body.child(self.folders.clone().cached(StyleRefinement::default().w(px(W_FOLDERS)).h_full().flex_none()));
             let list = || self.list.clone().cached(full());
             // Ответ — в области чтения над письмом (S5-06б): своя кэшируемая view сверху карточки.
+            // Выделено несколько писем — сводка на месте письма (S5-08).
+            let picked = self.list.read(cx).selection.len() > 1;
             let reading = || match self.compose.inline_view() {
+                _ if picked => card(l).flex_1().child(self.summary.clone().cached(full())),
                 Some(reply) => card(l)
                     .flex_1()
                     .child(reply.clone().cached(StyleRefinement::default().w_full().h(relative(INLINE_SHARE)).flex_none()))
