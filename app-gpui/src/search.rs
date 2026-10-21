@@ -369,6 +369,18 @@ pub(crate) fn hit_style(l: &Look) -> HighlightStyle {
     HighlightStyle { background_color: Some(l.pm(Pm::SearchHit)), ..Default::default() }
 }
 
+/// Текущее совпадение в письме (F3 / Shift+F3, S5-14): плотная янтарная заливка, как у просроченного срока, и
+/// черта снизу — без полужирного, чтобы строка не перестраивалась.
+pub(crate) fn current_hit_style(l: &Look) -> HighlightStyle {
+    let on = l.pm(Pm::DeadlineOn);
+    HighlightStyle {
+        background_color: Some(l.pm(Pm::DeadlineFill)),
+        color: Some(on),
+        underline: Some(UnderlineStyle { thickness: px(2.), color: Some(on), wavy: false }),
+        ..Default::default()
+    }
+}
+
 /// Текст с подсвеченными совпадениями; совпадений нет — просто текст.
 pub(crate) fn marked(text: &str, marks: Option<&[String]>, l: &Look) -> AnyElement {
     let spans = marks.map(|m| term_spans(text, m)).unwrap_or_default();

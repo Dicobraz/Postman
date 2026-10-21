@@ -24,6 +24,6 @@ search-refine-within = за { $n ->
 }
 search-refine-category = категория: { $name }
 search-empty = Ничего не найдено. Уберите уточнения или поищите везде.
-search-matches = Совпадения: { $n }
+search-matches = Совпадение { $k } из { $n }
 search-matches-none = Совпадения: нет в тексте
 search-matches-query = «{ $query }»

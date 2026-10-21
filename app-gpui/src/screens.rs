@@ -13,7 +13,8 @@
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
 //! `thread` (лента беседы, S5-05), `folder-menu`, `thread-stack`, `thread-list` (виды беседы, S5-05б), `lifecycle` и
-//! `overdue` (сроки, S5-04), `search`, `search-letter`, `palette` и `palette-query` (поиск и палитра команд, S5-10) —
+//! `overdue` (сроки, S5-04), `search`, `search-letter`, `palette` и `palette-query` (поиск и палитра команд, S5-10),
+//! `search-next` (F3 прокручивает к совпадению, S5-14) —
 //! только демо;
 //! вкладка «Настройки» (S5-09): `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts` и первый
 //! запуск `firstrun` — демо; `--live` без `POSTMAN_URL` — первый запуск (`firstrun`).
@@ -29,6 +30,10 @@ use crate::{Mailer, Section, sys};
 
 /// Кадров с выполненным условием до снимка: первые кадры после смены состояния ещё могут быть прежними.
 const SETTLE_FRAMES: u32 = 3;
+/// Снимок одного цвета (окно ещё не показано) — столько попыток; пауза перед второй, дальше — вдвое дольше
+/// (50, 100, 200, 400, 800 мс: до ~1,5 с всего).
+const CAPTURE_TRIES: u32 = 6;
+const CAPTURE_BACKOFF: Duration = Duration::from_millis(50);
 /// Сцена не готова за это время (воркер не ответил, страница не прочиталась) — ошибка.
 const SCENE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Запрос с результатами в демо-ящике (S5-10): последнее слово первой темы демо («Отчёт за квартал») — письма во
@@ -68,6 +73,9 @@ enum Scene {
     Search,
     /// Письмо из результатов поиска: подсветка в теме и тексте, строка «Совпадения».
     SearchLetter,
+    /// То же письмо (S5-14): прокручено до низа, затем F3 по кругу до первого совпадения (в теме) — оно прокручено в
+    /// вид, «Совпадение 1 из N». Готово, только если переход прокрутил письмо наверх.
+    SearchNext,
     /// Палитра команд Ctrl+K с пустым запросом: недавние — первыми.
     Palette,
     /// Палитра с запросом в другой раскладке.
@@ -148,7 +156,7 @@ enum Scene {
     Toasts,
 }
 
-const SCENES: [Scene; 53] = [
+const SCENES: [Scene; 54] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -165,6 +173,7 @@ const SCENES: [Scene; 53] = [
     Scene::InviteOutdated,
     Scene::Search,
     Scene::SearchLetter,
+    Scene::SearchNext,
     Scene::Palette,
     Scene::PaletteQuery,
     Scene::Calendar,
@@ -208,7 +217,7 @@ const SCENES: [Scene; 53] = [
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
-/// окно встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
+/// вкладка встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
 const LIVE_SCENES: [Scene; 10] = [
     Scene::List,
     Scene::Letter,
@@ -244,6 +253,7 @@ impl Scene {
             Scene::InviteOutdated => "invite-outdated",
             Scene::Search => "search",
             Scene::SearchLetter => "search-letter",
+            Scene::SearchNext => "search-next",
             Scene::Palette => "palette",
             Scene::PaletteQuery => "palette-query",
             Scene::Calendar => "calendar",
@@ -433,6 +443,18 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             };
             m.list.update(cx, |l, cx| l.select(i, cx));
         }
+        // Письмо прокручено вниз, затем F3 (`search.next_match`) по кругу — к первому совпадению.
+        Scene::SearchNext => m.reading.update(cx, |r, cx| {
+            let bottom = r.scroll.max_offset().y;
+            if bottom <= px(0.) {
+                return Err("the letter fits the reading pane: nothing to scroll".to_string());
+            }
+            r.scroll.set_offset(point(px(0.), -bottom));
+            for _ in 0..r.hits.get() {
+                r.step_hit(1, cx);
+            }
+            Ok(())
+        })?,
         Scene::Palette => {
             // Недавние — как после трёх запусков из палитры.
             m.recent = vec!["cmd:mail.due".into(), "folder:archive".into(), "cmd:mail.reply_all".into()];
@@ -819,6 +841,10 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let marked = m.reading.read(cx).marks.is_some();
             marked && selected.is_some() && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == selected)
         }
+        Scene::SearchNext => {
+            let r = m.reading.read(cx);
+            r.hits.get() > 0 && r.hit == 0 && r.scroll.offset().y.abs() < px(1.)
+        }
         Scene::Palette => m.palette.as_ref().is_some_and(|p| p.view.read(cx).shown() > 0),
         Scene::PaletteQuery => m.palette.as_ref().is_some_and(|p| p.view.read(cx).has_letters()),
         Scene::Calendar => {
@@ -1087,9 +1113,23 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     let name = format!("{}{}", scene.name(), d.suffix);
     let path = d.dir.join(format!("{name}.png"));
     let hwnd = sys::window_id(window).unwrap_or_else(|e| fail(scene, &e));
-    let task = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) });
+    let handle = window.window_handle();
     cx.spawn(async move |this, cx| {
-        let result = task.await;
+        // Снимок одного цвета — окно ещё не нарисовано (первый прогон после сборки: шейдеры, первый показ окна):
+        // попросить кадр и снять снова, с паузой вдвое дольше каждый раз. Обычно хватает первой попытки.
+        let mut result = Err(Shot::Failed(String::new()));
+        for attempt in 0..CAPTURE_TRIES {
+            if attempt > 0 {
+                let _ = cx.update_window(handle, |_, window, _| window.refresh());
+                cx.background_executor().timer(CAPTURE_BACKOFF * (1 << (attempt - 1))).await;
+            }
+            let path = path.clone();
+            result = cx.background_spawn(async move { shoot(hwnd, &path).map(|size| (path, size)) }).await;
+            if !matches!(result, Err(Shot::Blank(_))) {
+                break;
+            }
+        }
+        let result = result.map_err(Shot::message);
         let _ = this.update(cx, |m, cx| {
             match result {
                 Ok((path, (w, h))) => println!("screen {name} {} {w}x{h}", path.display()),
@@ -1123,12 +1163,29 @@ fn remember_composer(m: &mut Mailer, cx: &App) {
     }
 }
 
-fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), String> {
-    let img = sys::capture(hwnd)?;
-    if uniform(&img.rgba) {
-        return Err(format!("capture {}x{} is a single color: the window is not drawn", img.width, img.height));
+/// Неудачный снимок: окно ещё не нарисовано (повторить) или ошибка.
+enum Shot {
+    Blank(String),
+    Failed(String),
+}
+
+impl Shot {
+    fn message(self) -> String {
+        match self {
+            Shot::Blank(e) | Shot::Failed(e) => e,
+        }
     }
-    write_png(path, &img).map_err(|e| format!("{}: {e}", path.display()))?;
+}
+
+fn shoot(hwnd: isize, path: &Path) -> Result<(u32, u32), Shot> {
+    let img = sys::capture(hwnd).map_err(Shot::Failed)?;
+    if uniform(&img.rgba) {
+        return Err(Shot::Blank(format!(
+            "capture {}x{} is a single color after {CAPTURE_TRIES} tries: the window is not drawn",
+            img.width, img.height
+        )));
+    }
+    write_png(path, &img).map_err(|e| Shot::Failed(format!("{}: {e}", path.display())))?;
     Ok((img.width, img.height))
 }
 
@@ -1161,7 +1218,22 @@ fn finish(code: i32) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::uniform;
+    use super::{LIVE_SCENES, SCENES, SIGNIN_SCENES, uniform};
+
+    /// Список сцен в CLAUDE.md («Снимки экранов») — по `SCENES` и `LIVE_SCENES`: каждая сцена названа там
+    /// (`` `имя` ``), демо — до строки про `--live`, живые — после неё.
+    #[test]
+    fn every_scene_is_listed_in_claude_md() {
+        let doc = include_str!("../../CLAUDE.md").replace("\r\n", "\n");
+        let section = doc.split("### Снимки экранов").nth(1).and_then(|s| s.split("\n## ").next()).unwrap();
+        let (demo, live) = section.split_once("`--screens <каталог> --live`").unwrap();
+        for s in SCENES {
+            assert!(demo.contains(&format!("`{}`", s.name())), "CLAUDE.md: нет сцены `{}` в списке снимков", s.name());
+        }
+        for s in LIVE_SCENES.iter().chain(&SIGNIN_SCENES) {
+            assert!(live.contains(&format!("`{}`", s.name())), "CLAUDE.md: нет сцены `{}` в списке --live", s.name());
+        }
+    }
 
     #[test]
     fn one_color_capture_is_rejected() {

@@ -3,6 +3,7 @@
 //! ссылки — кликабельные диапазоны того же текста. Картинки `cid:` (уже декодированные воркером) — отдельными
 //! элементами между кусками текста абзаца; пока картинки нет — её подпись.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,44 +19,103 @@ use crate::roles::{Look, Pm, look};
 pub type Images = HashMap<String, Arc<RenderImage>>;
 
 pub fn blocks(bs: &[Block], key: &str, images: &Images, cx: &mut App) -> Vec<AnyElement> {
-    blocks_marked(bs, key, images, &[], cx)
+    blocks_marked(bs, key, images, &Hits::new(&[], 0, 0), cx)
 }
 
-/// Блоки с подсветкой совпадений поиска (S5-10): слова `marks` (`postman_core::fuzzy::term_spans`) — янтарной
-/// подложкой поверх своих выделений.
-pub fn blocks_marked(bs: &[Block], key: &str, images: &Images, marks: &[String], cx: &mut App) -> Vec<AnyElement> {
-    bs.iter().enumerate().map(|(n, b)| block(b, &format!("{key}.{n}"), images, marks, cx)).collect()
+/// Совпадения поиска при отрисовке письма (S5-10, S5-14): слова, номер текущего и счёт по порядку чтения — тот же
+/// порядок, что видит пользователь (тема, затем текст сверху вниз). Число совпадений — [`Hits::seen`] после отрисовки.
+pub struct Hits<'a> {
+    words: &'a [String],
+    current: usize,
+    /// Сколько совпадений уже нарисовано: номер следующего.
+    seen: Cell<usize>,
+    /// Прокрутить к текущему (после перехода F3 / Shift+F3).
+    reveal: Option<Reveal>,
 }
 
-/// Сколько совпадений поиска в тексте письма (абзацы, заголовки, цитаты, списки, таблицы).
-pub fn count_marks(bs: &[Block], marks: &[String]) -> usize {
-    fn inl(items: &[Inline], out: &mut String) {
-        for i in items {
-            match i {
-                Inline::Text { text, .. } => out.push_str(text),
-                Inline::LineBreak => out.push('\n'),
-                Inline::Link { content, .. } => inl(content, out),
-                Inline::Image { .. } => {}
-            }
+/// Куда прокручивать: прокрутка области чтения и её view (перерисовать со сдвигом).
+#[derive(Clone)]
+pub struct Reveal {
+    pub scroll: ScrollHandle,
+    pub view: EntityId,
+}
+
+impl<'a> Hits<'a> {
+    /// `start` — совпадений до текста (в теме письма).
+    pub fn new(words: &'a [String], current: usize, start: usize) -> Self {
+        Hits { words, current, seen: Cell::new(start), reveal: None }
+    }
+
+    pub fn with_reveal(self, reveal: Option<Reveal>) -> Self {
+        Hits { reveal, ..self }
+    }
+
+    pub fn seen(&self) -> usize {
+        self.seen.get()
+    }
+
+    /// Совпадения в тексте `text` следующими номерами; `Some(k)` — k-е из них текущее.
+    fn take(&self, text: &str) -> (Vec<std::ops::Range<usize>>, Option<usize>) {
+        if self.words.is_empty() {
+            return (Vec::new(), None);
         }
+        let spans = postman_core::fuzzy::term_spans(text, self.words);
+        let first = self.seen.get();
+        self.seen.set(first + spans.len());
+        let current = self.current.checked_sub(first).filter(|&k| k < spans.len());
+        (spans, current)
     }
-    let count = |items: &[Inline]| {
-        let mut t = String::new();
-        inl(items, &mut t);
-        postman_core::fuzzy::term_spans(&t, marks).len()
-    };
-    if marks.is_empty() {
-        return 0;
-    }
-    bs.iter()
-        .map(|b| match b {
-            Block::Paragraph { content, .. } | Block::Heading { content, .. } => count(content),
-            Block::Quote(inner) => count_marks(inner, marks),
-            Block::List { items, .. } => items.iter().map(|i| count_marks(i, marks)).sum(),
-            Block::Table(rows) => rows.iter().flatten().map(|c| count(c)).sum(),
-            Block::Code(_) | Block::Rule => 0,
-        })
-        .sum()
+}
+
+/// Текст с совпадениями поиска поверх своих выделений `hl`: обычные — янтарной подложкой, текущее — плотной
+/// (S5-14). Второе — начало текущего совпадения в тексте, если оно здесь.
+pub fn hit_text(text: String, mut hl: Vec<(std::ops::Range<usize>, HighlightStyle)>, hits: &Hits, l: &Look) -> (StyledText, Option<usize>) {
+    let (spans, current) = hits.take(&text);
+    let (hit, now) = (crate::search::hit_style(l), crate::search::current_hit_style(l));
+    let at = current.and_then(|k| spans.get(k)).map(|r| r.start);
+    hl.extend(spans.into_iter().enumerate().map(|(k, r)| (r, if Some(k) == current { now } else { hit })));
+    (StyledText::new(text).with_highlights(normalize(hl)), at)
+}
+
+/// Элемент текста с текущим совпадением: обёртка с невидимым холстом поверх — он после раскладки текста знает, где
+/// совпадение, и сдвигает прокрутку области чтения так, чтобы оно было видно (на трети высоты). Без перехода
+/// (`reveal` нет) — только обёртка: раскладка та же, текст не прыгает, когда совпадение становится текущим.
+pub fn reveal_at(el: AnyElement, layout: TextLayout, at: usize, hits: &Hits) -> AnyElement {
+    let reveal = hits.reveal.clone();
+    div()
+        .relative()
+        .child(el)
+        .children(reveal.map(|r| {
+            // Холст — после текста в той же обёртке: раскладка и prepaint текста к этому моменту сделаны.
+            canvas(
+                move |_, window, _| {
+                    let Some(pos) = layout.position_for_index(at) else { return };
+                    let (view, offset, max) = (r.scroll.bounds(), r.scroll.offset(), r.scroll.max_offset());
+                    if pos.y >= view.top() && pos.y + layout.line_height() <= view.bottom() {
+                        return;
+                    }
+                    let y = (offset.y + view.top() + view.size.height / 3. - pos.y).min(px(0.)).max(-max.y);
+                    if (y - offset.y).abs() < px(1.) {
+                        return;
+                    }
+                    r.scroll.set_offset(point(offset.x, y));
+                    // Область чтения закэширована: новый сдвиг — со следующего кадра, с её перерисовкой.
+                    let view = r.view;
+                    window.on_next_frame(move |_, cx| cx.notify(view));
+                    window.request_animation_frame();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        }))
+        .into_any_element()
+}
+
+/// Блоки с подсветкой совпадений поиска (S5-10): слова `hits` (`postman_core::fuzzy::term_spans`) — янтарной
+/// подложкой поверх своих выделений, текущее — плотной.
+pub fn blocks_marked(bs: &[Block], key: &str, images: &Images, hits: &Hits, cx: &mut App) -> Vec<AnyElement> {
+    bs.iter().enumerate().map(|(n, b)| block(b, &format!("{key}.{n}"), images, hits, cx)).collect()
 }
 
 /// Все `cid:` картинок документа, по порядку.
@@ -85,11 +145,11 @@ pub fn cids(doc: &Document) -> Vec<String> {
     out
 }
 
-fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) -> AnyElement {
+fn block(b: &Block, key: &str, images: &Images, hits: &Hits, cx: &mut App) -> AnyElement {
     let l = &*look(cx);
     match b {
         Block::Paragraph { align, content } => {
-            let d = div().child(paragraph(content, key, images, marks, l));
+            let d = div().child(paragraph(content, key, images, hits, l));
             match align {
                 Align::Center => d.text_center(),
                 Align::End => d.text_right(),
@@ -104,7 +164,7 @@ fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) 
                 3 => 17.,
                 _ => 15.,
             };
-            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images, marks, l)).into_any_element()
+            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images, hits, l)).into_any_element()
         }
         Block::Quote(inner) => div()
             .flex()
@@ -114,7 +174,7 @@ fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) 
             .border_l_2()
             .border_color(l.c(Role::StrokeStrong))
             .text_color(l.text2())
-            .children(blocks_marked(inner, key, images, marks, cx))
+            .children(blocks_marked(inner, key, images, hits, cx))
             .into_any_element(),
         Block::List { ordered, items } => div()
             .flex()
@@ -126,7 +186,7 @@ fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) 
                     .flex()
                     .gap_2()
                     .child(div().w(px(16.)).child(marker))
-                    .child(div().flex().flex_col().flex_1().children(blocks_marked(item, &format!("{key}.{n}"), images, marks, cx)))
+                    .child(div().flex().flex_col().flex_1().children(blocks_marked(item, &format!("{key}.{n}"), images, hits, cx)))
             }))
             .into_any_element(),
         Block::Code(code) => div().p_2().rounded_md().bg(l.fill()).font_family("Cascadia Mono").child(code.clone()).into_any_element(),
@@ -139,7 +199,7 @@ fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) 
                     .flex()
                     .when(r % 2 == 1, |d| d.bg(l.fill_passive()))
                     .children(row.iter().enumerate().map(|(c, cell)| {
-                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images, marks, l))
+                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images, hits, l))
                     }))
             }))
             .into_any_element(),
@@ -238,17 +298,17 @@ fn pieces<'a>(items: &'a [Inline], shown: impl Fn(&str) -> bool) -> Vec<Piece<'a
     out
 }
 
-fn paragraph(items: &[Inline], key: &str, images: &Images, marks: &[String], l: &Look) -> AnyElement {
+fn paragraph(items: &[Inline], key: &str, images: &Images, hits: &Hits, l: &Look) -> AnyElement {
     let parts = pieces(items, |cid| images.contains_key(cid));
     if !parts.iter().any(|p| matches!(p, Piece::Image(_))) {
-        return text(items, key, marks, l);
+        return text(items, key, hits, l);
     }
     div()
         .flex()
         .flex_col()
         .gap_1()
         .children(parts.into_iter().enumerate().map(|(n, p)| match p {
-            Piece::Text(t) => text(t, &format!("{key}.{n}"), marks, l),
+            Piece::Text(t) => text(t, &format!("{key}.{n}"), hits, l),
             Piece::Image(cid) => match images.get(cid) {
                 Some(image) => picture(image),
                 None => div().into_any_element(),
@@ -263,24 +323,28 @@ fn picture(image: &Arc<RenderImage>) -> AnyElement {
     crate::preview::picture(image, px(size.width.0 as f32)).into_any_element()
 }
 
-fn text(items: &[Inline], key: &str, marks: &[String], l: &Look) -> AnyElement {
+fn text(items: &[Inline], key: &str, hits: &Hits, l: &Look) -> AnyElement {
     let (mut text, mut hl, mut links) = (String::new(), Vec::new(), Vec::new());
     flatten(items, &mut text, &mut hl, &mut links, l);
-    let hit = crate::search::hit_style(l);
-    hl.extend(postman_core::fuzzy::term_spans(&text, marks).into_iter().map(|r| (r, hit)));
-    let styled = StyledText::new(text).with_highlights(normalize(hl));
-    if links.is_empty() {
-        return styled.into_any_element();
+    let (styled, at) = hit_text(text, hl, hits, l);
+    let layout = styled.layout().clone();
+    let el = if links.is_empty() {
+        styled.into_any_element()
+    } else {
+        let ranges: Vec<_> = links.iter().map(|(r, _, _)| r.clone()).collect();
+        let hrefs: Vec<String> = links.into_iter().map(|(_, h, _)| h).collect();
+        InteractiveText::new(SharedString::from(key.to_string()), styled)
+            .on_click(ranges, move |ix, _window, cx| {
+                if let Some(h) = hrefs.get(ix) {
+                    cx.open_url(h);
+                }
+            })
+            .into_any_element()
+    };
+    match at {
+        Some(at) => reveal_at(el, layout, at, hits),
+        None => el,
     }
-    let ranges: Vec<_> = links.iter().map(|(r, _, _)| r.clone()).collect();
-    let hrefs: Vec<String> = links.into_iter().map(|(_, h, _)| h).collect();
-    InteractiveText::new(SharedString::from(key.to_string()), styled)
-        .on_click(ranges, move |ix, _window, cx| {
-            if let Some(h) = hrefs.get(ix) {
-                cx.open_url(h);
-            }
-        })
-        .into_any_element()
 }
 
 /// gpui требует непересекающиеся выделения по возрастанию: ссылка поверх жирного и т.п. сливаем.

@@ -67,11 +67,12 @@ impl Phase {
         }
     }
 
-    /// `name_p50 name_p99 name_max name_cpu_pct name_ui_thread_cpu_pct`.
+    /// `name_p50 name_p95 name_p99 name_max name_cpu_pct name_ui_thread_cpu_pct`.
     fn report(&mut self, name: &str) -> String {
         let (p50, p99, max) = stats(&mut self.frames);
+        let p95 = quantile(&self.frames, 0.95);
         format!(
-            "{name}_p50={p50:.2} {name}_p99={p99:.2} {name}_max={max:.2} {name}_cpu_pct={:.0} {name}_ui_thread_cpu_pct={:.0}",
+            "{name}_p50={p50:.2} {name}_p95={p95:.2} {name}_p99={p99:.2} {name}_max={max:.2} {name}_cpu_pct={:.0} {name}_ui_thread_cpu_pct={:.0}",
             self.cpu, self.ui_cpu
         )
     }
@@ -319,6 +320,11 @@ pub fn finish(line: String) {
     });
 }
 
+/// Простой с планировщиком жизненного цикла (S5-14): проход по ящику в начале простоя и таймер к ближайшему сроку.
+pub const IDLE_LIFECYCLE_VAR: &str = "POSTMAN_BENCH_IDLE_LIFECYCLE";
+/// Простой без связи (S5-14): строка «нет связи» с обратным отсчётом повтора (таймер раз в секунду).
+pub const IDLE_OFFLINE_VAR: &str = "POSTMAN_BENCH_IDLE_OFFLINE";
+
 /// Порог рабочего набора в простое, МБ (S4-08): задан и превышен — бенч выходит с кодом 1 (для CI и стенда).
 pub const MAX_IDLE_RSS_VAR: &str = "POSTMAN_BENCH_MAX_IDLE_RSS_MB";
 
@@ -360,8 +366,12 @@ fn stats(v: &mut [f32]) -> (f32, f32, f32) {
         return (0.0, 0.0, 0.0);
     }
     v.sort_by(f32::total_cmp);
-    let p = |q: f32| v[((v.len() - 1) as f32 * q) as usize];
-    (p(0.5), p(0.99), v[v.len() - 1])
+    (quantile(v, 0.5), quantile(v, 0.99), v[v.len() - 1])
+}
+
+/// Квантиль `q` отсортированных значений (пусто — 0).
+fn quantile(sorted: &[f32], q: f32) -> f32 {
+    sorted.get(((sorted.len().saturating_sub(1)) as f32 * q) as usize).copied().unwrap_or(0.0)
 }
 
 /// Рабочий набор процесса (RSS / Working Set), байты.

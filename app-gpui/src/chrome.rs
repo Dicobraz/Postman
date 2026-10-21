@@ -80,6 +80,25 @@ pub(crate) mod glyph {
     pub(crate) const OFFLINE: char = '\u{F384}';
     /// Беседа (меню папки «Вид беседы», S5-05б).
     pub(crate) const CONVERSATION: char = '\u{E8F2}';
+    // Значки команд палитры (S5-14) и переход по совпадениям поиска.
+    pub(crate) const UP: char = '\u{E74A}';
+    pub(crate) const DOWN: char = '\u{E74B}';
+    pub(crate) const CHEVRON_UP: char = '\u{E70E}';
+    pub(crate) const CHEVRON_LEFT: char = '\u{E76B}';
+    pub(crate) const SELECT_ALL: char = '\u{E8B3}';
+    pub(crate) const CLEAR: char = '\u{E894}';
+    pub(crate) const PHISHING: char = '\u{E730}';
+    pub(crate) const SAVE: char = '\u{E74E}';
+    pub(crate) const GLOBE: char = '\u{E774}';
+    pub(crate) const HISTORY: char = '\u{E81C}';
+    pub(crate) const TODAY: char = '\u{E8D1}';
+    pub(crate) const BOLD: char = '\u{E8DD}';
+    pub(crate) const ITALIC: char = '\u{E8DB}';
+    pub(crate) const UNDERLINE: char = '\u{E8DC}';
+    pub(crate) const ADD_CONTACT: char = '\u{E8FA}';
+    pub(crate) const EDIT: char = '\u{E70F}';
+    pub(crate) const COPY: char = '\u{E8C8}';
+    pub(crate) const TENTATIVE: char = '\u{E897}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).

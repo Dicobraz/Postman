@@ -21,6 +21,6 @@ search-refine-within = last { $n ->
 }
 search-refine-category = category: { $name }
 search-empty = Nothing found. Remove refinements or search everywhere.
-search-matches = Matches: { $n }
+search-matches = Match { $k } of { $n }
 search-matches-none = Matches: none in the text
 search-matches-query = “{ $query }”
