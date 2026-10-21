@@ -90,13 +90,23 @@ pub(crate) fn load_stored(dir: &Path) -> Stored {
     }
 }
 
-/// Запомнить учётную запись после успешного входа: адрес и логин — в файл, пароль — в диспетчер.
-pub(crate) fn remember(dir: &Path, account: &Account) -> Result<(), String> {
+/// Запомнить учётную запись после успешного входа: адрес и логин — в файл, пароль — в диспетчер (`store`) или
+/// нигде: тогда прежний пароль этой записи из диспетчера удаляется, при запуске — строка входа с адресом и логином.
+pub(crate) fn remember(dir: &Path, account: &Account, store: bool) -> Result<(), String> {
     let s = Settings::of(account);
     if let Auth::Basic { password, .. } = &account.auth {
-        sys::credentials::write(&s.credential_target(), &s.user, password)?;
+        if store {
+            sys::credentials::write(&s.credential_target(), &s.user, password)?;
+        } else {
+            sys::credentials::delete(&s.credential_target())?;
+        }
     }
     s.save(dir).map_err(|e| format!("{SETTINGS_FILE}: {e}"))
+}
+
+/// Пароль учётной записи лежит в диспетчере учётных данных (чтение — не в потоке интерфейса).
+pub(crate) fn password_stored(s: &Settings) -> bool {
+    matches!(sys::credentials::read(&s.credential_target()), Ok(Some(_)))
 }
 
 /// `--sign-out`: забыть сохранённую учётную запись (кэш остаётся).

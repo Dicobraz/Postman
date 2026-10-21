@@ -39,6 +39,8 @@ pub(crate) struct Live {
     pub(crate) signin: Option<Entity<SignIn>>,
     /// Вход со строки входа: запомнить после первого ответа сервера, при ошибке — вернуть строку входа.
     pending: Option<Account>,
+    /// Пароль входа со строки входа — в диспетчер учётных данных (`false` — «Не хранить»).
+    pending_store: bool,
     index: Index,
     extractor: Option<Extractor>,
     search: Option<LiveSearch>,
@@ -358,7 +360,8 @@ impl Mailer {
         if plan.signed_in
             && let Some(account) = self.live.pending.take()
         {
-            self.remember(account, cx);
+            let store = self.live.pending_store;
+            self.remember(account, store, cx);
         }
         if let Some(s) = plan.status {
             self.live.status = status_text(&s);
@@ -560,10 +563,12 @@ impl Mailer {
         }
         self.save_labels(&book, cx);
         self.list.update(cx, |l, cx| l.set_labels(book, cx));
+        // Таблица во вкладке «Настройки → Категории» — та же.
+        self.categories_changed(cx);
     }
 
     /// Локальная копия таблиц — в файл рядом с кэшем (в фоне).
-    fn save_labels(&self, book: &postman_core::labels::Book, cx: &mut Context<Self>) {
+    pub(crate) fn save_labels(&self, book: &postman_core::labels::Book, cx: &mut Context<Self>) {
         use postman_core::labels::{LocalFile, Store as _};
         let Some(path) = self.live.path.clone() else { return };
         let book = book.clone();
@@ -576,9 +581,11 @@ impl Mailer {
     }
 
     /// Вход подтверждён сервером: адрес и логин — в файл, пароль — в диспетчер учётных данных (в фоне).
-    fn remember(&mut self, account: Account, cx: &mut Context<Self>) {
+    fn remember(&mut self, account: Account, store: bool, cx: &mut Context<Self>) {
         self.live.signin = None;
-        let task = cx.background_spawn(async move { account::remember(&crate::data_dir(), &account) });
+        // Аккаунт добавляли из настроек: карточка добавления там больше не нужна.
+        self.signed_in(cx);
+        let task = cx.background_spawn(async move { account::remember(&crate::data_dir(), &account, store) });
         cx.spawn(async move |this, cx| {
             if let Err(e) = task.await {
                 tracing::warn!("remember account: {e}");
@@ -718,22 +725,59 @@ impl Mailer {
         });
     }
 
-    /// Нет учётной записи: строка входа на месте списка писем.
+    /// Нет учётной записи (первый запуск): добавление аккаунта на месте экрана почты.
     pub(crate) fn show_signin(&mut self, prefill: Option<Settings>, window: &mut Window, cx: &mut Context<Self>) {
-        let panel = cx.new(|cx| SignIn::new(prefill, window, cx));
+        let panel = cx.new(|cx| SignIn::new(prefill, true, window, cx));
         self.watch_signin(&panel, window, cx);
         self.live.signin = Some(panel);
         cx.notify();
     }
 
-    fn watch_signin(&mut self, panel: &Entity<SignIn>, window: &mut Window, cx: &mut Context<Self>) {
-        self._subscriptions.push(cx.subscribe_in(panel, window, |this, _, Submit(account), window, cx| {
-            this.sign_in(account.clone(), window, cx);
+    pub(crate) fn watch_signin(&mut self, panel: &Entity<SignIn>, window: &mut Window, cx: &mut Context<Self>) {
+        self._subscriptions.push(cx.subscribe_in(panel, window, |this, panel, s: &Submit, window, cx| {
+            // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
+            if this.live.signin.is_none() {
+                this.live.signin = Some(panel.clone());
+            }
+            this.sign_in(s.account.clone(), s.store, window, cx);
+        }));
+        self._subscriptions.push(cx.subscribe_in(panel, window, |this, _, _: &crate::signin::Cancel, _, cx| {
+            this.cancel_add_account(cx);
         }));
     }
 
-    /// «Войти»: открыть кэш этой учётной записи (в фоне), затем экран на нём и синхронизацию.
-    fn sign_in(&mut self, account: Account, window: &mut Window, cx: &mut Context<Self>) {
+    /// Адрес и логин учётной записи, с которой идёт синхронизация (для «Настройки → Аккаунты»).
+    pub(crate) fn live_account(&self) -> Option<&Settings> {
+        self.live.account.as_ref()
+    }
+
+    /// Файл кэша учётной записи (рядом — её настройки: подписи и шаблоны); демо — `None`.
+    pub(crate) fn account_cache(&self) -> Option<PathBuf> {
+        self.live.path.clone()
+    }
+
+    /// Удалить аккаунт («Настройки → Аккаунты»): синхронизация останавливается, адрес и логин — из файла, пароль — из
+    /// диспетчера учётных данных (в фоне); кэш на диске остаётся. Экран — первый запуск.
+    pub(crate) fn remove_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!("account removed by the user");
+        cx.background_spawn(async move { account::forget(&crate::data_dir()) }).detach();
+        let cache = match Cache::open_in_memory() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("in-memory store: {e}");
+                return;
+            }
+        };
+        let screens = self.screens.take();
+        // Прежний поток синхронизации закончится сам: канал команд закрывается вместе с экраном.
+        SESSION.fetch_add(1, Ordering::Relaxed);
+        *self = Mailer { screens, ..Mailer::new(cache, None, window, cx) };
+        self.show_signin(None, window, cx);
+    }
+
+    /// «Проверить и подключить»: открыть кэш этой учётной записи (в фоне), затем экран на нём и синхронизацию.
+    fn sign_in(&mut self, account: Account, store: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.live.pending_store = store;
         let path = account::cache_path(&crate::data_dir(), &account);
         // Снова вход в ту же учётную запись (сервер отклонил пароль): кэш и экран уже её.
         if self.live.path.as_ref() == Some(&path) {
@@ -769,7 +813,9 @@ impl Mailer {
     ) {
         let panel = self.live.signin.take();
         let screens = self.screens.take();
+        let store = self.live.pending_store;
         *self = Mailer { screens, ..Mailer::new(cache, None, window, cx) };
+        self.live.pending_store = store;
         if let Some(panel) = panel {
             self.watch_signin(&panel, window, cx);
             self.live.signin = Some(panel);

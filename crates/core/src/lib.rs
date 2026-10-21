@@ -10,6 +10,7 @@ pub mod indexer;
 pub mod invite;
 pub mod labels;
 pub mod palette;
+pub mod prefs;
 pub mod render;
 pub mod rules;
 pub mod schedule;

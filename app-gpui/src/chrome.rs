@@ -114,10 +114,7 @@ impl Mailer {
     fn tab_title(&self, t: &Tab) -> String {
         match t.kind {
             TabKind::Mail => tr!("frame-tab-mail"),
-            TabKind::Settings => match &self.settings.panel {
-                Some(crate::settings::Panel::Rules(_)) => tr!("frame-tab-rules"),
-                _ => tr!("frame-tab-vacation"),
-            },
+            TabKind::Settings => tr!("frame-tab-settings"),
         }
     }
 
@@ -241,9 +238,7 @@ impl Mailer {
                 Box::new(view::Contacts)
             }))
             .child(div().flex_1())
-            .child(button("rail-settings", glyph::SETTINGS, "frame-rail-settings", settings_tab, || {
-                Box::new(settings::Vacation)
-            }))
+            .child(button("rail-settings", glyph::SETTINGS, "frame-rail-settings", settings_tab, || Box::new(settings::Open)))
     }
 
     /// Строка состояния: элементы, синхронизация, квота, последнее нажатие, песочница, уведомления.
@@ -278,7 +273,7 @@ impl Mailer {
             )
     }
 
-    /// Меню «…» под командной строкой справа: автоответы и правила (настройки — вкладкой в S5-09).
+    /// Меню «…» под командной строкой справа: автоответы, правила и все настройки (вкладка «Настройки», S5-09).
     pub(crate) fn more_menu(&self, l: &Look, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.more.open {
             return None;
@@ -323,6 +318,7 @@ impl Mailer {
             .shadow_lg()
             .child(item("more-vacation", glyph::VACATION, "frame-vacation", || Box::new(settings::Vacation)))
             .child(item("more-rules", glyph::RULES, "frame-rules", || Box::new(settings::Rules)))
+            .child(item("more-settings", glyph::SETTINGS, "frame-settings", || Box::new(settings::Open)))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.close_more(cx);
             }));
