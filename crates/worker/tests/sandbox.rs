@@ -140,14 +140,14 @@ fn fixture(name: &str) -> Vec<u8> {
 fn preview_round_trip() {
     use postman_worker::{OfficeFormat, Preview, PreviewKind};
     let mut c = client();
-    let (p, px) = c.preview(PreviewKind::Image, &fixture("img.png"), 0, 50).unwrap();
+    let (p, px) = c.preview(PreviewKind::Image, &fixture("img.png"), 0, 50, 0).unwrap();
     let Preview::Image { width, height, source, format } = p else { panic!("{p:?}") };
     assert_eq!((source, format.as_str()), ((300, 200), "PNG"));
     assert!(width <= 50 && height <= 50);
     assert_eq!(px.unwrap().pixels.len(), (width * height * 4) as usize);
 
     let pdf = fixture("report.pdf");
-    let (p, px) = c.preview(PreviewKind::Pdf, &pdf, 1, 800).unwrap();
+    let (p, px) = c.preview(PreviewKind::Pdf, &pdf, 1, 800, 0).unwrap();
     let Preview::Pdf { width, height, page, pages, title } = p else { panic!("{p:?}") };
     assert_eq!((page, pages, title.as_deref()), (1, 3, Some("Quarterly report Q3")));
     assert_eq!(height, 800);
@@ -157,25 +157,25 @@ fn preview_round_trip() {
     assert!(px.pixels.as_chunks::<4>().0.iter().any(|p| p[0] < 100));
     assert!(px.pixels.as_chunks::<4>().0.iter().filter(|p| p[0] > 250).count() > px.pixels.len() / 8);
     // Страница за концом — последняя.
-    let (p, _) = c.preview(PreviewKind::Pdf, &pdf, 99, 400).unwrap();
+    let (p, _) = c.preview(PreviewKind::Pdf, &pdf, 99, 400, 0).unwrap();
     assert!(matches!(p, Preview::Pdf { page: 2, pages: 3, .. }), "{p:?}");
 
-    let (p, _) = c.preview(PreviewKind::Archive, &fixture("screens.zip"), 0, 0).unwrap();
+    let (p, _) = c.preview(PreviewKind::Archive, &fixture("screens.zip"), 0, 0, 0).unwrap();
     let Preview::Archive(l) = p else { panic!("{p:?}") };
     assert_eq!(l.files, 8);
     assert!(l.entries.iter().any(|e| e.name == "tools/collect.bat" && e.modified.as_deref() == Some("2026-10-14 11:20")));
 
-    let (p, _) = c.preview(PreviewKind::Office, &fixture("budget.xlsm"), 0, 0).unwrap();
+    let (p, _) = c.preview(PreviewKind::Office, &fixture("budget.xlsm"), 0, 0, 0).unwrap();
     let Preview::Office(s) = p else { panic!("{p:?}") };
     assert_eq!((s.format, s.macros), (OfficeFormat::Ooxml, true));
     assert_eq!(s.modules, ["Module1", "Module2", "ThisWorkbook"]);
 
-    let (p, _) = c.preview(PreviewKind::Text, "Дата;Сумма\r\n21.10;100".as_bytes(), 0, 0).unwrap();
+    let (p, _) = c.preview(PreviewKind::Text, "Дата;Сумма\r\n21.10;100".as_bytes(), 0, 0, 0).unwrap();
     assert_eq!(p, Preview::Text { text: "Дата;Сумма\n21.10;100".into(), truncated: false });
 
-    assert!(c.preview(PreviewKind::Pdf, b"%PDF-1.7 broken", 0, 800).is_err());
-    assert!(c.preview(PreviewKind::Archive, b"PK\x03\x04", 0, 0).is_err());
-    assert!(c.preview(PreviewKind::Image, &vec![0; 60 * 1024 * 1024], 0, 0).is_err(), "больше предела — отказ до отправки");
+    assert!(c.preview(PreviewKind::Pdf, b"%PDF-1.7 broken", 0, 800, 0).is_err());
+    assert!(c.preview(PreviewKind::Archive, b"PK\x03\x04", 0, 0, 0).is_err());
+    assert!(c.preview(PreviewKind::Image, &vec![0; 60 * 1024 * 1024], 0, 0, 0).is_err(), "больше предела — отказ до отправки");
     assert!(c.render(&Request::Text("ok".into())).is_ok());
 }
 

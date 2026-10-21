@@ -2,7 +2,7 @@
 //! макросы. Только здесь, в песочнице: UI получает пиксели, строки и числа.
 //!
 //! Пределы — на каждый запрос: вход не больше [`MAX_INPUT`], картинка и страница — не больше `max_side` по
-//! стороне, текст — [`MAX_TEXT`] байт, оглавление — [`MAX_LISTED`] строк; архив не распаковывается (размеры —
+//! стороне (страница PDF — шириной `width`, если задана), текст — [`MAX_TEXT`] байт, оглавление — [`MAX_LISTED`] строк; архив не распаковывается (размеры —
 //! из центрального каталога), из OOXML читается только `vbaProject.bin` и не больше [`MAX_VBA`]. Время
 //! ограничивает сторож в `serve` (процесс завершается с [`crate::EXIT_TIME`]), память — Job Object песочницы.
 
@@ -106,8 +106,9 @@ pub enum OfficeFormat {
     Unknown,
 }
 
-/// Просмотр в песочнице: итог и пиксели (пусто, если их нет).
-pub fn preview(kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32) -> Result<(Preview, Vec<u8>), String> {
+/// Просмотр в песочнице: итог и пиксели (пусто, если их нет). `width` — ширина страницы PDF в пикселях (по ширине
+/// панели просмотра); 0 — страница целиком в `max_side`.
+pub fn preview(kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32, width: u32) -> Result<(Preview, Vec<u8>), String> {
     if bytes.len() > MAX_INPUT {
         return Err("файл слишком большой для просмотра".into());
     }
@@ -117,7 +118,7 @@ pub fn preview(kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32) -> Res
             let p = Preview::Image { width: img.width, height: img.height, source, format: format.into() };
             Ok((p, img.pixels))
         }
-        PreviewKind::Pdf => pdf(bytes, page, max_side),
+        PreviewKind::Pdf => pdf(bytes, page, max_side, width),
         PreviewKind::Archive => Ok((Preview::Archive(list_zip(bytes)?), Vec::new())),
         PreviewKind::Text => {
             let (text, truncated) = text(bytes);
@@ -129,7 +130,7 @@ pub fn preview(kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32) -> Res
 
 // --- PDF ---
 
-fn pdf(bytes: &[u8], page: u32, max_side: u32) -> Result<(Preview, Vec<u8>), String> {
+fn pdf(bytes: &[u8], page: u32, max_side: u32, width: u32) -> Result<(Preview, Vec<u8>), String> {
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::hayro_syntax::Pdf;
     use hayro::vello_cpu::color::palette::css::WHITE;
@@ -152,8 +153,10 @@ fn pdf(bytes: &[u8], page: u32, max_side: u32) -> Result<(Preview, Vec<u8>), Str
         return Err("у страницы нет размера".into());
     }
     let side = max_side.clamp(64, 4096) as f32;
-    // Меньше страницы в пунктах — не увеличиваем больше чем вчетверо; итог — не больше `side` по стороне.
-    let scale = (side / w.max(h)).min(4.0);
+    // По ширине `width`, но не больше `side` по стороне; меньше страницы в пунктах — не увеличиваем больше чем
+    // вчетверо.
+    let fit = side / w.max(h);
+    let scale = if width > 0 { (width as f32 / w).min(fit) } else { fit }.min(4.0);
     let settings = InterpreterSettings { render_annotations: true, ..InterpreterSettings::default() };
     let pixmap = hayro::render(
         p,
@@ -464,11 +467,11 @@ mod tests {
     fn garbage_is_an_error_not_a_panic() {
         assert!(list_zip(b"PK\x03\x04 garbage").is_err());
         assert!(list_zip(b"").is_err());
-        assert!(preview(PreviewKind::Pdf, b"not a pdf", 0, 800).is_err());
-        assert!(preview(PreviewKind::Pdf, b"%PDF-1.7\n garbage", 0, 800).is_err());
+        assert!(preview(PreviewKind::Pdf, b"not a pdf", 0, 800, 0).is_err());
+        assert!(preview(PreviewKind::Pdf, b"%PDF-1.7\n garbage", 0, 800, 0).is_err());
         assert!(scan_office(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0]).is_err());
         assert_eq!(scan_office(b"plain").unwrap(), OfficeScan::default());
-        assert!(preview(PreviewKind::Archive, &vec![0u8; MAX_INPUT + 1], 0, 800).is_err());
+        assert!(preview(PreviewKind::Archive, &vec![0u8; MAX_INPUT + 1], 0, 800, 0).is_err());
     }
 
     /// Составной файл с проектом VBA: модули — потоки хранилища `VBA`, служебные потоки не считаются.
@@ -534,6 +537,22 @@ mod tests {
         let big = "я".repeat(MAX_TEXT);
         let (t, cut) = text(big.as_bytes());
         assert!(cut && t.len() <= MAX_TEXT && t.chars().all(|c| c == 'я'));
+    }
+
+    #[test]
+    fn pdf_page_fits_width_within_side() {
+        let pdf = include_bytes!("../tests/fixtures/report.pdf");
+        // A4 (595 × 842 пт) шириной 900: высота по пропорции, сторона не больше 2048.
+        let (p, px) = preview(PreviewKind::Pdf, pdf, 0, 2048, 900).unwrap();
+        let Preview::Pdf { width, height, .. } = p else { panic!("{p:?}") };
+        assert_eq!(width, 900);
+        assert!((1270..=1276).contains(&height), "{height}");
+        assert_eq!(px.len(), (width * height * 4) as usize);
+        // Шире предела — предел по длинной стороне.
+        let (p, _) = preview(PreviewKind::Pdf, pdf, 0, 2048, 3000).unwrap();
+        let Preview::Pdf { width, height, .. } = p else { panic!("{p:?}") };
+        assert_eq!(height, 2048);
+        assert!(width < 1500, "{width}");
     }
 
     #[test]
