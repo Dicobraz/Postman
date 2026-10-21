@@ -15,6 +15,7 @@ pub mod indexer;
 pub mod invite;
 pub mod labels;
 pub mod lifecycle;
+pub mod mailtask;
 pub mod link;
 pub mod marks;
 pub mod palette;

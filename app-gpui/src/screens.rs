@@ -69,6 +69,8 @@ enum Scene {
     InviteUpdated,
     InviteCancelled,
     InviteOutdated,
+    /// Приглашение боковой панелью справа (S5-24, «Настройки → Чтение»): строка над письмом, панель — рядом.
+    InviteSide,
     /// Подписанные письма демо (S5-12 Ф1), карточка подписи раскрыта: подпись RSA верна (корпоративный УЦ), ГОСТ Р
     /// 34.10-2012 (проверено Postman, без СКЗИ), текст изменён после подписи, издатель не доверен.
     Smime,
@@ -193,6 +195,7 @@ const SCENES: [Scene; 66] = [
     Scene::InviteUpdated,
     Scene::InviteCancelled,
     Scene::InviteOutdated,
+    Scene::InviteSide,
     Scene::Smime,
     Scene::SmimeGost,
     Scene::SmimeBad,
@@ -285,6 +288,7 @@ impl Scene {
             Scene::InviteUpdated => "invite-updated",
             Scene::InviteCancelled => "invite-cancelled",
             Scene::InviteOutdated => "invite-outdated",
+            Scene::InviteSide => "invite-side",
             Scene::Smime => "smime",
             Scene::SmimeGost => "smime-gost",
             Scene::SmimeBad => "smime-bad",
@@ -452,6 +456,11 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     if let Some(id) = mail_tab.filter(|_| !matches!(scene, Scene::TabMail)) {
         m.close_tab(id, window, cx);
     }
+    // Боковая панель приглашения — только в своей сцене (S5-24).
+    let side = matches!(scene, Scene::InviteSide);
+    if crate::prefs::get(cx).reading.invite_side != side {
+        crate::prefs::update(cx, |p| p.reading.invite_side = side);
+    }
     // Плашки KeyTips — только в своих сценах: дальше Ctrl отпущен, схема — «Outlook».
     if crate::keytips::shown(cx) && !matches!(scene, Scene::KeyTips | Scene::KeyTipsSingle) {
         send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(false)));
@@ -478,7 +487,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             }
             cx.notify();
         }),
-        Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
+        Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated | Scene::InviteSide => {
             let which = scene.name().trim_start_matches("invite-");
             m.reading.update(cx, |r, cx| {
                 if let Some(c) = r.reading.as_mut().and_then(|r| r.invite.as_mut()) {
@@ -940,12 +949,15 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
             let shown = |r: &crate::reading::Reading| match scene {
                 Scene::Attachments | Scene::LetterImage => r.doc.is_some() && !r.images.is_empty(),
-                _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some() && c.day.is_some()),
+                _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some() && c.day.is_some() && c.clock.is_some()),
             };
             target.is_some() && reading.is_some_and(|r| Some(r.row.id.as_str()) == target && shown(r))
         }
         Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
             reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
+        }
+        Scene::InviteSide => {
+            crate::prefs::get(cx).reading.invite_side && reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
         }
         Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted => {
             // Подпись проверена воркером, карточка раскрыта, тело разобрано.
@@ -1176,6 +1188,15 @@ fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
             let closed = r.reading.as_ref().and_then(|r| r.smime.as_ref()).is_some_and(|s| !s.open && matches!(s.seal, crate::smime::Seal::Done(_)));
             if closed {
                 r.toggle_smime(cx);
+            }
+        });
+    }
+    if let Scene::Invite = scene {
+        // Встреча демо — в прошлом (файл `.ics` с датой): «сейчас» — за сутки до неё, карточка — новое приглашение.
+        m.reading.update(cx, |r, cx| {
+            if let Some(c) = r.reading.as_mut().and_then(|r| r.invite.as_mut()).filter(|c| c.invitation().is_some() && c.clock.is_none()) {
+                c.screen_state("new");
+                cx.notify();
             }
         });
     }
