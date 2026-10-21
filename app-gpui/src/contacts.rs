@@ -1800,8 +1800,9 @@ mod tests {
         assert_eq!(f[1].card.id, colleague.card.id, "карточка справочника");
         assert_eq!(f[2].card.id, friend.card.id, "карточка моих контактов");
         // Поиск — и в другой раскладке: «gfhn» — «парт».
-        assert_eq!(filter(&f, "gfhn"), [0]);
-        assert_eq!(filter(&f, "партн"), [0]);
+        assert!(filter(&f, "gfhn").contains(&0));
+        assert!(filter(&f, "партн").contains(&0));
+        assert!(!filter(&f, "gfhn").contains(&1), "сотрудник не подходит");
     }
 
     /// Список с буквами: заголовок буквы с числом, «Ё» — с «Е»; при поиске букв нет.

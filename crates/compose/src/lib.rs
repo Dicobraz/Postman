@@ -2,6 +2,8 @@
 //! RFC 5322 (multipart/alternative: Markdown как text/plain + HTML из
 //! фиксированного набора тегов). Без I/O.
 
+pub mod display;
+
 use std::borrow::Cow;
 
 use mail_builder::MessageBuilder;

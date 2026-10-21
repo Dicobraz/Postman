@@ -559,7 +559,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "thread.quotes" | "compose.quote" => QUOTE,
         "thread.next" | "attach.next" | "tab.next" | "calendar.next_week" | "meeting.next_day" => CHEVRON_RIGHT,
         "thread.prev" | "attach.prev" | "tab.prev" | "calendar.prev_week" | "meeting.prev_day" => CHEVRON_LEFT,
-        "attach.preview" | "compose.preview" => PREVIEW,
+        "attach.preview" => PREVIEW,
         "attach.save_all" => SAVE,
         "view.calendar" | "calendar.new_meeting" | "contacts.meeting" => CALENDAR,
         "view.contacts" => CONTACTS,
