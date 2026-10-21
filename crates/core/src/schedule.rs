@@ -23,14 +23,17 @@ pub struct Meeting {
     pub start: DateTime,
     pub time_zone: String,
     pub duration_secs: i64,
-    /// (имя, адрес).
+    /// Обязательные участники: (имя, адрес).
     pub attendees: Vec<(String, String)>,
+    /// Необязательные участники (и переговорные, ресурсы): (имя, адрес).
+    pub optional: Vec<(String, String)>,
 }
 
 impl Meeting {
-    /// Участники в форме `NewEvent` (все обязательные).
+    /// Участники в форме `NewEvent`: обязательные, затем необязательные.
     pub fn attendee_refs(&self) -> Vec<(&str, &str, bool)> {
-        self.attendees.iter().map(|(n, e)| (n.as_str(), e.as_str(), false)).collect()
+        let required = self.attendees.iter().map(|(n, e)| (n.as_str(), e.as_str(), false));
+        required.chain(self.optional.iter().map(|(n, e)| (n.as_str(), e.as_str(), true))).collect()
     }
 
     /// Событие для `CalendarEvent/set`; `attendees` — из [`Meeting::attendee_refs`].
@@ -158,7 +161,7 @@ pub async fn create(client: &Client, identities: &[Identity], meeting: &Meeting)
     let me = identities.first().ok_or_else(|| Error::Protocol("на сервере нет Identity для организатора".into()))?;
     let calendars = client.calendars().await?;
     let cal = default_calendar(&calendars).ok_or_else(|| Error::Protocol("у учётной записи нет календаря".into()))?;
-    let send = !meeting.attendees.is_empty();
+    let send = !meeting.attendees.is_empty() || !meeting.optional.is_empty();
     client.create_event(meeting.to_jmap(&cal.id, (&me.name, &me.email)), send).await
 }
 
@@ -251,6 +254,7 @@ mod tests {
             time_zone: "Europe/Moscow".into(),
             duration_secs: 1800,
             attendees: vec![("User 3".into(), "user3@itt.test".into())],
+            optional: vec![("Переговорная 1".into(), "room1@itt.test".into())],
         };
         let v = m.to_jmap("cal1", ("User 1", "user1@itt.test"));
         assert_eq!(v["calendarIds"]["cal1"], true);
@@ -258,6 +262,8 @@ mod tests {
         assert_eq!(v["duration"], "PT30M");
         assert_eq!(v["organizerCalendarAddress"], "mailto:user1@itt.test");
         assert_eq!(v["participants"]["a0"]["calendarAddress"], "mailto:user3@itt.test");
+        assert_eq!(v["participants"]["a1"]["calendarAddress"], "mailto:room1@itt.test");
+        assert_eq!(v["participants"]["a1"]["roles"]["optional"], true);
         assert_eq!(v["locations"]["l1"]["name"], "Переговорная 1");
         assert_eq!(utc(at("2026-10-21T08:00:00Z")), "2026-10-21T08:00:00Z");
     }

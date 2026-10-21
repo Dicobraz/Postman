@@ -61,6 +61,10 @@ pub(crate) struct Mailer {
     pub(crate) section: Section,
     /// Календарь — своя кэшируемая view (S3-05); окна новой встречи — `meeting.rs`.
     pub(crate) cal: Entity<calendar::CalendarView>,
+    /// Командные строки календаря и контактов (S5-11) — на месте строки почты в своём разделе.
+    pub(crate) cal_bar: Entity<calendar::CalendarBar>,
+    pub(crate) contacts_bar: Entity<crate::contacts::ContactsBar>,
+    /// Вкладки новых встреч (S5-11).
     pub(crate) meetings: crate::meeting::Meetings,
     /// Автоответ, квота (S4-05): панель настроек, полоса автоответа, строка состояния (`settings.rs`).
     pub(crate) settings: crate::settings::ServerSettings,
@@ -105,6 +109,8 @@ impl Mailer {
         let toasts = cx.new(|_| Toasts::new());
         let cal = cx.new(|cx| calendar::CalendarView::new(window, cx));
         let contacts = cx.new(|cx| crate::contacts::ContactsView::new(window, cx));
+        let cal_bar = cx.new(|cx| calendar::CalendarBar::new(cal.clone(), cx));
+        let contacts_bar = cx.new(|cx| crate::contacts::ContactsBar::new(contacts.clone(), cx));
         let subscriptions = vec![
             cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
             cx.subscribe(&cal, |this, _, action: &calendar::CalendarAction, cx| this.on_calendar(action, cx)),
@@ -199,6 +205,8 @@ impl Mailer {
             screens: None,
             section: Section::Mail,
             cal,
+            cal_bar,
+            contacts_bar,
             meetings: Default::default(),
             settings: Default::default(),
             contacts,
@@ -285,6 +293,11 @@ impl Mailer {
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
         // Модуль рейла — во вкладке «Почта» (вкладка настроек остаётся открытой).
         self.tabs.activate_kind(crate::tabs::TabKind::Mail);
+        if section == Section::Calendar {
+            // Цвета событий — по таблице категорий своего аккаунта.
+            let table = self.list.read(cx).labels.for_account(None).cloned().unwrap_or_else(crate::labels::default_table);
+            self.cal.update(cx, |c, cx| c.set_categories(table, cx));
+        }
         if section == Section::Calendar && self.section != section {
             self.cal.update(cx, |c, cx| c.refresh(cx));
         }
@@ -311,6 +324,10 @@ impl Render for Mailer {
         if let Some(prefill) = self.live.reauth.take() {
             cx.defer_in(window, move |this, window, cx| this.show_reauth(prefill, window, cx));
         }
+        // Новые встречи — вкладками (полям ввода нужно окно).
+        if !self.meetings.pending.is_empty() {
+            cx.defer_in(window, |this, window, cx| this.create_meetings(window, cx));
+        }
         self.drive_bench(window, cx);
         screens::drive(self, window, cx);
         let l = crate::roles::look(cx);
@@ -322,13 +339,19 @@ impl Render for Mailer {
             crate::tabs::TabKind::Compose(id) => self.compose.get(id).cloned(),
             _ => None,
         };
+        // Вкладка встречи (S5-11) — так же: карточка на всю ширину, своя строка «Отправить» (макет «Новая встреча»).
+        let active = self.tabs.active();
+        let meeting = (active.kind == crate::tabs::TabKind::Meeting)
+            .then(|| self.meetings.view(active.id).map(|v| AnyView::from(v.clone())))
+            .flatten();
         let free = settings.is_none();
         let first_run = self.section == Section::Mail && self.live.signin.is_some();
         // Командная строка и полоса автоответа — у почты; во вкладках «Настройки», письма и при первом запуске их нет.
-        let bars = free && !first_run && letter.is_none();
+        let bars = free && !first_run && letter.is_none() && meeting.is_none();
         // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» без открытых настроек (`commands.rs`).
         let context = match self.section {
             _ if letter.is_some() => "Mailer ComposeView",
+            _ if meeting.is_some() => "Mailer MeetingTab",
             _ if !free => "Mailer SettingsView",
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
@@ -363,6 +386,23 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::calendar::PrevWeek, _, cx| this.calendar_week(Some(-1), cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::NextWeek, _, cx| this.calendar_week(Some(1), cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::Today, _, cx| this.calendar_week(None, cx)))
+            .on_action(cx.listener(|this, _: &commands::contacts::New, window, cx| {
+                this.contacts.update(cx, |c, cx| c.new_contact(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &commands::contacts::Edit, window, cx| {
+                this.contacts.update(cx, |c, cx| c.edit(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &commands::contacts::Delete, _, cx| this.contacts.update(cx, |c, cx| c.ask_delete(cx))))
+            .on_action(cx.listener(|this, _: &commands::contacts::Write, _, cx| this.contacts.update(cx, |c, cx| c.write(cx))))
+            .on_action(cx.listener(|this, _: &commands::contacts::Meeting, _, cx| this.contacts.update(cx, |c, cx| c.meet(cx))))
+            .on_action(cx.listener(|this, _: &commands::contacts::CopyAddress, _, cx| {
+                this.contacts.update(cx, |c, cx| c.copy_address(cx));
+            }))
+            .on_action(cx.listener(|this, _: &commands::invite::Accept, _, cx| this.invite_key(postman_calendar::Partstat::Accepted, cx)))
+            .on_action(cx.listener(|this, _: &commands::invite::Tentative, _, cx| {
+                this.invite_key(postman_calendar::Partstat::Tentative, cx)
+            }))
+            .on_action(cx.listener(|this, _: &commands::invite::Decline, _, cx| this.invite_key(postman_calendar::Partstat::Declined, cx)))
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 if this.section == Section::Contacts {
                     return this.contacts.update(cx, |c, cx| c.focus_search(window, cx));
@@ -433,12 +473,12 @@ impl Render for Mailer {
             .text_color(l.text())
             .text_size(px(13.))
             .child(self.titlebar(&l, window, cx))
-            .when(bars, |d| d.child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none())))
+            .when(bars, |d| d.child(self.section_bar(free)))
             .when_some(self.settings.bar.clone().filter(|_| bars), |d, bar| {
                 d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
             })
-            .map(|d| match letter {
-                Some(view) => d.child(
+            .map(|d| match (letter, meeting) {
+                (Some(view), _) => d.child(
                     div()
                         .flex()
                         .flex_1()
@@ -446,8 +486,16 @@ impl Render for Mailer {
                         .px(px(8.))
                         .child(view.cached(StyleRefinement::default().size_full())),
                 ),
+                (None, Some(view)) => d.child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .px(px(8.))
+                        .child(card(&l).flex_1().child(view.cached(StyleRefinement::default().size_full()))),
+                ),
                 // Закладки быстрых фильтров — поверх карточки списка (S5-03).
-                None => d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx))),
+                (None, None) => d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx))),
             })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
@@ -471,7 +519,7 @@ pub(crate) const W_LIST: f32 = 452.0;
 const INLINE_SHARE: f32 = 0.6;
 
 /// Карточка на фоне каркаса: скругление сверху, рамка без нижней стороны.
-fn card(l: &crate::roles::Look) -> Div {
+pub(crate) fn card(l: &crate::roles::Look) -> Div {
     div()
         .h_full()
         .min_w_0()
@@ -535,10 +583,28 @@ impl Mailer {
                 Pane::Hidden => body.child(card(l).flex_1().child(list())),
             };
         }
+        // Календарь и контакты рисуют свои панели и карточки сами (макеты S5-11).
         match self.section {
-            Section::Calendar => body.child(card(l).flex_1().child(self.cal.clone().cached(full()))),
-            Section::Contacts => body.child(card(l).flex_1().child(self.contacts.clone().cached(full()))),
+            Section::Calendar => body.child(div().flex_1().min_w_0().h_full().child(self.cal.clone().cached(full()))),
+            Section::Contacts => body.child(div().flex_1().min_w_0().h_full().child(self.contacts.clone().cached(full()))),
             Section::Mail => body,
+        }
+    }
+
+    /// Командная строка: своя у календаря и контактов (вкладка «Почта»), иначе — строка почты.
+    fn section_bar(&self, free: bool) -> AnyElement {
+        let style = StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none();
+        match self.section {
+            Section::Calendar if free => self.cal_bar.clone().cached(style).into_any_element(),
+            Section::Contacts if free => self.contacts_bar.clone().cached(style).into_any_element(),
+            _ => self.bar.clone().cached(style).into_any_element(),
+        }
+    }
+
+    /// Клавиши A / T / N: ответ на приглашение открытого письма (в «Почте»).
+    fn invite_key(&mut self, status: postman_calendar::Partstat, cx: &mut Context<Self>) {
+        if self.section == Section::Mail {
+            self.reading.update(cx, |r, cx| r.invite_hotkey(status, cx));
         }
     }
 }

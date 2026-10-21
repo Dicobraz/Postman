@@ -1,32 +1,42 @@
-//! Контакты (S4-02): раздел «Контакты» (Ctrl+3) — личные контакты (JMAP ContactCard) и справочник сотрудников
-//! (Principals: сотрудники, переговорные, ресурсы), поиск, карточка, «Написать письмо»; создать, изменить и удалить
-//! личный контакт (`ContactCard/set`), удаление — после строки «Удалить контакт? Да / Нет». Справочник — только
-//! просмотр.
+//! Контакты (S4-02; вид — S5-11 по макету «Контакты и справочник», Ctrl+3): слева — источники («Справочник
+//! компании», «Мои контакты»), список с буквами и указателем, справа — карточка: «Написать», «Встреча» (вкладка
+//! встречи с этим участником), «Копировать адрес», поля в две колонки, занятость сегодня (сотрудники и переговорные).
+//! Командная строка раздела — [`ContactsBar`] с поиском. Личный контакт меняется на месте (форма вместо карточки,
+//! `ContactCard/set`), удаление — после строки «Удалить контакт? Да / Нет». Справочник — только просмотр; из него —
+//! «Добавить в мои контакты».
 //!
 //! Демо: контакты из `postman_demo::contacts`; правка и удаление — только в памяти этого окна (на сервер ничего
 //! не уходит, после перезапуска — снова демо-набор). Живой ящик: данные — событиями синхронизации
-//! (`ContactsLoaded`, `DirectoryLoaded`), изменения — командами (`SaveContact`, `DeleteContact`).
+//! (`ContactsLoaded`, `DirectoryLoaded`), изменения — командами (`SaveContact`, `DeleteContact`), занятость —
+//! `Availability`.
 //!
 //! Своя кэшируемая view: перерисовывается только по своему `notify`. С экраном говорит событиями [`ContactsAction`].
-
-use std::ops::Range;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
+use pets_ui::theme::Metric;
+use postman_calendar::{Busy, BusyKind, Span};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::contacts::AddressBook;
 use postman_core::sync::{Command, Event as SyncEvent};
 use postman_jmap::{ContactCard, Principal};
 
-use crate::calendar::button;
+use crate::calendar::{accent_button, add_days, avatar, button, chip_outline, day_start, g, hm, outline_button};
+use crate::chrome::icon;
+use crate::roles::{Look, Pm};
 
-const LIST_W: f32 = 320.;
-const ROW_H: f32 = 40.;
-const LABEL_W: f32 = 110.;
+const NAV_W: f32 = 236.;
+const LIST_W: f32 = 452.;
+const ROW_H: f32 = 52.;
+const HEAD_H: f32 = 26.;
+/// Занятость в карточке: часы дня.
+const DAY_FROM: i64 = 8;
+const DAY_TO: i64 = 20;
 
 /// Откуда список: личная адресная книга или справочник организации.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +123,16 @@ impl Entry {
             (n, _) => n.to_string(),
         }
     }
+
+    /// Буква указателя: первая буква имени, цифры и знаки — «#».
+    fn letter(&self) -> char {
+        let c = self.name().chars().next().map(|c| c.to_uppercase().next().unwrap_or(c)).unwrap_or('#');
+        match c {
+            'Ё' => 'Е', // i18n-ok: Ё в указателе — вместе с Е
+            c if c.is_alphabetic() => c,
+            _ => '#',
+        }
+    }
 }
 
 fn normalize(s: &str) -> String {
@@ -128,6 +148,30 @@ pub(crate) fn filter(entries: &[Entry], query: &str) -> Vec<usize> {
 /// По имени (без регистра), затем по адресу.
 fn sort(entries: &mut [Entry]) {
     entries.sort_by_cached_key(|e| (normalize(&e.name()), e.card.emails.first().cloned()));
+}
+
+/// Строка списка: буква-заголовок (буква, сколько) или контакт (индекс в источнике).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Item {
+    Letter(char, usize),
+    Row(usize),
+}
+
+/// Список с буквами: строки `shown` (уже по алфавиту) — под заголовком своей буквы. При поиске букв нет.
+pub(crate) fn items(entries: &[Entry], shown: &[usize], letters: bool) -> Vec<Item> {
+    if !letters {
+        return shown.iter().map(|&i| Item::Row(i)).collect();
+    }
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < shown.len() {
+        let letter = entries[shown[k]].letter();
+        let n = shown[k..].iter().take_while(|&&i| entries[i].letter() == letter).count();
+        out.push(Item::Letter(letter, n));
+        out.extend(shown[k..k + n].iter().map(|&i| Item::Row(i)));
+        k += n;
+    }
+    out
 }
 
 // --- форма карточки (без gpui) ---
@@ -227,7 +271,7 @@ enum Mode {
     Confirm,
 }
 
-/// Что раздел просит у экрана: сервер, окно письма, тост.
+/// Что раздел просит у экрана: сервер, письмо, встреча, тост.
 pub(crate) enum ContactsAction {
     /// Перечитать контакты и справочник (`Command::Contacts`).
     Load,
@@ -240,9 +284,26 @@ pub(crate) enum ContactsAction {
         id: String,
         ticket: u64,
     },
-    /// Окно письма с адресом.
+    /// Занятость адреса на сутки (`Command::Availability`).
+    Availability {
+        ticket: u64,
+        email: String,
+        from: i64,
+        to: i64,
+    },
+    /// Новое письмо с адресом.
     Write(Address),
+    /// Вкладка встречи с этим участником.
+    Meet(Address),
     Toast(Toast, String),
+}
+
+/// Занятость выбранного сегодня: адрес, тикет запроса, ответ (`None` в ответе — нет данных).
+#[derive(Default)]
+struct Today {
+    email: String,
+    ticket: Option<u64>,
+    busy: Option<Option<Vec<Busy>>>,
 }
 
 pub(crate) struct ContactsView {
@@ -254,10 +315,13 @@ pub(crate) struct ContactsView {
     loading: bool,
     /// Контакты пришли с сервера (снимки `--screens --live` ждут их).
     pub(crate) loaded: bool,
-    search: Entity<InputState>,
+    pub(crate) search: Entity<InputState>,
     query: String,
     /// Индексы показанных строк текущего источника (после поиска).
     shown: Vec<usize>,
+    /// Строки списка с буквами.
+    items: Vec<Item>,
+    list: ListState,
     selected: Option<String>,
     mode: Mode,
     /// Тикет сохранения или удаления, которого ждём с сервера.
@@ -270,7 +334,10 @@ pub(crate) struct ContactsView {
     demo_noted: bool,
     /// Снимок `contacts`: выделить первую строку, как только она появится (живой ящик — после ответа сервера).
     want_first: bool,
-    scroll: UniformListScrollHandle,
+    /// Мой адрес: «Внешний» у чужих доменов, заголовок источников.
+    me: Option<String>,
+    today: Today,
+    tz: TimeZone,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -288,7 +355,7 @@ impl ContactsView {
         });
         let mut this = Self {
             live: false,
-            source: Source::Mine,
+            source: Source::Directory,
             mine: demo_mine(),
             directory: demo_directory(),
             loading: false,
@@ -296,6 +363,8 @@ impl ContactsView {
             search,
             query: String::new(),
             shown: Vec::new(),
+            items: Vec::new(),
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
             selected: None,
             mode: Mode::View,
             pending: None,
@@ -304,10 +373,12 @@ impl ContactsView {
             error: None,
             demo_noted: false,
             want_first: false,
-            scroll: UniformListScrollHandle::new(),
+            me: Some(postman_demo::ME.to_string()),
+            today: Today::default(),
+            tz: TimeZone::system(),
             _subscriptions: vec![on_search],
         };
-        this.shown = filter(this.entries(), "");
+        this.reshow();
         this
     }
 
@@ -321,6 +392,8 @@ impl ContactsView {
         self.selected = None;
         self.mode = Mode::View;
         self.pending = None;
+        self.me = None;
+        self.today = Today::default();
         self.refilter(cx);
     }
 
@@ -337,6 +410,7 @@ impl ContactsView {
     pub(crate) fn not_sent(&mut self, cx: &mut Context<Self>) {
         self.loading = false;
         self.pending = None;
+        self.today.ticket = None;
         cx.notify();
     }
 
@@ -352,8 +426,23 @@ impl ContactsView {
         self.entries().iter().find(|e| e.card.id == id)
     }
 
-    fn refilter(&mut self, cx: &mut Context<Self>) {
+    /// Переговорные и ресурсы справочника — во вкладку встречи: (имя, адрес).
+    pub(crate) fn rooms(&self) -> Vec<(String, String)> {
+        self.directory
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Room | Kind::Resource))
+            .filter_map(|e| e.card.emails.first().map(|m| (e.name(), m.clone())))
+            .collect()
+    }
+
+    fn reshow(&mut self) {
         self.shown = filter(self.entries(), &self.query);
+        self.items = items(self.entries(), &self.shown, self.query.trim().is_empty());
+        self.list.reset(self.items.len());
+    }
+
+    fn refilter(&mut self, cx: &mut Context<Self>) {
+        self.reshow();
         cx.notify();
     }
 
@@ -362,7 +451,6 @@ impl ContactsView {
             self.source = source;
             self.selected = None;
             self.mode = Mode::View;
-            self.scroll.scroll_to_item(0, ScrollStrategy::Top);
             self.refilter(cx);
         }
     }
@@ -373,28 +461,77 @@ impl ContactsView {
         }
         self.selected = Some(id);
         self.mode = Mode::View;
+        self.ask_today(cx);
         cx.notify();
     }
 
-    /// Первая строка списка (снимок `contacts`); личных нет — первый сотрудник.
+    /// Занятость выбранного сегодня: сотрудники и переговорные (у личных контактов — нет).
+    fn ask_today(&mut self, cx: &mut Context<Self>) {
+        let Some(e) = self.selected_entry() else { return };
+        let Some(email) = e.card.emails.first().cloned().filter(|_| e.kind != Kind::Contact) else {
+            self.today = Today::default();
+            return;
+        };
+        if self.today.email.eq_ignore_ascii_case(&email) {
+            return;
+        }
+        let day = jiff::Zoned::now().with_time_zone(self.tz.clone()).date();
+        let (from, to) = (day_start(day, &self.tz), day_start(add_days(day, 1), &self.tz));
+        if !self.live {
+            let busy = postman_demo::calendar::colleagues()
+                .into_iter()
+                .find(|(_, m, _)| m.eq_ignore_ascii_case(&email))
+                .map(|(_, _, b)| shift_to_today(b, from, &self.tz));
+            self.today = Today { email, ticket: None, busy: Some(busy) };
+            return;
+        }
+        let ticket = self.ticket();
+        self.today = Today { email: email.clone(), ticket: Some(ticket), busy: None };
+        cx.emit(ContactsAction::Availability { ticket, email, from, to });
+    }
+
+    /// Первая строка списка (снимок `contacts`); в справочнике пусто — первый личный контакт.
     pub(crate) fn select_first(&mut self, cx: &mut Context<Self>) {
         self.want_first = true;
-        if self.mine.is_empty() && !self.directory.is_empty() {
-            self.set_source(Source::Directory, cx);
+        if self.directory.is_empty() && !self.mine.is_empty() {
+            self.set_source(Source::Mine, cx);
         }
-        self.selected = self.shown.first().and_then(|&i| self.entries().get(i)).map(|e| e.card.id.clone());
+        // Снимок — сотрудник с занятостью (не «Бухгалтерия»): первый, у кого есть должность или занятость.
+        let pick = self
+            .shown
+            .iter()
+            .filter_map(|&i| self.entries().get(i))
+            .find(|e| e.kind == Kind::Person && e.card.emails.first().is_some_and(|m| m.split('@').next().is_some_and(|p| p.contains('.'))))
+            .or_else(|| self.shown.first().and_then(|&i| self.entries().get(i)))
+            .map(|e| e.card.id.clone());
+        self.selected = pick;
         self.mode = Mode::View;
+        self.ask_today(cx);
         cx.notify();
+    }
+
+    /// Выделить запись с адресом (снимок `contacts` в демо: коллега с занятостью).
+    pub(crate) fn select_email(&mut self, email: &str, cx: &mut Context<Self>) {
+        let found = self.entries().iter().find(|e| e.card.emails.iter().any(|m| m.eq_ignore_ascii_case(email))).map(|e| e.card.id.clone());
+        if let Some(id) = found {
+            self.select(id, cx);
+        }
     }
 
     /// Что показывать уже есть: демо — сразу, живой ящик — после ответа сервера.
     pub(crate) fn ready(&self) -> bool {
-        (!self.live || self.loaded) && (self.selected.is_some() || self.shown.is_empty())
+        (!self.live || self.loaded) && (self.selected.is_some() || self.shown.is_empty()) && self.today.ticket.is_none()
     }
 
-    /// Правка выделенного личного контакта (снимок `contact-edit`).
+    /// Правка первого личного контакта (снимок `contact-edit`).
     pub(crate) fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(card) = self.selected_entry().filter(|e| e.kind == Kind::Contact).map(|e| e.card.clone()) {
+        let card = match self.selected_entry().filter(|e| e.kind == Kind::Contact) {
+            Some(e) => Some(e.card.clone()),
+            None => self.mine.first().map(|e| e.card.clone()),
+        };
+        if let Some(card) = card {
+            self.set_source(Source::Mine, cx);
+            self.selected = Some(card.id.clone());
             self.start_edit(Some(card), window, cx);
         }
     }
@@ -418,7 +555,7 @@ impl ContactsView {
             Mode::View if !self.query.is_empty() => {
                 self.search.update(cx, |s, cx| s.set_value("", window, cx));
                 self.query.clear();
-                self.shown = filter(self.entries(), "");
+                self.reshow();
             }
             Mode::View => return false,
         }
@@ -426,8 +563,67 @@ impl ContactsView {
         true
     }
 
+    /// «Новый контакт» (Ctrl+Shift+C).
+    pub(crate) fn new_contact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_edit(None, window, cx);
+    }
+
+    /// «Изменить» (F2): личный контакт — форма; сотрудник справочника — новый личный с его именем и адресом.
+    pub(crate) fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_entry().map(|e| (e.kind, e.card.clone())) {
+            Some((Kind::Contact, card)) => self.start_edit(Some(card), window, cx),
+            Some((_, card)) => self.copy_to_mine(card, window, cx),
+            None => {}
+        }
+    }
+
+    /// «Удалить» (Delete): строка подтверждения у личного контакта.
+    pub(crate) fn ask_delete(&mut self, cx: &mut Context<Self>) {
+        if self.selected_entry().is_some_and(|e| e.kind == Kind::Contact) && matches!(self.mode, Mode::View) {
+            self.mode = Mode::Confirm;
+            cx.notify();
+        }
+    }
+
+    /// Адрес выбранного: (имя, адрес).
+    fn selected_address(&self) -> Option<Address> {
+        let e = self.selected_entry()?;
+        e.card.emails.first().map(|m| Address::new(&e.card.name, m))
+    }
+
+    pub(crate) fn write(&mut self, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_address() {
+            cx.emit(ContactsAction::Write(a));
+        }
+    }
+
+    pub(crate) fn meet(&mut self, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_address() {
+            cx.emit(ContactsAction::Meet(a));
+        }
+    }
+
+    pub(crate) fn copy_address(&mut self, cx: &mut Context<Self>) {
+        if let Some(a) = self.selected_address() {
+            cx.write_to_clipboard(ClipboardItem::new_string(a.email.clone()));
+            cx.emit(ContactsAction::Toast(Toast::Info, tr!("contacts-copied", email = a.email)));
+        }
+    }
+
+    /// Сотрудник справочника → новый личный контакт (форма с его именем и адресом).
+    fn copy_to_mine(&mut self, card: ContactCard, window: &mut Window, cx: &mut Context<Self>) {
+        let prefill = ContactCard { id: String::new(), ..card };
+        self.set_source(Source::Mine, cx);
+        self.start_form(None, Some(prefill), window, cx);
+    }
+
     fn start_edit(&mut self, old: Option<ContactCard>, window: &mut Window, cx: &mut Context<Self>) {
-        let text = old.as_ref().map(FormText::of).unwrap_or_default();
+        let prefill = old.clone();
+        self.start_form(old, prefill, window, cx);
+    }
+
+    fn start_form(&mut self, old: Option<ContactCard>, prefill: Option<ContactCard>, window: &mut Window, cx: &mut Context<Self>) {
+        let text = prefill.as_ref().map(FormText::of).unwrap_or_default();
         let mut field = |value: String, placeholder: Option<&str>, cx: &mut Context<Self>| {
             let state = cx.new(|cx| {
                 let s = InputState::new(window, cx).default_value(value);
@@ -541,6 +737,17 @@ impl ContactsView {
                 self.directory = people.iter().cloned().map(Entry::from_principal).collect();
                 sort(&mut self.directory);
             }
+            SyncEvent::Me { address, .. } => {
+                self.me = Some(address.email.clone());
+                cx.notify();
+                return;
+            }
+            SyncEvent::Availability { ticket, people, .. } if self.today.ticket == Some(*ticket) => {
+                self.today.ticket = None;
+                self.today.busy = Some(people.first().and_then(|(_, b)| b.clone()));
+                cx.notify();
+                return;
+            }
             SyncEvent::ContactSaved { ticket, id } if self.pending == Some(*ticket) => {
                 self.pending = None;
                 let name = match &self.mode {
@@ -582,20 +789,73 @@ impl ContactsView {
         }
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    // --- слева: источники ---
+
+    fn nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
-        let tab = |id: &'static str, text: String, source: Source, cx: &mut Context<Self>| {
+        let item = |id: &'static str, key: &str, n: usize, source: Source, cx: &mut Context<Self>| {
+            let on = self.source == source;
             div()
                 .id(id)
-                .px_2()
-                .py_0p5()
-                .rounded_md()
+                .h(px(32.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(8.))
+                .rounded(px(4.))
                 .cursor_pointer()
-                .when(self.source == source, |d| d.bg(l.picked()).font_weight(FontWeight::SEMIBOLD))
-                .when(self.source != source, |d| d.hover(|d| d.bg(l.fill())))
-                .child(text)
+                .when(on, |d| d.bg(l.panel()).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |d| d.hover(|d| d.bg(l.hover())))
+                .child(div().flex_1().child(tr!(key)))
+                .child(div().text_color(l.text2()).font_weight(FontWeight::NORMAL).child(n.to_string()))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_source(source, cx)))
         };
+        let account = self.me.clone().unwrap_or_else(|| tr!("contacts-account"));
+        div()
+            .w(px(NAV_W))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .pt(px(4.))
+            .pr(px(8.))
+            .pl(px(4.))
+            .text_size(px(13.))
+            .child(div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(8.)).pb(px(4.)).truncate().child(account))
+            .child(item("src-dir", "contacts-directory", self.directory.len(), Source::Directory, cx))
+            .child(item("src-mine", "contacts-mine", self.mine.len(), Source::Mine, cx))
+            .when(self.loading, |d| d.child(div().px(px(8.)).pt(px(6.)).text_size(px(12.)).text_color(l.text2()).child(tr!("contacts-loading"))))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .mx(px(4.))
+                    .mb(px(12.))
+                    .px(px(12.))
+                    .py(px(10.))
+                    .rounded(px(6.))
+                    .bg(l.pm(Pm::CalOff))
+                    .border_1()
+                    .border_color(l.border())
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(l.text2())
+                    .child(tr!("contacts-nav-note")),
+            )
+    }
+
+    // --- список ---
+
+    fn list_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
+        let title = tr!(match self.source {
+            Source::Mine => "contacts-mine",
+            Source::Directory => "contacts-directory",
+        });
+        let searching = !self.query.trim().is_empty();
+        let summary =
+            if searching { tr!("contacts-found", n = self.shown.len()) } else { tr!("contacts-count", n = self.entries().len()) };
         let note = if self.loading && self.entries().is_empty() {
             Some(tr!("contacts-loading"))
         } else if self.shown.is_empty() {
@@ -603,76 +863,125 @@ impl ContactsView {
         } else {
             None
         };
-        let list = uniform_list(
-            "contacts",
-            self.shown.len(),
-            cx.processor(|this, range: Range<usize>, _window, cx| {
-                range
-                    .filter_map(|i| {
-                        let e = this.entries().get(*this.shown.get(i)?)?;
-                        let selected = this.selected.as_deref() == Some(e.card.id.as_str());
-                        Some(row(i, e, selected, cx))
-                    })
-                    .collect::<Vec<_>>()
-            }),
+        let header = div()
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(14.))
+            .pr(px(10.))
+            .border_b_1()
+            .border_color(l.border())
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(px(12.)).text_color(l.text2()).child(summary))
+            .child(div().flex_1())
+            .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!(if searching { "contacts-sort-match" } else { "contacts-sort-name" })));
+        let list = list(
+            self.list.clone(),
+            cx.processor(|this, ix: usize, _window, cx| this.item(ix, cx)),
         )
-        .track_scroll(&self.scroll)
         .size_full();
-        div()
+        let letters: Vec<(char, usize)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| match it {
+                Item::Letter(c, _) => Some((*c, i)),
+                Item::Row(_) => None,
+            })
+            .collect();
+        let index = (!searching && letters.len() > 1).then(|| {
+            div()
+                .w(px(24.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .py(px(6.))
+                .border_l_1()
+                .border_color(l.border())
+                .children(letters.into_iter().map(|(c, i)| {
+                    div()
+                        .id(("letter", i))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.))
+                        .text_color(l.text2())
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(l.accent_text()))
+                        .child(c.to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.list.scroll_to(ListOffset { item_ix: i, offset_in_item: px(0.) });
+                            cx.notify();
+                        }))
+                }))
+        });
+        crate::mailer::card(&l)
             .w(px(LIST_W))
             .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(l.border())
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .px_2()
-                    .pt_2()
-                    .child(tab("src-mine", tr!("contacts-mine", n = self.mine.len()), Source::Mine, cx))
-                    .child(tab("src-dir", tr!("contacts-directory", n = self.directory.len()), Source::Directory, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(l.border())
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
-                    .child(
-                        button("contact-new", tr!("contacts-new"), true)
-                            .on_click(cx.listener(|this, _, window, cx| this.start_edit(None, window, cx))),
-                    ),
-            )
+            .mr(px(8.))
+            .child(header)
             .when_some(self.error.clone(), |d, e| d.child(div().px_3().py_1().text_color(l.error()).child(e)))
-            .when_some(note, |d, n| d.child(div().px_3().py_2().text_color(l.text2()).child(n)))
+            .when_some(note, |d, n| d.child(div().px(px(24.)).py(px(32.)).text_center().text_color(l.text2()).child(n)))
             .child(
                 div()
-                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(list)
-                    .child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always)),
+                    .flex()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(list)
+                            .child(Scrollbar::vertical(&self.list).mode(ScrollbarMode::Hover)),
+                    )
+                    .children(index),
             )
     }
+
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let l = crate::roles::look(cx);
+        match self.items.get(ix).copied() {
+            Some(Item::Letter(c, n)) => div()
+                .w_full()
+                .h(px(HEAD_H))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(14.))
+                .bg(l.pm(Pm::CalOff))
+                .border_b_1()
+                .border_color(l.border())
+                .text_size(px(12.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(c.to_string()))
+                .child(div().text_color(l.text2()).child(n.to_string()))
+                .into_any_element(),
+            Some(Item::Row(i)) => match self.entries().get(i) {
+                Some(e) => row(ix, e, self.selected.as_deref() == Some(e.card.id.as_str()), self.external(e), &l, cx),
+                None => div().into_any_element(),
+            },
+            None => div().into_any_element(),
+        }
+    }
+
+    /// «Внешний»: личный контакт с адресом не моего домена.
+    fn external(&self, e: &Entry) -> bool {
+        let Some(mine) = self.me.as_deref().and_then(|m| m.split_once('@')).map(|(_, d)| d) else { return false };
+        e.kind == Kind::Contact
+            && e.card.emails.first().and_then(|m| m.split_once('@')).is_some_and(|(_, d)| !d.eq_ignore_ascii_case(mine))
+    }
+
+    // --- карточка ---
 
     fn card_pane(&self, e: &Entry, cx: &mut Context<Self>) -> AnyElement {
         let l = crate::roles::look(cx);
         let c = &e.card;
         let mine = e.kind == Kind::Contact;
         let busy = self.pending.is_some();
-        let field = |label: &str, values: Vec<AnyElement>| {
-            div()
-                .flex()
-                .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(l.text2()).child(tr!(label)))
-                .child(div().flex_1().min_w_0().flex().flex_col().children(values))
-        };
         let confirm = matches!(self.mode, Mode::Confirm).then(|| {
             let answer = |id: &'static str, text: String, yes: bool, cx: &mut Context<Self>| {
                 div()
@@ -697,7 +1006,7 @@ impl ContactsView {
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_3()
+                .px(px(24.))
                 .py_1p5()
                 .bg(l.warning_bg())
                 .border_b_1()
@@ -716,25 +1025,125 @@ impl ContactsView {
                     ))
                 })
         });
-        let write = c.emails.first().map(|email| {
-            let address = Address::new(&c.name, email);
-            button("contact-write", tr!("contacts-write"), true)
-                .on_click(cx.listener(move |_, _, _, cx| cx.emit(ContactsAction::Write(address.clone()))))
-        });
-        let actions = div().flex().gap_2().children(write).when(mine, |d| {
-            let old = c.clone();
-            d.child(
-                button("contact-edit", tr!("contacts-edit"), false)
-                    .on_click(cx.listener(move |this, _, window, cx| this.start_edit(Some(old.clone()), window, cx))),
+        let (badge, link) = if mine {
+            (tr!("contacts-badge-mine"), tr!("contacts-edit-f2"))
+        } else {
+            (tr!("contacts-badge-directory"), tr!("contacts-add-mine"))
+        };
+        let second = if !c.title.is_empty() { c.title.clone() } else { e.kind.label() };
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .child(avatar(&e.name(), 64., &l))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .line_height(px(24.))
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).line_height(px(30.)).child(e.name()))
+                    .child(div().text_size(px(14.)).child(second))
+                    .when(!c.organization.is_empty(), |d| d.child(div().text_color(l.text2()).child(c.organization.clone()))),
             )
-            .child(button("contact-delete", tr!("contacts-delete"), false).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.mode = Mode::Confirm;
-                    cx.notify();
-                },
-            )))
-        });
-        let text = |s: &String| div().child(s.clone()).into_any_element();
+            .child(
+                div()
+                    .self_start()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(6.))
+                    .child(div().h(px(24.)).px(px(10.)).flex().items_center().rounded(px(12.)).bg(l.fill()).text_size(px(12.)).child(badge))
+                    .child(
+                        div()
+                            .id("card-link")
+                            .text_size(px(12.))
+                            .text_color(l.accent_text())
+                            .cursor_pointer()
+                            .child(link)
+                            .on_click(cx.listener(|this, _, window, cx| this.edit(window, cx))),
+                    ),
+            );
+        let has_mail = !c.emails.is_empty();
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .when(has_mail, |d| {
+                d.child(
+                    accent_button("contact-write", &l)
+                        .child(icon(g::MAIL, 14.))
+                        .child(tr!("contacts-write"))
+                        .on_click(cx.listener(|this, _, _, cx| this.write(cx))),
+                )
+                .child(
+                    outline_button("contact-meet", &l)
+                        .child(icon(g::CALENDAR, 14.))
+                        .child(tr!("contacts-meet"))
+                        .on_click(cx.listener(|this, _, _, cx| this.meet(cx))),
+                )
+                .child(
+                    outline_button("contact-copy", &l)
+                        .child(icon(g::COPY, 14.))
+                        .child(tr!("contacts-copy"))
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_address(cx))),
+                )
+            });
+        let cell = |label: &str, values: Vec<AnyElement>| {
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!(label)))
+                .children(values)
+        };
+        let plain = |s: &String| div().truncate().child(s.clone()).into_any_element();
+        let dash = || div().text_color(l.text3()).child("—").into_any_element();
+        let emails: Vec<AnyElement> = c
+            .emails
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let to = Address::new(&c.name, m);
+                div()
+                    .id(("mail", i))
+                    .truncate()
+                    .text_color(l.accent_text())
+                    .cursor_pointer()
+                    .child(m.clone())
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ContactsAction::Write(to.clone()))))
+                    .into_any_element()
+            })
+            .collect();
+        let phones: Vec<AnyElement> = c.phones.iter().map(plain).collect();
+        let grid_rows = [
+            ("contacts-emails", if emails.is_empty() { vec![dash()] } else { emails }),
+            ("contacts-phones", if phones.is_empty() { vec![dash()] } else { phones }),
+            ("contacts-organization", vec![if c.organization.is_empty() { dash() } else { plain(&c.organization) }]),
+            ("contacts-title", vec![if c.title.is_empty() { dash() } else { plain(&c.title) }]),
+        ];
+        let mut cells: Vec<AnyElement> = grid_rows.into_iter().map(|(k, v)| cell(k, v).into_any_element()).collect();
+        if !mine {
+            cells.push(cell("contacts-kind", vec![div().child(e.kind.label()).into_any_element()]).into_any_element());
+        }
+        // Две колонки.
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for (i, c) in cells.into_iter().enumerate() {
+            if i % 2 == 0 { left.push(c) } else { right.push(c) }
+        }
+        let fields = div()
+            .flex()
+            .gap(px(24.))
+            .py(px(14.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(l.border())
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.)).children(left))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.)).children(right));
+        let today = (!mine).then(|| self.today_block(e, &l, cx));
         div()
             .flex()
             .flex_col()
@@ -748,31 +1157,132 @@ impl ContactsView {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .p_4()
+                    .gap(px(16.))
+                    .px(px(24.))
+                    .pt(px(20.))
+                    .pb(px(16.))
+                    .child(head)
+                    .child(actions)
+                    .child(fields)
+                    .children(today)
+                    .when(!mine, |d| d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("contacts-readonly")))),
+            )
+            .into_any_element()
+    }
+
+    /// «Сегодня»: занятость сотрудника или переговорной на день (без названий встреч).
+    fn today_block(&self, e: &Entry, l: &Look, cx: &mut Context<Self>) -> impl IntoElement {
+        let day = jiff::Zoned::now().with_time_zone(self.tz.clone());
+        let start = day_start(day.date(), &self.tz);
+        let range = Span::new(start + DAY_FROM * 3600, start + DAY_TO * 3600);
+        let frac = |t: i64| ((t - range.start) as f32 / range.len() as f32).clamp(0., 1.);
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("cal-today")))
+            .child(div().text_size(px(12.)).text_color(l.text2()).child(crate::calendar::long_day(day.date())))
+            .child(div().flex_1())
+            .when(!e.card.emails.is_empty(), |d| {
+                d.child(
+                    outline_button("today-meet", l)
+                        .h(px(26.))
+                        .text_size(px(12.))
+                        .child(tr!(if e.kind == Kind::Room { "contacts-book-room" } else { "contacts-meet" }))
+                        .on_click(cx.listener(|this, _, _, cx| this.meet(cx))),
+                )
+            });
+        let body: AnyElement = match &self.today.busy {
+            _ if self.today.ticket.is_some() => {
+                div().text_size(px(12.)).text_color(l.text2()).child(tr!("meeting-busy-loading")).into_any_element()
+            }
+            Some(Some(busy)) => {
+                let now = jiff::Timestamp::now().as_second();
+                let segs = busy.iter().filter(|b| b.span.overlaps(&range)).map(|b| {
+                    let (s, x) = (b.span.start.max(range.start), b.span.end.min(range.end));
+                    let color = match b.kind {
+                        BusyKind::Busy => l.pm(Pm::FbBusy),
+                        BusyKind::Tentative => l.pm(Pm::FbTentative),
+                        BusyKind::Unavailable => l.pm(Pm::FbOof),
+                    };
+                    div()
+                        .absolute()
+                        .top(px(3.))
+                        .bottom(px(3.))
+                        .left(relative(frac(s)))
+                        .w(relative(frac(x) - frac(s)))
+                        .rounded(px(3.))
+                        .bg(color)
+                });
+                let ticks = (0..(DAY_TO - DAY_FROM)).map(|h| {
+                    div().absolute().top_0().bottom_0().w(px(1.)).left(relative(h as f32 / (DAY_TO - DAY_FROM) as f32)).bg(l.border())
+                });
+                let now_in = (range.start..range.end).contains(&now);
+                let now_x = now_in.then(|| {
+                    div().absolute().top(px(-2.)).bottom(px(-2.)).w(px(2.)).left(relative(frac(now))).bg(l.text())
+                });
+                let past = (now > range.start).then(|| {
+                    div().absolute().top_0().bottom_0().left_0().w(relative(frac(now))).bg(l.panel().opacity(0.5))
+                });
+                let hours = (0..=(DAY_TO - DAY_FROM)).step_by(2).map(|h| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left(relative(h as f32 / (DAY_TO - DAY_FROM) as f32))
+                        .text_size(px(11.))
+                        .text_color(l.text2())
+                        .child(format!("{}", DAY_FROM + h))
+                });
+                let legend = |color: Hsla, key: &str| {
+                    div().flex().items_center().gap(px(6.)).child(div().w(px(12.)).h(px(8.)).rounded(px(2.)).bg(color)).child(tr!(key))
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .relative()
+                            .h(px(26.))
+                            .rounded(px(4.))
+                            .bg(l.fill_passive())
+                            .overflow_hidden()
+                            .children(ticks)
+                            .children(segs)
+                            .children(past)
+                            .children(now_x),
+                    )
+                    .child(div().relative().h(px(14.)).children(hours))
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(e.name()))
-                            .child(div().text_color(l.text2()).child(e.kind.label())),
+                            .flex_wrap()
+                            .gap_x(px(14.))
+                            .text_size(px(12.))
+                            .text_color(l.text2())
+                            .child(legend(l.pm(Pm::FbBusy), "cal-busy"))
+                            .child(legend(l.pm(Pm::FbTentative), "cal-tentative"))
+                            .child(legend(l.pm(Pm::FbOof), "cal-unavailable"))
+                            .when(now_in, |d| d.child(div().child(tr!("contacts-now", time = hm(now, &self.tz)))))
+                            .child(div().child(tr!("contacts-no-titles"))),
                     )
-                    .child(actions)
-                    .when(!c.emails.is_empty(), |d| {
-                        let emails =
-                            c.emails.iter().map(|m| div().text_color(l.accent_text()).child(m.clone()).into_any_element());
-                        d.child(field("contacts-emails", emails.collect()))
-                    })
-                    .when(!c.phones.is_empty(), |d| {
-                        d.child(field("contacts-phones", c.phones.iter().map(text).collect()))
-                    })
-                    .when(!c.organization.is_empty(), |d| {
-                        d.child(field("contacts-organization", vec![text(&c.organization)]))
-                    })
-                    .when(!c.title.is_empty(), |d| d.child(field("contacts-title", vec![text(&c.title)])))
-                    .when(!mine, |d| d.child(div().text_xs().text_color(l.text2()).child(tr!("contacts-readonly")))),
-            )
-            .into_any_element()
+                    .into_any_element()
+            }
+            _ => div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(6.))
+                .bg(l.pm(Pm::CalOff))
+                .border_1()
+                .border_color(l.border())
+                .child(icon(g::HIDDEN, 14.).text_color(l.text2()))
+                .child(div().flex_1().child(tr!("contacts-busy-hidden")))
+                .into_any_element(),
+        };
+        div().flex().flex_col().gap(px(8.)).child(head).child(body)
     }
 
     fn form_pane(&self, f: &Form, cx: &mut Context<Self>) -> AnyElement {
@@ -780,40 +1290,63 @@ impl ContactsView {
         let busy = self.pending.is_some();
         let field = |label: &str, state: &Entity<InputState>| {
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(px(LABEL_W)).flex_none().text_color(l.text2()).child(tr!(label)))
-                .child(div().flex_1().min_w_0().max_w(px(520.)).child(Input::new(state)))
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!(label)))
+                .child(Input::new(state))
         };
         let title = tr!(if f.old.is_some() { "contacts-form-edit" } else { "contacts-form-new" });
+        let note = tr!(if self.live { "contacts-form-where" } else { "contacts-form-where-demo" });
         div()
             .id("contact-form")
             .size_full()
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_4()
-            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(field("contacts-name", &f.name))
-            .child(field("contacts-emails", &f.emails))
-            .child(field("contacts-phones", &f.phones))
-            .child(field("contacts-organization", &f.organization))
-            .child(field("contacts-title", &f.title))
-            .child(div().pl(px(LABEL_W + 8.)).text_xs().text_color(l.text2()).child(tr!("contacts-form-hint")))
-            .when_some(f.error.clone(), |d, e| d.child(div().pl(px(LABEL_W + 8.)).text_color(l.error()).child(e)))
+            .gap(px(14.))
+            .px(px(24.))
+            .pt(px(20.))
+            .pb(px(16.))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .pl(px(LABEL_W + 8.))
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .size(px(64.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(l.fill())
+                            .text_color(l.text2())
+                            .child(icon(if f.old.is_some() { g::EDIT } else { g::ADD }, 22.)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                            .child(div().text_color(l.text2()).child(note)),
+                    ),
+            )
+            .child(div().flex().child(field("contacts-name", &f.name)))
+            .child(div().flex().gap(px(16.)).child(field("contacts-organization", &f.organization)).child(field("contacts-title", &f.title)))
+            .child(div().flex().child(field("contacts-emails", &f.emails)))
+            .child(div().flex().child(field("contacts-phones", &f.phones)))
+            .child(div().text_size(px(12.)).line_height(px(17.)).text_color(l.text2()).child(tr!("contacts-form-hint")))
+            .when_some(f.error.clone(), |d, e| d.child(div().text_color(l.error()).child(e)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
                     .when(!busy, |d| {
-                        d.child(
-                            button("form-save", tr!("contacts-save"), true)
-                                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                        )
+                        d.child(button("form-save", tr!("contacts-save"), true).on_click(cx.listener(|this, _, _, cx| this.save(cx))))
                     })
                     .when(busy, |d| d.child(div().text_color(l.text2()).child(tr!("contacts-saving"))))
                     .child(button("form-cancel", tr!("contacts-cancel"), false).on_click(cx.listener(
@@ -828,36 +1361,47 @@ impl ContactsView {
     }
 }
 
-/// Строка списка: имя, ниже — адрес (если имя не он сам) или тип записи справочника, организация.
-fn row(i: usize, e: &Entry, selected: bool, cx: &mut Context<ContactsView>) -> AnyElement {
-    let l = crate::roles::look(cx);
+/// Строка списка: кружок с буквами, имя, ниже — должность и организация или адрес (тип у переговорных).
+fn row(ix: usize, e: &Entry, selected: bool, external: bool, l: &Look, cx: &mut Context<ContactsView>) -> AnyElement {
     let name = e.name();
     let email = e.card.emails.first().filter(|m| !m.eq_ignore_ascii_case(&name)).cloned();
-    let email = match (email, e.kind) {
-        (None, Kind::Person | Kind::Room | Kind::Resource) => Some(e.kind.label()),
-        (m, _) => m,
+    let second = match (e.kind, e.card.title.as_str(), e.card.organization.as_str(), email) {
+        (Kind::Room | Kind::Resource, _, _, _) => e.kind.label(),
+        (_, t, o, _) if !t.is_empty() && !o.is_empty() => format!("{t} · {o}"),
+        (_, t, _, _) if !t.is_empty() => t.to_string(),
+        (_, _, o, Some(m)) if !o.is_empty() => format!("{m} · {o}"),
+        (_, _, _, Some(m)) => m,
+        (_, _, o, None) => o.to_string(),
     };
-    let second = match (email.as_ref(), e.card.organization.as_str()) {
-        (Some(m), "") => m.clone(),
-        (Some(m), org) => format!("{m} · {org}"),
-        (None, org) => org.to_string(),
-    };
+    let second = if second.is_empty() { e.kind.label() } else { second };
     let id = e.card.id.clone();
     div()
-        .id(("contact", i))
+        .id(("contact", ix))
         .w_full()
         .h(px(ROW_H))
-        .px_3()
         .flex()
-        .flex_col()
-        .justify_center()
+        .items_center()
+        .gap(px(10.))
+        .pl(px(14.))
+        .pr(px(12.))
         .border_b_1()
         .border_color(l.border())
         .cursor_pointer()
         .when(selected, |d| d.bg(l.picked()))
         .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
-        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(name))
-        .child(div().truncate().text_xs().text_color(l.text2()).child(second))
+        .child(avatar(&name, 36., l))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(div().truncate().child(name))
+                .child(div().truncate().text_size(px(12.)).text_color(l.text2()).child(second)),
+        )
+        .when(matches!(e.kind, Kind::Room | Kind::Resource), |d| d.child(icon(g::PIN, 12.).text_color(l.text2())))
+        .when(external, |d| d.child(chip_outline(tr!("cal-external"), l)))
         .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
         .into_any_element()
 }
@@ -872,9 +1416,12 @@ impl Render for ContactsView {
                 None => div()
                     .size_full()
                     .flex()
+                    .flex_col()
                     .items_center()
                     .justify_center()
+                    .gap(px(8.))
                     .text_color(l.text2())
+                    .child(icon(crate::chrome::glyph::CONTACTS, 28.).text_color(l.text3()))
                     .child(tr!("contacts-pick"))
                     .into_any_element(),
             },
@@ -883,14 +1430,121 @@ impl Render for ContactsView {
             .size_full()
             .flex()
             .min_w_0()
-            .bg(l.panel())
-            .child(self.sidebar(cx))
-            .child(div().flex_1().min_w_0().h_full().child(pane))
+            .text_size(px(13.))
+            .child(self.nav(cx))
+            .child(self.list_card(cx))
+            .child(crate::mailer::card(&l).flex_1().child(pane))
+    }
+}
+
+/// Демо: занятость коллеги из демо-недели — на сегодня (тот же день недели).
+fn shift_to_today(busy: Vec<Busy>, today: i64, tz: &TimeZone) -> Vec<Busy> {
+    let Some(z) = crate::calendar::zoned(today, tz) else { return busy };
+    let wd = z.weekday();
+    busy.into_iter()
+        .filter_map(|b| {
+            let d = crate::calendar::zoned(b.span.start, tz)?.date();
+            (d.weekday() == wd).then(|| {
+                let shift = today - day_start(d, tz);
+                Busy { span: Span::new(b.span.start + shift, b.span.end + shift), kind: b.kind }
+            })
+        })
+        .collect()
+}
+
+// --- командная строка раздела ---
+
+/// Командная строка контактов (макет: на месте строки почты): «Новый контакт», «Написать», «Встреча»,
+/// «Копировать адрес», «Изменить», «Удалить», поиск.
+pub(crate) struct ContactsBar {
+    contacts: Entity<ContactsView>,
+    _subscription: Subscription,
+}
+
+impl ContactsBar {
+    pub(crate) fn new(contacts: Entity<ContactsView>, cx: &mut Context<Self>) -> Self {
+        let sub = cx.observe(&contacts, |_, _, cx| cx.notify());
+        Self { contacts, _subscription: sub }
+    }
+}
+
+impl Render for ContactsBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = crate::roles::look(cx);
+        let c = self.contacts.read(cx);
+        let kind = c.selected_entry().map(|e| e.kind);
+        let has_mail = c.selected_entry().is_some_and(|e| !e.card.emails.is_empty());
+        let search_state = c.search.clone();
+        let action = |id: &'static str, glyph: char, key: &str, on: bool, act: fn() -> Box<dyn Action>| {
+            crate::chrome::quiet_button(id, &l)
+                .child(icon(glyph, 16.))
+                .child(tr!(key))
+                .when(!on, |d| d.opacity(0.45))
+                .on_click(move |_, window, cx| window.dispatch_action(act(), cx))
+        };
+        use crate::commands::contacts as cmd;
+        let new = div()
+            .id("contacts-new")
+            .h(px(32.))
+            .px(px(14.))
+            .mr(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(l.px(Metric::RadiusControl))
+            .bg(l.accent())
+            .text_color(l.on_accent())
+            .cursor_pointer()
+            .hover(|d| d.bg(l.accent_hover()))
+            .child(icon(g::ADD, 14.))
+            .child(tr!("contacts-new"))
+            .child(
+                div()
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(l.on_accent().opacity(0.55))
+                    .text_size(px(11.))
+                    .child("Ctrl+Shift+C"),
+            )
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(cmd::New), cx));
+        let kbd = div()
+            .flex_none()
+            .px(px(6.))
+            .rounded(l.px(Metric::RadiusControl))
+            .border_1()
+            .border_color(l.stroke())
+            .text_size(px(11.))
+            .text_color(l.text3())
+            .child("Ctrl+E");
+        let search = Input::new(&search_state).prefix(icon(g::SEARCH, 14.).text_color(l.text3())).suffix(kbd);
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .px(px(12.))
+            .text_color(l.text())
+            .child(new)
+            .child(action("contacts-write", g::MAIL, "contacts-write", has_mail, || Box::new(cmd::Write)))
+            .child(action("contacts-meet", g::CALENDAR, "contacts-meet", has_mail, || Box::new(cmd::Meeting)))
+            .child(action("contacts-copy", g::COPY, "contacts-copy", has_mail, || Box::new(cmd::CopyAddress)))
+            .child(div().w(px(1.)).h(px(20.)).mx(px(8.)).bg(l.stroke()))
+            .child(action(
+                "contacts-edit",
+                g::EDIT,
+                if kind.is_some_and(|k| k != Kind::Contact) { "contacts-add-mine" } else { "contacts-edit" },
+                kind.is_some(),
+                || Box::new(cmd::Edit),
+            ))
+            .child(action("contacts-delete", g::DELETE, "contacts-delete", kind == Some(Kind::Contact), || Box::new(cmd::Delete)))
+            .child(div().flex_1())
+            .child(div().ml(px(12.)).w(px(300.)).flex_none().child(search))
     }
 }
 
 impl crate::Mailer {
-    /// Просьба раздела: команда синхронизации, окно письма или тост. Демо сюда правки не шлёт (они в окне).
+    /// Просьба раздела: команда синхронизации, письмо, встреча или тост. Демо сюда правки не шлёт (они в окне).
     pub(crate) fn on_contacts(&mut self, action: &ContactsAction, cx: &mut Context<Self>) {
         let command = match action {
             ContactsAction::Load => Command::Contacts,
@@ -898,8 +1552,18 @@ impl crate::Mailer {
                 Command::SaveContact { card: card.clone(), old: old.clone(), ticket: *ticket }
             }
             ContactsAction::Delete { id, ticket } => Command::DeleteContact { id: id.clone(), ticket: *ticket },
+            ContactsAction::Availability { ticket, email, from, to } => {
+                Command::Availability { ticket: *ticket, emails: vec![email.clone()], from: *from, to: *to }
+            }
             ContactsAction::Write(address) => {
                 self.open_compose(Draft { to: vec![address.clone()], ..Default::default() }, cx);
+                return;
+            }
+            ContactsAction::Meet(address) => {
+                let now = jiff::Zoned::now();
+                let mut model = crate::meeting::MeetingModel::new(crate::meeting::default_start(&now), 3600);
+                model.attendees = format!("{}; ", address.display());
+                self.open_meeting(Some(model), cx);
                 return;
             }
             ContactsAction::Toast(level, text) => {
@@ -951,7 +1615,7 @@ fn demo_directory() -> Vec<Entry> {
     v
 }
 
-/// Демо: личные контакты и справочник — в подсказки адресов окна письма и окна встречи.
+/// Демо: личные контакты и справочник — в подсказки адресов окна письма и вкладки встречи.
 pub(crate) fn add_demo(book: &mut AddressBook) {
     let mine = postman_demo::contacts::mine();
     book.add_contacts(mine.iter().flat_map(|c| c.emails.iter().map(|e| (c.name, *e))));
@@ -961,7 +1625,7 @@ pub(crate) fn add_demo(book: &mut AddressBook) {
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{ContactCard, Entry, FormError, FormText, Kind, demo_directory, demo_mine, filter};
+    use super::{ContactCard, Entry, FormError, FormText, Item, Kind, demo_directory, demo_mine, filter, items};
 
     fn names(entries: &[Entry], q: &str) -> Vec<String> {
         filter(entries, q).into_iter().map(|i| entries[i].card.name.clone()).collect()
@@ -985,6 +1649,29 @@ mod tests {
         assert_eq!(names(&dir, "ПЕРЕГОВОРНАЯ 3"), ["Переговорная 3"]);
         let room = dir.iter().find(|e| e.card.name == "Переговорная 3").map(|e| e.kind);
         assert_eq!(room, Some(Kind::Room));
+    }
+
+    /// Список с буквами: заголовок буквы с числом, «Ё» — с «Е»; при поиске букв нет.
+    #[test]
+    fn letters_group_the_list() {
+        let dir = demo_directory();
+        let shown = filter(&dir, "");
+        let list = items(&dir, &shown, true);
+        let letters: Vec<(char, usize)> = list
+            .iter()
+            .filter_map(|i| match i {
+                Item::Letter(c, n) => Some((*c, *n)),
+                Item::Row(_) => None,
+            })
+            .collect();
+        assert_eq!(list.len(), shown.len() + letters.len());
+        assert_eq!(letters.iter().map(|(_, n)| n).sum::<usize>(), shown.len());
+        assert!(letters.iter().any(|(c, _)| *c == 'П'), "{letters:?}");
+        let fe = letters.iter().find(|(c, _)| *c == 'Ф').map(|(_, n)| *n);
+        assert_eq!(fe, Some(1), "Фёдорова — под «Ф»");
+        assert!(matches!(list.first(), Some(Item::Letter(_, _))));
+        let found = filter(&dir, "петров");
+        assert_eq!(items(&dir, &found, false), found.iter().map(|&i| Item::Row(i)).collect::<Vec<_>>());
     }
 
     #[test]

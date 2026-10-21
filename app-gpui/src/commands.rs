@@ -54,9 +54,19 @@ pub mod calendar {
     gpui_kit::actions!(calendar, [NewMeeting, PrevWeek, NextWeek, Today]);
 }
 
-/// Окно встречи (S3-05).
+/// Вкладка встречи (S3-05, вкладкой — S5-11).
 pub mod meeting {
     gpui_kit::actions!(meeting, [Send, Close]);
+}
+
+/// Контакты (S5-11): новый, изменить, удалить, написать, встреча, копировать адрес.
+pub mod contacts {
+    gpui_kit::actions!(contacts, [New, Edit, Delete, Write, Meeting, CopyAddress]);
+}
+
+/// Ответ на приглашение в письме (S5-11): клавиши A / T / N, когда карточка ждёт ответа.
+pub mod invite {
+    gpui_kit::actions!(invite, [Accept, Tentative, Decline]);
 }
 
 /// Вкладка «Настройки» (S5-09); автоответы и правила (S4-05, S4-07) — её разделы, в Outlook — меню «Файл».
@@ -81,13 +91,17 @@ const LIST: Option<&str> = Some("MailView && !Input && !Composer");
 const MAIL: Option<&str> = Some("MailView && !Composer");
 /// Раздел «Календарь».
 const CALENDAR: Option<&str> = Some("CalendarView");
+/// Раздел «Контакты» вне полей ввода (Delete, F2 в поиске — правка текста).
+const CONTACTS: Option<&str> = Some("ContactsView && !Input");
+/// Раздел «Контакты», включая поле поиска.
+const CONTACTS_ANY: Option<&str> = Some("ContactsView");
 /// Весь экран почты (любой раздел), включая поле поиска.
 const MAILER: Option<&str> = Some("Mailer");
 /// Письмо, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
 /// отправка, а не перевод строки), а при равной глубине побеждает привязка, заданная позже (`bind` — после
 /// `gpui_kit::init`).
 const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
-/// Окно встречи, как окно письма.
+/// Вкладка встречи, как окно письма.
 const MEETING: Option<&str> = Some("Meeting || (Meeting > Input)");
 
 const fn cmd(id: &'static str, keys: &'static [&'static str], context: Option<&'static str>) -> Command {
@@ -130,10 +144,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("search.focus", &["ctrl-e"], None),
     cmd("search.clear", &["escape"], None),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
-    // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — кнопкой.
+    // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — Alt+Home (макет S5-11).
     cmd("calendar.prev_week", &["alt-up"], CALENDAR),
     cmd("calendar.next_week", &["alt-down"], CALENDAR),
-    cmd("calendar.today", &[], CALENDAR),
+    cmd("calendar.today", &["alt-home"], CALENDAR),
     cmd("compose.send", &["ctrl-enter", "alt-s"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
     cmd("compose.attach", &[], COMPOSER),
@@ -152,6 +166,17 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.discard", &[], COMPOSER),
     cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Контакты (S5-11): Outlook — Ctrl+Shift+C новый контакт; F2 — правка, Delete — удалить (после «Да»).
+    cmd("contacts.new", &["ctrl-shift-c"], CONTACTS_ANY),
+    cmd("contacts.edit", &["f2"], CONTACTS),
+    cmd("contacts.delete", &["delete"], CONTACTS),
+    cmd("contacts.write", &[], CONTACTS_ANY),
+    cmd("contacts.meeting", &[], CONTACTS_ANY),
+    cmd("contacts.copy_address", &[], CONTACTS_ANY),
+    // Не Outlook (макет «Приглашение в письме»): A / T / N — ответ, если открыто приглашение без ответа.
+    cmd("invite.accept", &["a"], LIST),
+    cmd("invite.tentative", &["t"], LIST),
+    cmd("invite.decline", &["n"], LIST),
     // Не Outlook (там «Файл → Параметры»): Ctrl+, — как в новом Outlook и редакторах (S5-09).
     cmd("settings.open", &["ctrl-,"], None),
     // Outlook: «Файл → Автоматические ответы», без клавиши.

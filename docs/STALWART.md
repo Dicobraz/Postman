@@ -37,6 +37,7 @@ cargo test -p postman-core --test stand -- --ignored
 | `contacts_are_edited_and_directory_is_listed` | S4-02, user3: `ContactCard/set` create (телефон, организация, должность) → update патчем (адрес добавлен, телефон убран `null`, имя и должность другие) → destroy; `Principal/query` без фильтра — user1…3 типа `individual` |
 | `contacts_through_sync` | S4-02, user3, через поток синхронизации: после входа `ContactsLoaded` и `DirectoryLoaded`; `SaveContact` (новая, затем правка) и `DeleteContact` → итог и свежий `ContactsLoaded` |
 | `calendar_through_sync` | S3-05, через поток синхронизации: `ShareFreeBusy` (user3 → user1), `CreateMeeting` с приглашением → у user3 по uid, `Events` → встреча в неделе, `Availability` → занятость user3 |
+| `event_keywords_sequence_and_principal_kinds` | S5-11: событие с `keywords` и `categories` → оба возвращаются как есть; встреча с user3 → перенос с рассылкой → `sequence` 0 → 1 и у организатора, и у участника; справочник (`Principal/query` без фильтра) — типы на стенде |
 | `rejected_password_stops_sync_with_auth_error` | S4-03: неверный пароль → `Error` рода `Auth` на шаге `Connect`, поток синхронизации закрывается без повторов |
 | `load_more_through_sync` | S4-03: `LoadMore` после первой страницы → `LoadedMore` с числом писем следующей страницы |
 | `calendar_change_arrives_by_push` | S4-03: событие календаря, созданное другим клиентом → push → один `CalendarChanged` (~1,5 с, задержка на пачку), письма не перечитываются |
@@ -208,6 +209,16 @@ cargo test -p postman-core --test stand -- --ignored
     своя таблица. Аккаунт пользователя, открывшего user3 папку (`shared-ro`): сессия объявляет у него FileNode
     (`mayCreateTopLevelFileNode: false`), но любой метод FileNode — `forbidden` «You do not have access to account j».
     Клиент считает, что таблицы у такого аккаунта нет (`Reply::Unsupported`), и берёт свою.
+33. **Метки и версия событий** (S5-11, тест `event_keywords_sequence_and_principal_kinds`). `keywords` и `categories`
+    (`CalendarEvent/set create`) хранятся и отдаются как есть, если их запросить в `properties` — по ним клиент
+    красит блок недели цветом категории (`Categories::for_event`: `pm.cat.<id>` или имя категории). `sequence`:
+    без рассылки правка его не меняет, нулевой сервер не отдаёт (клиент считает 0); правка организатором с
+    `sendSchedulingMessages: true` поднимает его на 1 и у организатора, и в копии участника — по нему карточка
+    приглашения видит «изменено» и «устарело» (`invite::classify`).
+34. **Переговорные и ресурсы.** На стенде `Principal/query` отдаёт только `individual` и `group` (9 записей): типов
+    `location`/`resource` нет — строка «Переговорная» во вкладке встречи на стенде не появляется (в демо — есть).
+    Бронирование переговорной (участник-ресурс, автопринятие) и её занятость через `Principal/getAvailability` —
+    [проверить], когда администратор заведёт такую запись.
 
 ## Общие ящики на стенде (S4-06)
 

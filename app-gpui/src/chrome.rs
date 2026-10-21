@@ -131,6 +131,7 @@ impl Mailer {
         match t.kind {
             TabKind::Mail => (tr!("frame-tab-mail"), false),
             TabKind::Settings => (tr!("frame-tab-settings"), false),
+            TabKind::Meeting => (self.meetings.title(t.id, cx), false),
             TabKind::Compose(id) => {
                 let Some(c) = self.compose.get(id) else { return (tr!("compose-title-new"), false) };
                 let m = &c.read(cx).model;
@@ -179,6 +180,7 @@ impl Mailer {
                 .when(on, |d| d.bg(l.panel()).text_color(l.text()))
                 .when(!on, |d| d.text_color(l.text2()).hover(|d| d.bg(l.hover())))
                 .when(letter, |d| d.child(icon(glyph::NEW_MAIL, 12.)))
+                .when(t.kind == TabKind::Meeting, |d| d.child(icon(crate::calendar::g::CALENDAR, 13.)))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 // Несохранённый черновик — точка (DESIGN «Новое письмо», макет вкладки).
                 .when(dirty, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(l.text2())))
@@ -246,7 +248,7 @@ impl Mailer {
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(key)).build(window, cx))
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
         };
-        let module = |s: Section| !settings_tab && self.section == s;
+        let module = |s: Section| self.tabs.is_active(TabKind::Mail) && self.section == s;
         div()
             .w(px(W_RAIL))
             .h_full()
@@ -420,6 +422,7 @@ impl Mailer {
                 self.close_settings(window, cx);
             }
             TabKind::Compose(letter) => self.close_compose_tab(letter, window, cx),
+            TabKind::Meeting => self.close_meeting(id, window, cx),
         }
         cx.notify();
     }
