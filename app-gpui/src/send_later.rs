@@ -154,10 +154,8 @@ impl Mailer {
                 let draft = offered.or(kept).or_else(|| draft_from_cache(self, email));
                 let text = match draft {
                     Some(d) => {
-                        if let Some(c) = self.open_compose(d, cx) {
-                            let key = email.clone();
-                            c.update(cx, |c, _| c.model.set_server_id(key));
-                        }
+                        let how = crate::compose::OpenAs { letter: None, server_id: Some(email.clone()) };
+                        self.open_draft(d, how, cx);
                         tr!("send-unsent")
                     }
                     None => tr!("send-unsent-drafts"),

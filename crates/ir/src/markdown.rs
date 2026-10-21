@@ -200,13 +200,16 @@ fn trim_trailing_newlines(s: &mut String) {
     }
 }
 
-/// Markdown композера -> HTML исходящего письма. Сырой HTML экранируется,
-/// ссылки — только http(s)/mailto, картинки — только cid:.
+/// Markdown композера -> HTML исходящего письма. Сырой HTML экранируется (кроме `<u>`/`</u>`: подчёркивания в
+/// Markdown нет, кнопка «Ч» композера вставляет их), ссылки — только http(s)/mailto, картинки — только cid:.
 pub fn markdown_to_html(md: &str) -> String {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     let mut link_stack: Vec<bool> = Vec::new();
     let mut image_depth = 0usize;
     let events = Parser::new_ext(md, opts).filter_map(|ev| match ev {
+        Event::InlineHtml(s) if s.eq_ignore_ascii_case("<u>") || s.eq_ignore_ascii_case("</u>") => {
+            Some(Event::InlineHtml(s))
+        }
         Event::Html(s) | Event::InlineHtml(s) => Some(Event::Text(s)),
         Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
             let ok = safe_link(&dest_url);
@@ -270,5 +273,15 @@ mod tests {
         assert!(h.contains(r#"href="https://ok.ru""#));
         assert!(!h.contains("track/p.gif"));
         assert!(h.contains(r#"src="cid:logo""#));
+    }
+
+    /// Подчёркивание композера (S5-06б): `<u>` проходит, остальной HTML и атрибуты — текстом.
+    #[test]
+    fn underline_passes_and_other_html_does_not() {
+        let h = markdown_to_html("a <u>b</u> <u onclick=x>c</u> <b>d</b>");
+        assert!(h.contains("<u>b</u>"), "{h}");
+        assert!(!h.contains("<u onclick"), "{h}");
+        assert!(!h.contains("<b>"), "{h}");
+        assert!(format!("{:?}", from_html(&h)).contains("underline: true"));
     }
 }

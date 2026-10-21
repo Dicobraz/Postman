@@ -43,8 +43,10 @@ pub(crate) struct Mailer {
     pub(crate) backend: Backend,
     /// Живой ящик: статус синхронизации, строка входа, поиск на сервере (`live.rs`).
     pub(crate) live: crate::live::Live,
-    /// Окна письма (S3-01).
+    /// Письма: вкладки и ответ в области чтения (S5-06б).
     pub(crate) compose: crate::compose::Composers,
+    /// Окно экрана: полям ввода нового письма нужно окно, а письмо открывается и из событий синхронизации.
+    pub(crate) window: AnyWindowHandle,
     /// Ответ, пересылка, удаление (S3-02).
     pub(crate) actions: crate::actions::Actions,
     /// Уровень песочницы последнего разбора; о слабой песочнице — один тост за запуск.
@@ -155,6 +157,8 @@ impl Mailer {
             }),
             // Значок уведомлений в строке состояния.
             cx.observe(&toasts, |_, _, cx| cx.notify()),
+            // Ответ в области чтения — над своим письмом: открыли другое — ответ уходит во вкладку или закрывается.
+            cx.observe(&reading, |this, _, cx| this.inline_follows_letter(cx)),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -170,6 +174,7 @@ impl Mailer {
             backend: Backend::Demo,
             live: Default::default(),
             compose: Default::default(),
+            window: window.window_handle(),
             actions: Default::default(),
             sandbox: None,
             last_key: String::new(),
@@ -294,9 +299,15 @@ impl Render for Mailer {
         // Вкладка настроек — панель на месте модуля.
         let settings_tab = self.tabs.is_active(crate::tabs::TabKind::Settings);
         let settings = self.settings.panel.as_ref().filter(|_| settings_tab).map(|p| p.view());
+        // Вкладка письма (S5-06б): письмо на всю ширину, без командной строки и рейла (макет «Новое письмо»).
+        let letter = match self.tabs.active().kind {
+            crate::tabs::TabKind::Compose(id) => self.compose.get(id).cloned(),
+            _ => None,
+        };
         let free = settings.is_none();
         // Контекст раздела: клавиши писем (j/k, Delete, Ctrl+R…) — только в «Почте» без открытых настроек (`commands.rs`).
         let context = match self.section {
+            _ if letter.is_some() => "Mailer ComposeView",
             _ if !free => "Mailer SettingsView",
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
@@ -339,8 +350,8 @@ impl Render for Mailer {
             }))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
-            .on_action(cx.listener(|this, _: &commands::tab::Next, _, cx| this.step_tab(1, cx)))
-            .on_action(cx.listener(|this, _: &commands::tab::Prev, _, cx| this.step_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Next, window, cx| this.step_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &commands::tab::Prev, window, cx| this.step_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &commands::tab::Close, window, cx| {
                 let id = this.tabs.active().id;
                 this.close_tab(id, window, cx);
@@ -382,11 +393,23 @@ impl Render for Mailer {
             .text_color(l.text())
             .text_size(px(13.))
             .child(self.titlebar(&l, window, cx))
-            .child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
-            .when_some(self.settings.bar.clone(), |d, bar| {
-                d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
+            .when(letter.is_none(), |d| {
+                d.child(self.bar.clone().cached(StyleRefinement::default().w_full().h(px(BAR_HEIGHT)).flex_none()))
+                    .when_some(self.settings.bar.clone(), |d, bar| {
+                        d.child(bar.cached(StyleRefinement::default().w_full().h(px(crate::vacation::BAR_HEIGHT)).flex_none()))
+                    })
             })
-            .child(self.body(&l, settings, free))
+            .map(|d| match letter {
+                Some(view) => d.child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .px(px(8.))
+                        .child(view.cached(StyleRefinement::default().size_full())),
+                ),
+                None => d.child(self.body(&l, settings, free)),
+            })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
             // Окно «Отменить» отправки — внизу, над строкой состояния.
@@ -405,6 +428,8 @@ impl Render for Mailer {
 /// Ширина панели папок и карточки списка (макет главного окна).
 const W_FOLDERS: f32 = 236.0;
 const W_LIST: f32 = 452.0;
+/// Доля высоты области чтения под ответом (остальное — письмо, на которое отвечают).
+const INLINE_SHARE: f32 = 0.6;
 
 /// Карточка на фоне каркаса: скругление сверху, рамка без нижней стороны.
 fn card(l: &crate::roles::Look) -> Div {
@@ -435,9 +460,17 @@ impl Mailer {
             if let Some(s) = self.live.signin.clone() {
                 return body.child(card(l).flex_1().child(s));
             }
+            // Ответ — в области чтения над письмом (S5-06б): своя кэшируемая view сверху карточки.
+            let reading = match self.compose.inline_view() {
+                Some(reply) => card(l)
+                    .flex_1()
+                    .child(reply.clone().cached(StyleRefinement::default().w_full().h(relative(INLINE_SHARE)).flex_none()))
+                    .child(self.reading.clone().cached(StyleRefinement::default().w_full().flex_1().min_h_0())),
+                None => card(l).flex_1().child(self.reading.clone().cached(full())),
+            };
             return body
                 .child(card(l).w(px(W_LIST)).flex_none().mr(px(8.)).child(self.list.clone().cached(full())))
-                .child(card(l).flex_1().child(self.reading.clone().cached(full())));
+                .child(reading);
         }
         match self.section {
             Section::Calendar => body.child(card(l).flex_1().child(self.cal.clone().cached(full()))),
