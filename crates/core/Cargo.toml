@@ -35,6 +35,8 @@ postman-smime = { workspace = true, features = ["testkit"] }
 # Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
 postman-demo.workspace = true
 tempfile = "3"
+# CalDAV в тесте стенда задач (S6-01): PROPFIND, REPORT, PUT .ics — тем же HTTP-клиентом, что у `postman-jmap`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [lints]
 workspace = true
