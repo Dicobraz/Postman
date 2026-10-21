@@ -50,6 +50,7 @@ mod settings_cats;
 mod settings_keys;
 mod settings_sign;
 mod settings_accounts;
+mod filters;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -87,6 +88,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/threads.ftl")),
     ("ru", include_str!("../i18n/ru/send.ftl")),
     ("ru", include_str!("../i18n/ru/frame.ftl")),
+    ("ru", include_str!("../i18n/ru/filters.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -104,6 +106,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/threads.ftl")),
     ("en", include_str!("../i18n/en/send.ftl")),
     ("en", include_str!("../i18n/en/frame.ftl")),
+    ("en", include_str!("../i18n/en/filters.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

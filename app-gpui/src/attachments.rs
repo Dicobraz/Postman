@@ -12,13 +12,13 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::Metric;
 use postman_cache::AttachmentRow;
-use postman_core::attach::{self, Risk, Viewer};
+use postman_core::attach::{self as classify, Risk, Viewer};
 use postman_core::files;
 use postman_worker::OfficeScan;
 
 use crate::Mailer;
 use crate::chrome::icon;
-use crate::commands::attach as cmd;
+use crate::commands::attach;
 use crate::reading::{Reading, ReadingPane};
 use crate::roles::{Look, Pm};
 
@@ -93,13 +93,13 @@ pub(crate) fn listed(
         .filter(|a| a.cid.as_ref().is_none_or(|c| !shown_cids.contains(c)))
         .filter(|a| !(invite_card && is_invite(a)))
         .map(|a| {
-            let risk = attach::risk_with(&a.name, scans.get(&a.blob_id).map(|s| s.macros));
+            let risk = classify::risk_with(&a.name, scans.get(&a.blob_id).map(|s| s.macros));
             Item {
                 row: a.clone(),
                 name: files::safe_name(&a.name),
                 kind: kind(&a.name, &a.mime),
                 risk,
-                viewer: attach::viewer(&a.name, &a.mime),
+                viewer: classify::viewer(&a.name, &a.mime),
                 can_open: risk == Risk::Safe && files::can_open(&a.name),
             }
         })
@@ -188,14 +188,14 @@ pub(crate) fn visible(total: usize, expanded: bool) -> (usize, usize) {
 /// Команды вложений — на корне экрана почты (`Mailer::render`). ← / → без открытого просмотра не нужны:
 /// действие уходит дальше (`propagate`).
 pub(crate) fn handlers(root: Div, cx: &mut Context<Mailer>) -> Div {
-    root.on_action(cx.listener(|this, _: &cmd::Preview, _, cx| this.reading.update(cx, |r, cx| r.toggle_preview(None, cx))))
-        .on_action(cx.listener(|this, _: &cmd::SaveAll, _, cx| this.reading.update(cx, |r, cx| r.save_all(cx))))
-        .on_action(cx.listener(|this, _: &cmd::Next, _, cx| {
+    root.on_action(cx.listener(|this, _: &attach::Preview, _, cx| this.reading.update(cx, |r, cx| r.toggle_preview(None, cx))))
+        .on_action(cx.listener(|this, _: &attach::SaveAll, _, cx| this.reading.update(cx, |r, cx| r.save_all(cx))))
+        .on_action(cx.listener(|this, _: &attach::Next, _, cx| {
             if !this.reading.update(cx, |r, cx| r.step_preview(1, cx)) {
                 cx.propagate();
             }
         }))
-        .on_action(cx.listener(|this, _: &cmd::Prev, _, cx| {
+        .on_action(cx.listener(|this, _: &attach::Prev, _, cx| {
             if !this.reading.update(cx, |r, cx| r.step_preview(-1, cx)) {
                 cx.propagate();
             }

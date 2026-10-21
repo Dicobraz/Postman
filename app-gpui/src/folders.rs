@@ -1,5 +1,6 @@
 //! Панель папок (разделы — рейл модулей, `chrome.rs`). Общие ящики (S4-06) — свёртываемые ветки
-//! с именем аккаунта под своими папками.
+//! с именем аккаунта под своими папками. Воронка у открытой папки переключает панель на фильтры (S5-03,
+//! `filters.rs`).
 
 use std::collections::HashSet;
 
@@ -10,6 +11,7 @@ use postman_cache::{AccountRow, MailboxRow, account_of};
 
 use pets_ui::theme::{Metric, Role};
 
+use crate::filters::FilterModel;
 use crate::roles::{Look, look};
 
 // --- папки ---
@@ -23,6 +25,9 @@ pub(crate) struct Folders {
     pub(crate) current: Option<String>,
     /// Число результатов, пока показан поиск.
     pub(crate) results: Option<usize>,
+    /// Фильтры (S5-03): модель, общая со списком; панель на месте папок — `FilterModel::panel`.
+    pub(crate) filters: Option<Entity<FilterModel>>,
+    _watch: Option<Subscription>,
 }
 
 pub(crate) enum FolderEvent {
@@ -33,7 +38,14 @@ impl EventEmitter<FolderEvent> for Folders {}
 
 impl Folders {
     pub(crate) fn new(mailboxes: Vec<MailboxRow>, accounts: Vec<AccountRow>, current: Option<String>) -> Self {
-        Self { mailboxes, accounts, collapsed: HashSet::new(), current, results: None }
+        Self { mailboxes, accounts, collapsed: HashSet::new(), current, results: None, filters: None, _watch: None }
+    }
+
+    /// Следить за фильтрами: панель, воронка и её счётчик перерисовываются вместе с моделью.
+    pub(crate) fn watch(mut self, filters: Entity<FilterModel>, cx: &mut Context<Self>) -> Self {
+        self._watch = Some(cx.observe(&filters, |_, _, cx| cx.notify()));
+        self.filters = Some(filters);
+        self
     }
 
     /// Папки аккаунта (`None` — своего) в порядке сервера.
@@ -75,6 +87,8 @@ impl Folders {
             .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
             // Непрочитанные — с сервера (`Mailbox.unreadEmails`), а не по загруженной части папки.
             .when(m.unread > 0, |d| unread(d, m.unread, l))
+            // Воронка — у открытой папки.
+            .when_some(self.filters.as_ref().filter(|_| selected), |d, f| d.child(crate::filters::funnel(f, f.read(cx), l)))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(FolderEvent::Open(id.clone()))))
             .into_any_element()
     }
@@ -133,6 +147,10 @@ fn unread(d: Stateful<Div>, n: u32, l: &Look) -> Stateful<Div> {
 impl Render for Folders {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = look(cx);
+        // Режим фильтров: белая карточка с фильтрами на месте дерева.
+        if let Some(f) = self.filters.as_ref().filter(|f| f.read(cx).panel) {
+            return div().size_full().pt(px(4.)).pr(px(8.)).text_color(l.text()).child(crate::filters::panel(f, f.read(cx), &l));
+        }
         let mut col = div().flex().flex_col().size_full().pt(px(4.)).pr(px(8.)).pl(px(4.)).text_color(l.text());
         if let Some(n) = self.results {
             col = col.child(

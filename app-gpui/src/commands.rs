@@ -35,7 +35,15 @@ pub mod attach {
 }
 
 pub mod view {
-    gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
+    gpui_kit::actions!(
+        view,
+        [Mail, Calendar, Contacts, Notifications, Filters, QuickFilters, SortByDate, SortBySender, SortBySize]
+    );
+}
+
+/// Фильтры списка (S5-03).
+pub mod filters {
+    gpui_kit::actions!(filters, [Reset]);
 }
 
 /// Вкладки в заголовке окна (S5-01): следующая, предыдущая, закрыть.
@@ -186,6 +194,14 @@ pub const COMMANDS: &[Command] = &[
     cmd("settings.vacation", &[], None),
     // Outlook: «Файл → Правила и оповещения», без клавиши.
     cmd("settings.rules", &[], None),
+    // Фильтры (S5-03). Ctrl+Shift+F — в Outlook «Расширенный поиск», здесь — панель фильтров на месте папок.
+    cmd("view.filters", &["ctrl-shift-f"], MAIL),
+    // Вид → Быстрые фильтры: вернуть скрытые закладки; сортировка — меню над списком; без клавиш.
+    cmd("view.quick_filters", &[], MAIL),
+    cmd("view.sort_by_date", &[], MAIL),
+    cmd("view.sort_by_sender", &[], MAIL),
+    cmd("view.sort_by_size", &[], MAIL),
+    cmd("filters.reset", &[], MAIL),
 ];
 
 /// Привязать клавиши всех команд с учётом своих (`overrides`, «Настройки → Клавиатура»): привязки команд

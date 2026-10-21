@@ -62,9 +62,17 @@ pub(crate) struct Live {
     /// прочитанная позже, затёрла бы таблицу с сервера, а несохранённая правка — потерялась).
     labels_local: bool,
     labels_early: Vec<categories::Reply>,
+    /// Запрос фильтров «Все папки» на сервере (S5-03, `Command::Query`): номер последнего.
+    pub(crate) filter_ticket: Option<u64>,
 }
 
 impl Live {
+    /// Номер нового запроса к серверу (поиск, фильтры).
+    pub(crate) fn ticket(&mut self) -> u64 {
+        self.next_ticket += 1;
+        self.next_ticket
+    }
+
     /// Поиск сброшен (другая папка): поздний ответ сервера список не трогает.
     pub(crate) fn clear_search(&mut self) {
         self.search = None;
@@ -298,6 +306,8 @@ impl Mailer {
                 c.refresh(cx);
             }
         });
+        // Кто я для фильтров (упоминания, «Мне», внешние) — из `Event::Me`, не владелец демо-ящика.
+        self.list.update(cx, |l, cx| l.forget_me(cx));
         // Контакты и справочник — с сервера (S4-02): поток синхронизации присылает их после входа.
         self.contacts.update(cx, |c, cx| c.go_live(cx));
         self.live.session = session;
@@ -401,6 +411,9 @@ impl Mailer {
             if let Some(s) = self.live.search.as_mut().filter(|s| s.ticket == ticket) {
                 s.server = Some(ids);
                 self.show_live_results(cx);
+            } else if self.live.filter_ticket == Some(ticket) {
+                // Фильтры «Все папки»: письма сервера уже в кэше — список пересчитывается с ними.
+                self.list.update(cx, |l, cx| l.set_server_hits(ids, cx));
             }
         }
         for id in plan.bodies {
@@ -698,8 +711,7 @@ impl Mailer {
             return;
         }
         let mailbox = self.search_mailbox(cx);
-        self.live.next_ticket += 1;
-        let ticket = self.live.next_ticket;
+        let ticket = self.live.ticket();
         let sent = self.backend.send(Command::Search { query: query.clone(), mailbox: mailbox.clone(), ticket });
         if !sent {
             self.sync_stopped(cx);

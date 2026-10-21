@@ -160,11 +160,13 @@ pub struct QuickItem {
 #[serde(default)]
 pub struct QuickFilters {
     pub items: Vec<QuickItem>,
+    /// Закладки скрыты целиком («×» у закладок, S5-03); вернуть — Вид → Быстрые фильтры. Выбор `items` остаётся.
+    pub hidden: bool,
 }
 
 impl Default for QuickFilters {
     fn default() -> Self {
-        Self { items: Quick::ALL.iter().map(|&filter| QuickItem { filter, shown: true }).collect() }
+        Self { items: Quick::ALL.iter().map(|&filter| QuickItem { filter, shown: true }).collect(), hidden: false }
     }
 }
 
@@ -172,6 +174,11 @@ impl QuickFilters {
     /// Показанные закладками, по порядку (S5-03 строит по ним закладки списка).
     pub fn shown(&self) -> impl Iterator<Item = Quick> + '_ {
         self.items.iter().filter(|i| i.shown).map(|i| i.filter)
+    }
+
+    /// Закладки в списке: показанные, если полоса не скрыта целиком.
+    pub fn tabs(&self) -> impl Iterator<Item = Quick> + '_ {
+        self.shown().filter(|_| !self.hidden)
     }
 
     /// Каждый фильтр по одному разу; пропавшие (файл старой версии) — в конец, показанными.
