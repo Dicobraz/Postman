@@ -913,7 +913,6 @@ impl Mailer {
             max_delay,
             me: self.compose.me.clone(),
             book: self.compose.book.clone(),
-            worker: self.reading.read(cx).worker.clone(),
             mailer: cx.entity().downgrade(),
             categories,
             place,

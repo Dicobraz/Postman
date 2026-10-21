@@ -98,7 +98,7 @@ pub mod settings {
 pub mod compose {
     gpui_kit::actions!(
         compose,
-        [Send, Attach, Preview, Close, Bold, Italic, Underline, Bullets, Numbers, Link, Quote, Expand, Discard]
+        [Send, Attach, Close, Bold, Italic, Underline, Bullets, Numbers, Link, Quote, Expand, Discard]
     );
 }
 
@@ -239,8 +239,6 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.send", &["ctrl-enter"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
     cmd("compose.attach", &[], COMPOSER),
-    // Ctrl+Shift+P — исключение до живого отображения Markdown (S5-27), с ним команда уходит.
-    cmd("compose.preview", &["ctrl-shift-p"], COMPOSER),
     cmd("compose.close", &["escape"], COMPOSER),
     // Панель форматирования (S5-06б): как в Outlook — Ctrl+B, Ctrl+I, Ctrl+U; списки, ссылка и цитата — кнопками.
     cmd("compose.bold", &["ctrl-b"], COMPOSER),
@@ -384,9 +382,9 @@ fn keyed_action(c: &Command, keys: &str) -> Option<Box<dyn Action>> {
 #[cfg(test)]
 pub(crate) mod rule {
     /// Исключения правила одного модификатора (DESIGN «Хоткеи»): ради привычки Outlook и стандарта Windows.
-    /// Ctrl+Shift+B — встреча (S5-23); Ctrl+Shift+P — предпросмотр письма до живого отображения (S5-27).
+    /// Ctrl+Shift+B — встреча (S5-23).
     pub(crate) const TWO_MODIFIERS: &[&str] =
-        &["ctrl-shift-r", "ctrl-shift-q", "ctrl-shift-c", "ctrl-shift-b", "ctrl-shift-v", "ctrl-shift-tab", "ctrl-shift-p"];
+        &["ctrl-shift-r", "ctrl-shift-q", "ctrl-shift-c", "ctrl-shift-b", "ctrl-shift-v", "ctrl-shift-tab"];
 
     /// Клавиши без модификатора (DESIGN «Хоткеи»): навигация и действие над выделенным; 1–9 — категории (решение №6);
     /// End — пара к Home в списке; «Меню» — контекстное меню, как Shift+F10. Буквы без модификатора — только в схеме

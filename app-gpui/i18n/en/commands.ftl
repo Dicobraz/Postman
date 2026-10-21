@@ -63,7 +63,6 @@ cmd-tab-close = Close tab
 cmd-view-notifications = Notifications
 cmd-compose-send = Send message
 cmd-compose-attach = Attach file
-cmd-compose-preview = Preview message
 cmd-compose-close = Close the message
 cmd-compose-bold = Bold
 cmd-compose-italic = Italic
