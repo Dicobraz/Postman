@@ -940,7 +940,16 @@ impl Mailer {
         if let Some(tab) = tab {
             self.tabs.close(tab);
         }
+        self.refocus(cx);
         cx.notify();
+    }
+
+    /// Фокус — в активную вкладку после её смены не от щелчка (письмо закрылось, ответ развернули).
+    fn refocus(&mut self, cx: &mut Context<Self>) {
+        let (handle, mailer) = (self.window, cx.entity());
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| mailer.update(cx, |m, cx| m.focus_active_tab(window, cx)));
+        });
     }
 
     /// «Развернуть»: ответ из области чтения — во вкладку, с тем же черновиком.
@@ -953,6 +962,7 @@ impl Mailer {
             view.update(cx, |c, cx| c.set_place(Place::Tab, cx));
         }
         self.tabs.open(TabKind::Compose(id));
+        self.refocus(cx);
         cx.notify();
     }
 

@@ -381,7 +381,7 @@ impl Mailer {
     }
 
     /// Фокус — в активную вкладку: письмо — в его текст, иначе — экран (клавиши писем, вкладок).
-    fn focus_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.active().kind {
             TabKind::Compose(id) => {
                 if let Some(c) = self.compose.get(id).cloned() {
