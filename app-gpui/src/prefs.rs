@@ -48,6 +48,14 @@ pub(crate) fn get(cx: &App) -> Prefs {
     cx.try_global::<Store>().map(|s| s.prefs.clone()).unwrap_or_default()
 }
 
+/// Часть настроек без копии всего (строки списка читают её на каждой строке).
+pub(crate) fn with<R>(cx: &App, f: impl FnOnce(&Prefs) -> R) -> R {
+    match cx.try_global::<Store>() {
+        Some(s) => f(&s.prefs),
+        None => f(&Prefs::default()),
+    }
+}
+
 /// Перерисовать view `T`, когда настройки изменились (раскладка экрана почты зависит от «Панели чтения»).
 pub(crate) fn observe<T: 'static>(cx: &mut gpui_kit::Context<T>) -> gpui_kit::Subscription {
     cx.observe_global::<Store>(|_, cx| cx.notify())

@@ -70,6 +70,46 @@ pub mod credentials {
     }
 }
 
+/// Автозапуск, клиент `mailto:`, журнал в файл, открытие в Проводнике (S5-30).
+#[cfg(windows)]
+pub mod shell;
+
+/// Другие ОС: ничего из этого нет.
+#[cfg(not(windows))]
+pub mod shell {
+    use std::path::Path;
+
+    pub fn set_autostart(_on: bool) -> Result<(), String> {
+        Err("autostart is Windows only".into())
+    }
+
+    pub fn autostart() -> bool {
+        false
+    }
+
+    pub fn register_mailto() -> Result<(), String> {
+        Err("mailto registration is Windows only".into())
+    }
+
+    pub fn mailto_is_default() -> bool {
+        false
+    }
+
+    pub fn log_to_file(_path: &Path) -> bool {
+        false
+    }
+
+    pub fn default_env(_name: &str, _value: &str) {}
+
+    pub fn open(_target: &str) -> Result<(), String> {
+        Err("open is Windows only".into())
+    }
+
+    pub fn reveal(_path: &Path) -> Result<(), String> {
+        Err("reveal is Windows only".into())
+    }
+}
+
 /// Снимок окна: RGBA, 8 бит на канал, строки сверху вниз.
 pub struct Image {
     pub width: u32,

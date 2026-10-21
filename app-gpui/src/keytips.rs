@@ -22,10 +22,18 @@ pub(crate) const DELAY: Duration = Duration::from_millis(400);
 
 /// Таймер KeyTips: нажали Ctrl (один, без других клавиш) — через [`DELAY`] плашки; отпустили или нажали другую
 /// клавишу — плашек нет.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Timer {
     since: Option<Instant>,
     shown: bool,
+    /// Задержка («Настройки → Внешний вид», S5-30); по умолчанию — [`DELAY`].
+    pub(crate) delay: Duration,
+}
+
+impl Default for Timer {
+    fn default() -> Self {
+        Self { since: None, shown: false, delay: DELAY }
+    }
 }
 
 impl Timer {
@@ -48,7 +56,7 @@ impl Timer {
 
     /// Когда проверить снова (`None` — не ждём).
     pub(crate) fn due(&self) -> Option<Instant> {
-        self.since.filter(|_| !self.shown).map(|s| s + DELAY)
+        self.since.filter(|_| !self.shown).map(|s| s + self.delay)
     }
 
     /// Прошло время: держат Ctrl [`DELAY`] — показать. `true` — показ сменился.
@@ -181,6 +189,7 @@ impl crate::Mailer {
     /// Модификаторы сменились: один Ctrl — ждать [`DELAY`]; другие или отпущен — плашек нет.
     pub(crate) fn keytips_modifiers(&mut self, m: Modifiers, cx: &mut Context<Self>) {
         let ctrl_only = m.control && !m.alt && !m.shift && !m.platform && !m.function;
+        self.keytips.delay = Duration::from_millis(u64::from(crate::prefs::get(cx).look.keytips_delay));
         if self.keytips.modifiers(ctrl_only, Instant::now()) {
             set_shown(false, cx);
         }

@@ -622,7 +622,8 @@ impl Render for Mailer {
             .flex_col()
             .bg(l.base())
             .text_color(l.text())
-            .text_size(px(13.))
+            // Размер шрифта (S5-30, «Внешний вид»): список, письма и панели.
+            .text_size(px(f32::from(crate::prefs::with(cx, |p| p.look.font_px()))))
             .child(self.titlebar(&l, window, cx))
             .when(bars, |d| d.child(self.section_bar(free)))
             .when_some(self.settings.bar.clone().filter(|_| bars), |d, bar| {
