@@ -8,11 +8,12 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::component::input::{
-    Backspace, Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
+    Backspace, Editor, EditorState, Enter, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp,
+    TextDecoration, TextDecorationCollection,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -24,8 +25,6 @@ use postman_core::marks;
 use postman_core::prefs::AccountPrefs;
 use postman_core::send_later::{self, Choice, Reject};
 use postman_core::sync::{Command, Event, Sender};
-use postman_ir::Document;
-use postman_worker::{Client as Worker, Request};
 
 use crate::chrome::{glyph, icon};
 use crate::commands::compose;
@@ -34,7 +33,7 @@ use crate::compose::{
     compose_field, current_token, next_ticket, segments, size_text,
 };
 use crate::roles::{Look, Pm};
-use crate::{Mailer, ir_view};
+use crate::Mailer;
 
 /// Подсказок адреса под полем.
 const SUGGESTIONS: usize = 6;
@@ -68,7 +67,6 @@ pub(crate) struct Open {
     pub(crate) senders: Vec<Sender>,
     pub(crate) max_delay: u64,
     pub(crate) book: Book,
-    pub(crate) worker: Arc<Mutex<Worker>>,
     pub(crate) mailer: WeakEntity<Mailer>,
     /// Категории аккаунта: ключевое слово, имя, цвет Fluent.
     pub(crate) categories: Vec<(String, String, &'static str)>,
@@ -76,12 +74,6 @@ pub(crate) struct Open {
     pub(crate) screens: bool,
     /// Подписи учётной записи (S5-09): подпись по умолчанию — вместо подписи Identity, все — в меню «Подпись».
     pub(crate) prefs: AccountPrefs,
-}
-
-enum Preview {
-    Off,
-    Rendering,
-    Shown(Document),
 }
 
 /// Подсказки адреса под активным полем.
@@ -125,13 +117,15 @@ pub(crate) struct Composer {
     cc: Entity<InputState>,
     bcc: Entity<InputState>,
     subject: Entity<InputState>,
-    body: Entity<TextareaState>,
+    /// Текст письма — поле с живым отображением Markdown (S5-27): разметка — `postman_compose::display`, оформление —
+    /// украшения поля ([`Composer::paint_markdown`]).
+    body: Entity<EditorState>,
+    /// Украшения текста письма и тема, в которой они посчитаны (сменилась — заново).
+    marks: Option<TextDecorationCollection>,
+    marks_look: Option<Rc<crate::roles::Look>>,
     focus: FocusHandle,
     mailer: WeakEntity<Mailer>,
     book: Book,
-    worker: Arc<Mutex<Worker>>,
-    preview: Preview,
-    preview_gen: u64,
     suggest: Suggest,
     /// Таймер автосохранения запущен.
     autosave_armed: bool,
@@ -188,8 +182,18 @@ impl Composer {
         let time = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("send-later-time-placeholder")));
         let later = Later { max_delay: open.max_delay, menu: false, picking: false, date, time, error: None };
         let body_text = model.body.clone();
+        // Поле редактора без кода: без номеров строк, сворачивания, направляющих отступа, поиска и автопар скобок;
+        // перенос строк — по ширине.
         let body = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(tr!("compose-body-placeholder")).default_value(body_text)
+            EditorState::new(window, cx)
+                .line_number(false)
+                .folding(false)
+                .indent_guides(false)
+                .searchable(false)
+                .auto_close(false)
+                .soft_wrap(true)
+                .placeholder(tr!("compose-body-placeholder"))
+                .default_value(body_text)
         });
         let mut subscriptions = Vec::new();
         for (f, state) in [(Field::To, &to), (Field::Cc, &cc), (Field::Bcc, &bcc)] {
@@ -205,6 +209,9 @@ impl Composer {
         subscriptions.push(cx.subscribe_in(&body, window, |this, state, ev: &InputEvent, _, cx| {
             let value = state.read(cx).value().to_string();
             this.on_input(Field::Body, value, ev, cx);
+            if matches!(ev, InputEvent::Change) {
+                this.paint_markdown(cx);
+            }
         }));
         // Enter в строке «Отправить позже» — «Запланировать».
         for state in [&later.date, &later.time] {
@@ -235,9 +242,8 @@ impl Composer {
             focus: cx.focus_handle(),
             mailer: open.mailer,
             book: open.book,
-            worker: open.worker,
-            preview: Preview::Off,
-            preview_gen: 0,
+            marks: None,
+            marks_look: None,
             suggest: Suggest::default(),
             autosave_armed: false,
             sync_inputs: false,
@@ -659,44 +665,8 @@ impl Composer {
         cx.notify();
     }
 
-    /// Предпросмотр: Markdown → HTML → IR в воркере-песочнице, как входящие письма.
-    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.preview_gen += 1;
-        if !matches!(self.preview, Preview::Off) {
-            self.preview = Preview::Off;
-            self.body.update(cx, |s, cx| s.focus(window, cx));
-            cx.notify();
-            return;
-        }
-        self.preview = Preview::Rendering;
-        window.focus(&self.focus, cx);
-        let generation = self.preview_gen;
-        let html = postman_ir::markdown_to_html(&self.model.body);
-        let worker = self.worker.clone();
-        let task = cx.background_spawn(async move {
-            let mut w = worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            w.render(&Request::Html(html))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |c, cx| {
-                if c.preview_gen != generation {
-                    return;
-                }
-                let doc = result
-                    .unwrap_or_else(|e| postman_ir::from_plain(&tr!("compose-preview-error", error = e.to_string())));
-                c.preview = Preview::Shown(doc);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     /// Кнопка панели форматирования: разметка вокруг выделения текста письма.
     fn format(&mut self, f: Format, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.preview, Preview::Off) {
-            return;
-        }
         let (text, sel) = {
             let s = self.body.read(cx);
             (s.value().to_string(), s.selected_range())
@@ -715,6 +685,24 @@ impl Composer {
     fn sync_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.model.body.clone();
         self.body.update(cx, |s, cx| s.replace_all(body, window, cx));
+        self.paint_markdown(cx);
+    }
+
+    /// Живое отображение Markdown (S5-27): разметка текста письма — оформлением поля. Свой текст разбирается здесь же
+    /// (`postman_compose::display`, без чужих данных); цвета — роли темы.
+    pub(crate) fn paint_markdown(&mut self, cx: &mut Context<Self>) {
+        let l = crate::roles::look(cx);
+        let text = self.body.read(cx).value().to_string();
+        let marks: Vec<TextDecoration> =
+            postman_compose::display::display(&text).into_iter().map(|s| TextDecoration::new(s.range, md_style(&s.look, &l))).collect();
+        self.marks_look = Some(l);
+        match &self.marks {
+            Some(c) => c.set(marks, cx),
+            None => {
+                let c = self.body.update(cx, |s, cx| s.create_decorations_collection(marks, cx));
+                self.marks = Some(c);
+            }
+        }
     }
 
     /// Действие замечания «Перед отправкой»: первое (`primary`) или второе.
@@ -1198,16 +1186,6 @@ impl Composer {
                         .on_click(cx.listener(|this, _, _, cx| this.set_menu(Menu::Signature, cx))),
                 ).children(menu(Menu::Signature).then(|| self.signature_menu(l, cx))),
             ))
-            .child(
-                quiet("tb-preview", l)
-                    .w(px(30.))
-                    .px(px(0.))
-                    .justify_center()
-                    .when(!matches!(self.preview, Preview::Off), |d| d.bg(l.picked()))
-                    .child(icon(glyph::PREVIEW, 16.))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("cmd-compose-preview")).build(window, cx))
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))),
-            )
             .child(div().flex_1())
             .child(
                 div().relative().child(
@@ -1281,32 +1259,24 @@ impl Composer {
         deferred(self.close_menu_out(menu, cx)).with_priority(1).into_any_element()
     }
 
-    /// Текст письма или предпросмотр.
-    fn content(&self, l: &Look, cx: &mut Context<Self>) -> AnyElement {
-        match &self.preview {
-            Preview::Off => div()
-                .flex_1()
-                .min_h_0()
-                .px(px(16.))
-                .py(px(8.))
-                .child(Textarea::new(&self.body).appearance(false).h(relative(1.)))
-                .into_any_element(),
-            Preview::Rendering => {
-                div().flex_1().px(px(24.)).py(px(16.)).text_color(l.text2()).child(tr!("compose-preview-rendering")).into_any_element()
-            }
-            Preview::Shown(doc) => div()
-                .id("preview")
-                .flex_1()
-                .min_h_0()
-                .px(px(24.))
-                .py(px(16.))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .overflow_y_scroll()
-                .children(ir_view::blocks(&doc.blocks, "preview", &ir_view::Images::new(), cx))
-                .into_any_element(),
-        }
+    /// Текст письма: Markdown с живым отображением (S5-27), шрифт интерфейса, а не кода.
+    fn content(&self, window: &Window) -> AnyElement {
+        // Шрифт и размер — как у текста окна (редактор по умолчанию — моноширинный).
+        let text = window.text_style();
+        div()
+            .flex_1()
+            .min_h_0()
+            .px(px(16.))
+            .py(px(8.))
+            .child(
+                Editor::new(&self.body)
+                    .appearance(false)
+                    .font_family(text.font_family.clone())
+                    .text_size(text.font_size)
+                    .line_height(relative(1.5))
+                    .h(relative(1.)),
+            )
+            .into_any_element()
     }
 
     fn line_button(id: &'static str, text: String, primary: bool, l: &Look) -> Stateful<Div> {
@@ -1946,6 +1916,10 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
+        // Оформление Markdown — в первый кадр и при смене темы (цвета — роли темы).
+        if self.marks_look.as_ref().is_none_or(|was| !Rc::ptr_eq(was, &l)) {
+            self.paint_markdown(cx);
+        }
         if std::mem::take(&mut self.sync_inputs) {
             for f in [Field::To, Field::Cc, Field::Bcc] {
                 let open = segments(self.model.field(f)).1;
@@ -1988,7 +1962,7 @@ impl Render for Composer {
             .child(self.toolbar(&l, cx))
             .children(self.later_picker(&l, cx))
             .when(inline, |d| d.children(self.attachment_chips(&l, cx)))
-            .child(self.content(&l, cx))
+            .child(self.content(window))
             .when(inline, |d| d.children(self.inline_checks(&l, cx)))
             .children(self.confirm_lines(&l, cx))
             .child(self.bottom_row(&l, cx));
@@ -1997,7 +1971,6 @@ impl Render for Composer {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &compose::Send, _, cx| this.dispatch(Purpose::Send, cx)))
             .on_action(cx.listener(|this, _: &compose::Attach, _, cx| this.pick_files(cx)))
-            .on_action(cx.listener(|this, _: &compose::Preview, window, cx| this.toggle_preview(window, cx)))
             .on_action(cx.listener(|this, _: &compose::Close, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &compose::Bold, window, cx| this.format(Format::Bold, window, cx)))
             .on_action(cx.listener(|this, _: &compose::Italic, window, cx| this.format(Format::Italic, window, cx)))
@@ -2113,4 +2086,38 @@ pub(crate) mod scenes {
             blob_id: None,
         }
     }
+}
+
+/// Оформление отрезка Markdown в поле письма: знаки разметки приглушены, ссылка и маркер списка — акцентом, цитата —
+/// вторичным текстом, код — подложкой (роли темы).
+fn md_style(m: &postman_compose::display::Look, l: &Look) -> HighlightStyle {
+    let mut s = HighlightStyle::default();
+    if m.strong || m.heading > 0 {
+        s.font_weight = Some(FontWeight::BOLD);
+    }
+    if m.emphasis {
+        s.font_style = Some(FontStyle::Italic);
+    }
+    if m.underline || m.link {
+        s.underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
+    }
+    if m.strike {
+        s.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None });
+    }
+    if m.code {
+        s.background_color = Some(l.fill());
+    }
+    // Роли текста бывают полупрозрачными, а цвет украшения ложится поверх цвета текста (`blend`): берём их видимый
+    // цвет на подложке письма.
+    let solid = |c: Hsla| l.panel().blend(c);
+    s.color = if m.markup {
+        Some(solid(l.text3()))
+    } else if m.link || m.list {
+        Some(solid(l.accent_text()))
+    } else if m.quote {
+        Some(solid(l.text2()))
+    } else {
+        None
+    };
+    s
 }

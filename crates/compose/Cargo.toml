@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 postman-ir.workspace = true
 mail-builder = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 mail-parser = "0.11"

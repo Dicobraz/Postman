@@ -63,7 +63,6 @@ cmd-tab-close = Закрыть вкладку
 cmd-view-notifications = Уведомления
 cmd-compose-send = Отправить письмо
 cmd-compose-attach = Вложить файл
-cmd-compose-preview = Предпросмотр письма
 cmd-compose-close = Закрыть письмо
 cmd-compose-bold = Жирный
 cmd-compose-italic = Курсив
