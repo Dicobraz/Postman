@@ -67,7 +67,7 @@ pub mod palette {
 }
 
 pub mod calendar {
-    gpui_kit::actions!(calendar, [NewMeeting, PrevWeek, NextWeek, Today]);
+    gpui_kit::actions!(calendar, [NewMeeting, PrevWeek, NextWeek, Today, ViewDay, ViewWorkWeek, ViewWeek, ViewMonth]);
 }
 
 /// Вкладка встречи (S3-05, вкладкой — S5-11).
@@ -230,11 +230,15 @@ pub const COMMANDS: &[Command] = &[
     cmd("palette.run", &["enter"], PALETTE),
     cmd("palette.close", &["escape"], PALETTE),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
-    // DESIGN «Хоткеи»: период — PgUp / PgDn, «Сегодня» — Home (Alt не используется; в Outlook — Alt+↑/↓, Alt+Home).
-    // Виды 1…4 — с видами календаря (S5-21), в схеме «Одиночные клавиши» (S5-17).
+    // DESIGN «Хоткеи»: период вида — PgUp / PgDn (id — с недели, S3-05), «Сегодня» — Home (Alt не используется; в
+    // Outlook — Alt+↑/↓, Alt+Home). Виды — 1…4 вне полей ввода (S5-21; в Outlook — Ctrl+Alt+1…4, Alt не берём).
     cmd("calendar.prev_week", &["pageup"], CALENDAR),
     cmd("calendar.next_week", &["pagedown"], CALENDAR),
     cmd("calendar.today", &["home"], CALENDAR),
+    cmd("calendar.view_day", &["1"], CALENDAR),
+    cmd("calendar.view_work_week", &["2"], CALENDAR),
+    cmd("calendar.view_week", &["3"], CALENDAR),
+    cmd("calendar.view_month", &["4"], CALENDAR),
     // Отправить — Ctrl+Enter (Alt+S Outlook не берём: Alt не используется).
     cmd("compose.send", &["ctrl-enter"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.

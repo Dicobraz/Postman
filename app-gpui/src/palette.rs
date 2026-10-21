@@ -589,6 +589,10 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "settings.vacation" => VACATION,
         "settings.rules" => RULES,
         "settings.calendar" => crate::calendar::g::CALENDAR,
+        // Виды календаря (S5-21): «День» и «Неделя» Segoe Fluent Icons, месяц — календарь.
+        "calendar.view_day" => '\u{E8BF}',
+        "calendar.view_work_week" | "calendar.view_week" => '\u{E8C0}',
+        "calendar.view_month" => crate::calendar::g::CALENDAR,
         "view.filters" | "view.quick_filters" => FILTER,
         "view.sort_by_date" | "view.sort_by_sender" | "view.sort_by_size" => SORT,
         _ => return None,

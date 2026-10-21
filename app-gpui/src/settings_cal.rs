@@ -4,9 +4,9 @@
 //!
 //! Действуют сразу: рабочие дни и часы (затенение недели, общие окна встречи), пояс (календарь, встреча,
 //! приглашение, контакты), длительность новой встречи, «Учитывать необязательных» (новая вкладка встречи), цвет
-//! свободного времени (встреча), удаление письма-приглашения после ответа. Остальное помечено «сохраняется»: вид и
-//! первый день недели, шаг, второй пояс — S5-21; напоминание, «на 5 мин позже», «под вопросом» — позже; цвета и имена
-//! коллег — S5-22.
+//! свободного времени (встреча), удаление письма-приглашения после ответа; вид по умолчанию, первый день недели, шаг
+//! сетки и второй пояс — виды календаря (S5-21). Остальное помечено «сохраняется»: напоминание, «на 5 мин позже»,
+//! «под вопросом» — позже; цвета и имена коллег — S5-22.
 
 use std::rc::Rc;
 
@@ -314,10 +314,10 @@ impl SettingsView {
             .child(group(tr!("settings-cal-week-group"), l))
             .child(line(tr!("settings-cal-days"), None, Some(tr!("settings-cal-days-hint")), seg_group(days, l), l))
             .child(line(tr!("settings-cal-hours"), None, Some(tr!("settings-cal-hours-hint")), hours, l))
-            .child(line(tr!("settings-cal-first"), Some(stored(l)), Some(tr!("settings-cal-first-hint")), seg_group(firsts, l), l))
+            .child(line(tr!("settings-cal-first"), None, Some(tr!("settings-cal-first-hint")), seg_group(firsts, l), l))
             .child(group(tr!("settings-cal-view-group"), l))
-            .child(line(tr!("settings-cal-view"), Some(stored(l)), Some(tr!("settings-cal-view-hint")), seg_group(views, l), l))
-            .child(line(tr!("settings-cal-step"), Some(stored(l)), Some(tr!("settings-cal-step-hint")), seg_group(steps, l), l))
+            .child(line(tr!("settings-cal-view"), None, Some(tr!("settings-cal-view-hint")), seg_group(views, l), l))
+            .child(line(tr!("settings-cal-step"), None, Some(tr!("settings-cal-step-hint")), seg_group(steps, l), l))
             .child(line(
                 tr!("settings-cal-zone"),
                 None,
@@ -325,7 +325,7 @@ impl SettingsView {
                 self.cal_select(Menu::Zone, zone_choice(c.zone.as_deref()), 260., zones, l, cx),
                 l,
             ))
-            .child(line(tr!("settings-cal-second"), Some(stored(l)), Some(tr!("settings-cal-second-hint")), second, l))
+            .child(line(tr!("settings-cal-second"), None, Some(tr!("settings-cal-second-hint")), second, l))
             .child(group(tr!("settings-cal-meet-group"), l))
             .child(line(tr!("settings-cal-duration"), None, Some(tr!("settings-cal-duration-hint")), seg_group(durations, l), l))
             .child(line(

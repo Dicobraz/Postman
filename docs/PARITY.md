@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 108 из 108 (100 %).
+Сделано: 112 из 112 (100 %).
 
 Хоткей — схема «Outlook» (по умолчанию); «Одиночные» — буквы схемы «Одиночные клавиши» (S5-17) поверх неё.
 
@@ -72,9 +72,13 @@
 | Палитра: выполнить | `palette.run` | `enter` |  | есть |
 | Палитра: закрыть | `palette.close` | `escape` |  | есть |
 | Новая встреча (помощник планирования) | `calendar.new_meeting` | `ctrl-shift-q` |  | есть |
-| Предыдущая неделя | `calendar.prev_week` | `pageup` |  | есть |
-| Следующая неделя | `calendar.next_week` | `pagedown` |  | есть |
+| Предыдущий период (день, неделя, месяц) | `calendar.prev_week` | `pageup` |  | есть |
+| Следующий период (день, неделя, месяц) | `calendar.next_week` | `pagedown` |  | есть |
 | Сегодня в календаре | `calendar.today` | `home` |  | есть |
+| Вид «День» | `calendar.view_day` | `1` |  | есть |
+| Вид «Рабочая неделя» | `calendar.view_work_week` | `2` |  | есть |
+| Вид «Неделя» | `calendar.view_week` | `3` |  | есть |
+| Вид «Месяц» | `calendar.view_month` | `4` |  | есть |
 | Отправить письмо | `compose.send` | `ctrl-enter` |  | есть |
 | Вложить файл | `compose.attach` |  |  | есть |
 | Закрыть письмо | `compose.close` | `escape` |  | есть |
