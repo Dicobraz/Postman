@@ -805,6 +805,12 @@ fn signature_title(s: &str) -> String {
 }
 
 fn quiet(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
+    quiet_plain(id, l).hover(|d| d.bg(l.hover()))
+}
+
+/// Тихая кнопка без подложки при наведении (поле «От»). Стиль наведения у элемента задаётся один раз: второй
+/// `.hover` поверх `quiet` в отладочной сборке gpui — паника «hover style already set».
+fn quiet_plain(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(30.))
@@ -815,7 +821,6 @@ fn quiet(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
         .gap(px(6.))
         .rounded(px(4.))
         .cursor_pointer()
-        .hover(|d| d.bg(l.hover()))
         .active(|d| d.bg(l.pressed()))
 }
 
@@ -928,9 +933,8 @@ impl Composer {
         let from = self.model.from();
         let many = self.senders.len() > 1;
         let current = from.email.to_lowercase();
-        let button = quiet("from", l)
+        let button = quiet_plain("from", l)
             .px(px(0.))
-            .hover(|d| d)
             .child(from.display())
             .when(many, |d| d.child(icon(glyph::CHEVRON, 10.).text_color(l.text2())))
             .when(many, |d| d.on_click(cx.listener(|this, _, _, cx| this.set_menu(Menu::From, cx))));
