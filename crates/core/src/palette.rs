@@ -7,7 +7,7 @@
 //!
 //! Красный — только безопасность, янтарный — только сроки ([`Reserved`]): подложка и текст — из таблицы, точки —
 //! прежние (вне таблицы). В одной таблице категорий цвета не близки (ΔE2000 ≥ [`MIN_DELTA_E`], [`clash`], [`check`]);
-//! принятые таблицей исключения — [`EXEMPT`] и [`EXEMPT_DARK`].
+//! принятое исключение — [`EXEMPT`] (розовый бренда и красный безопасности).
 //!
 //! Цвета категорий, сохранённые прежними версиями (имена Fluent: `darkGreen`, `lightTeal`…), рисуются ближайшим цветом
 //! таблицы ([`LEGACY`], [`resolve`]); категории по умолчанию — своим цветом по имени (`labels::Category::shown_color`).
@@ -86,8 +86,8 @@ pub const PALETTE: &[Color] = &[
     Color { key: BLUE, light: sw(0x4687D8, 0xDFF0FF, 0x234E82), dark: sw(0x689BDB, 0x23364F, 0xBFDDFF) },
     Color { key: GREEN, light: sw(0x5F983A, 0xE5F4DD, 0x34591B), dark: sw(0x709349, 0x2A3B20, 0xBAD9AB) },
     Color { key: PINK, light: sw(0xE4107F, 0xFCE4EF, 0x8C0B4E), dark: sw(0xD2569A, 0x3A1A2A, 0xF0A8CA) },
-    Color { key: GRAPHITE, light: sw(0x5A5A5A, 0xEBEBEB, 0x3D3D3D), dark: sw(0x9E9E9E, 0x3A3A3A, 0xE0E0E0) },
-    Color { key: GREY, light: sw(0xB7B7B7, 0xF5F5F5, 0x616161), dark: sw(0x6A6A6A, 0x323232, 0xA6A6A6) },
+    Color { key: GRAPHITE, light: sw(0x5A5A5A, 0xEBEBEB, 0x3D3D3D), dark: sw(0xCDCDCD, 0x3A3A3A, 0xE0E0E0) },
+    Color { key: GREY, light: sw(0xB7B7B7, 0xF5F5F5, 0x616161), dark: sw(0x5C5C5C, 0x323232, 0xA6A6A6) },
 ];
 
 /// Прежние цвета (общие цвета Fluent 2, S5-02) → ближайший цвет таблицы: наименьшая ΔE2000 точки `primary` Fluent
@@ -146,13 +146,6 @@ const DEADLINE: (Swatch, Swatch) = (sw(0xEAA300, 0xF8DEA8, 0x664700), sw(0xEAA30
 /// розовый бренда и красный безопасности (≈ 19 и 23,5; DESIGN «Цвет», строка «Исключение», PR #60).
 pub const EXEMPT: &[(&str, Reserved, f64)] = &[(PINK, Reserved::Threat, 18.0)];
 
-/// Пары категорий, которые в тёмной теме таблицы ближе [`MIN_DELTA_E`]: графит #9E9E9E (решение владельца
-/// 2026-10-22) рядом с серым #6A6A6A (ΔE ≈ 19,2), синим (≈ 20,5) и зелёным (≈ 24,0). Без исключения ΔE ≥ 25 в тёмной
-/// достижим только при графите не темнее #D0D0D0 — вопрос владельцу (S5-31); нижняя граница — 19.
-pub const EXEMPT_DARK: &[(&str, &str)] = &[(GRAPHITE, GREY), (GRAPHITE, BLUE), (GRAPHITE, GREEN)];
-
-/// Нижняя граница для пары из [`EXEMPT_DARK`].
-const EXEMPT_DARK_MIN: f64 = 19.0;
 
 /// Имя цвета таблицы для сохранённого имени: своё, прежнее ([`LEGACY`]) или `None`.
 fn canonical(key: &str) -> Option<&'static str> {
@@ -208,19 +201,12 @@ pub enum Clash {
     Unknown,
 }
 
-/// Наименьшая разница двух цветов категорий: ΔE точек в той теме, где она меньше всего относительно своей границы.
-/// `Some(ΔE)` — ближе допустимого хотя бы в одной теме.
+/// Наименьшая ΔE точек двух цветов категорий по темам, если она меньше [`MIN_DELTA_E`].
 fn too_close(a: &Color, b: &Color) -> Option<f64> {
-    let exempt = |t: Theme| {
-        t == Theme::Dark && EXEMPT_DARK.iter().any(|&(x, y)| (x, y) == (a.key, b.key) || (y, x) == (a.key, b.key))
-    };
     Theme::ALL
         .iter()
-        .filter_map(|&t| {
-            let d = delta_e(a.swatch(t).dot, b.swatch(t).dot);
-            let min = if a.key != b.key && exempt(t) { EXEMPT_DARK_MIN } else { MIN_DELTA_E };
-            (d < min).then_some(d)
-        })
+        .map(|&t| delta_e(a.swatch(t).dot, b.swatch(t).dot))
+        .filter(|&d| d < MIN_DELTA_E)
         .min_by(f64::total_cmp)
 }
 
@@ -528,7 +514,7 @@ mod tests {
     }
 
     /// Категории по умолчанию (DESIGN: синий, зелёный, розовый бренда, графит, серый) различимы между собой и с
-    /// красным и янтарным в обеих темах (ΔE2000 ≥ 25, S5-01); исключения — [`EXEMPT`] и [`EXEMPT_DARK`].
+    /// красным и янтарным в обеих темах (ΔE2000 ≥ 25, S5-01); исключение — только [`EXEMPT`].
     #[test]
     fn default_categories_are_far_apart() {
         let defaults = [BLUE, GREEN, PINK, GRAPHITE, NEUTRAL];
@@ -540,20 +526,10 @@ mod tests {
             for (i, &(a, x)) in dots.iter().enumerate() {
                 for &(b, y) in &dots[i + 1..] {
                     let d = delta_e(x, y);
-                    let dark_pair = EXEMPT_DARK.iter().any(|&(p, q)| (p, q) == (a, b) || (q, p) == (a, b));
-                    let min = match (a, b) {
-                        (PINK, "threat") => 18.0,
-                        _ if theme == Theme::Dark && dark_pair => EXEMPT_DARK_MIN,
-                        _ => MIN_DELTA_E,
-                    };
+                    let min = if (a, b) == (PINK, "threat") { 18.0 } else { MIN_DELTA_E };
                     assert!(d >= min, "{theme:?}: {a} {b} ΔE {d:.1}");
                 }
             }
-        }
-        // Исключения тёмной темы — ровно те пары, что ближе 25.
-        for &(a, b) in EXEMPT_DARK {
-            let d = delta_e(swatch(a, Theme::Dark).dot, swatch(b, Theme::Dark).dot);
-            assert!(d < MIN_DELTA_E, "{a} {b}: ΔE {d:.1} — исключение не нужно");
         }
     }
 
