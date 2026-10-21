@@ -1797,7 +1797,7 @@ impl Render for MeetingView {
                     .child(icon(g::SEND, 14.))
                     .child(tr!("meeting-send"))
                     .when(busy, |d| d.opacity(0.5))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("meeting-send-tip")).build(window, cx))
+                    .tooltip({ let tip = crate::keytips::with_key(tr!("meeting-send-tip"), crate::keytips::key("meeting.send", cx)); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx) })
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
             .child(div().w(px(1.)).h(px(20.)).mx(px(4.)).bg(l.border()))

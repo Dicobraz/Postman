@@ -55,6 +55,9 @@ pub struct Prefs {
     pub keys_rev: u32,
     /// Схема клавиш (S5-17, «Настройки → Клавиатура»): «Outlook» по умолчанию или «Одиночные клавиши».
     pub key_scheme: KeyScheme,
+    /// KeyTips (S5-18): удержание Ctrl показывает клавиши над кнопками. Место в макете — «Внешний вид» (S5-30), до
+    /// него — «Клавиатура».
+    pub keytips: bool,
     /// Свои клавиши столбца «Одиночные клавиши» (как `keys`, но для слоя схемы); действуют, когда она выбрана.
     pub keys_single: BTreeMap<String, Vec<String>>,
 }
@@ -82,6 +85,7 @@ impl Default for Prefs {
             keys: BTreeMap::new(),
             keys_rev: 0,
             key_scheme: KeyScheme::Outlook,
+            keytips: true,
             keys_single: BTreeMap::new(),
         }
     }
@@ -835,6 +839,7 @@ mod tests {
         p.keys.insert("mail.reply".into(), vec!["ctrl-shift-y".into()]);
         p.keys.insert("tab.close".into(), vec![]);
         p.key_scheme = KeyScheme::Single;
+        p.keytips = false;
         p.keys_single.insert("mail.archive".into(), vec!["y".into()]);
         p.save(&path).unwrap();
         let back = Prefs::load(&path).unwrap();

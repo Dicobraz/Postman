@@ -9,7 +9,7 @@ search-summary-waiting = { $n ->
    *[other] { $n } results
 } · { $place } · searching the server…
 search-where-all = all folders
-search-close = Close search — back to the folder (Esc)
+search-close = Close search — back to the folder
 search-refine = Refine
 search-refine-from = from: { $name }
 search-refine-to-me = to: me

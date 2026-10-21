@@ -323,6 +323,8 @@ pub fn bind(cx: &mut App, prefs: &postman_core::prefs::Prefs) {
         cx.clear_key_bindings();
         cx.bind_keys(others);
     }
+    // Клавиши кнопок (подсказки, KeyTips) — по тем же привязкам (S5-18).
+    crate::keytips::rebuild(cx, prefs);
     let mut bindings = Vec::new();
     let set = crate::keymap::KeySet::of(prefs);
     for b in crate::keymap::bound(COMMANDS, &SINGLE, &set) {

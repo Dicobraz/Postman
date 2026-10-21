@@ -266,6 +266,7 @@ settings-keys-reset-all = Сбросить все
 settings-keys-command = Команда
 settings-keys-col-outlook = Outlook
 settings-keys-col-single = Одиночные клавиши
+settings-keys-keytips = KeyTips: удержание Ctrl показывает клавиши над кнопками
 settings-keys-scheme = Схема
 settings-keys-scheme-outlook = Outlook (по умолчанию)
 settings-keys-scheme-single = Одиночные клавиши

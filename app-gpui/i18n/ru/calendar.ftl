@@ -5,7 +5,7 @@ cal-today-tip = Перейти к сегодня (Alt+Home)
 cal-prev-week-tip = Предыдущая неделя (Alt+↑)
 cal-next-week-tip = Следующая неделя (Alt+↓)
 cal-new-meeting = Создать встречу
-cal-new-meeting-tip = Создать встречу (Ctrl+Shift+Q)
+cal-new-meeting-tip = Создать встречу
 cal-loading = Загрузка недели…
 cal-day = { $d ->
     [0] Пн
@@ -116,7 +116,7 @@ cal-write-participants = Написать участникам
 meeting-title-new = Новая встреча
 meeting-tab-titled = Новая встреча · { $title }
 meeting-send = Отправить
-meeting-send-tip = Отправить приглашения (Ctrl+Enter)
+meeting-send-tip = Отправить приглашения
 meeting-subject = Тема
 meeting-subject-placeholder = Тема встречи
 meeting-required = Обязательные

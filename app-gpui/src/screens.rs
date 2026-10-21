@@ -168,9 +168,13 @@ enum Scene {
     Offline,
     /// Стопка тостов (три и «+N ещё») рядом с открытой историей уведомлений.
     Toasts,
+    /// KeyTips (S5-18): письмо открыто, Ctrl удержан 0,4 с — плашки с клавишами над кнопками (схема «Outlook»).
+    KeyTips,
+    /// То же в схеме «Одиночные клавиши»: открыто приглашение без ответа — A / T / N на его кнопках.
+    KeyTipsSingle,
 }
 
-const SCENES: [Scene; 62] = [
+const SCENES: [Scene; 64] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -228,6 +232,8 @@ const SCENES: [Scene; 62] = [
     Scene::Phishing,
     Scene::Offline,
     Scene::Toasts,
+    Scene::KeyTips,
+    Scene::KeyTipsSingle,
     // Первый запуск (S5-09): добавление аккаунта на месте экрана почты (сроки прошлых сцен сняты).
     Scene::SignIn,
     // Последней из прежних: лента остаётся включённой, прежние сцены снимаются без неё.
@@ -321,6 +327,8 @@ impl Scene {
             Scene::Phishing => "phishing",
             Scene::Offline => "offline",
             Scene::Toasts => "toasts",
+            Scene::KeyTips => "keytips",
+            Scene::KeyTipsSingle => "keytips-single",
         }
     }
 }
@@ -435,6 +443,11 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     let mail_tab = m.tabs.iter().find(|t| t.kind == crate::tabs::TabKind::Mail).map(|t| t.id);
     if let Some(id) = mail_tab.filter(|_| !matches!(scene, Scene::TabMail)) {
         m.close_tab(id, window, cx);
+    }
+    // Плашки KeyTips — только в своих сценах: дальше Ctrl отпущен, схема — «Outlook».
+    if crate::keytips::shown(cx) && !matches!(scene, Scene::KeyTips | Scene::KeyTipsSingle) {
+        send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(false)));
+        crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Outlook);
     }
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
@@ -588,6 +601,21 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
             // Как событие синхронизации: связи нет, повтор через 25 с, две правки в очереди.
             m.on_connection(postman_core::link::Connection::Offline { retry_in: 25, queued: 2 }, cx);
+        }
+        Scene::KeyTips => {
+            if m.toasts.read(cx).is_history_open() {
+                m.toasts.update(cx, |t, cx| t.toggle_history(cx));
+            }
+            m.set_section(Section::Mail, cx);
+            m.open_mailbox("inbox".into(), cx);
+            m.list.update(cx, |l, cx| l.select(0, cx));
+            // Как удержание Ctrl: событие окна, таймер экрана почты (0,4 с).
+            send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(true)));
+        }
+        Scene::KeyTipsSingle => {
+            crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Single);
+            let Some(i) = demo_row(m.list.read(cx), Scene::Invite) else { return Err("no invitation in the demo inbox".into()) };
+            m.list.update(cx, |l, cx| l.select(i, cx));
         }
         Scene::Toasts => {
             // Связь вернулась (запись в истории), затем пять уведомлений: видно три и «+2 ещё»; история открыта.
@@ -1072,6 +1100,11 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::ContextMenu | Scene::Phishing => m.menu.is_some() && rows_loaded,
         Scene::Offline => m.offline.is_down() && list.offline.is_some(),
         Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
+        Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
+        Scene::KeyTipsSingle => {
+            let single = crate::prefs::get(cx).key_scheme == postman_core::prefs::KeyScheme::Single;
+            crate::keytips::shown(cx) && single && reading.is_some_and(|r| r.doc.is_some() && r.invite.is_some())
+        }
         Scene::Thread => {
             let r = m.reading.read(cx);
             let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN);
@@ -1325,6 +1358,20 @@ fn fail(scene: Scene, e: &str) -> ! {
 fn finish(code: i32) -> ! {
     bench::remove_work_copy();
     std::process::exit(code)
+}
+
+/// Событие окна для сцены (KeyTips — удержание Ctrl, подсказка — наведение): после кадра, когда экран почты не занят
+/// отрисовкой; уходит в окно тем же путём, что ввод ОС.
+fn send_input(window: &Window, cx: &mut Context<Mailer>, event: PlatformInput) {
+    let handle = window.window_handle();
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| window.dispatch_event(event, cx));
+    });
+}
+
+/// Нажатые модификаторы: только Ctrl или ничего.
+fn ctrl(on: bool) -> ModifiersChangedEvent {
+    ModifiersChangedEvent { modifiers: Modifiers { control: on, ..Modifiers::default() }, capslock: Capslock::default() }
 }
 
 #[cfg(test)]
