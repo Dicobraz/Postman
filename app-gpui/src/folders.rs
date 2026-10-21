@@ -27,6 +27,10 @@ pub(crate) struct Folders {
     pub(crate) results: Option<usize>,
     /// Фильтры (S5-03): модель, общая со списком; панель на месте папок — `FilterModel::panel`.
     pub(crate) filters: Option<Entity<FilterModel>>,
+    /// Своя учётная запись (логин) — подпись над своими папками; без неё (демо) подписи нет, пока есть связь.
+    pub(crate) own: Option<String>,
+    /// Связи с сервером нет (S5-08): метка «нет связи» у своего аккаунта.
+    pub(crate) offline: bool,
     _watch: Option<Subscription>,
 }
 
@@ -38,7 +42,17 @@ impl EventEmitter<FolderEvent> for Folders {}
 
 impl Folders {
     pub(crate) fn new(mailboxes: Vec<MailboxRow>, accounts: Vec<AccountRow>, current: Option<String>) -> Self {
-        Self { mailboxes, accounts, collapsed: HashSet::new(), current, results: None, filters: None, _watch: None }
+        Self {
+            mailboxes,
+            accounts,
+            collapsed: HashSet::new(),
+            current,
+            results: None,
+            filters: None,
+            own: None,
+            offline: false,
+            _watch: None,
+        }
     }
 
     /// Следить за фильтрами: панель, воронка и её счётчик перерисовываются вместе с моделью.
@@ -127,7 +141,7 @@ fn row_h(l: &Look) -> f32 {
 }
 
 /// Значок папки по роли JMAP.
-fn folder_glyph(role: Option<&str>) -> char {
+pub(crate) fn folder_glyph(role: Option<&str>) -> char {
     use crate::chrome::glyph;
     match role {
         Some("inbox") => glyph::MAIL,
@@ -165,6 +179,42 @@ impl Render for Folders {
             );
         }
         let mut list = div().id("folders").flex().flex_col().gap(px(2.)).flex_1().min_h_0().overflow_y_scroll();
+        // Свой аккаунт — подписью над папками, без связи — с меткой «нет связи» (макет «Состояния»).
+        if self.own.is_some() || self.offline {
+            let mark = self.offline.then(|| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(18.))
+                    .px(px(6.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(l.stroke())
+                    .text_size(px(11.))
+                    .child(div().size(px(6.)).rounded_full().bg(l.text3()))
+                    .child(tr!("states-account-offline"))
+            });
+            list = list.child(
+                div()
+                    .id("own-account")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .pt(px(6.))
+                    .pb(px(4.))
+                    .text_size(l.px(Metric::TypeCaption))
+                    .text_color(l.text2())
+                    .child(div().flex_1().min_w_0().truncate().child(self.own.clone().unwrap_or_default()))
+                    .children(mark)
+                    .when(self.offline, |d| {
+                        d.tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("states-account-offline-hint")).build(window, cx))
+                    }),
+            );
+        }
         let own: Vec<AnyElement> = self.of(None).map(|m| self.folder(m, false, &l, cx)).collect();
         list = list.children(own);
         for a in &self.accounts {

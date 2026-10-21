@@ -121,7 +121,7 @@ pub(crate) fn removal(from: &str, mailboxes: &[MailboxRow]) -> Removal {
 }
 
 impl Mailer {
-    fn toast(&mut self, level: Toast, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn toast(&mut self, level: Toast, text: String, cx: &mut Context<Self>) {
         self.toasts.update(cx, |t, cx| t.push(level, text, cx));
     }
 
@@ -173,6 +173,11 @@ impl Mailer {
 
     /// `mail.delete`: в «Удалённые»; из «Удалённых» — строка «Удалить навсегда?».
     pub(crate) fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        // Выделено несколько писем — в «Удалённые» пачкой с «Отменить» (S5-08).
+        if self.picking(cx) {
+            let ids = self.targets(cx);
+            return self.ask(ids, crate::bulk::Ask::Trash, cx);
+        }
         let list = self.list.read(cx);
         let (Some(index), Some(row)) = (list.selected, list.selected_row()) else {
             return self.toast(Toast::Info, tr!("actions-select-letter"), cx);
@@ -193,7 +198,8 @@ impl Mailer {
 
     /// Esc: снять строку «Удалить навсегда?». `true` — она была.
     pub(crate) fn cancel_purge(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.list.read(cx).confirm.is_none() {
+        let list = self.list.read(cx);
+        if list.confirm.is_none() && list.confirm_many.is_none() {
             return false;
         }
         self.list.update(cx, |l, cx| l.answer_purge(false, cx));

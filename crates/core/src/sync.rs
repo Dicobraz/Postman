@@ -13,6 +13,7 @@ use postman_compose::{Address, Draft};
 
 use crate::categories;
 use crate::lifecycle;
+use crate::link::{Connection, Link};
 use crate::invite::{self, Delivery};
 use crate::settings;
 use crate::schedule::{self, Meeting};
@@ -128,6 +129,37 @@ pub enum Command {
     /// Рассылки «Входящих» своего аккаунта: прочитанные раньше `cutoff` (Unix-секунды), кроме последней от каждого
     /// отправителя, — в «Архив» → `Event::Newsletters`.
     Newsletters { cutoff: i64, archive_name: String },
+    /// «Сообщить о фишинге» (S5-08): письма `ids` (ключи кэша) — вложениями `message/rfc822` одним письмом на адрес
+    /// `to` от своего адреса → `Event::Reported`. Без связи — в очередь, как правки писем.
+    ReportPhishing { ids: Vec<String>, to: Address, subject: String, text: String, ticket: u64 },
+    /// «Повторить сейчас» (S5-08): без связи — попытка сразу, не дожидаясь паузы; со связью — ничего.
+    Reconnect,
+}
+
+impl Command {
+    /// Копия команды, которую можно повторить, когда связь вернётся (`link`): правки писем и сообщение о фишинге.
+    /// Остальное (тела, поиск, отправка с окном письма) без связи не ждёт — интерфейс показывает ошибку сам.
+    pub fn replayable(&self) -> Option<Command> {
+        Some(match self {
+            Command::Keyword { id, keyword, on } => Command::Keyword { id: id.clone(), keyword, on: *on },
+            Command::SetKeywords { ids, add, remove } => {
+                Command::SetKeywords { ids: ids.clone(), add: add.clone(), remove: remove.clone() }
+            }
+            Command::Move { id, from, to } => Command::Move { id: id.clone(), from: from.clone(), to: to.clone() },
+            Command::Destroy(id) => Command::Destroy(id.clone()),
+            Command::Patch { patches, archive_name } => {
+                Command::Patch { patches: patches.clone(), archive_name: archive_name.clone() }
+            }
+            Command::ReportPhishing { ids, to, subject, text, ticket } => Command::ReportPhishing {
+                ids: ids.clone(),
+                to: to.clone(),
+                subject: subject.clone(),
+                text: text.clone(),
+                ticket: *ticket,
+            },
+            _ => return None,
+        })
+    }
 }
 
 /// Что делает синхронизация. Текст — у интерфейса (`sync.ftl`), здесь только код и данные.
@@ -295,6 +327,11 @@ pub enum Event {
     Categories(categories::Reply),
     /// Рассылки перенесены в «Архив» (`Command::Newsletters`): сколько.
     Newsletters { archived: usize },
+    /// Связь с сервером (S5-08, `link`): пропала (повтор через N с, правок в очереди) или вернулась.
+    Connection(Connection),
+    /// Сообщение о фишинге (`Command::ReportPhishing`) отправлено (`error: None`) или не отправлено. Без связи
+    /// события нет — команда ждёт в очереди.
+    Reported { ticket: u64, error: Option<String> },
     Error(SyncError),
 }
 
@@ -322,8 +359,23 @@ pub fn spawn(
                 Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),
             };
             rt.block_on(async {
-                if let Err(e) = run(account, cache, index, rx, &notify).await {
-                    notify(Event::Error(e));
+                let mut rx = rx;
+                let mut link = Link::default();
+                // Сервер не ответил при входе или первой загрузке — без связи: повтор с паузой (S5-08). Отказ во входе
+                // и прочие ошибки останавливают синхронизацию, как раньше.
+                loop {
+                    match run(account.clone(), cache.clone(), index.clone(), &mut rx, &mut link, &notify).await {
+                        Ok(()) => return,
+                        Err(e) if e.kind == ErrorKind::Network => {
+                            notify(Event::Error(e));
+                            let wait = link.failed();
+                            notify(Event::Connection(link.connection(wait)));
+                            if !wait_offline(&mut rx, &mut link, wait, &notify).await {
+                                return;
+                            }
+                        }
+                        Err(e) => return notify(Event::Error(e)),
+                    }
                 }
             });
         });
@@ -332,6 +384,48 @@ pub fn spawn(
         let _ = failed.send(Event::Error(SyncError::internal(format!("sync thread: {e}"))));
     }
     tx
+}
+
+/// Без связи до входа: ждать паузу `wait` (или «Повторить сейчас»); правки писем — в очередь (уйдут после входа),
+/// прочие команды без сервера выполнить нельзя. `false` — интерфейс закрыл канал команд: синхронизации конец.
+async fn wait_offline(
+    rx: &mut UnboundedReceiver<Command>,
+    link: &mut Link<Command>,
+    wait: Duration,
+    notify: &impl Fn(Event),
+) -> bool {
+    let until = tokio::time::Instant::now() + wait;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(until) => return true,
+            cmd = rx.recv() => match cmd {
+                None => return false,
+                Some(Command::Reconnect) => return true,
+                Some(cmd) => {
+                    if let Some(c) = cmd.replayable() {
+                        link.queue(c);
+                        let left = until.saturating_duration_since(tokio::time::Instant::now());
+                        notify(Event::Connection(link.connection(left)));
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Связь пропала (или повтор не удался): пауза до следующей попытки — интерфейсу и циклу.
+fn went_down(link: &mut Link<Command>, notify: &impl Fn(Event)) -> tokio::time::Instant {
+    let wait = link.failed();
+    notify(Event::Connection(link.connection(wait)));
+    tokio::time::Instant::now() + wait
+}
+
+/// Ждать срока повтора; срока нет — никогда.
+async fn retry_at(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(t) => tokio::time::sleep_until(t).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Где изменилась почта по событию push.
@@ -524,7 +618,8 @@ async fn run(
     account: Account,
     mut cache: Cache,
     index: Index,
-    mut rx: UnboundedReceiver<Command>,
+    rx: &mut UnboundedReceiver<Command>,
+    link: &mut Link<Command>,
     notify: &impl Fn(Event),
 ) -> Result<(), SyncError> {
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
@@ -594,21 +689,86 @@ async fn run(
     // Тела писем без тела — в фоне, свежие первыми: чтение без сети и полнотекстовый поиск.
     let mut prefetch: VecDeque<String> = cache.missing_bodies(PREFETCH_LIMIT).unwrap_or_default().into();
     let mut refill = false;
+    // Без связи (S5-08): срок следующей попытки; правки писем без связи — в `link`.
+    let mut retry: Option<tokio::time::Instant> = None;
+    // Вход удался — связь есть: правки, сделанные без связи (в том числе до входа), — на сервер.
+    if let Some(queued) = link.ok() {
+        notify(Event::Connection(Connection::Online));
+        let ctx = Ctx { accounts: &accounts, identities: &identities, send_as: &send_as };
+        match replay(&ctx, &mut cache, &index, link, queued, notify).await {
+            Replayed::Stop => return Ok(()),
+            Replayed::Down(at) => retry = Some(at),
+            Replayed::Done => {}
+        }
+    }
     loop {
         tokio::select! {
             // Команды пользователя важнее фоновой работы.
             biased;
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { return Ok(()) };
+                if matches!(cmd, Command::Reconnect) {
+                    if link.is_down() {
+                        retry = Some(tokio::time::Instant::now());
+                    }
+                    continue;
+                }
+                // Без связи правки писем — сразу в очередь: каждая попытка ждала бы тайм-аута сети.
+                if link.is_down()
+                    && let Some(c) = cmd.replayable()
+                {
+                    link.queue(c);
+                    let left = retry.map(|t| t.saturating_duration_since(tokio::time::Instant::now())).unwrap_or_default();
+                    notify(Event::Connection(link.connection(left)));
+                    continue;
+                }
                 // Догруженная страница — тоже в предзагрузку тел.
                 let more = matches!(cmd, Command::LoadMore { .. });
-                if let Err(e) = handle(&accounts, &mut cache, &index, &identities, &send_as, cmd, notify).await
-                    && report(e, Stage::Command, notify)
-                {
-                    return Ok(());
+                let again = cmd.replayable();
+                let ctx = Ctx { accounts: &accounts, identities: &identities, send_as: &send_as };
+                match handle(ctx.accounts, &mut cache, &index, ctx.identities, ctx.send_as, cmd, notify).await {
+                    Ok(()) => {
+                        if let Some(queued) = link.ok() {
+                            notify(Event::Connection(Connection::Online));
+                            retry = None;
+                            match replay(&ctx, &mut cache, &index, link, queued, notify).await {
+                                Replayed::Stop => return Ok(()),
+                                Replayed::Down(at) => retry = Some(at),
+                                Replayed::Done => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if ErrorKind::of(&e) == ErrorKind::Network {
+                            if let Some(c) = again {
+                                link.queue(c);
+                            }
+                            if !link.is_down() {
+                                retry = Some(went_down(link, notify));
+                            }
+                        }
+                        if report(e, Stage::Command, notify) {
+                            return Ok(());
+                        }
+                    }
                 }
                 if more && prefetch.is_empty() {
                     prefetch.extend(cache.missing_bodies(PREFETCH_LIMIT).unwrap_or_default());
+                }
+            }
+            () = retry_at(retry) => {
+                retry = None;
+                let mut outcome = Refreshed::Done;
+                for acc in accounts.all_mut() {
+                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    if outcome != Refreshed::Done {
+                        break;
+                    }
+                }
+                match after_refresh(outcome, true, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await {
+                    Next::Stop => return Ok(()),
+                    Next::Retry(at) => retry = at,
+                    Next::Keep => {}
                 }
             }
             Some(first) = push_rx.recv() => {
@@ -625,10 +785,17 @@ async fn run(
                     let request = categories::Request::Load { account: acc.scope.clone() };
                     categories::handle(&client, &own_id, None, request, &|r| notify(Event::Categories(r))).await;
                 }
+                let mut outcome = Refreshed::Done;
                 for acc in accounts.all_mut().filter(|a| changed.mail.touches(&a.id)) {
-                    if apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await {
+                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    if outcome == Refreshed::Stop {
                         return Ok(());
                     }
+                }
+                match after_refresh(outcome, false, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await {
+                    Next::Stop => return Ok(()),
+                    Next::Retry(at) => retry = at,
+                    Next::Keep => {}
                 }
             }
             () = calendar.wait() => {
@@ -637,10 +804,17 @@ async fn run(
                 }
             }
             _ = poll.tick() => {
+                let mut outcome = Refreshed::Done;
                 for acc in accounts.all_mut() {
-                    if apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await {
+                    outcome = outcome.max(apply_refresh(acc, &mut cache, &index, &mut prefetch, notify).await);
+                    if outcome == Refreshed::Stop {
                         return Ok(());
                     }
+                }
+                match after_refresh(outcome, false, &accounts, &identities, &send_as, &mut cache, &index, link, notify).await {
+                    Next::Stop => return Ok(()),
+                    Next::Retry(at) => retry = at,
+                    Next::Keep => {}
                 }
                 // Предзагрузка прервалась ошибкой — остаток со следующего опроса. Полный обход кэша (а в большом
                 // ящике это десятки тысяч строк) — только тогда, а не на каждое событие push.
@@ -648,7 +822,8 @@ async fn run(
                     prefetch.extend(cache.missing_bodies(PREFETCH_LIMIT).unwrap_or_default());
                 }
             }
-            _ = std::future::ready(()), if !prefetch.is_empty() => {
+            // Без связи тела не тянем: каждая попытка — тайм-аут сети.
+            _ = std::future::ready(()), if !prefetch.is_empty() && !link.is_down() => {
                 let n = prefetch.len().min(PREFETCH_BATCH);
                 let keys: Vec<String> = prefetch.drain(..n).collect();
                 match prefetch_bodies(&accounts, &cache, &keys).await {
@@ -657,11 +832,96 @@ async fn run(
                         // Не долбим сервер: остаток подберёт следующий опрос.
                         prefetch.clear();
                         refill = true;
+                        if ErrorKind::of(&e) == ErrorKind::Network && !link.is_down() {
+                            retry = Some(went_down(link, notify));
+                        }
                         if report(e, Stage::Prefetch, notify) {
                             return Ok(());
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Что нужно командам писем помимо кэша: аккаунты и отправители (для `handle` и отправки очереди).
+struct Ctx<'a> {
+    accounts: &'a Accounts,
+    identities: &'a [Identity],
+    send_as: &'a [SendAs],
+}
+
+/// Итог отправки очереди: всё ушло, связь снова пропала (срок повтора) или синхронизацию остановить.
+enum Replayed {
+    Done,
+    Down(tokio::time::Instant),
+    Stop,
+}
+
+/// Связь вернулась: правки из очереди — на сервер по порядку. Сеть пропала посреди — остаток снова в очередь.
+async fn replay(
+    ctx: &Ctx<'_>,
+    cache: &mut Cache,
+    index: &Index,
+    link: &mut Link<Command>,
+    queued: Vec<Command>,
+    notify: &impl Fn(Event),
+) -> Replayed {
+    let mut rest = queued.into_iter();
+    while let Some(cmd) = rest.next() {
+        let again = cmd.replayable();
+        let Err(e) = handle(ctx.accounts, cache, index, ctx.identities, ctx.send_as, cmd, notify).await else { continue };
+        if ErrorKind::of(&e) == ErrorKind::Network {
+            let mut back: Vec<Command> = again.into_iter().collect();
+            back.extend(rest);
+            link.requeue(back);
+            let at = went_down(link, notify);
+            report(e, Stage::Command, notify);
+            return Replayed::Down(at);
+        }
+        if report(e, Stage::Command, notify) {
+            return Replayed::Stop;
+        }
+    }
+    Replayed::Done
+}
+
+/// Что делать со сроком повтора после сверки.
+enum Next {
+    /// Срок прежний.
+    Keep,
+    /// Новый срок (или `None` — связь есть, повтора нет).
+    Retry(Option<tokio::time::Instant>),
+    Stop,
+}
+
+/// После сверки (push, опрос, повтор по сроку `timer`): сервер ответил — связь есть, очередь — на сервер; не
+/// ответил — без связи (повтор по сроку не удался или связь только что пропала — следующий срок, длиннее).
+#[allow(clippy::too_many_arguments)]
+async fn after_refresh(
+    outcome: Refreshed,
+    timer: bool,
+    accounts: &Accounts,
+    identities: &[Identity],
+    send_as: &[SendAs],
+    cache: &mut Cache,
+    index: &Index,
+    link: &mut Link<Command>,
+    notify: &impl Fn(Event),
+) -> Next {
+    match outcome {
+        Refreshed::Stop => Next::Stop,
+        Refreshed::Network if link.is_down() && !timer => Next::Keep,
+        Refreshed::Network => Next::Retry(Some(went_down(link, notify))),
+        Refreshed::Done => {
+            let Some(queued) = link.ok() else { return Next::Keep };
+            notify(Event::Connection(Connection::Online));
+            let ctx = Ctx { accounts, identities, send_as };
+            match replay(&ctx, cache, index, link, queued, notify).await {
+                Replayed::Down(at) => Next::Retry(Some(at)),
+                Replayed::Done => Next::Retry(None),
+                Replayed::Stop => Next::Stop,
             }
         }
     }
@@ -687,14 +947,36 @@ async fn prefetch_bodies(accounts: &Accounts, cache: &Cache, keys: &[String]) ->
     Ok(stored)
 }
 
-/// Сверка аккаунта с сервером; `true` — сервер отклонил вход, синхронизацию остановить.
+/// Итог сверки аккаунта; по порядку тяжести (`max` по аккаунтам).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Refreshed {
+    Done,
+    /// Сервер не ответил (сеть): без связи.
+    Network,
+    /// Сервер отклонил вход: синхронизацию остановить.
+    Stop,
+}
+
+/// Ошибка сверки — в интерфейс; что дальше.
+fn refresh_failed(e: postman_jmap::Error, notify: &impl Fn(Event)) -> Refreshed {
+    let network = ErrorKind::of(&e) == ErrorKind::Network;
+    if report(e, Stage::Refresh, notify) {
+        Refreshed::Stop
+    } else if network {
+        Refreshed::Network
+    } else {
+        Refreshed::Done
+    }
+}
+
+/// Сверка аккаунта с сервером.
 async fn apply_refresh(
     acc: &mut MailAccount,
     cache: &mut Cache,
     index: &Index,
     prefetch: &mut VecDeque<String>,
     notify: &impl Fn(Event),
-) -> bool {
+) -> Refreshed {
     // Первая загрузка общего ящика не удалась — снова целиком.
     let Some(since) = acc.state.clone() else {
         return match start_state(acc, cache, index, notify).await {
@@ -702,9 +984,9 @@ async fn apply_refresh(
                 acc.state = Some(s);
                 notify(Event::MailboxesChanged);
                 notify(Event::EmailsChanged);
-                false
+                Refreshed::Done
             }
-            Err(e) => report(e, Stage::Refresh, notify),
+            Err(e) => refresh_failed(e, notify),
         };
     };
     match refresh(acc, cache, index, &since, notify).await {
@@ -720,10 +1002,10 @@ async fn apply_refresh(
             if acc.scope.is_none() {
                 settings::handle(&acc.client, settings::Request::Quota, &|r| notify(Event::Settings(r))).await;
             }
-            false
+            Refreshed::Done
         }
-        Ok(None) => false,
-        Err(e) => report(e, Stage::Refresh, notify),
+        Ok(None) => Refreshed::Done,
+        Err(e) => refresh_failed(e, notify),
     }
 }
 
@@ -1086,7 +1368,74 @@ async fn handle(
                 Err(e) => Event::ComposeFailed { ticket, error: e.to_string() },
             });
         }
+        Command::ReportPhishing { ids, to, subject, text, ticket } => {
+            let r = report_phishing(accounts, cache, send_as, &ids, to, subject, text).await;
+            match &r {
+                Ok(()) => notify(Event::Reported { ticket, error: None }),
+                // Без связи — ждёт в очереди (`link`), события нет.
+                Err(e) if ErrorKind::of(e) == ErrorKind::Network => {}
+                Err(e) => notify(Event::Reported { ticket, error: Some(e.to_string()) }),
+            }
+            r?;
+        }
+        // «Повторить сейчас» — забота цикла синхронизации.
+        Command::Reconnect => {}
     }
+    Ok(())
+}
+
+/// Имя вложения `.eml` из темы письма: без знаков, которые Windows не пускает в имя файла; пустая — «message».
+fn eml_name(subject: Option<&str>) -> String {
+    let clean: String = subject
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_control() || r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
+        .take(80)
+        .collect();
+    let clean = clean.trim().trim_end_matches('.');
+    format!("{}.eml", if clean.is_empty() { "message" } else { clean })
+}
+
+/// `Command::ReportPhishing`: письма — вложениями `message/rfc822` (байты скачивает отправка по `blobId`) одним
+/// письмом на `to` от своего адреса, сразу (без окна «Отменить»).
+async fn report_phishing(
+    accounts: &Accounts,
+    cache: &Cache,
+    send_as: &[SendAs],
+    keys: &[String],
+    to: Address,
+    subject: String,
+    text: String,
+) -> postman_jmap::Result<()> {
+    let me = send_as
+        .iter()
+        .find(|s| s.scope.is_none())
+        .or(send_as.first())
+        .ok_or_else(|| postman_jmap::Error::Protocol("no Identity on the server to send from".into()))?;
+    let mut draft = Draft {
+        from: Address::new(&me.identity.name, &me.identity.email),
+        to: vec![to],
+        subject,
+        markdown: text,
+        ..Default::default()
+    };
+    for (scope, keys) in by_account(keys) {
+        let Some(acc) = accounts.by_scope(scope) else { continue };
+        let ids: Vec<String> = keys.iter().map(|k| unscoped(k).1.to_owned()).collect();
+        for e in acc.client.email_blobs(&ids).await? {
+            draft.attachments.push(postman_compose::Attachment {
+                name: eml_name(e.subject.as_deref()),
+                mime: "message/rfc822".into(),
+                data: Vec::new(),
+                inline_cid: None,
+                blob_id: Some(acc.key(&e.blob_id)),
+            });
+        }
+    }
+    if draft.attachments.is_empty() {
+        return Err(postman_jmap::Error::Protocol("the reported messages are gone from the server".into()));
+    }
+    send(accounts, cache, send_as, &draft, None, Release::Now).await?;
     Ok(())
 }
 

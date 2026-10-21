@@ -287,6 +287,12 @@ impl Mailer {
         tracing::info!("sync start: {}", account.url);
         self.live.status = status_text(&Status::Connecting { url: account.url.clone() });
         self.live.account = Some(Settings::of(&account));
+        // Свой аккаунт — подписью над папками (метка «нет связи» — у неё, S5-08).
+        let own = Settings::of(&account).user;
+        self.folders.update(cx, |f, cx| {
+            f.own = Some(own);
+            cx.notify();
+        });
         self.live.path = Some(account::cache_path(&crate::data_dir(), &account));
         let commands = sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint);
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
@@ -433,6 +439,9 @@ impl Mailer {
         // Вход со строки входа не удался: синхронизация остановилась, строка входа — с причиной.
         if self.live.pending.take().is_some() {
             self.backend = Backend::Demo;
+            // Синхронизация остановлена: «нет связи» к этой попытке входа больше не относится.
+            self.offline = Default::default();
+            self.show_offline(String::new(), false, cx);
             self.live.status.clear();
             if let (Some(panel), Some(e)) = (&self.live.signin, errors.last()) {
                 let text = error_text(e);
@@ -448,6 +457,8 @@ impl Mailer {
             self.live.reauth = Some(self.live.account.clone().unwrap_or_default());
             cx.notify();
         }
+        // Нет связи — не тостом, а строкой состояния, меткой у аккаунта и полосой над списком (S5-08, `states.rs`).
+        let errors: Vec<SyncError> = errors.into_iter().filter(|e| e.kind != ErrorKind::Network).collect();
         for e in fresh_errors(&mut self.live.last_error, errors) {
             let text = tr!("account-sync-error", error = error_text(&e));
             self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));

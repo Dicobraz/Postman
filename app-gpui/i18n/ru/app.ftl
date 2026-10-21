@@ -14,7 +14,7 @@ sandbox-partial = Песочница: частичная
 sandbox-none = Песочница: нет
 sandbox-weak = Песочница разбора писем ослаблена ({ $level }): письма открываются с меньшей защитой.
 status-items = Элементов: { $n }
-status-notifications = 🔔 { $n }
+status-notifications-hint = Уведомления
 second-instance = Postman уже запущен — показано это окно.
 
 # Сбой запуска (журнал Windows и stderr).

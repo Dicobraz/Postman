@@ -63,10 +63,12 @@ pub(crate) enum Pm {
     ConflictBg,
     /// Нерабочие часы в сетке недели.
     CalOff,
+    /// «Сообщить о фишинге» — красная маска (DESIGN «Действия и состояния», #CD605A): красный — безопасность.
+    Phish,
 }
 
 impl Pm {
-    pub(crate) const COUNT: usize = Pm::CalOff as usize + 1;
+    pub(crate) const COUNT: usize = Pm::Phish as usize + 1;
 }
 
 const fn c(v: u32) -> Color {
@@ -102,6 +104,7 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::ConflictFg, "app.conflict.fg", c(0x5C2E91), c(0xDFC1EE), Role::TextPrimary),
     (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
+    (Pm::Phish, "app.phish", c(0xCD605A), c(0xD47C76), Role::CriticalFg),
 ];
 
 /// Части цвета категории: точка и полоса, текст и подложка метки.
@@ -180,6 +183,7 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::ConflictFg,
     Pm::ConflictBg,
     Pm::CalOff,
+    Pm::Phish,
 ];
 
 /// Цвета категории в теме.

@@ -73,7 +73,7 @@ pub(crate) enum Place {
 impl Place {
     pub(crate) fn of(context: Option<&str>) -> Place {
         // «… && !Composer» — клавиши почты вне письма (письмо вкладкой и ответ в области чтения, S5-06б): это почта.
-        let context = context.map(|c| c.replace("!Composer", ""));
+        let context = context.map(|c| c.replace("!Composer", "").replace("!ContextMenu", ""));
         match context.as_deref() {
             Some(c) if c.contains("Composer") => Place::Composer,
             Some(c) if c.contains("Meeting") => Place::Meeting,
