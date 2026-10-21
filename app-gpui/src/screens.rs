@@ -817,15 +817,22 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             }
         }
         Scene::SettingsKeys => {
-            // Своё сочетание у «Флаг» и конфликт: «Сегодня в календаре» на Ctrl+2, как «Календарь».
+            // Своё сочетание у «Флаг» и конфликт: «Сегодня в календаре» на Ctrl+2, как «Календарь»; схема «Одиночные
+            // клавиши» (S5-17) со своей буквой у «Архив».
             crate::prefs::update(cx, |p| {
                 p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-g".into()]);
                 p.keys.insert("calendar.today".into(), vec!["ctrl-2".into()]);
+                p.key_scheme = postman_core::prefs::KeyScheme::Single;
+                p.keys_single.insert("mail.archive".into(), vec!["y".into()]);
             });
             m.open_settings(Some(SettingsSection::Keys), window, cx);
         }
         Scene::SettingsAccounts => {
-            crate::prefs::update(cx, |p| p.keys.clear());
+            crate::prefs::update(cx, |p| {
+                p.keys.clear();
+                p.keys_single.clear();
+                p.key_scheme = postman_core::prefs::KeyScheme::Outlook;
+            });
             m.open_settings(Some(SettingsSection::Accounts), window, cx);
             m.on_settings(&crate::settings_tab::SettingsEvent::AddAccount, window, cx);
         }
