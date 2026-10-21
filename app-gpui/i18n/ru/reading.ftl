@@ -4,10 +4,6 @@ reading-att-size = { $unit ->
     [kb] { $n } КБ
    *[mb] { $n } МБ
 }
-reading-att-open = Открыть
-reading-att-save = Сохранить как…
-reading-att-only-save = только сохранить
-reading-att-loading = скачивание…
 reading-saved = Сохранено: { $path }
 reading-file-failed = «{ $name }»: { $error }
 reading-blob-failed = Вложение не скачано: { $error }

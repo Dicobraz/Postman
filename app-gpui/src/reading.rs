@@ -3,7 +3,7 @@
 //! Чужие данные (HTML, картинки, `.ics`) разбирает только воркер. Байты вложений — из демо-ящика, из хранилища
 //! или с сервера (`Command::Blob` → `Event::BlobReady` в [`ReadingPane::on_sync`]); диск, воркер и сервер — в фоне.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -19,7 +19,7 @@ use postman_core::files;
 use postman_core::invite::Delivery;
 use postman_core::sync::{Command, Event};
 use postman_ir::Document;
-use postman_worker::{Client as Worker, Level, Request, Rgba};
+use postman_worker::{Client as Worker, Level, OfficeScan, Request, Rgba};
 
 use crate::attachments::{self, FileAct};
 use crate::invite_card::{self, Card, State};
@@ -41,6 +41,30 @@ pub(crate) struct Reading {
     /// `cid:`, за которыми уже пошли (байты, декодирование).
     pub(crate) requested: HashSet<String>,
     pub(crate) invite: Option<Card>,
+    /// Проверки документов Office в воркере (S5-07): `blob_id` → итог; `scanning` — ждут байтов или воркера.
+    pub(crate) scans: HashMap<String, OfficeScan>,
+    pub(crate) scanning: HashSet<String>,
+    /// Встроенный просмотр вложения (на месте текста письма).
+    pub(crate) preview: Option<crate::preview::Pv>,
+    /// Лента вложений развёрнута («+N»).
+    pub(crate) expanded: bool,
+}
+
+impl Reading {
+    fn new(row: EmailRow, body: Option<BodyRow>) -> Self {
+        Self {
+            row,
+            body,
+            doc: None,
+            images: Images::new(),
+            requested: HashSet::new(),
+            invite: None,
+            scans: HashMap::new(),
+            scanning: HashSet::new(),
+            preview: None,
+            expanded: false,
+        }
+    }
 }
 
 // --- область чтения ---
@@ -72,6 +96,8 @@ pub(crate) struct ReadingPane {
     pub(crate) mine: Vec<String>,
     /// Отправки, которые держит сервер (S5-06): у такого письма — строка «Отправится …» с отменой.
     pub(crate) scheduled: Vec<postman_core::send_later::Scheduled>,
+    /// «Сохранить все» ждёт байтов вложений (S5-07).
+    pub(crate) save_all: Option<crate::preview::SaveAll>,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -132,6 +158,7 @@ impl ReadingPane {
             quotes: false,
             mine: Vec::new(),
             scheduled: Vec::new(),
+            save_all: None,
         }
     }
 
@@ -169,7 +196,9 @@ impl ReadingPane {
 
     /// Показать другое письмо (или ничего): картинки прежнего — в [`ReadingPane::retired`].
     fn replace(&mut self, next: Option<Reading>) {
+        self.save_all = None;
         if let Some(old) = std::mem::replace(&mut self.reading, next) {
+            self.retired.extend(old.preview.as_ref().and_then(|p| p.image()));
             self.retired.extend(old.images.into_values());
         }
     }
@@ -179,9 +208,10 @@ impl ReadingPane {
             return;
         }
         let body = Some(postman_demo::body(&row.id));
-        self.replace(Some(Reading { row, body, doc: None, images: Images::new(), requested: HashSet::new(), invite: None }));
+        self.replace(Some(Reading::new(row, body)));
         self.render_body(cx);
         self.ensure_invite(cx);
+        self.ensure_scans(cx);
         self.sync_thread(cx);
         cx.notify();
     }
@@ -191,7 +221,7 @@ impl ReadingPane {
         if self.reading.as_ref().is_some_and(|r| r.row.id == row.id) {
             return;
         }
-        self.replace(Some(Reading { row, body: None, doc: None, images: Images::new(), requested: HashSet::new(), invite: None }));
+        self.replace(Some(Reading::new(row, None)));
         self.sync_thread(cx);
         cx.notify();
     }
@@ -203,6 +233,7 @@ impl ReadingPane {
         r.doc = None;
         self.render_body(cx);
         self.ensure_invite(cx);
+        self.ensure_scans(cx);
         cx.notify();
     }
 
@@ -253,6 +284,7 @@ impl ReadingPane {
             SyncRequest::Blob(a) => {
                 self.in_flight.remove(&a.blob_id);
                 self.pending_files.retain(|(p, _)| p.blob_id != a.blob_id);
+                self.attachment_failed(&a.blob_id, &tr!("reading-blob-unavailable"), cx);
                 if let Some(card) = self.reading.as_mut().and_then(|r| r.invite.as_mut()).filter(|c| c.waits_for(&a.blob_id)) {
                     card.state = State::Failed(tr!("reading-blob-unavailable"));
                 }
@@ -343,7 +375,7 @@ impl ReadingPane {
     }
 
     /// Байты вложения: демо — сразу; живой ящик — из хранилища (в фоне), иначе с сервера.
-    fn fetch(&mut self, a: &AttachmentRow, cx: &mut Context<Self>) {
+    pub(crate) fn fetch(&mut self, a: &AttachmentRow, cx: &mut Context<Self>) {
         if !self.live {
             match postman_demo::blob(&a.blob_id) {
                 Some(data) => self.blob_ready(&a.blob_id, Arc::new(data), cx),
@@ -391,6 +423,7 @@ impl ReadingPane {
                 self.decode_image(id.clone(), cid, data.clone(), cx);
             }
         }
+        self.attachment_ready(blob_id, &data, cx);
         let (ready, rest) = std::mem::take(&mut self.pending_files).into_iter().partition(|(a, _)| a.blob_id == blob_id);
         self.pending_files = rest;
         for (a, act) in ready {
@@ -401,11 +434,19 @@ impl ReadingPane {
 
     fn blob_failed(&mut self, blob_id: &str, error: String, cx: &mut Context<Self>) {
         self.in_flight.remove(blob_id);
+        let mut user = self.pending_files.iter().any(|(a, _)| a.blob_id == blob_id);
         self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
         if let Some(card) = self.reading.as_mut().and_then(|r| r.invite.as_mut()).filter(|c| c.waits_for(blob_id)) {
             card.state = State::Failed(error.clone());
+            user = true;
         }
-        cx.emit(ReadingEvent::Toast(Toast::Error, tr!("reading-blob-failed", error = error)));
+        user |= self.attachment_failed(blob_id, &error, cx);
+        // Фоновая проверка Office на макросы не скачалась — без тоста: щиток просто не появится.
+        if user {
+            cx.emit(ReadingEvent::Toast(Toast::Error, tr!("reading-blob-failed", error = error)));
+        } else {
+            tracing::warn!("attachment {blob_id} is not downloaded: {error}");
+        }
         cx.notify();
     }
 
@@ -491,6 +532,11 @@ impl ReadingPane {
     fn do_file(&mut self, a: AttachmentRow, act: FileAct, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         let name = files::safe_name(&a.name);
         match act {
+            FileAct::Open if self.risk_of(&a) != postman_core::attach::Risk::Safe => {
+                // Макросы (по имени или найденные воркером) и исполняемые — только «Сохранить» (S5-07).
+                let text = tr!("reading-file-failed", name = name, error = tr!("att-status-macros"));
+                cx.emit(ReadingEvent::Toast(Toast::Warning, text));
+            }
             FileAct::Open => {
                 let dir = self.open_dir.clone();
                 let task = cx.background_spawn(async move { files::open(&dir, &a.name, &data).map(|_| ()) });
@@ -527,54 +573,10 @@ impl ReadingPane {
         }
     }
 
-    fn attachment_strip(&self, r: &Reading, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let body = r.body.as_ref()?;
-        let shown: HashSet<String> = r.doc.as_ref().map(|d| ir_view::cids(d).into_iter().collect()).unwrap_or_default();
-        let card = r.invite.as_ref().is_some_and(|c| c.invitation().is_some());
-        let items = attachments::listed(&body.attachments, &shown, card);
-        if items.is_empty() {
-            return None;
-        }
-        let l = look(cx);
-        let chips = items.into_iter().enumerate().map(|(n, item)| {
-            let pending = self.pending_files.iter().any(|(p, _)| p.blob_id == item.row.blob_id);
-            let link = |id: &'static str, label: String, act: FileAct, row: AttachmentRow| {
-                div()
-                    .id((id, n))
-                    .px_1()
-                    .rounded_sm()
-                    .text_color(l.accent_text())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(l.hover()))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.file_action(row.clone(), act, cx)))
-            };
-            let mut chip = div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(l.stroke())
-                .bg(l.panel())
-                .child(attachments::icon(item.kind))
-                .child(item.name.clone())
-                .child(div().text_color(l.text2()).child(attachments::size_text(item.row.size)));
-            if pending {
-                chip = chip.child(div().text_color(l.text2()).child(tr!("reading-att-loading")));
-            } else {
-                if item.can_open {
-                    chip = chip.child(link("att-open", tr!("reading-att-open"), FileAct::Open, item.row.clone()));
-                } else {
-                    chip = chip.child(div().text_color(l.warning()).child(tr!("reading-att-only-save")));
-                }
-                chip = chip.child(link("att-save", tr!("reading-att-save"), FileAct::SaveAs, item.row));
-            }
-            chip
-        });
-        Some(div().flex().flex_wrap().gap_2().children(chips).into_any_element())
+    /// Опасность вложения с учётом проверки содержимого (S5-07).
+    fn risk_of(&self, a: &AttachmentRow) -> postman_core::attach::Risk {
+        let scanned = self.reading.as_ref().and_then(|r| r.scans.get(&a.blob_id)).map(|s| s.macros);
+        postman_core::attach::risk_with(&a.name, scanned)
     }
 }
 
@@ -680,7 +682,27 @@ impl Render for ReadingPane {
                 .child(feed)
                 .into_any_element();
         }
-        let strip = self.attachment_strip(r, cx);
+        let strip = self.ribbon(r, cx);
+        // Открыт просмотр вложения — он на месте текста письма и карточки приглашения (DESIGN «Вложения»).
+        if let Some(p) = &r.preview {
+            let pane = self.preview_pane(p, cx);
+            return div()
+                .id("reading")
+                .flex()
+                .flex_col()
+                .size_full()
+                .px(px(24.))
+                .pt(px(20.))
+                .pb(px(16.))
+                .gap(px(12.))
+                .overflow_y_scroll()
+                .child(header)
+                .children(scheduled)
+                .children(bar)
+                .children(strip)
+                .child(pane)
+                .into_any_element();
+        }
         let card = r.invite.as_ref().map(|c| invite_card::render(c, self.me.as_deref(), cx));
         let body: AnyElement = match &r.doc {
             None => div().text_color(l.text2()).child("…").into_any_element(),

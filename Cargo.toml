@@ -27,6 +27,33 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# Просмотр PDF в воркере (S5-07, docs/SIZE.md «Воркер»): рендер одной страницы по запросу — холодный код,
+# оптимизация по размеру. Крейты только воркера (gpui их не использует), на postman.exe не влияет.
+[profile.release.package.hayro]
+opt-level = "s"
+[profile.release.package.hayro-interpret]
+opt-level = "s"
+[profile.release.package.hayro-syntax]
+opt-level = "s"
+[profile.release.package.hayro-jbig2]
+opt-level = "s"
+[profile.release.package.hayro-jpeg2000]
+opt-level = "s"
+[profile.release.package.hayro-ccitt]
+opt-level = "s"
+[profile.release.package.hayro-cmap]
+opt-level = "s"
+[profile.release.package.hayro-postscript]
+opt-level = "s"
+[profile.release.package.vello_cpu]
+opt-level = "s"
+[profile.release.package.vello_common]
+opt-level = "s"
+[profile.release.package.fearless_simd]
+opt-level = "s"
+[profile.release.package.pic-scale]
+opt-level = "s"
+
 # «Не падать» (S2-03): вне тестов нет unwrap/expect/panic!; в тестах разрешены (clippy.toml).
 [workspace.lints.clippy]
 unwrap_used = "deny"

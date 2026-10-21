@@ -38,8 +38,14 @@ enum Scene {
     List,
     /// Первое письмо выбрано, тело разобрано воркером.
     Letter,
-    /// Письмо с вложениями и картинкой `cid:` в тексте (S3-03).
+    /// Письмо с вложениями и картинкой `cid:` в тексте (S3-03): лента 40 px с «+N» (S5-07).
     Attachments,
+    /// Встроенный просмотр вложений того же письма (S5-07): фото, страница PDF, оглавление архива, книга с
+    /// макросами (карточка «Открытие заблокировано»).
+    PreviewImage,
+    PreviewPdf,
+    PreviewZip,
+    AttachMacro,
     /// Письмо с приглашением: карточка встречи (S3-03), новое — с пересечением с моим днём (S5-11).
     Invite,
     /// Та же карточка: отвечено, изменено организатором, отменено, устарело (S5-11; подмена входов карточки).
@@ -109,10 +115,14 @@ enum Scene {
     SettingsSign,
 }
 
-const SCENES: [Scene; 36] = [
+const SCENES: [Scene; 40] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
+    Scene::PreviewImage,
+    Scene::PreviewPdf,
+    Scene::PreviewZip,
+    Scene::AttachMacro,
     Scene::Invite,
     Scene::InviteAnswered,
     Scene::InviteUpdated,
@@ -174,6 +184,10 @@ impl Scene {
             Scene::List => "list",
             Scene::Letter => "letter",
             Scene::Attachments => "attachments",
+            Scene::PreviewImage => "preview-image",
+            Scene::PreviewPdf => "preview-pdf",
+            Scene::PreviewZip => "preview-zip",
+            Scene::AttachMacro => "attach-macro",
             Scene::Invite => "invite",
             Scene::InviteAnswered => "invite-answered",
             Scene::InviteUpdated => "invite-updated",
@@ -316,6 +330,11 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 return Err("no such message in the first rows of the demo inbox".into());
             };
             m.list.update(cx, |l, cx| l.select(i, cx));
+        }
+        Scene::PreviewImage | Scene::PreviewPdf | Scene::PreviewZip | Scene::AttachMacro => {
+            // Как щелчок по карточке ленты.
+            let blob = preview_blob(scene).to_string();
+            m.reading.update(cx, |r, cx| r.toggle_preview(Some(blob), cx));
         }
         Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
             let which = scene.name().trim_start_matches("invite-");
@@ -588,6 +607,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
             reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
         }
+        Scene::PreviewImage | Scene::PreviewPdf | Scene::PreviewZip | Scene::AttachMacro => {
+            // Просмотр разобран воркером; у книги с макросами — и проверка для щитка в ленте.
+            let blob = preview_blob(scene);
+            reading.is_some_and(|r| {
+                let ready = r.preview.as_ref().is_some_and(|p| p.row.blob_id == blob && p.ready());
+                ready && (!matches!(scene, Scene::AttachMacro) || r.scans.contains_key(blob))
+            })
+        }
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => {
             let c = m.cal.read(cx);
@@ -786,6 +813,16 @@ fn shared_inbox(m: &Mailer, cx: &App) -> Option<String> {
     let mut boxes = f.of(Some(&account.id));
     let first = f.of(Some(&account.id)).next().map(|b| b.id.clone());
     boxes.find(|b| b.role.as_deref() == Some("inbox")).map(|b| b.id.clone()).or(first)
+}
+
+/// Вложение демо-письма для сцены просмотра (`postman_demo::blob`).
+fn preview_blob(scene: Scene) -> &'static str {
+    match scene {
+        Scene::PreviewImage => "photo",
+        Scene::PreviewPdf => "pdf",
+        Scene::PreviewZip => "zip",
+        _ => "xlsm",
+    }
 }
 
 /// Первое прочитанное письмо демо-ящика для сцены: с картинкой `cid:` (и без приглашения) или с приглашением.

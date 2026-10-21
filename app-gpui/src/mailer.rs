@@ -367,7 +367,7 @@ impl Render for Mailer {
             Section::Calendar => "Mailer CalendarView",
             Section::Contacts => "Mailer ContactsView",
         };
-        let root = crate::actions::handlers(div(), cx)
+        let root = crate::attachments::handlers(crate::actions::handlers(div(), cx), cx)
             .key_context(context)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &mail::Next, _, cx| this.step(|_| 1, cx)))
@@ -449,6 +449,10 @@ impl Render for Mailer {
                 }
                 // …затем меню «…» и панель выбора срока.
                 if this.close_more(cx) || this.close_picker(cx) {
+                    return;
+                }
+                // …затем просмотр вложения (S5-07).
+                if this.section == Section::Mail && this.reading.update(cx, |r, cx| r.close_preview(cx)) {
                     return;
                 }
                 // …затем панель фильтров (S5-03) — назад к папкам.

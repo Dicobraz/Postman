@@ -44,7 +44,7 @@ Windows. Приложение семейства «Pets»: общий архит
 
 Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу.
 
-- `worker` — отдельный процесс-песочница для разбора чужих данных (HTML, картинки, .ics).
+- `worker` — отдельный процесс-песочница для разбора чужих данных (HTML, картинки, .ics, просмотр вложений: PDF, ZIP, макросы Office).
   Windows: AppContainer + Job Object + mitigation policies, запуск без консоли (`DETACHED_PROCESS`).
   Linux (dev): seccomp + Landlock. Чужие данные в UI-процессе не разбираются никогда.
 - Патч Windows-платформы gpui (шейдеры в exe, кадры по запросу, живой ресайз) — в репозитории `pets`
@@ -87,7 +87,7 @@ cargo run --release -p postman-gpui -- --screens <каталог>
 ```
 
 Агенты проверяют интерфейс снимками, а не нажатиями в окне: демо-ящик (свежая копия на 2000 писем, удаляется
-в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite` (и состояния карточки `invite-answered`, `invite-updated`, `invite-cancelled`, `invite-outdated`, S5-11), `search`, `calendar`, `event`, `meeting` и `assistant` (вкладка встречи: общие окна и занятость каждого, S5-11), `contacts`, `contact-edit`, `compose` (письмо вкладкой, S5-06б), `send-later` (меню «Отправить позже», S5-06), `checks` (замечания «Перед отправкой»), `reply-inline` (ответ в области чтения), `vacation` и `rules` (разделы вкладки «Настройки»), `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts`, `settings-quick`, `settings-reading`, `settings-sign` (вкладка «Настройки», S5-09), `shared` (общий ящик в дереве папок, S4-06), `labels` (полосы категорий и метки, S5-02), `filters` (панель фильтров, «Все папки», S5-03), `quick` (быстрые фильтры, S5-03), `lifecycle` (все метки сроков, «Срочное» и панель «Срок», S5-04), `overdue` (просроченный срок в строке и шапке), `firstrun` (первый запуск: добавление аккаунта на месте, S5-09), `thread` (лента беседы, S5-05);
+в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments` (лента вложений, S5-07) и встроенный просмотр `preview-image`, `preview-pdf`, `preview-zip`, `attach-macro`, `invite` (и состояния карточки `invite-answered`, `invite-updated`, `invite-cancelled`, `invite-outdated`, S5-11), `search`, `calendar`, `event`, `meeting` и `assistant` (вкладка встречи: общие окна и занятость каждого, S5-11), `contacts`, `contact-edit`, `compose` (письмо вкладкой, S5-06б), `send-later` (меню «Отправить позже», S5-06), `checks` (замечания «Перед отправкой»), `reply-inline` (ответ в области чтения), `vacation` и `rules` (разделы вкладки «Настройки»), `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts`, `settings-quick`, `settings-reading`, `settings-sign` (вкладка «Настройки», S5-09), `shared` (общий ящик в дереве папок, S4-06), `labels` (полосы категорий и метки, S5-02), `filters` (панель фильтров, «Все папки», S5-03), `quick` (быстрые фильтры, S5-03), `lifecycle` (все метки сроков, «Срочное» и панель «Срок», S5-04), `overdue` (просроченный срок в строке и шапке), `firstrun` (первый запуск: добавление аккаунта на месте, S5-09), `thread` (лента беседы, S5-05);
 на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
 stderr и код 1. Только Windows.
 `--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list`, `letter` и `reply-inline` после первой синхронизации,

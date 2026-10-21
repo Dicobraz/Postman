@@ -7,6 +7,7 @@
 //! на Windows — без win32k. Зависание или падение воркера стоит одного письма:
 //! клиент убивает процесс и поднимает новый.
 
+pub mod preview;
 mod sandbox;
 
 use std::io::{self, Read, Write};
@@ -17,7 +18,15 @@ use std::time::Duration;
 use postman_ir::Document;
 use serde::{Deserialize, Serialize};
 
+pub use preview::{Entry, Listing, OfficeFormat, OfficeScan, Preview, PreviewKind};
 pub use sandbox::Level;
+
+/// Код выхода воркера, которого остановил сторож времени: разбор одного запроса дольше [`TIME_LIMIT`].
+pub const EXIT_TIME: i32 = 5;
+/// Предел времени на один запрос внутри воркера (сторож в [`serve`]); клиент ждёт чуть дольше.
+pub const TIME_LIMIT: Duration = Duration::from_secs(8);
+/// Сколько клиент ждёт ответа на просмотр вложения: сторож воркера срабатывает раньше.
+pub const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Больше этого не принимаем ни в одну сторону.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -30,6 +39,9 @@ pub enum Request {
     Calendar,
     /// Картинка (PNG/JPEG/GIF/WebP) в бинарной части; ответ — RGBA не больше `max_side` по стороне.
     Image { max_side: u32 },
+    /// Встроенный просмотр вложения (S5-07): файл в бинарной части; `page` — страница PDF с нуля; ответ —
+    /// [`Preview`], пиксели картинки и страницы — RGBA в бинарной части.
+    Preview { kind: PreviewKind, page: u32, max_side: u32 },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -68,6 +80,7 @@ enum Response {
     /// RGBA8 в бинарной части.
     Image { width: u32, height: u32 },
     Calendar(serde_json::Value),
+    Preview(Preview),
     Err(String),
 }
 
@@ -79,6 +92,11 @@ pub struct Rgba {
 }
 
 fn decode_image(bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
+    decode(bytes, max_side).map(|(img, _, _)| img)
+}
+
+/// Картинка, её исходный размер и формат.
+pub(crate) fn decode(bytes: &[u8], max_side: u32) -> Result<(Rgba, (u32, u32), &'static str), String> {
     use image::codecs::{gif::GifDecoder, jpeg::JpegDecoder, png::PngDecoder, webp::WebPDecoder};
     use image::{DynamicImage, ImageDecoder, ImageFormat, ImageResult, Limits};
 
@@ -96,20 +114,21 @@ fn decode_image(bytes: &[u8], max_side: u32) -> Result<Rgba, String> {
     limits.max_image_height = Some(16_384);
     limits.max_alloc = Some(256 * 1024 * 1024);
     let r = io::Cursor::new(bytes);
-    let decoded = match image::guess_format(bytes) {
-        Ok(ImageFormat::Png) => PngDecoder::with_limits(r, limits.clone()).and_then(|d| load(d, limits)),
-        Ok(ImageFormat::Jpeg) => JpegDecoder::new(r).and_then(|d| load(d, limits)),
-        Ok(ImageFormat::Gif) => GifDecoder::new(r).and_then(|d| load(d, limits)),
-        Ok(ImageFormat::WebP) => WebPDecoder::new(r).and_then(|d| load(d, limits)),
+    let (decoded, format) = match image::guess_format(bytes) {
+        Ok(ImageFormat::Png) => (PngDecoder::with_limits(r, limits.clone()).and_then(|d| load(d, limits)), "PNG"),
+        Ok(ImageFormat::Jpeg) => (JpegDecoder::new(r).and_then(|d| load(d, limits)), "JPEG"),
+        Ok(ImageFormat::Gif) => (GifDecoder::new(r).and_then(|d| load(d, limits)), "GIF"),
+        Ok(ImageFormat::WebP) => (WebPDecoder::new(r).and_then(|d| load(d, limits)), "WebP"),
         _ => return Err("формат картинки не поддерживается".into()),
     };
     let mut img = decoded.map_err(|e| e.to_string())?;
+    let source = (img.width(), img.height());
     let max_side = max_side.clamp(16, 4096);
     if img.width() > max_side || img.height() > max_side {
         img = img.thumbnail(max_side, max_side);
     }
     let rgba = img.into_rgba8();
-    Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
+    Ok((Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() }, source, format))
 }
 
 /// iCalendar → `{ "method": "REQUEST", "data": <JSCalendar> }`. Чужие данные — только в песочнице.
@@ -167,6 +186,9 @@ fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
 pub fn serve() -> ! {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
+    // Сторож времени — до запирания (потом новые потоки могут быть запрещены): запрос дольше `TIME_LIMIT`
+    // завершает процесс; клиент видит код `EXIT_TIME` и поднимает новый воркер.
+    let watchdog = watchdog();
     if let Err(e) = sandbox::lockdown() {
         // Без песочницы не работаем: лучше показать письмо текстом, чем разбирать HTML без защиты.
         let json = serde_json::to_vec(&Response::Err(format!("песочница: {e}"))).unwrap_or_default();
@@ -175,6 +197,9 @@ pub fn serve() -> ! {
     }
     loop {
         let Ok((frame, bin)) = read_msg(&mut stdin) else { std::process::exit(0) };
+        if let Some(w) = &watchdog {
+            let _ = w.send(true);
+        }
         let mut out_bin = Vec::new();
         let resp = match serde_json::from_slice::<Request>(&frame) {
             Ok(Request::Html(h)) => Response::Ok(postman_ir::from_html(&h)),
@@ -190,15 +215,50 @@ pub fn serve() -> ! {
                 }
                 Err(e) => Response::Err(e),
             },
+            Ok(Request::Preview { kind, page, max_side }) => {
+                // Сбой разборщика на чужом файле — ошибка этого просмотра, а не смерть процесса.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| preview::preview(kind, &bin, page, max_side)));
+                match r {
+                    Ok(Ok((p, pixels))) => {
+                        out_bin = pixels;
+                        Response::Preview(p)
+                    }
+                    Ok(Err(e)) => Response::Err(e),
+                    Err(_) => Response::Err("файл не разобран: сбой разборщика".into()),
+                }
+            }
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
         };
+        if let Some(w) = &watchdog {
+            let _ = w.send(false);
+        }
         let out = serde_json::to_vec(&resp).unwrap_or_default();
         if write_msg(&mut stdout, &out, &out_bin).is_err() {
             std::process::exit(0);
         }
     }
+}
+
+/// Поток-сторож: `true` — запрос начат, `false` — закончен. Не закончен за [`TIME_LIMIT`] — выход с [`EXIT_TIME`].
+/// В простое поток спит в `recv` и процессор не тратит. Поток не запустился — работаем без сторожа (клиент всё
+/// равно убьёт воркер по своему таймауту).
+fn watchdog() -> Option<mpsc::Sender<bool>> {
+    let (tx, rx) = mpsc::channel::<bool>();
+    let spawned = std::thread::Builder::new().name("watchdog".into()).spawn(move || {
+        while let Ok(started) = rx.recv() {
+            if !started {
+                continue;
+            }
+            match rx.recv_timeout(TIME_LIMIT) {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => std::process::exit(EXIT_TIME),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    spawned.ok().map(|_| tx)
 }
 
 /// Запущенный процесс-воркер, как его видит клиент.
@@ -258,7 +318,7 @@ impl Client {
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
         match self.call(req, &[])?.0 {
             Response::Ok(doc) => Ok(doc),
-            Response::Image { .. } | Response::Calendar(_) => Err("неожиданный ответ".into()),
+            Response::Image { .. } | Response::Calendar(_) | Response::Preview(_) => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
@@ -274,6 +334,25 @@ impl Client {
         }
     }
 
+    /// Встроенный просмотр вложения в песочнице (S5-07): итог и пиксели картинки или страницы PDF.
+    pub fn preview(&mut self, kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32) -> Result<(Preview, Option<Rgba>), String> {
+        if bytes.len() > preview::MAX_INPUT {
+            return Err("файл слишком большой для просмотра".into());
+        }
+        let timeout = self.timeout.max(PREVIEW_TIMEOUT);
+        match self.call_for(&Request::Preview { kind, page, max_side }, bytes, timeout)? {
+            (Response::Preview(p), pixels) => match &p {
+                Preview::Image { width, height, .. } | Preview::Pdf { width, height, .. } => {
+                    let img = preview::rgba(*width, *height, pixels)?;
+                    Ok((p, Some(img)))
+                }
+                _ => Ok((p, None)),
+            },
+            (Response::Err(e), _) => Err(e),
+            _ => Err("неожиданный ответ".into()),
+        }
+    }
+
     /// Разобрать приглашение (.ics) в песочнице.
     pub fn parse_calendar(&mut self, ics: &[u8]) -> Result<serde_json::Value, String> {
         match self.call(&Request::Calendar, ics)?.0 {
@@ -284,8 +363,12 @@ impl Client {
     }
 
     fn call(&mut self, req: &Request, bin: &[u8]) -> Result<(Response, Vec<u8>), String> {
+        self.call_for(req, bin, self.timeout)
+    }
+
+    fn call_for(&mut self, req: &Request, bin: &[u8], timeout: Duration) -> Result<(Response, Vec<u8>), String> {
         let json = serde_json::to_vec(req).map_err(|e| e.to_string())?;
-        let mut result = self.exchange(&json, bin);
+        let mut result = self.exchange(&json, bin, timeout);
         // Воркер не ответил ни разу в полной изоляции (например, AppContainer не может прочитать
         // свой exe в профиле пользователя) — одна попытка с ослабленной, уровень станет «частичная».
         if let Err(strict) = &result
@@ -295,7 +378,7 @@ impl Client {
         {
             self.running = None;
             self.relaxed = true;
-            result = self.exchange(&json, bin).map_err(|e| format!("{e}; в полной изоляции: {strict}"));
+            result = self.exchange(&json, bin, timeout).map_err(|e| format!("{e}; в полной изоляции: {strict}"));
         }
         if result.is_err() {
             // Таймаут, падение или ошибка песочницы: процесс больше не используем.
@@ -305,13 +388,13 @@ impl Client {
         Ok((serde_json::from_slice(&json).map_err(|e| e.to_string())?, bin))
     }
 
-    fn exchange(&mut self, json: &[u8], bin: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn exchange(&mut self, json: &[u8], bin: &[u8], timeout: Duration) -> Result<(Vec<u8>, Vec<u8>), String> {
         if self.running.is_none() {
             self.running = Some(self.start()?);
         }
         let Some(r) = self.running.as_mut() else { return Err("воркер не запущен".into()) };
         write_msg(&mut r.stdin, json, bin).map_err(|e| format!("воркер недоступен: {e}"))?;
-        match r.responses.recv_timeout(self.timeout) {
+        match r.responses.recv_timeout(timeout) {
             Ok(Ok(msg)) => {
                 r.answered = true;
                 Ok(msg)
@@ -320,7 +403,7 @@ impl Client {
                 Some(code) => format!("воркер завершился, код {}", exit_name(code)),
                 None => "воркер завершился".into(),
             }),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("воркер не ответил за {:?}", self.timeout)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("воркер не ответил за {timeout:?}")),
         }
     }
 
@@ -348,6 +431,7 @@ impl Client {
 /// Код завершения с расшифровкой частых NTSTATUS.
 fn exit_name(code: u32) -> String {
     let name = match code {
+        5 => " (превышено время разбора)",
         0xC000_0005 => " (нарушение доступа к памяти)",
         0xC000_0022 => " (нет доступа — вероятно, AppContainer не может прочитать файлы воркера)",
         0xC000_0135 => " (не найдена DLL)",
