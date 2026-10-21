@@ -1564,7 +1564,7 @@ pub(crate) fn status_glyph(s: Partstat, l: &Look) -> Div {
         Partstat::Accepted | Partstat::Delegated => {
             base.bg(l.success()).text_color(l.on_accent()).child(icon(g::CHECK, 10.))
         }
-        Partstat::Tentative => base.bg(l.pm(Pm::FbBusy)).text_color(l.on_accent()).text_size(px(12.)).font_weight(FontWeight::BOLD).child("?"),
+        Partstat::Tentative => base.bg(l.pm(Pm::FbBusyLine)).text_color(l.on_accent()).text_size(px(12.)).font_weight(FontWeight::BOLD).child("?"),
         Partstat::Declined => base.bg(l.text3()).text_color(l.on_accent()).child(icon(g::CANCEL, 9.)),
         Partstat::NeedsAction => base.border_2().border_dashed().border_color(l.text3()),
     }
