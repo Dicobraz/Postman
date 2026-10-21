@@ -931,6 +931,11 @@ async fn after_refresh(
         Refreshed::Network if link.is_down() && !timer => Next::Keep,
         Refreshed::Network => Next::Retry(Some(went_down(link, notify))),
         Refreshed::Done => {
+            // Почта сверена: задачи со ссылкой на письмо — по письмам (срок снят — выполнена, S6-03).
+            let store = tasks::JmapStore::new(&accounts.own.client);
+            if let Err(e) = tasks::handle(&store, cache, tasks::Request::Reconcile, &|r| notify(Event::Tasks(r))).await {
+                tracing::warn!("mail tasks reconcile failed: {e}");
+            }
             let Some(queued) = link.ok() else { return Next::Keep };
             notify(Event::Connection(Connection::Online));
             let ctx = Ctx { accounts, identities, send_as };

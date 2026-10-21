@@ -328,6 +328,9 @@ pub enum Request {
     Delete(String),
     /// Отправить правки, не дошедшие до сервера (связь вернулась).
     Flush,
+    /// Сверить задачи со ссылкой на письмо с письмами кэша (S6-03, `mailtask::reconcile`): срок у письма снят —
+    /// задача выполнена, письмо удалено — без ссылки → `Changed`, затем отправка. Без сервера, если менять нечего.
+    Reconcile,
 }
 
 impl Request {
@@ -337,14 +340,18 @@ impl Request {
     pub fn replayable(&self) -> Option<Request> {
         match self {
             Request::Save(_) | Request::Delete(_) | Request::Flush => Some(self.clone()),
-            Request::Load | Request::Refresh => None,
+            Request::Load | Request::Refresh | Request::Reconcile => None,
         }
     }
 }
 
 /// Правка у себя: задача в кэше с пометкой «не отправлена» (уйдёт по [`Request::Flush`]); ответ — как её покажет
 /// список.
+/// Задача-письмо (`mailtask::is_letter`) не записывается: её срок — слова письма (`mailtask::letter_patch`).
 pub fn save_local(cache: &Cache, task: Task) -> postman_cache::Result<Task> {
+    if crate::mailtask::is_letter(&task) {
+        return Ok(task);
+    }
     let old = cache.task(&task.uid)?;
     // База правки — версия с сервера: у уже правленной без связи — прежняя база.
     let base = old.as_ref().and_then(|o| if o.dirty { o.base.clone() } else { o.server_id.as_ref().map(|_| o.json.clone()) });
@@ -427,12 +434,14 @@ pub async fn handle(store: &impl TaskStore, cache: &Cache, request: Request, not
             if refresh(store, cache, notify).await? {
                 notify(Reply::Loaded(cached(cache)));
             }
+            reconcile(cache, notify).map_err(db)?;
             flush(store, cache, notify).await
         }
         Request::Refresh => {
             if refresh(store, cache, notify).await? {
                 notify(Reply::Loaded(cached(cache)));
             }
+            reconcile(cache, notify).map_err(db)?;
             flush(store, cache, notify).await
         }
         Request::Save(task) => {
@@ -445,7 +454,28 @@ pub async fn handle(store: &impl TaskStore, cache: &Cache, request: Request, not
             flush(store, cache, notify).await
         }
         Request::Flush => flush(store, cache, notify).await,
+        Request::Reconcile => {
+            if reconcile(cache, notify).map_err(db)? {
+                flush(store, cache, notify).await?;
+            }
+            Ok(())
+        }
     }
+}
+
+/// Задачи со ссылкой на письмо — по письмам кэша; `true` — что-то изменилось (записано у себя).
+fn reconcile(cache: &Cache, notify: &impl Fn(Reply)) -> postman_cache::Result<bool> {
+    let now = jiff::Timestamp::now().as_second();
+    let fixed = crate::mailtask::reconcile_cache(cache, now, &TimeZone::system())?;
+    if fixed.is_empty() {
+        return Ok(false);
+    }
+    let mut shown = Vec::new();
+    for t in fixed {
+        shown.push(save_local(cache, t)?);
+    }
+    notify(Reply::Changed(shown));
+    Ok(true)
 }
 
 /// Сверка с сервером: дельта (или полная загрузка, если дельты нет). Правки, ещё не отправленные, не затираются.
