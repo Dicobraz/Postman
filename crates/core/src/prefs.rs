@@ -544,11 +544,20 @@ pub struct Reading {
     pub pane: Pane,
     /// Предупреждать, если текст ссылки — один адрес, а ведёт она на другой.
     pub warn_link_mismatch: bool,
+    /// Приглашение в письме (S5-24): подробности, кнопки столбиком и лента дня — колонкой 300 px справа, а не
+    /// карточкой над текстом.
+    pub invite_side: bool,
 }
 
 impl Default for Reading {
     fn default() -> Self {
-        Self { conversation: Conversation::Feed, folders: BTreeMap::new(), pane: Pane::Right, warn_link_mismatch: true }
+        Self {
+            conversation: Conversation::Feed,
+            folders: BTreeMap::new(),
+            pane: Pane::Right,
+            warn_link_mismatch: true,
+            invite_side: false,
+        }
     }
 }
 
@@ -998,6 +1007,7 @@ mod tests {
         p.reading.pane = Pane::Bottom;
         p.reading.set_folder("news", Some(Conversation::Outlook));
         p.reading.warn_link_mismatch = false;
+        p.reading.invite_side = true;
         p.keys.insert("mail.reply".into(), vec!["ctrl-shift-y".into()]);
         p.keys.insert("tab.close".into(), vec![]);
         p.key_scheme = KeyScheme::Single;

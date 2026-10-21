@@ -3,8 +3,11 @@
 //!
 //! Состояние — `postman_core::invite::classify`: новое (кнопки «Принять / Под вопросом / Отклонить», клавиши
 //! A / T / N), отвечено («Вы приняли · Изменить ответ»), изменено организатором (что было — зачёркнуто), отменено,
-//! устарело (есть новее, встреча прошла). Справа — «Ваш день»: мои события вокруг встречи и пересечения
-//! (`invite::conflicts`). Ответ — путь S3-03 (`Command::RespondInvite`); мой день — `Command::Events` на сутки встречи.
+//! устарело (есть новее, встреча прошла). Раскладка — Г1 (S5-24): сверху детали, под ними лента дня на всю ширину
+//! (мои события серые, приглашение синее, пересечение фиолетовое — [`day_blocks`], `invite::conflicts`), ниже кнопки
+//! в строку. Опция «Настройки → Чтение → Боковая панель справа» — над письмом строка, подробности, кнопки столбиком и
+//! лента дня 8–19 — колонкой 300 px ([`render_side`]). Ответ — путь S3-03 (`Command::RespondInvite`); мой день —
+//! `Command::Events` на сутки встречи.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -14,15 +17,15 @@ use postman_calendar::{Event, Invitation, Partstat, Span, layout_day};
 use postman_core::invite::{Change, InviteState, Known, Outdated, Seen, classify, conflicts};
 use postman_core::sync::Event as SyncEvent;
 
-use crate::calendar::{accent_button, add_days, day_start, duration_text, g, hm, outline_button, zoned};
+use crate::calendar::{FIRST_HOUR, HOURS, accent_button, add_days, day_start, duration_text, g, hm, zoned};
 use crate::chrome::icon;
 use crate::reading::{ReadingEvent, ReadingPane, SyncRequest};
 use crate::roles::{Look, Pm};
 
-/// «Ваш день»: часов в окне и высота часа.
-const DAY_HOURS: i64 = 5;
-const DAY_HOUR_PX: f32 = 24.;
-const DAY_W: f32 = 196.;
+/// Лента дня: часов в окне карточки, высота часа, ширина боковой панели (макет Г1 и вариант с панелью справа).
+const CARD_HOURS: i64 = 6;
+const ROW_PX: f32 = 32.;
+const SIDE_W: f32 = 300.;
 
 pub(crate) enum State {
     /// Ждём байты вложения или ответ воркера.
@@ -187,9 +190,19 @@ pub(crate) fn attendees(inv: &Invitation) -> Vec<(String, Partstat)> {
 
 /// «Чт, 23 октября · 11:00–12:00».
 fn when_line(span: Span, all_day: bool, tz: &TimeZone) -> String {
+    let short = day_line(span, tz);
+    if all_day { format!("{short} · {}", tr!("cal-all-day")) } else { format!("{short} · {}", time_range(span, tz)) }
+}
+
+/// «Чт, 23 октября».
+fn day_line(span: Span, tz: &TimeZone) -> String {
     let Some(a) = zoned(span.start, tz) else { return String::new() };
-    let short = tr!("invite-day", wd = tr!("cal-day", d = a.weekday().to_monday_zero_offset()), day = a.day(), month = tr!("cal-month-of", m = a.month()));
-    if all_day { format!("{short} · {}", tr!("cal-all-day")) } else { format!("{short} · {}–{}", hm(span.start, tz), hm(span.end, tz)) }
+    tr!("invite-day", wd = tr!("cal-day", d = a.weekday().to_monday_zero_offset()), day = a.day(), month = tr!("cal-month-of", m = a.month()))
+}
+
+/// «11:00–12:00».
+fn time_range(span: Span, tz: &TimeZone) -> String {
+    format!("{}–{}", hm(span.start, tz), hm(span.end, tz))
 }
 
 /// Листок календаря: день недели и число.
@@ -197,7 +210,7 @@ fn date_tile(span: Span, dim: bool, small: bool, tz: &TimeZone, l: &Look) -> Div
     let z = zoned(span.start, tz);
     let wd = z.as_ref().map(|z| tr!("cal-day", d = z.weekday().to_monday_zero_offset()).to_uppercase()).unwrap_or_default();
     let day = z.as_ref().map(|z| z.day().to_string()).unwrap_or_default();
-    let (w, h, head, num) = if small { (30., 34., 11., 13.) } else { (36., 40., 13., 16.) };
+    let (w, h, head, wd_size) = if small { (30., 34., 11., 9.) } else { (40., 44., 16., 11.) };
     div()
         .w(px(w))
         .h(px(h))
@@ -215,7 +228,7 @@ fn date_tile(span: Span, dim: bool, small: bool, tz: &TimeZone, l: &Look) -> Div
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(9.))
+                .text_size(px(wd_size))
                 .font_weight(FontWeight::SEMIBOLD)
                 .bg(if dim { l.text3() } else { l.accent() })
                 .text_color(l.on_accent())
@@ -227,18 +240,237 @@ fn date_tile(span: Span, dim: bool, small: bool, tz: &TimeZone, l: &Look) -> Div
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(num))
+                .text_size(px(13.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(if dim { l.text3() } else { l.text() })
                 .child(day),
         )
 }
 
-/// Карточка; кнопки ответа зовут [`ReadingPane::answer_invite`].
+// --- лента дня (модель) ---
+
+/// Вид блока в ленте дня: свои события — серые, приглашение — синее, своё, пересекающееся с приглашением, —
+/// фиолетовое (DESIGN «Приглашение в письме»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lane {
+    Own,
+    Invite,
+    Conflict,
+}
+
+/// Блок ленты: время, подпись, вид и место по колонкам (`calendar::layout_day`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Block {
+    pub(crate) span: Span,
+    pub(crate) title: String,
+    pub(crate) lane: Lane,
+    pub(crate) column: usize,
+    pub(crate) span_columns: usize,
+    pub(crate) columns: usize,
+}
+
+/// Окно ленты, часы `[первый, первый + n)`: в карточке — шесть часов от «за два часа до встречи», в боковой панели —
+/// день 8–19; встреча целиком в окне.
+pub(crate) fn day_window(span: Span, tz: &TimeZone, side: bool) -> (i64, i64) {
+    let Some(z) = zoned(span.start, tz) else { return (FIRST_HOUR, HOURS) };
+    let start = i64::from(z.hour());
+    let len_h = (span.len() + 3599) / 3600;
+    let end = (start + len_h.max(1)).min(24);
+    let (first, last) = if side {
+        (FIRST_HOUR.min(start), (FIRST_HOUR + HOURS).max(end))
+    } else {
+        let first = (start - 2).clamp(0, 24 - CARD_HOURS);
+        (first, (first + CARD_HOURS).max(end))
+    };
+    (first, (last.min(24) - first).max(1))
+}
+
+/// Блоки ленты в окне `window`: мои события (без отклонённых, событий «весь день» и копии самой встречи) и встреча;
+/// мои, что пересекаются со встречей (`invite::conflicts`), — [`Lane::Conflict`].
+pub(crate) fn day_blocks(e: &Event, day: &[Event], me: Option<&str>, window: Span) -> Vec<Block> {
+    let hits = conflicts(e.span, &e.uid, day, me);
+    let mine: Vec<&Event> = day
+        .iter()
+        .filter(|x| x.uid != e.uid && !x.all_day && x.span.overlaps(&window))
+        .filter(|x| crate::calendar::event_look(x, me) != crate::calendar::Shown::Hidden)
+        .collect();
+    let mut spans: Vec<Span> = mine.iter().map(|x| x.span).collect();
+    spans.push(e.span);
+    layout_day(&spans)
+        .into_iter()
+        .map(|p| {
+            let (span, title, lane) = match mine.get(p.index) {
+                Some(x) => {
+                    let hit = hits.iter().any(|h| h.uid == x.uid && h.span == x.span);
+                    (x.span, x.title.clone(), if hit { Lane::Conflict } else { Lane::Own })
+                }
+                None => (e.span, e.title.clone(), Lane::Invite),
+            };
+            Block { span, title, lane, column: p.column, span_columns: p.span_columns, columns: p.columns }
+        })
+        .collect()
+}
+
+// --- отрисовка ---
+
+/// Боковая панель вместо карточки (S5-24, «Настройки → Чтение»): только у приглашения с ответом или кнопками;
+/// отмена и устаревшее — строкой над письмом, как без опции.
+pub(crate) fn side_wanted(card: &Card, me: Option<&str>, cx: &App) -> bool {
+    crate::prefs::get(cx).reading.invite_side
+        && matches!(
+            card.state_for(me),
+            Some(InviteState::New | InviteState::Updated(_) | InviteState::Answered(_) | InviteState::NotInvited)
+        )
+}
+
+/// Подписи и цвета карточки для одного приглашения: общее у карточки и боковой панели.
+struct Parts {
+    state: InviteState,
+    organizer: String,
+    accepted: usize,
+    total: usize,
+    names: String,
+    changes: Vec<Change>,
+    answered: Option<Partstat>,
+}
+
+impl Parts {
+    fn of(card: &Card, inv: &Invitation, me: Option<&str>) -> Self {
+        let e = &inv.event;
+        let state = card.state_for(me).unwrap_or(InviteState::Info);
+        let organizer = e.organizer().map(|o| if o.name.is_empty() { o.email.clone() } else { o.name.clone() }).unwrap_or_default();
+        let people = attendees(inv);
+        let accepted = people.iter().filter(|(_, s)| *s == Partstat::Accepted).count() + 1;
+        let names = people
+            .iter()
+            .map(|(n, s)| format!("{n} — {}", tr!("reading-partstat", s = postman_calendar::partstat_json(*s))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let changes = match &state {
+            InviteState::Updated(c) => c.clone(),
+            _ => Vec::new(),
+        };
+        let answered = match &state {
+            InviteState::Answered(s) if !card.changing => Some(*s),
+            _ => None,
+        };
+        Parts { total: people.len() + 1, state, organizer, accepted, names, changes, answered }
+    }
+}
+
+/// Ответы участников точками: организатор и участники, до 12.
+fn dots(inv: &Invitation, l: &Look) -> Div {
+    let people = attendees(inv);
+    div().flex().gap(px(4.)).children(std::iter::once(Partstat::Accepted).chain(people.iter().map(|(_, s)| *s)).take(12).map(|s| {
+        let d = div().size(px(6.)).rounded_full();
+        match s {
+            Partstat::Accepted => d.bg(l.success()),
+            Partstat::Tentative => d.bg(l.text3()),
+            Partstat::Declined => d.bg(l.error().opacity(0.6)),
+            _ => d.border_1().border_color(l.text3()),
+        }
+    }))
+}
+
+/// Метка состояния справа от темы: «Ждёт ответа», «Принято», «Под вопросом», «Отклонено».
+fn chip(answered: Option<Partstat>, l: &Look) -> Div {
+    let (key, bg, fg) = match answered {
+        None => ("invite-chip-waiting", l.pm(Pm::Tinted), l.pm(Pm::TintedFg)),
+        Some(Partstat::Accepted) => ("invite-chip-accepted", l.pm(Pm::OkBg), l.pm(Pm::OkFg)),
+        Some(Partstat::Declined) => ("invite-chip-declined", l.fill(), l.text2()),
+        Some(_) => ("invite-chip-tentative", l.fill(), l.text2()),
+    };
+    div().flex_none().px(px(8.)).rounded(px(4.)).text_size(px(11.)).line_height(px(16.)).bg(bg).text_color(fg).child(tr!(key))
+}
+
+/// Длительность меткой: «1 ч».
+fn length_chip(secs: i64, l: &Look) -> Div {
+    div().flex_none().px(px(8.)).rounded(px(4.)).text_size(px(11.)).line_height(px(16.)).bg(l.fill()).text_color(l.text2()).child(duration_text(secs))
+}
+
+/// Тонированная кнопка (DESIGN «Цвет»: второстепенные — синяя подложка без рамки).
+fn tinted_button(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
+    let hover = l.pm(Pm::TintedHover);
+    div()
+        .id(id)
+        .h(px(32.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .rounded(px(4.))
+        .bg(l.pm(Pm::Tinted))
+        .text_color(l.pm(Pm::TintedFg))
+        .cursor_pointer()
+        .hover(move |d| d.bg(hover))
+}
+
+/// Кнопки ответа: «Принять» — заливка, «Под вопросом» и «Отклонить» — тонированные, у всех — значок в круге; клавиша
+/// (A / T / N в схеме «Одиночные клавиши») — подсказкой «Название (клавиша)» и KeyTips, не в тексте кнопки (S5-18).
+fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPane>) -> Vec<Stateful<Div>> {
+    let sending = card.sending;
+    [
+        ("invite-accept", "cal-accept", "invite.accept", Partstat::Accepted),
+        ("invite-tentative", "cal-tentative-answer", "invite.tentative", Partstat::Tentative),
+        ("invite-decline", "cal-decline", "invite.decline", Partstat::Declined),
+    ]
+    .into_iter()
+    .map(|(id, key, command, s)| {
+        let primary = s == Partstat::Accepted;
+        let b = if primary { accent_button(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { tinted_button(id, l) };
+        let ink = if primary { l.on_accent() } else { l.pm(Pm::TintedFg) };
+        let b = b
+            .when(!side, |d| d.w(px(160.)).min_w(px(88.)).px(px(8.)))
+            .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
+            .child(status_mark(s, ink))
+            .child(tr!(key))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if sending.is_none() {
+                    this.answer_invite(s, cx);
+                }
+            }));
+        crate::keytips::command(b, command, Some(tr!(key)), l, cx)
+    })
+    .collect()
+}
+
+/// Значок ответа в круге (DESIGN «Цвет», кнопки статуса): ✓ принять, ? под вопросом, ✕ отклонить.
+fn status_mark(s: Partstat, ink: Hsla) -> Div {
+    let mark = div().size(px(16.)).flex_none().flex().items_center().justify_center().rounded_full().border_1().border_color(ink).text_color(ink);
+    match s {
+        Partstat::Accepted => mark.child(icon(g::CHECK, 9.)),
+        Partstat::Declined => mark.child(icon(g::CANCEL, 8.)),
+        _ => mark.text_size(px(11.)).line_height(px(14.)).font_weight(FontWeight::BOLD).child("?"),
+    }
+}
+
+/// «Вы приняли» и «Изменить ответ».
+fn done_text(s: Partstat, l: &Look) -> Div {
+    let (text, color) = match s {
+        Partstat::Accepted => (tr!("invite-done-accepted"), l.pm(Pm::OkFg)),
+        Partstat::Tentative => (tr!("invite-done-tentative"), l.text2()),
+        Partstat::Declined => (tr!("invite-done-declined"), l.text2()),
+        _ => (tr!("reading-invite-mine", status = tr!("reading-partstat", s = postman_calendar::partstat_json(s))), l.text2()),
+    };
+    div().flex().items_center().gap(px(8.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(icon(g::CHECK, 12.)).child(text)
+}
+
+fn change_answer(cx: &mut Context<ReadingPane>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    cx.listener(|this, _, _, cx| {
+        if let Some(card) = this.reading.as_mut().and_then(|r| r.invite.as_mut()) {
+            card.changing = true;
+        }
+        cx.notify();
+    })
+}
+
+/// Карточка; кнопки ответа зовут [`ReadingPane::answer_invite`]. В режиме боковой панели — строка над письмом, сама
+/// панель — [`render_side`].
 pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane>) -> AnyElement {
     let l = crate::roles::look(cx);
     let tz = crate::prefs::get(cx).calendar.zone();
-    let frame = || div().rounded(px(6.)).border_1().border_color(l.c(pets_ui::theme::Role::StrokeCard)).text_size(px(13.));
+    let frame = || div().rounded(px(8.)).border_1().border_color(l.c(pets_ui::theme::Role::StrokeCard)).text_size(px(13.));
     let inv = match &card.state {
         State::Loading { .. } => {
             return frame().p_3().text_color(l.text2()).child(tr!("reading-invite-loading")).into_any_element();
@@ -249,10 +481,11 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
         State::Ready(inv) => inv,
     };
     let e = &inv.event;
-    let state = card.state_for(me).unwrap_or(InviteState::Info);
-    // Компактная строка: отмена, устаревшее, прочие методы.
+    let p = Parts::of(card, inv, me);
+    // Компактная строка: отмена, устаревшее, прочие методы (макет «Приглашение · состояния»).
     let compact = |reason: String, glyph: char, dim: bool, strike: bool| {
         frame()
+            .rounded(px(6.))
             .h(px(44.))
             .flex()
             .items_center()
@@ -287,11 +520,8 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
             )
             .into_any_element()
     };
-    let organizer = e.organizer().map(|o| if o.name.is_empty() { o.email.clone() } else { o.name.clone() }).unwrap_or_default();
-    match &state {
-        InviteState::Cancelled => {
-            return compact(tr!("invite-cancelled", organizer = organizer), g::CANCEL, true, true);
-        }
+    match &p.state {
+        InviteState::Cancelled => return compact(tr!("invite-cancelled", organizer = p.organizer.clone()), g::CANCEL, true, true),
         InviteState::Outdated(why) => {
             let reason = match why {
                 Outdated::Newer => tr!("invite-outdated-newer"),
@@ -299,96 +529,270 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
             };
             return compact(reason, g::CLOCK, true, false);
         }
-        InviteState::Info => {
-            return compact(tr!("reading-invite-head", method = inv.method.as_str()), g::INFO, false, false);
-        }
+        InviteState::Info => return compact(tr!("reading-invite-head", method = inv.method.as_str()), g::INFO, false, false),
         _ => {}
     }
-    let changes = match &state {
-        InviteState::Updated(c) => c.clone(),
-        _ => Vec::new(),
-    };
-    let changed = |c: fn(&Change) -> bool| changes.iter().any(c);
+    // Боковая панель (опция «Чтение»): над письмом — тонированная строка.
+    if side_wanted(card, me, cx) {
+        let when = format!("{} {}", short_date_title(e.span, &tz), time_range(e.span, &tz));
+        let hint = tr!("invite-side-strip-hint");
+        return div()
+            .id("invite-strip")
+            .h(px(32.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .bg(l.pm(Pm::Tinted))
+            .text_color(l.pm(Pm::TintedFg))
+            .text_size(px(12.))
+            .child(icon(g::CALENDAR, 14.))
+            .child(div().min_w_0().truncate().child(tr!("invite-side-strip", when = when)))
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
+            .into_any_element();
+    }
+    let changed = |c: fn(&Change) -> bool| p.changes.iter().any(c);
     let highlight = |d: Div, on: bool| if on { d.px(px(4.)).rounded(px(3.)).bg(l.picked()) } else { d };
-    // Строка «когда» и «где»: изменённое подсвечено, прежнее — зачёркнуто рядом.
-    let was_time = changes.iter().find_map(|c| match c {
+    let was_time = p.changes.iter().find_map(|c| match c {
         Change::Time(s) => Some(*s),
         _ => None,
     });
-    let was_place = changes.iter().find_map(|c| match c {
+    let was_place = p.changes.iter().find_map(|c| match c {
         Change::Location(p) => Some(p.clone()),
         _ => None,
     });
-    let was_title = changes.iter().find_map(|c| match c {
+    let was_title = p.changes.iter().find_map(|c| match c {
         Change::Title(t) => Some(t.clone()),
         _ => None,
     });
     let old = |text: String| div().text_size(px(12.)).text_color(l.text3()).line_through().child(text);
+    // Детали: тема и метка, день и время, место, организатор, ответы.
+    let title_row = div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .min_w_0()
+        .child(
+            highlight(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD), was_title.is_some()).child(e.title.clone()),
+        )
+        .when_some(was_title.clone(), |d, t| d.child(old(t)))
+        .child(chip(p.answered, &l));
     let when_row = div()
         .flex()
         .flex_wrap()
         .items_center()
-        .gap_x(px(6.))
+        .gap_x(px(8.))
         .min_w_0()
+        .child(day_line(e.span, &tz))
+        .child(div().text_color(l.text3()).child("·"))
         .child(
             highlight(div().flex_none().font_weight(FontWeight::SEMIBOLD), changed(|c| matches!(c, Change::Time(_))))
-                .child(when_line(e.span, e.all_day, &tz)),
+                .child(if e.all_day { tr!("cal-all-day") } else { time_range(e.span, &tz) }),
         )
-        .child(div().flex_none().text_color(l.text2()).child(format!("· {}", duration_text(e.span.len()))))
+        .child(length_chip(e.span.len(), &l))
         .when_some(was_time, |d, s| d.child(old(when_line(s, e.all_day, &tz))));
-    let place_row = (!e.location.trim().is_empty() || was_place.is_some()).then(|| {
+    let place = (!e.location.trim().is_empty() || was_place.is_some()).then(|| {
         div()
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap_x(px(5.))
-            .text_size(px(12.))
-            .text_color(l.text2())
+            .gap(px(8.))
             .child(icon(g::PIN, 12.))
             .child(highlight(div().flex_none(), was_place.is_some()).child(e.location.clone()))
             .when_some(was_place.clone(), |d, p| d.when(!p.trim().is_empty(), |d| d.child(old(p))))
     });
-    let head = div()
+    let names = p.names.clone();
+    let people = div()
         .flex()
         .items_center()
-        .gap(px(10.))
-        .child(date_tile(e.span, false, false, &tz, &l))
-        .child(div().flex_1().min_w_0().flex().flex_col().line_height(px(19.)).child(when_row).children(place_row));
-    // Организатор и ответы участников точками.
-    let people = attendees(inv);
-    let accepted = people.iter().filter(|(_, s)| *s == Partstat::Accepted).count() + 1;
-    let total = people.len() + 1;
-    let dots = div().flex().gap(px(2.)).children(
-        std::iter::once(Partstat::Accepted).chain(people.iter().map(|(_, s)| *s)).take(12).map(|s| {
-            let d = div().size(px(6.)).rounded_full();
-            match s {
-                Partstat::Accepted => d.bg(l.success()),
-                Partstat::Tentative => d.bg(l.text3()),
-                Partstat::Declined => d.bg(l.error().opacity(0.6)),
-                _ => d.border_1().border_color(l.text3()),
-            }
-        }),
-    );
-    let names = people.iter().map(|(n, s)| format!("{n} — {}", tr!("reading-partstat", s = postman_calendar::partstat_json(*s)))).collect::<Vec<_>>().join(", ");
-    let org_row = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(6.))
-        .text_size(px(12.))
-        .text_color(l.text2())
-        .child(div().min_w_0().truncate().child(tr!("invite-organizer", name = organizer)))
-        .child(div().text_color(l.text3()).child("·"))
-        .child(dots)
+        .gap(px(8.))
+        .child(dots(inv, &l))
         .child(
             div()
                 .id("invite-people")
                 .flex_none()
                 .text_color(l.text())
-                .child(tr!("invite-accepted-of", n = accepted, total = total))
+                .child(tr!("invite-accepted-of", n = p.accepted, total = p.total))
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(names.clone()).build(window, cx)),
         );
-    let updated_banner = (!changes.is_empty()).then(|| {
+    let facts = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(px(20.))
+        .gap_y(px(4.))
+        .text_size(px(12.))
+        .text_color(l.text2())
+        .children(place)
+        .child(div().flex().items_center().gap(px(8.)).child(icon(g::PERSON, 12.)).child(tr!("invite-organizer", name = p.organizer.clone())))
+        .child(people);
+    let updated_banner = updated_banner(&p.changes, &l);
+    let details = div()
+        .flex()
+        .items_start()
+        .gap(px(16.))
+        .p(px(16.))
+        .child(date_tile(e.span, false, false, &tz, &l))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(8.)).children(updated_banner).child(title_row).child(when_row).child(facts));
+    // День: на всю ширину карточки.
+    let day = div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .px(px(16.))
+        .pt(px(12.))
+        .pb(px(16.))
+        .border_t_1()
+        .border_color(l.border())
+        .bg(l.pm(Pm::CalOff))
+        .child(day_head(card, inv, me, &tz, &l))
+        .child(timeline(card, inv, me, &tz, false, &l));
+    // Ответ: кнопки в строку или итог; справа — куда уйдёт ответ.
+    let actions = div()
+        .h(px(56.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .px(px(16.))
+        .border_t_1()
+        .border_color(l.border())
+        .min_w_0()
+        .map(|d| match (&p.state, p.answered) {
+            (InviteState::NotInvited, _) => d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-not-invited"))),
+            (_, Some(s)) => d.child(done_text(s, &l)).child(
+                tinted_button("invite-change", &l).ml(px(12.)).child(tr!("cal-change-answer")).child(icon(g::DOWN, 10.)).on_click(change_answer(cx)),
+            ),
+            _ => d.children(answer_buttons(card, false, &l, cx)).when(card.sending.is_some(), |d| {
+                d.child(div().ml(px(8.)).text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-sending")))
+            }),
+        })
+        .child(route(p.answered.is_some(), "invite-route", &l).ml_auto().pl(px(8.)));
+    frame().flex().flex_col().min_w_0().flex_none().child(details).child(day).child(actions).into_any_element()
+}
+
+/// Боковая панель приглашения: подробности, кнопки столбиком, лента дня 8–19 (макет «Приглашение» с панелью
+/// справа). `None` — опция выключена или приглашению панель не нужна.
+pub(crate) fn render_side(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane>) -> Option<AnyElement> {
+    if !side_wanted(card, me, cx) {
+        return None;
+    }
+    let l = crate::roles::look(cx);
+    let tz = crate::prefs::get(cx).calendar.zone();
+    let inv = card.invitation()?;
+    let e = &inv.event;
+    let p = Parts::of(card, inv, me);
+    let line = |glyph: char| div().h(px(20.)).flex().items_center().gap(px(8.)).min_w_0().child(icon(glyph, 14.).text_color(l.text2()));
+    let names = p.names.clone();
+    let details = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .children(updated_banner(&p.changes, &l))
+        .child(
+            div()
+                .h(px(20.))
+                .mb(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(l.text()).child(tr!("invite-side-title")))
+                .child(chip(p.answered, &l)),
+        )
+        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(l.text()).child(e.title.clone()))
+        .child(
+            line(g::CLOCK)
+                .text_size(px(13.))
+                .text_color(l.text())
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(when_line(e.span, e.all_day, &tz)))
+                .child(length_chip(e.span.len(), &l)),
+        )
+        .when(!e.location.trim().is_empty(), |d| d.child(line(g::PIN).child(div().truncate().child(e.location.clone()))))
+        .child(line(g::PERSON).child(div().truncate().child(tr!("invite-organizer", name = p.organizer.clone()))))
+        .child(
+            line(g::PEOPLE)
+                .child(
+                    div()
+                        .id("invite-side-people")
+                        .text_color(l.text())
+                        .child(tr!("invite-accepted-of", n = p.accepted, total = p.total))
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(names.clone()).build(window, cx)),
+                )
+                .child(dots(inv, &l)),
+        );
+    let answer = div().flex().flex_col().gap(px(8.)).map(|d| match (&p.state, p.answered) {
+        (InviteState::NotInvited, _) => d.child(div().text_color(l.text2()).child(tr!("reading-invite-not-invited"))),
+        (_, Some(s)) => d.child(
+            div()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(12.))
+                .rounded(px(4.))
+                .bg(l.fill())
+                .text_size(px(13.))
+                .child(div().flex_1().min_w_0().child(done_text(s, &l)))
+                .child(
+                    div()
+                        .id("invite-change")
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .text_size(px(12.))
+                        .text_color(l.accent_text())
+                        .cursor_pointer()
+                        .child(tr!("cal-change-answer"))
+                        .child(icon(g::DOWN, 10.))
+                        .on_click(change_answer(cx)),
+                ),
+        ),
+        _ => d.children(answer_buttons(card, true, &l, cx).into_iter().map(|b| b.text_size(px(13.)))).when(card.sending.is_some(), |d| {
+            d.child(div().text_color(l.text2()).child(tr!("reading-invite-sending")))
+        }),
+    });
+    let day = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .pt(px(12.))
+        .border_t_1()
+        .border_color(l.border())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(l.text()).child(tr!("invite-your-day-title")))
+                .child(div().text_color(l.text2()).child(day_line(e.span, &tz))),
+        )
+        .child(timeline(card, inv, me, &tz, true, &l))
+        .children(conflict_line(card, inv, me, &tz, &l));
+    Some(
+        div()
+            .id("invite-side")
+            .w(px(SIDE_W))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(16.))
+            .border_l_1()
+            .border_color(l.border())
+            .overflow_y_scroll()
+            .text_size(px(12.))
+            .text_color(l.text2())
+            .child(details)
+            .child(div().flex().flex_col().gap(px(8.)).child(answer).child(route(p.answered.is_some(), "invite-route", &l).text_size(px(11.))))
+            .child(day)
+            .into_any_element(),
+    )
+}
+
+/// «Организатор изменил: время, место».
+fn updated_banner(changes: &[Change], l: &Look) -> Option<Div> {
+    (!changes.is_empty()).then(|| {
         let what: Vec<String> = changes
             .iter()
             .map(|c| match c {
@@ -406,233 +810,160 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
             .text_color(l.accent_text())
             .child(icon(g::EDIT, 12.))
             .child(tr!("invite-updated", what = what.join(", ")))
-            .when_some(was_title, |d, t| d.child(old(t)))
-    });
-    // Ответ: кнопки или итог.
-    let answered = match &state {
-        InviteState::Answered(s) if !card.changing => Some(*s),
-        _ => None,
-    };
-    let actions: AnyElement = match (&state, answered) {
-        (InviteState::NotInvited, _) => {
-            div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-not-invited")).into_any_element()
-        }
-        (_, Some(s)) => {
-            let (text, color) = match s {
-                Partstat::Accepted => (tr!("invite-done-accepted"), l.success()),
-                Partstat::Tentative => (tr!("invite-done-tentative"), l.text()),
-                Partstat::Declined => (tr!("invite-done-declined"), l.text()),
-                _ => (tr!("reading-invite-mine", status = tr!("reading-partstat", s = postman_calendar::partstat_json(s))), l.text()),
-            };
-            div()
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .text_size(px(12.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color)
-                        .when(s == Partstat::Accepted, |d| d.child(icon(g::CHECK, 12.)))
-                        .child(text),
-                )
-                .child(
-                    div()
-                        .id("invite-change")
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .text_color(l.accent_text())
-                        .cursor_pointer()
-                        .child(tr!("cal-change-answer"))
-                        .child(icon(g::DOWN, 9.))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(card) = this.reading.as_mut().and_then(|r| r.invite.as_mut()) {
-                                card.changing = true;
-                            }
-                            cx.notify();
-                        })),
-                )
-                .into_any_element()
-        }
-        _ => {
-            let sending = card.sending;
-            // Клавиши (A / T / N в схеме «Одиночные клавиши») — подсказкой и KeyTips, не в тексте кнопок (S5-18).
-            let button = |id: &'static str, key: &str, command: &'static str, s: Partstat, primary: bool, cx: &mut Context<ReadingPane>| {
-                let b = if primary { accent_button(id, &l) } else { outline_button(id, &l) };
-                let b = b
-                    .h(px(28.))
-                    .px(px(9.))
-                    .text_size(px(12.))
-                    .when(primary, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
-                    .when(primary, |d| d.child(icon(g::CHECK, 11.)))
-                    .child(tr!(key))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if sending.is_none() {
-                            this.answer_invite(s, cx);
-                        }
-                    }));
-                crate::keytips::command(b, command, Some(tr!(key)), &l, cx)
-            };
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(6.))
-                .child(button("invite-accept", "cal-accept", "invite.accept", Partstat::Accepted, true, cx))
-                .child(button("invite-tentative", "cal-tentative-answer", "invite.tentative", Partstat::Tentative, false, cx))
-                .child(button("invite-decline", "cal-decline", "invite.decline", Partstat::Declined, false, cx))
-                .when(sending.is_some(), |d| {
-                    d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-sending")))
-                })
-                .into_any_element()
-        }
-    };
-    let route = div()
-        .text_size(px(11.))
-        .text_color(l.text3())
-        .truncate()
-        .child(tr!(if answered.is_some() { "invite-route-done" } else { "invite-route" }));
-    let left = div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .px(px(12.))
-        .py(px(10.))
-        .children(updated_banner)
-        .child(head)
-        .child(org_row)
-        .child(actions)
-        .child(route);
-    frame()
-        .flex()
-        .child(left)
-        .child(your_day(card, inv, me, &tz, &l))
-        .into_any_element()
+    })
 }
 
-/// «Ваш день»: мои события вокруг встречи, сама встреча и пересечения.
-fn your_day(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, l: &Look) -> Div {
+/// Куда уйдёт ответ: коротко, подробно — в подсказке.
+fn route(done: bool, id: &'static str, l: &Look) -> Stateful<Div> {
+    let long = tr!(if done { "invite-route-done" } else { "invite-route" });
+    div()
+        .id(id)
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.))
+        .text_color(l.text3())
+        .child(tr!(if done { "invite-route-short-done" } else { "invite-route-short" }))
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(long.clone()).build(window, cx))
+}
+
+/// Заголовок дня в карточке: «Ваш день», дата и пересечение справа.
+fn day_head(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, l: &Look) -> Div {
+    div()
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(12.))
+        .min_w_0()
+        .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(l.text()).child(tr!("invite-your-day-title")))
+        .child(div().flex_none().text_color(l.text2()).child(day_line(inv.event.span, tz)))
+        .child(div().flex_1())
+        .children(conflict_line(card, inv, me, tz, l))
+}
+
+/// «Пересекается: Планёрка 11:30–12:00» (время — само пересечение) или «Пересечений нет»; день не пришёл — «Календарь
+/// загружается…».
+fn conflict_line(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, l: &Look) -> Option<Div> {
     let e = &inv.event;
-    let panel = div()
-        .w(px(DAY_W))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .px(px(10.))
-        .py(px(8.))
-        .border_l_1()
-        .border_color(l.border())
-        .rounded_r(px(6.))
-        .bg(l.pm(Pm::CalOff));
-    let Some(z) = zoned(e.span.start, tz) else { return panel };
-    let first_hour = (i64::from(z.hour()) - 2).clamp(0, 24 - DAY_HOURS);
-    let day0 = day_start(z.date(), tz);
-    let window = Span::new(day0 + first_hour * 3600, day0 + (first_hour + DAY_HOURS) * 3600);
-    let title = div()
-        .flex()
-        .text_size(px(11.))
-        .text_color(l.text2())
-        .child(div().flex_1().child(tr!("invite-your-day", day = short_date(z.date()))))
-        .child(format!("{}–{}", first_hour, first_hour + DAY_HOURS));
+    let row = || div().flex().items_center().gap(px(8.)).min_w_0().text_size(px(12.)).text_color(l.text2());
     let Some(day) = &card.day else {
-        return panel.child(title).child(div().text_size(px(11.)).text_color(l.text3()).child(tr!("invite-day-loading")));
+        return Some(row().child(tr!("invite-day-loading")));
     };
     let hits = conflicts(e.span, &e.uid, day, me);
-    // В окне: мои события (без отклонённых и самой встречи) и встреча.
-    let mine: Vec<&Event> = day
-        .iter()
-        .filter(|x| x.uid != e.uid && !x.all_day && x.span.overlaps(&window))
-        .filter(|x| crate::calendar::event_look(x, me) != crate::calendar::Shown::Hidden)
-        .collect();
-    let mut spans: Vec<Span> = mine.iter().map(|x| x.span).collect();
-    spans.push(e.span);
-    let placed = layout_day(&spans);
-    let y = |t: i64| ((t - window.start) as f32 / 3600. * DAY_HOUR_PX).clamp(0., DAY_HOURS as f32 * DAY_HOUR_PX);
-    let accepted = matches!(card.state_for(me), Some(InviteState::Answered(Partstat::Accepted)));
-    let blocks = placed.into_iter().map(|p| {
-        let (span, label, kind) = match mine.get(p.index) {
-            Some(x) => (x.span, x.title.clone(), if hits.iter().any(|h| h.uid == x.uid && h.span == x.span) { 2 } else { 0 }),
-            None => (e.span, e.title.clone(), 1),
-        };
-        let (top, bottom) = (y(span.start), y(span.end));
-        div()
-            .absolute()
-            .top(px(top + 1.))
-            .h(px((bottom - top - 1.).max(8.)))
-            .left(relative(p.column as f32 / p.columns as f32))
-            .w(relative(p.span_columns as f32 / p.columns as f32))
-            .px(px(1.))
-            .child(
-                div()
-                    .size_full()
-                    .px(px(4.))
-                    .rounded(px(3.))
-                    .text_size(px(10.))
-                    .line_height(px(13.))
-                    .overflow_hidden()
-                    .truncate()
-                    .map(|d| match kind {
-                        1 if accepted => d.bg(l.accent()).text_color(l.on_accent()).font_weight(FontWeight::SEMIBOLD),
-                        1 => d.bg(l.panel()).border_1().border_dashed().border_color(l.accent()).text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD),
-                        2 => d.bg(l.pm(Pm::ConflictBg)).border_l_2().border_color(l.pm(Pm::ConflictFg)).text_color(l.pm(Pm::ConflictFg)),
-                        _ => d.bg(l.fill()).border_l_2().border_color(l.text3()).text_color(l.text2()),
-                    })
-                    .child(label),
-            )
-    });
-    let lines = (0..=DAY_HOURS).map(|h| {
+    Some(match hits.first() {
+        Some(h) => {
+            let both = Span::new(h.span.start.max(e.span.start), h.span.end.min(e.span.end));
+            let time = time_range(both, tz);
+            let text = if hits.len() > 1 {
+                tr!("invite-conflict-many", title = h.title.clone(), time = time, n = hits.len() - 1)
+            } else {
+                tr!("invite-conflict", title = h.title.clone(), time = time)
+            };
+            row().child(div().size(px(8.)).flex_none().rounded_full().bg(l.pm(Pm::DayOverlap))).child(div().truncate().child(text))
+        }
+        None => row().child(icon(g::CHECK, 11.)).child(tr!("invite-no-conflict")),
+    })
+}
+
+/// Вертикальная лента дня: часы слева, мои события серые, приглашение синее, пересечение фиолетовое, линия
+/// «сейчас».
+fn timeline(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, side: bool, l: &Look) -> Div {
+    let e = &inv.event;
+    let (first, hours) = day_window(e.span, tz, side);
+    let Some(z) = zoned(e.span.start, tz) else { return div() };
+    let day0 = day_start(z.date(), tz);
+    let window = Span::new(day0 + first * 3600, day0 + (first + hours) * 3600);
+    let (label_w, area) = if side { (40., 44.) } else { (44., 48.) };
+    let height = hours as f32 * ROW_PX;
+    let y = |t: i64| ((t - window.start) as f32 / 3600. * ROW_PX).clamp(0., height);
+    let lines = (0..=hours).map(|h| div().absolute().left(px(label_w)).right_0().top(px(h as f32 * ROW_PX)).h(px(1.)).bg(l.border()));
+    let labels = (0..hours).map(|h| {
         div()
             .absolute()
             .left_0()
-            .right_0()
-            .top(px(h as f32 * DAY_HOUR_PX - 7.))
+            .w(px(36.))
+            .top(px(h as f32 * ROW_PX - 7.))
             .h(px(14.))
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .child(div().w(px(18.)).text_right().text_size(px(10.)).text_color(l.text3()).child((first_hour + h).to_string()))
-            .child(div().flex_1().h(px(1.)).bg(l.border()))
-    });
-    let timeline = div()
-        .relative()
-        .h(px(DAY_HOURS as f32 * DAY_HOUR_PX))
-        .mt(px(4.))
-        .children(lines)
-        .child(div().absolute().left(px(24.)).right_0().top_0().bottom_0().children(blocks));
-    let conflict = hits.first().map(|h| {
-        let text = if hits.len() > 1 {
-            tr!("invite-conflict-many", title = h.title.clone(), time = hm(h.span.start, tz), n = hits.len() - 1)
-        } else {
-            tr!("invite-conflict", title = h.title.clone(), time = hm(h.span.start, tz))
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .mt(px(2.))
             .text_size(px(11.))
-            .text_color(l.pm(Pm::ConflictFg))
-            .child(icon(g::OVERLAP, 12.))
-            .child(div().truncate().child(text))
+            .line_height(px(14.))
+            .text_color(l.text2())
+            .child(format!("{:02}:00", first + h))
     });
-    let free = hits.is_empty().then(|| {
-        div().mt(px(2.)).flex().items_center().gap(px(5.)).text_size(px(11.)).text_color(l.text2()).child(icon(g::CHECK, 11.)).child(tr!("invite-no-conflict"))
+    let accepted = matches!(card.state_for(me), Some(InviteState::Answered(Partstat::Accepted)));
+    let declined = matches!(card.state_for(me), Some(InviteState::Answered(Partstat::Declined)));
+    let blocks = card.day.as_ref().map(|day| day_blocks(e, day, me, window)).unwrap_or_default().into_iter().map(|b| {
+        let (top, bottom) = (y(b.span.start), y(b.span.end));
+        let invite = l.pm(Pm::DayAccepted);
+        let gap = if b.columns > 1 { 2. } else { 0. };
+        div()
+            .absolute()
+            .top(px(top + 1.))
+            .h(px((bottom - top - 2.).max(10.)))
+            .left(relative(b.column as f32 / b.columns as f32))
+            .w(relative(b.span_columns as f32 / b.columns as f32))
+            .px(px(gap))
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    // Узкая колонка панели: время — второй строкой, если блок не короче двух строк.
+                    .when(side && bottom - top >= 28., |d| d.flex_col())
+                    .items_start()
+                    .gap(px(if side { 2. } else { 8. }))
+                    .px(px(if side { 6. } else { 8. }))
+                    .py(px(if bottom - top < 24. { 1. } else if side { 2. } else { 4. }))
+                    .rounded(px(4.))
+                    .overflow_hidden()
+                    .text_size(px(if side { 11. } else { 12. }))
+                    .line_height(px(14.))
+                    .map(|d| match b.lane {
+                        Lane::Invite if accepted => d.bg(invite).text_color(l.pm(Pm::DayAcceptedOn)),
+                        Lane::Invite if declined => d.border_1().border_dashed().border_color(invite).text_color(l.text2()),
+                        Lane::Invite => d.bg(invite.opacity(0.35)).border_1().border_dashed().border_color(invite).text_color(l.pm(Pm::TintedFg)),
+                        Lane::Conflict => d.bg(l.pm(Pm::DayOverlap)).text_color(l.pm(Pm::DayOverlapOn)),
+                        Lane::Own => d.bg(l.pm(Pm::DayOwn)).text_color(l.pm(Pm::DayOwnFg)),
+                    })
+                    .child(div().min_w_0().max_w_full().truncate().font_weight(FontWeight::SEMIBOLD).child(b.title.clone()))
+                    .child(div().flex_none().opacity(0.8).text_size(px(11.)).child(time_range(b.span, tz))),
+            )
     });
-    panel.child(title).child(timeline).children(conflict).children(free)
+    // «Сейчас» — только в сутки встречи, внутри окна.
+    let now = card.now();
+    let now_line = (now >= window.start && now < window.end).then(|| {
+        let top = y(now);
+        let tip = tr!("invite-now", time = hm(now, tz));
+        div()
+            .id("invite-now")
+            .absolute()
+            .left(px(label_w - 2.))
+            .right_0()
+            .top(px(top - 2.))
+            .h(px(5.))
+            .flex()
+            .items_center()
+            .child(div().size(px(5.)).flex_none().rounded_full().bg(l.text()))
+            .child(div().flex_1().h(px(1.)).bg(l.text()))
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+    });
+    div()
+        .relative()
+        .flex_none()
+        .h(px(height))
+        .my(px(if side { 8. } else { 4. }))
+        .children(lines)
+        .children(labels)
+        .child(div().absolute().left(px(area)).right_0().top_0().bottom_0().children(blocks))
+        .children(now_line)
 }
 
-/// «чт 23 окт».
-fn short_date(d: jiff::civil::Date) -> String {
-    format!("{} {} {}", tr!("reading-weekday", d = d.weekday().to_monday_zero_offset()), d.day(), tr!("invite-month-short", m = d.month()))
+/// «Чт 23 окт».
+fn short_date_title(span: Span, tz: &TimeZone) -> String {
+    let Some(z) = zoned(span.start, tz) else { return String::new() };
+    let d = z.date();
+    let wd = tr!("reading-weekday", d = d.weekday().to_monday_zero_offset());
+    let mut chars = wd.chars();
+    let wd = chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
+    format!("{wd} {} {}", d.day(), tr!("invite-month-short", m = d.month()))
 }
 
 // --- область чтения: мой день и клавиши ---
@@ -715,7 +1046,7 @@ fn demo_day(date: jiff::civil::Date, tz: &TimeZone) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
-    use super::{Card, State, attendees, decode, encode, state_key};
+    use super::{Card, Lane, State, attendees, day_blocks, day_window, decode, encode, state_key};
     use jiff::tz::TimeZone;
     use postman_calendar::{Invitation, Partstat};
     use postman_core::invite::{InviteState, Seen};
@@ -783,6 +1114,60 @@ mod tests {
             a,
             [("maria@partner.example".to_string(), Partstat::Accepted), ("Я".to_string(), Partstat::NeedsAction)]
         );
+    }
+
+    fn event(uid: &str, title: &str, start: &str, end: &str, extra: serde_json::Value) -> postman_calendar::Event {
+        let mut v = json!({ "uid": uid, "title": title, "utcStart": start, "utcEnd": end });
+        if let (Some(o), Some(x)) = (v.as_object_mut(), extra.as_object()) {
+            o.extend(x.clone());
+        }
+        postman_calendar::Event::from_jmap(&v, &TimeZone::UTC).unwrap()
+    }
+
+    /// Лента дня (S5-24): свои события серые, приглашение синее, своё ∩ приглашение — фиолетовое; копия встречи,
+    /// отклонённое, «весь день» и события вне окна — не в ленте; пересекающиеся — рядом по колонкам.
+    #[test]
+    fn day_lane_marks_overlap_with_the_invite() {
+        let me = Some("me@corp.example");
+        let invite = event("u-1@partner.example", "Созвон", "2026-10-21T11:00:00Z", "2026-10-21T12:00:00Z", json!({}));
+        let day = vec![
+            event("own-1", "Стендап", "2026-10-21T09:00:00Z", "2026-10-21T09:45:00Z", json!({})),
+            event("own-2", "Планёрка", "2026-10-21T11:30:00Z", "2026-10-21T13:00:00Z", json!({})),
+            event("own-3", "Обед", "2026-10-21T13:00:00Z", "2026-10-21T14:00:00Z", json!({})),
+            // Копия самой встречи в моём календаре — не дублируется.
+            event("u-1@partner.example", "Созвон", "2026-10-21T11:00:00Z", "2026-10-21T12:00:00Z", json!({})),
+            // Отклонённое мной — скрыто.
+            event("own-4", "Отклонено", "2026-10-21T11:00:00Z", "2026-10-21T11:30:00Z", json!({ "participants": {
+                "o": { "calendarAddress": "mailto:boss@corp.example", "roles": { "owner": true } },
+                "m": { "calendarAddress": "mailto:me@corp.example", "roles": { "attendee": true }, "participationStatus": "declined" }
+            }})),
+            event("own-5", "Весь день", "2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z", json!({ "showWithoutTime": true })),
+            // Вне окна 9–15.
+            event("own-6", "Вечер", "2026-10-21T18:00:00Z", "2026-10-21T19:00:00Z", json!({})),
+        ];
+        let (first, hours) = day_window(invite.span, &TimeZone::UTC, false);
+        assert_eq!((first, hours), (9, 6), "шесть часов от «за два часа до встречи»");
+        let day0 = "2026-10-21T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second();
+        let window = postman_calendar::Span::new(day0 + first * 3600, day0 + (first + hours) * 3600);
+        let blocks = day_blocks(&invite, &day, me, window);
+        let lane = |t: &str| blocks.iter().find(|b| b.title == t).map(|b| b.lane);
+        assert_eq!(lane("Созвон"), Some(Lane::Invite));
+        assert_eq!(lane("Стендап"), Some(Lane::Own));
+        assert_eq!(lane("Планёрка"), Some(Lane::Conflict), "свои ∩ приглашение — фиолетовое");
+        assert_eq!(lane("Обед"), Some(Lane::Own), "встык — не пересечение");
+        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        assert_eq!(blocks.iter().filter(|b| b.lane == Lane::Invite).count(), 1);
+        // Встреча и планёрка — рядом, по половине.
+        let (a, b) = (blocks.iter().find(|b| b.title == "Созвон").unwrap(), blocks.iter().find(|b| b.title == "Планёрка").unwrap());
+        assert_eq!((a.columns, b.columns), (2, 2));
+        assert_ne!(a.column, b.column);
+        // Боковая панель — день 8–19; поздняя встреча — окно сдвигается, она целиком внутри.
+        assert_eq!(day_window(invite.span, &TimeZone::UTC, true), (8, 11));
+        let late = postman_calendar::Span::new(day0 + 22 * 3600, day0 + 23 * 3600 + 1800);
+        let (f, h) = day_window(late, &TimeZone::UTC, false);
+        assert!(f <= 22 && f + h >= 24 && f + h <= 24, "{f}+{h}");
+        let (f, h) = day_window(late, &TimeZone::UTC, true);
+        assert_eq!((f, f + h), (8, 24));
     }
 
     #[test]

@@ -777,6 +777,16 @@ impl SettingsView {
             })
             .child(group(tr!("settings-pane-group"), l))
             .child(row(tr!("settings-pane"), Some(tr!("settings-pane-hint")), seg_group(panes, l), l))
+            // Приглашение (S5-24): карточка над текстом письма или колонка справа.
+            .child(row(
+                tr!("settings-invite-side"),
+                Some(tr!("settings-invite-side-hint")),
+                toggle("settings-invite-side-toggle", p.invite_side, l).on_click(cx.listener(|_, _, _, cx| {
+                    crate::prefs::update(cx, |p| p.reading.invite_side = !p.reading.invite_side);
+                    cx.notify();
+                })),
+                l,
+            ))
             .child(group(tr!("settings-external-group"), l))
             .child(row(tr!("settings-images"), Some(tr!("settings-images-hint")), images, l))
             .child(row(

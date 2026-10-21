@@ -129,7 +129,8 @@ pub struct Alert {
     pub email: bool,
 }
 
-/// Письмо, из которого задача: `Message-ID` (виден другим клиентам ссылкой `mid:`) и id письма в ящике.
+/// Письмо, из которого задача: `Message-ID` (виден другим клиентам ссылкой `mid:`; пустой — ещё не известен) и
+/// id письма в ящике.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MailLink {
     pub message_id: String,
@@ -289,10 +290,12 @@ impl Task {
             .filter_map(|l| l["href"].as_str())
             .find_map(|h| h.strip_prefix("mid:").map(|m| m.trim_start_matches('<').trim_end_matches('>').to_owned()));
         let message_id = ical.get(X_MESSAGE_ID).map(|m| m.trim_start_matches('<').trim_end_matches('>').to_owned()).or(mail_link);
-        let mail = message_id.filter(|m| !m.is_empty()).map(|message_id| MailLink {
-            message_id,
-            email_id: ical.get(X_EMAIL_ID).filter(|x| !x.is_empty()).cloned(),
-        });
+        let email_id = ical.get(X_EMAIL_ID).filter(|x| !x.is_empty()).cloned();
+        let message_id = message_id.filter(|m| !m.is_empty());
+        // Ссылка — по Message-ID (видна другим клиентам) и/или по id письма в ящике (Message-ID ещё не известен:
+        // тело письма не загружено).
+        let mail = (message_id.is_some() || email_id.is_some())
+            .then(|| MailLink { message_id: message_id.unwrap_or_default(), email_id });
         let parent = v["relatedTo"]
             .as_object()
             .into_iter()
@@ -410,7 +413,9 @@ impl Task {
             push(X_ORDER, json!(o.to_string()));
         }
         if let Some(m) = &self.mail {
-            push(X_MESSAGE_ID, json!(format!("<{}>", m.message_id)));
+            if !m.message_id.is_empty() {
+                push(X_MESSAGE_ID, json!(format!("<{}>", m.message_id)));
+            }
             if let Some(e) = &m.email_id {
                 push(X_EMAIL_ID, json!(e));
             }
@@ -453,7 +458,7 @@ impl Task {
         );
         v.insert(
             "links".into(),
-            self.mail.as_ref().map_or(Value::Null, |m| {
+            self.mail.as_ref().filter(|m| !m.message_id.is_empty()).map_or(Value::Null, |m| {
                 json!({ "mail": { "@type": "Link", "href": format!("mid:{}", m.message_id), "rel": "describedby" } })
             }),
         );
@@ -555,8 +560,10 @@ impl Task {
             l.push(format!("X-POSTMAN-ORDER:{o}"));
         }
         if let Some(m) = &self.mail {
-            l.push(format!("X-POSTMAN-MESSAGE-ID:<{}>", text(&m.message_id)));
-            l.push(format!("URL:mid:{}", m.message_id));
+            if !m.message_id.is_empty() {
+                l.push(format!("X-POSTMAN-MESSAGE-ID:<{}>", text(&m.message_id)));
+                l.push(format!("URL:mid:{}", m.message_id));
+            }
             if let Some(e) = &m.email_id {
                 l.push(format!("X-POSTMAN-EMAIL-ID:{}", text(e)));
             }
