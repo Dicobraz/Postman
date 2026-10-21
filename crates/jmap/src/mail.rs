@@ -255,6 +255,59 @@ pub fn keywords_patch(add: &[String], remove: &[String]) -> Value {
     Value::Object(patch)
 }
 
+/// Письмо с признаком рассылки ([`Client::list_letters`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListLetter {
+    pub id: String,
+    /// Адрес отправителя.
+    pub from: String,
+    pub received_at: i64,
+    pub seen: bool,
+    /// Есть `List-Id` или `List-Unsubscribe`.
+    pub list: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawListLetter {
+    id: String,
+    from: Option<Vec<EmailAddress>>,
+    #[serde(default)]
+    received_at: String,
+    #[serde(default)]
+    keywords: HashMap<String, bool>,
+    #[serde(rename = "header:List-Id", default)]
+    list_id: Option<String>,
+    #[serde(rename = "header:List-Unsubscribe", default)]
+    unsubscribe: Option<String>,
+}
+
+/// Патч одного письма для `Email/set update` (S5-04): папки и ключевые слова — путями, остальное не трогается.
+/// `true` — поставить, `false` — снять (`null`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EmailPatch(serde_json::Map<String, Value>);
+
+impl EmailPatch {
+    pub fn mailbox(mut self, id: &str, on: bool) -> Self {
+        let path = format!("mailboxIds/{}", id.replace('~', "~0").replace('/', "~1"));
+        self.0.insert(path, if on { Value::Bool(true) } else { Value::Null });
+        self
+    }
+
+    pub fn keyword(mut self, keyword: &str, on: bool) -> Self {
+        self.0.insert(keyword_path(keyword), if on { Value::Bool(true) } else { Value::Null });
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn to_json(&self) -> Value {
+        Value::Object(self.0.clone())
+    }
+}
+
 /// Условие `Email/query` (RFC 8621 §4.4.1) — для фильтров панели и «Все папки».
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
@@ -274,6 +327,8 @@ pub enum Filter {
     Or(Vec<Filter>),
     /// Ни одно из условий (`operator: NOT`): «внешние» — отправитель не из своих доменов.
     Not(Vec<Filter>),
+    /// Получено раньше (`before`, UTCDate `2026-10-21T00:00:00Z`).
+    Before(String),
 }
 
 impl Filter {
@@ -293,6 +348,7 @@ impl Filter {
             Filter::And(list) => op("AND", list),
             Filter::Or(list) => op("OR", list),
             Filter::Not(list) => op("NOT", list),
+            Filter::Before(at) => json!({ "before": at }),
         }
     }
 }
@@ -454,6 +510,95 @@ impl Client {
         Ok(failed)
     }
 
+    /// Свой патч каждому письму (`ids` и патчи — парами), один `Email/set` на [`SET_CHUNK`] писем: жизненный цикл
+    /// (S5-04) переносит, помечает и снимает сроки пачкой. Ответ — письма, которые сервер не изменил.
+    pub async fn patch_emails(&self, patches: &[(String, EmailPatch)]) -> Result<Vec<(String, Error)>> {
+        let acc = self.mail_account()?;
+        let mut failed = Vec::new();
+        for chunk in patches.chunks(SET_CHUNK) {
+            let update: serde_json::Map<String, Value> =
+                chunk.iter().filter(|(_, p)| !p.is_empty()).map(|(id, p)| (id.clone(), p.to_json())).collect();
+            if update.is_empty() {
+                continue;
+            }
+            let mut r = self.call(USING, &[inv("Email/set", json!({ "accountId": acc, "update": update }), "s")]).await?;
+            let v: Value = take(&mut r, "s")?;
+            for (id, _) in chunk {
+                if let Err(e) = set_error(&v, "notUpdated", id, "Email/set") {
+                    failed.push((id.clone(), e));
+                }
+            }
+        }
+        Ok(failed)
+    }
+
+    /// Письма по фильтру с признаком рассылки (S5-04), новые сверху, до `limit`: есть ли `List-Id` или
+    /// `List-Unsubscribe`. Заголовки — в сыром виде: условие `header` в `Email/query` Stalwart не выполняет (ни одного
+    /// совпадения), а `header:List-Id:asText` отдаёт `null` (`docs/STALWART-GAPS.md`).
+    pub async fn list_letters(&self, filter: &Filter, limit: u64) -> Result<Vec<ListLetter>> {
+        let acc = self.mail_account()?;
+        let query = json!({
+            "accountId": acc,
+            "filter": filter.to_json(),
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "limit": limit,
+        });
+        let get = json!({
+            "accountId": acc,
+            "#ids": { "resultOf": "q", "name": "Email/query", "path": "/ids" },
+            "properties": ["id", "from", "receivedAt", "keywords", "header:List-Id", "header:List-Unsubscribe"],
+        });
+        let mut r = self.call(USING, &[inv("Email/query", query, "q"), inv("Email/get", get, "g")]).await?;
+        let g: GetResponse<RawListLetter> = take(&mut r, "g")?;
+        Ok(g.list
+            .into_iter()
+            .map(|e| ListLetter {
+                from: e.from.as_ref().and_then(|f| f.first()).and_then(|a| a.email.clone()).unwrap_or_default(),
+                received_at: utc_to_unix(&e.received_at).unwrap_or(0),
+                seen: e.keywords.get("$seen").copied().unwrap_or(false),
+                list: e.list_id.as_deref().is_some_and(|v| !v.trim().is_empty())
+                    || e.unsubscribe.as_deref().is_some_and(|v| !v.trim().is_empty()),
+                id: e.id,
+            })
+            .collect())
+    }
+
+    /// Создать папку верхнего уровня с ролью (`archive` — «Архив» для жизненного цикла, S5-04) → id.
+    pub async fn create_mailbox(&self, name: &str, role: Option<&str>) -> Result<String> {
+        let acc = self.mail_account()?;
+        let mut mb = json!({ "name": name, "parentId": null });
+        if let Some(r) = role {
+            mb["role"] = json!(r);
+        }
+        let args = json!({ "accountId": acc, "create": { "m": mb } });
+        let mut r = self.call(USING, &[inv("Mailbox/set", args, "s")]).await?;
+        let v: Value = take(&mut r, "s")?;
+        set_error(&v, "notCreated", "m", "Mailbox/set")?;
+        v["created"]["m"]["id"].as_str().map(str::to_owned).ok_or_else(|| Error::Protocol("Mailbox/set: no id".into()))
+    }
+
+    /// Удалить пустую папку.
+    pub async fn destroy_mailbox(&self, id: &str) -> Result<()> {
+        let acc = self.mail_account()?;
+        let mut r = self.call(USING, &[inv("Mailbox/set", json!({ "accountId": acc, "destroy": [id] }), "s")]).await?;
+        let v: Value = take(&mut r, "s")?;
+        set_error(&v, "notDestroyed", id, "Mailbox/set")
+    }
+
+    /// Только id писем по фильтру (без кратких записей), новые сверху, до `limit`: планировщик жизненного цикла.
+    pub async fn query_ids(&self, filter: &Filter, limit: u64) -> Result<Vec<String>> {
+        let acc = self.mail_account()?;
+        let args = json!({
+            "accountId": acc,
+            "filter": filter.to_json(),
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "limit": limit,
+        });
+        let mut r = self.call(USING, &[inv("Email/query", args, "q")]).await?;
+        let q: QueryResponse = take(&mut r, "q")?;
+        Ok(q.ids)
+    }
+
     /// Письма по фильтру, новые сверху (фильтры панели, «Все папки» — без `inMailbox`).
     pub async fn filtered(&self, filter: &Filter, limit: u64) -> Result<EmailPage> {
         self.query_page(filter.to_json(), Some(0), None, limit).await
@@ -601,6 +746,18 @@ mod tests {
         assert_eq!(Filter::HasAttachment(true).to_json(), json!({ "hasAttachment": true }));
         assert_eq!(Filter::To("me@x".into()).to_json(), json!({ "to": "me@x" }));
         assert_eq!(Filter::Body("@anna".into()).to_json(), json!({ "body": "@anna" }));
+        assert_eq!(Filter::Before("2026-10-21T00:00:00Z".into()).to_json(), json!({ "before": "2026-10-21T00:00:00Z" }));
+    }
+
+    /// Патч письма (S5-04): папки и слова путями, снять — `null`.
+    #[test]
+    fn email_patch_paths() {
+        let p = EmailPatch::default().mailbox("in", false).mailbox("arch", true).keyword("$seen", false).keyword("pm.remind", true);
+        assert_eq!(
+            p.to_json(),
+            json!({ "mailboxIds/in": null, "mailboxIds/arch": true, "keywords/$seen": null, "keywords/pm.remind": true })
+        );
+        assert!(EmailPatch::default().is_empty());
     }
 
     #[test]

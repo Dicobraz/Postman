@@ -640,10 +640,27 @@ impl SettingsView {
                 })));
             row(title, Some(hint), control, l)
         };
+        // Куда уходит письмо в срок «Исчезнет» (S5-04): свой срок и коды подтверждения.
+        use postman_core::prefs::ExpireTo;
+        let target = |i: usize, to: ExpireTo, label: String| {
+            seg(("settings-expire-to", i), label, lc.expire_to == to, true, l).on_click(cx.listener(move |_, _, _, cx| {
+                crate::prefs::update(cx, |p| p.lifecycle.expire_to = to);
+                cx.notify();
+            }))
+        };
+        let expire_to = seg_group(
+            [
+                target(0, ExpireTo::Archive, tr!("lifecycle-settings-to-archive")),
+                target(1, ExpireTo::Trash, tr!("lifecycle-settings-to-trash")),
+            ],
+            l,
+        );
         let rules = vec![
             rule(0, tr!("settings-life-wait"), tr!("settings-life-wait-hint"), lc.wait_reply, |l| l.wait_reply = !l.wait_reply, Some(wait)),
+            row(tr!("lifecycle-settings-remind"), Some(tr!("lifecycle-settings-remind-hint")), div(), l),
             rule(1, tr!("settings-life-news"), tr!("settings-life-news-hint"), lc.archive_news, |l| l.archive_news = !l.archive_news, Some(news)),
             rule(2, tr!("settings-life-codes"), tr!("settings-life-codes-hint"), lc.expire_codes, |l| l.expire_codes = !l.expire_codes, Some(codes)),
+            row(tr!("lifecycle-settings-expire-to"), Some(tr!("lifecycle-settings-expire-to-hint")), expire_to, l),
             rule(3, tr!("settings-life-overdue"), tr!("settings-life-overdue-hint"), lc.overdue_first, |l| l.overdue_first = !l.overdue_first, None),
         ];
         div()

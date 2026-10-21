@@ -1483,7 +1483,7 @@ impl Composer {
     /// «Ждать ответа · N дней»: переключатель; число дней — по щелчку на нём, по кругу.
     fn wait_toggle(&self, l: &Look, cx: &mut Context<Self>) -> Div {
         let on = self.model.wait.is_some();
-        let days = self.model.wait.unwrap_or(marks::WAIT_DEFAULT);
+        let days = self.model.wait.unwrap_or_else(|| crate::lifecycle::wait_default(cx));
         let knob = div()
             .w(px(28.))
             .h(px(16.))
@@ -1505,7 +1505,7 @@ impl Composer {
             .child(knob)
             .child(tr!("compose-wait"))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.model.wait = if this.model.wait.is_some() { None } else { Some(marks::WAIT_DEFAULT) };
+                this.model.wait = if this.model.wait.is_some() { None } else { Some(crate::lifecycle::wait_default(cx)) };
                 this.schedule_autosave(cx);
                 cx.notify();
             }));
@@ -1515,7 +1515,7 @@ impl Composer {
             .child(tr!("compose-wait-days", n = days))
             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("compose-wait-days-hint")).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| {
-                let now = this.model.wait.unwrap_or(marks::WAIT_DEFAULT);
+                let now = this.model.wait.unwrap_or_else(|| crate::lifecycle::wait_default(cx));
                 let i = marks::WAIT_DAYS.iter().position(|d| *d == now).map_or(0, |i| (i + 1) % marks::WAIT_DAYS.len());
                 this.model.wait = Some(marks::WAIT_DAYS[i]);
                 this.schedule_autosave(cx);

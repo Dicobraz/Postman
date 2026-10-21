@@ -469,9 +469,11 @@ impl Days {
     }
 }
 
-/// Группа строк списка: дата (одна папка, по дате) или папка («Все папки»).
+/// Группа строк списка: дата (одна папка, по дате) или папка («Все папки»); в одной папке над ними — «Срочное»
+/// (S5-04: просроченный срок, сработавшее напоминание — `crate::lifecycle::on_top`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
+    Top,
     Day(Day),
     Folder(String),
 }
@@ -486,12 +488,14 @@ pub struct Hit {
     pub size: u64,
     /// Номер папки в порядке дерева («Все папки»); в одной папке — 0.
     pub folder: usize,
+    /// Наверху списка одной папки (группа [`Group::Top`]).
+    pub top: bool,
 }
 
 impl Hit {
     pub fn of(row: &EmailRow, folder: usize) -> Hit {
         let sender = if row.from_name.is_empty() { &row.from_addr } else { &row.from_name };
-        Hit { id: row.id.clone(), received_at: row.received_at, sender: sender.to_lowercase(), size: row.size, folder }
+        Hit { id: row.id.clone(), received_at: row.received_at, sender: sender.to_lowercase(), size: row.size, folder, top: false }
     }
 }
 
@@ -499,7 +503,8 @@ impl Hit {
 pub type Arranged = (Vec<String>, Vec<(Group, usize)>);
 
 /// Расставить письма: порядок `sort`; «Все папки» (`folders` — id папок по номеру `Hit::folder`) — группы по папкам,
-/// одна папка по дате — группы по датам, иначе без групп.
+/// одна папка по дате — группы по датам, иначе без групп. В одной папке по дате письма `Hit::top` — первыми, группой
+/// [`Group::Top`].
 pub fn arrange(mut hits: Vec<Hit>, sort: Sort, folders: Option<&[String]>, days: &Days) -> Arranged {
     let by_sort = |a: &Hit, b: &Hit| match sort {
         Sort::Date => b.received_at.cmp(&a.received_at),
@@ -507,10 +512,15 @@ pub fn arrange(mut hits: Vec<Hit>, sort: Sort, folders: Option<&[String]>, days:
         Sort::Size => b.size.cmp(&a.size).then(b.received_at.cmp(&a.received_at)),
     }
     .then_with(|| a.id.cmp(&b.id));
-    hits.sort_by(|a, b| if folders.is_some() { a.folder.cmp(&b.folder).then_with(|| by_sort(a, b)) } else { by_sort(a, b) });
+    hits.sort_by(|a, b| match folders {
+        Some(_) => a.folder.cmp(&b.folder).then_with(|| by_sort(a, b)),
+        None if sort == Sort::Date => b.top.cmp(&a.top).then_with(|| by_sort(a, b)),
+        None => by_sort(a, b),
+    });
     let key = |h: &Hit| -> Option<Group> {
         match (folders, sort) {
             (Some(f), _) => Some(Group::Folder(f.get(h.folder).cloned().unwrap_or_default())),
+            (None, Sort::Date) if h.top => Some(Group::Top),
             (None, Sort::Date) => Some(Group::Day(days.of(h.received_at))),
             (None, _) => None,
         }
@@ -712,6 +722,7 @@ mod tests {
             sender: sender.into(),
             size,
             folder,
+            top: false,
         };
         let hits = vec![
             hit("a", today - 86_400 * 30, "борис", 10, 1),
@@ -728,8 +739,18 @@ mod tests {
         assert_eq!(groups, [(Group::Day(Day::Today), 2), (Group::Day(Day::Yesterday), 1), (Group::Day(Day::Earlier), 1)]);
         let (ids, groups) = arrange(hits.clone(), Sort::Sender, None, &d);
         assert_eq!((ids, groups), (vec!["b".to_string(), "d".into(), "a".into(), "c".into()], vec![]));
-        let (ids, _) = arrange(hits, Sort::Size, None, &d);
+        let (ids, _) = arrange(hits.clone(), Sort::Size, None, &d);
         assert_eq!(ids, ["c", "a", "b", "d"]);
+        // «Срочное» (S5-04) — первым, своей группой; в «Все папки» — без неё.
+        let mut pinned = hits;
+        pinned[0].top = true;
+        let (ids, groups) = arrange(pinned.clone(), Sort::Date, None, &d);
+        assert_eq!(ids, ["a", "b", "c", "d"]);
+        assert_eq!(groups, [(Group::Top, 1), (Group::Day(Day::Today), 2), (Group::Day(Day::Yesterday), 1)]);
+        let (ids, groups) = arrange(pinned.clone(), Sort::Size, None, &d);
+        assert_eq!((ids, groups), (vec!["c".to_string(), "a".into(), "b".into(), "d".into()], vec![]), "не по дате — без «Срочного»");
+        let (_, groups) = arrange(pinned, Sort::Date, Some(&folders), &d);
+        assert!(!groups.iter().any(|(g, _)| *g == Group::Top));
     }
 
     /// Закладки по настройкам (S5-09): тот же порядок по срочности; скрытая полоса — без закладок.

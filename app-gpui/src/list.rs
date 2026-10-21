@@ -159,6 +159,8 @@ struct Job {
     order: Vec<String>,
     /// Нужен свой набор писем (иначе — только счётчики).
     own: bool,
+    /// «Просроченный срок — наверх» (S5-04): такие письма и сработавшие напоминания — группой «Срочное».
+    overdue_first: bool,
 }
 
 /// Итог пересчёта: счётчики и, если нужен, список с группами.
@@ -169,11 +171,29 @@ struct Computed {
 
 impl Job {
     fn run(self, cache: &Cache) -> Computed {
-        let days = Days::now();
+        let now = jiff::Zoned::now();
+        let days = Days::at(&now);
         let folders = matches!(self.scan, Scan::Account(_));
+        // Папка по дате без фильтров — страницы из кэша; есть «Срочное» (S5-04) — свой набор с ним наверху.
+        let pins = !folders && self.query.sort == Sort::Date;
+        let mut own = self.own;
+        loop {
+            let (counts, hits, tops) = self.pass(cache, own, pins, folders, &now);
+            if !own && tops > 0 {
+                own = true;
+                continue;
+            }
+            let list = own.then(|| arrange(hits, self.query.sort, folders.then_some(self.order.as_slice()), &days));
+            return Computed { counts, list };
+        }
+    }
+
+    /// Один обход: счётчики, письма своего набора (`own`) и сколько из них — наверху.
+    fn pass(&self, cache: &Cache, own: bool, pins: bool, folders: bool, now: &jiff::Zoned) -> (Counts, Vec<Hit>, usize) {
         let index: HashMap<&str, usize> = self.order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
         let mut counts = Counts::default();
         let mut hits = Vec::new();
+        let mut tops = 0;
         let scanned = cache.scan(&self.scan, |row, to| {
             let f = Facts::of(&self.me, &row, &to);
             let mut pass = counts.add(&self.query.criteria, &f, &row.keywords);
@@ -181,10 +201,12 @@ impl Job {
                 pass = true;
                 counts.shown += 1;
             }
-            if self.own && pass {
+            let top = pass && pins && postman_core::lifecycle::on_top(&row, now, self.overdue_first);
+            tops += usize::from(top);
+            if own && pass {
                 let folder = if folders { row.mailbox_ids.iter().filter_map(|m| index.get(m.as_str())).min().copied() } else { Some(0) };
                 if let Some(folder) = folder {
-                    hits.push(Hit::of(&row, folder));
+                    hits.push(Hit { top, ..Hit::of(&row, folder) });
                 }
             }
             true
@@ -192,8 +214,7 @@ impl Job {
         if let Err(e) = scanned {
             tracing::warn!("filters: {e}");
         }
-        let list = self.own.then(|| arrange(hits, self.query.sort, folders.then_some(self.order.as_slice()), &days));
-        Computed { counts, list }
+        (counts, hits, tops)
     }
 }
 
@@ -501,6 +522,7 @@ impl MailList {
             server_hits: self.server_hits.clone(),
             order: self.order.clone(),
             own: self.query.own_list(),
+            overdue_first: crate::prefs::get(cx).lifecycle.overdue_first,
         };
         let cache = self.cache.clone();
         let task = cx.background_spawn(async move { job.run(&cache) });
@@ -1076,12 +1098,15 @@ impl Render for MailList {
                 this.ask_more(rows.end, cx);
             }
             let l = look(cx);
+            let now = jiff::Zoned::now();
             items
                 .map(|item| match this.layout.slot(item) {
                     Some(Slot::Header(seg)) => this.group_el(seg, &l, cx),
                     Some(Slot::Row(i)) => match this.row(i).cloned() {
                         Some(r) => {
                             let mut labels = crate::labels::row_labels(&this.labels, &r);
+                            // Сроки (S5-04) — после категорий.
+                            labels.marks = crate::lifecycle::row_badges(&r, &now);
                             // Ждёт отправки — первой меткой, нейтральной (DESIGN.md: служебные — серые).
                             let now = jiff::Timestamp::now().as_second();
                             if let Some(&at) = this.scheduled.get(&r.id).filter(|&&at| at > now) {
@@ -1245,7 +1270,8 @@ pub(crate) fn list_row(
         .justify_end()
         .gap(px(4.))
         .overflow_hidden()
-        .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color, l)));
+        .children(labels.chips.into_iter().map(|(name, color)| crate::labels::chip(name, color, l)))
+        .children(labels.marks.iter().map(|b| crate::lifecycle::chip(b, l)));
     let line1 = div()
         .flex()
         .items_center()

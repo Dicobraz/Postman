@@ -12,7 +12,7 @@
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
-//! `thread` (лента беседы, S5-05) — только демо;
+//! `thread` (лента беседы, S5-05), `lifecycle` и `overdue` (сроки, S5-04) — только демо;
 //! вкладка «Настройки» (S5-09): `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts` и первый
 //! запуск `firstrun` — демо; `--live` без `POSTMAN_URL` — первый запуск (`firstrun`).
 
@@ -94,6 +94,11 @@ enum Scene {
     Quick,
     /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
     Thread,
+    /// Жизненный цикл (S5-04): «Входящие» со всеми метками сроков (срок впереди, сегодня к часу, ждём ответа,
+    /// напомнит, исчезнет, просрочено — наверху, «Срочное») и открытая панель «Срок» у первого письма.
+    Lifecycle,
+    /// Письмо с просроченным сроком открыто: плотная янтарная метка в строке и в шапке.
+    Overdue,
     /// Вкладка «Настройки», раздел «Общие» (S5-09).
     SettingsGeneral,
     /// «Настройки → Категории» с правкой новой категории: палитра с перечёркнутыми близкими цветами.
@@ -110,7 +115,7 @@ enum Scene {
     SettingsSign,
 }
 
-const SCENES: [Scene; 38] = [
+const SCENES: [Scene; 40] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -147,7 +152,9 @@ const SCENES: [Scene; 38] = [
     Scene::Labels,
     Scene::Filters,
     Scene::Quick,
-    // Первый запуск (S5-09): добавление аккаунта на месте экрана почты.
+    Scene::Lifecycle,
+    Scene::Overdue,
+    // Первый запуск (S5-09): добавление аккаунта на месте экрана почты (сроки прошлых сцен сняты).
     Scene::SignIn,
     // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
     Scene::Thread,
@@ -205,6 +212,8 @@ impl Scene {
             Scene::Filters => "filters",
             Scene::Quick => "quick",
             Scene::Thread => "thread",
+            Scene::Lifecycle => "lifecycle",
+            Scene::Overdue => "overdue",
             Scene::SettingsGeneral => "settings-general",
             Scene::SettingsCategories => "settings-categories",
             Scene::SettingsKeys => "settings-keys",
@@ -238,6 +247,10 @@ pub struct Driver {
     composer: Option<u64>,
     /// Окончание имён файлов: `-dark` для `--theme dark` (S5-01), иначе пусто.
     suffix: &'static str,
+    /// Сроки, поставленные сценой `lifecycle`: снять до следующих сцен.
+    undo: Vec<postman_core::lifecycle::Patch>,
+    /// Письмо с просроченным сроком (сцена `overdue`).
+    overdue: Option<String>,
 }
 
 impl Driver {
@@ -245,7 +258,7 @@ impl Driver {
     pub fn new(dir: PathBuf, live: bool, suffix: &'static str) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let dir = std::path::absolute(&dir)?;
-        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix })
+        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix, undo: Vec::new(), overdue: None })
     }
 
     /// Окно открывается со строкой входа: снимается она.
@@ -363,7 +376,19 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.cal.update(cx, |c, cx| c.select_busiest(cx));
             m.set_section(Section::Calendar, cx);
         }
+        Scene::Lifecycle => lifecycle_scene(m, cx)?,
+        Scene::Overdue => {
+            m.close_picker(cx);
+            let id = m.screens.as_ref().and_then(|d| d.overdue.clone());
+            let row = id.and_then(|id| m.cache.rows_by_ids(&[id]).ok()).and_then(|mut r| r.pop());
+            let Some(row) = row else { return Err("no overdue letter".into()) };
+            m.list.update(cx, |l, cx| l.select(0, cx));
+            m.open_letter(row, cx);
+        }
         Scene::SignIn => {
+            // Сроки сцены `lifecycle` — снять: дальше снимки без них.
+            let undo = m.screens.as_mut().map(|d| std::mem::take(&mut d.undo)).unwrap_or_default();
+            m.apply_patches(undo, cx);
             m.close_settings(window, cx);
             m.set_section(Section::Mail, cx);
             // Демо: первый запуск без учётной записи — так же, как без `POSTMAN_URL` и сохранённого входа.
@@ -523,7 +548,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         Scene::SettingsKeys => {
             // Своё сочетание у «Флаг» и конфликт: «Сегодня в календаре» на Ctrl+2, как «Календарь».
             crate::prefs::update(cx, |p| {
-                p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-shift-g".into()]);
+                p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-shift-k".into()]);
                 p.keys.insert("calendar.today".into(), vec!["ctrl-2".into()]);
             });
             m.open_settings(Some(SettingsSection::Keys), window, cx);
@@ -703,6 +728,16 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 && f.quick_open
                 && (rows_loaded || list.count == 0)
         }
+        Scene::Lifecycle | Scene::Overdue => {
+            let now = jiff::Zoned::now();
+            let (_, rows) = &list.rows;
+            let marked = rows.iter().filter(|r| !crate::lifecycle::row_badges(r, &now).is_empty()).count();
+            let want = m.screens.as_ref().and_then(|d| d.overdue.as_deref());
+            let top = list.row(0).map(|r| r.id.as_str()) == want;
+            let open = reading.is_some_and(|r| r.doc.is_some() && (matches!(scene, Scene::Lifecycle) || Some(r.row.id.as_str()) == want));
+            let picker = m.lifecycle.picker.is_some() == matches!(scene, Scene::Lifecycle);
+            marked >= 6 && top && list.view.is_some() && !list.computing && rows_loaded && open && picker
+        }
         Scene::Thread => {
             let r = m.reading.read(cx);
             let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN);
@@ -717,6 +752,53 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Mail && opened && (list.count == 0 || letter)
         }
     }
+}
+
+/// Сцена `lifecycle`: первым шести письмам «Входящих» — сроки всех видов (от «сейчас»), как поставили бы действия
+/// «Срок…», «Напомнить…», «Ждать ответа…», «Исчезнет…»; у первого письма открыта панель «Срок».
+fn lifecycle_scene(m: &mut Mailer, cx: &mut Context<Mailer>) -> Result<(), String> {
+    use postman_core::lifecycle;
+    use postman_core::marks::{Kind, When};
+    m.set_section(Section::Mail, cx);
+    m.reset_filters(cx);
+    m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = false));
+    let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes).ok_or("no inbox")?;
+    m.open_mailbox(inbox, cx);
+    let rows: Vec<postman_cache::EmailRow> = m.list.read(cx).rows.1.iter().take(6).cloned().collect();
+    if rows.len() < 6 {
+        return Err("fewer than 6 letters in the demo inbox".into());
+    }
+    let now = jiff::Zoned::now();
+    let tz = now.time_zone().clone();
+    let ts = now.timestamp().as_second();
+    let at = |secs: i64| lifecycle::when_at(ts + secs, &tz).ok_or("time out of range");
+    let day = |days: i64| now.date().checked_add(jiff::Span::new().days(days)).map_err(|e| e.to_string());
+    let remind_day = day(3)?;
+    let marks: [(Kind, When); 6] = [
+        (Kind::Due, When::day(day(2)?)),
+        (Kind::Due, at(3 * 3600)?),
+        (Kind::Wait, When::day(day(2)?)),
+        (Kind::Remind, When::at(remind_day, jiff::civil::Time::new(9, 0, 0, 0).map_err(|e| e.to_string())?)),
+        (Kind::Expire, at(3 * 86_400)?),
+        (Kind::Due, When::day(day(-1)?)),
+    ];
+    let mut patches = Vec::new();
+    let mut undo = Vec::new();
+    for (row, (kind, when)) in rows.iter().zip(marks) {
+        let p = lifecycle::set(row, kind, Some(when));
+        let added: Vec<(String, bool)> = p.keywords.iter().filter(|(_, on)| *on).map(|(k, _)| (k.clone(), false)).collect();
+        undo.push(lifecycle::Patch { id: row.id.clone(), keywords: added, mailboxes: Vec::new() });
+        patches.push(p);
+    }
+    // «Напомнить» — словом без переноса в «Архив»: письмо остаётся в списке со своей меткой.
+    if let Some(d) = &mut m.screens {
+        d.undo = undo;
+        d.overdue = Some(rows[5].id.clone());
+    }
+    m.apply_patches(patches, cx);
+    m.open_letter(rows[0].clone(), cx);
+    m.lifecycle.picker = Some(crate::lifecycle::Picker::new(Kind::Due, rows[0].clone()));
+    Ok(())
 }
 
 /// Вкладка «Настройки» открыта на разделе `section`.
