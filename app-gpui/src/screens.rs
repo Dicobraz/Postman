@@ -104,6 +104,8 @@ enum Scene {
     Reply,
     /// Вкладка новой встречи: поля и подбор времени в одной форме (S5-11); общие окна — розовым бренда (S5-20).
     Meeting,
+    /// Та же встреча (S5-23): курсор ←/→ на втором общем окне — рамка плотнее и свечение.
+    MeetingSlot,
     /// Та же встреча, цвет свободного времени — синий бренда («Настройки → Календарь», S5-20).
     MeetingBlue,
     /// Раздел «Контакты»: список и карточка первого контакта (S4-02).
@@ -174,7 +176,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 64] = [
+const SCENES: [Scene; 65] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -201,6 +203,7 @@ const SCENES: [Scene; 64] = [
     Scene::Calendar,
     Scene::Event,
     Scene::Meeting,
+    Scene::MeetingSlot,
     Scene::MeetingBlue,
     Scene::Assistant,
     Scene::Contacts,
@@ -297,6 +300,7 @@ impl Scene {
             Scene::Checks => "checks",
             Scene::Reply => "reply-inline",
             Scene::Meeting => "meeting",
+            Scene::MeetingSlot => "meeting-slot",
             Scene::MeetingBlue => "meeting-blue",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
@@ -529,13 +533,22 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 c.select_pending(cx);
             });
         }
+        Scene::MeetingSlot => {
+            // Как →, → с клавиатуры: курсор — на втором общем окне.
+            let Some(v) = m.meetings.last() else { return Err("no meeting tab".into()) };
+            v.update(cx, |v, cx| {
+                v.step_cursor(true, cx);
+                v.step_cursor(true, cx);
+            });
+        }
         Scene::MeetingBlue => crate::prefs::update(cx, |p| p.calendar.free_color = postman_core::prefs::FreeColor::Blue),
         Scene::Assistant => {
-            // Цвет свободного времени — снова по умолчанию (после `meeting-blue`).
+            // Цвет свободного времени — снова по умолчанию (после `meeting-blue`), курсора окон нет — как на макете.
             crate::prefs::update(cx, |p| p.calendar.free_color = postman_core::prefs::FreeColor::default());
             let Some(v) = m.meetings.last() else { return Err("no meeting tab".into()) };
             v.update(cx, |v, cx| {
                 v.only_free = false;
+                v.slot_cursor = None;
                 cx.notify();
             });
         }
@@ -962,13 +975,15 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let loaded = c.loaded || m.screens.as_ref().is_some_and(|d| !d.live);
             m.section == Section::Calendar && c.clock.is_some() && loaded
         }
-        Scene::Meeting | Scene::MeetingBlue | Scene::Assistant => {
+        Scene::Meeting | Scene::MeetingSlot | Scene::MeetingBlue | Scene::Assistant => {
             let tab = m.tabs.is_active(crate::tabs::TabKind::Meeting);
             let blue = crate::prefs::get(cx).calendar.free_color == postman_core::prefs::FreeColor::Blue;
             tab && blue == matches!(scene, Scene::MeetingBlue)
                 && m.meetings.last().is_some_and(|v| {
                     let v = v.read(cx);
-                    v.ready() && (v.only_free == matches!(scene, Scene::Meeting | Scene::MeetingBlue))
+                    v.ready()
+                        && (v.only_free == matches!(scene, Scene::Meeting | Scene::MeetingSlot | Scene::MeetingBlue))
+                        && (!matches!(scene, Scene::MeetingSlot) || v.slot_cursor.is_some())
                 })
         }
         Scene::Event => {

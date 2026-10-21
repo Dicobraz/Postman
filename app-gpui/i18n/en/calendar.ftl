@@ -152,6 +152,7 @@ meeting-legend-busy = Busy
 meeting-legend-unknown = Unknown
 meeting-legend-external = External
 meeting-not-counted-n = Not counted: { $n } — free/busy unknown
+meeting-slots-hint = { $prev } { $next } — through free slots, { $pick } — pick
 meeting-participants-n = Attendees · { $n }
 meeting-everyone = All attendees
 meeting-known = { $known } of { $n } with free/busy data

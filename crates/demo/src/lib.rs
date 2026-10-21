@@ -423,6 +423,16 @@ const BUDGET: &[u8] = include_bytes!("../../worker/tests/fixtures/budget.xlsm");
 const PHOTO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.jpg");
 /// Приглашение Outlook (iMIP REQUEST) — каждое десятое демо-письмо.
 const INVITE: &[u8] = include_bytes!("../../worker/tests/fixtures/invite-outlook.ics");
+/// Приглашение демо — на завтра (дата файла заменяется): в любой час запуска оно впереди и ждёт ответа, а не
+/// «Встреча уже прошла». Длина файла та же — размер вложения в письме верен.
+pub fn invite() -> Vec<u8> {
+    let tomorrow = jiff::Zoned::now().date().tomorrow().unwrap_or(jiff::civil::date(2026, 10, 22));
+    let day = format!("{:04}{:02}{:02}T", tomorrow.year(), tomorrow.month(), tomorrow.day());
+    String::from_utf8_lossy(INVITE).replace(INVITE_DAY, &day).into_bytes()
+}
+
+/// День встречи в файле приглашения (`DTSTART`, `DTEND`).
+const INVITE_DAY: &str = "20261021T";
 const INVITE_HTML: &str = "<p>Иван Петров приглашает вас на встречу «Обсуждение пилота SIEM».</p>";
 
 /// Письмо с большой картинкой в тексте — `demo4`, `demo104`… (одно на сотню: бенч открытия писем их почти не видит).
@@ -487,7 +497,7 @@ pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
     match blob_id {
         "logo" => Some(LOGO.to_vec()),
         "chart" => Some(chart().to_vec()),
-        "ics" => Some(INVITE.to_vec()),
+        "ics" => Some(invite()),
         "pdf" => Some(REPORT.to_vec()),
         "zip" => Some(SCREENS.to_vec()),
         "xlsm" => Some(BUDGET.to_vec()),
