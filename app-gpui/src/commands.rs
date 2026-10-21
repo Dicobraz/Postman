@@ -55,8 +55,14 @@ pub mod tab {
     gpui_kit::actions!(tab, [Next, Prev, Close]);
 }
 
+/// Поиск в командной строке (S5-10): охват «Везде | Текущая папка» и уточнения — как чипы «Уточнить».
 pub mod search {
-    gpui_kit::actions!(search, [Focus, Clear]);
+    gpui_kit::actions!(search, [Focus, Clear, All, Folder, Attachments, Unread, Recent]);
+}
+
+/// Палитра команд (S5-10): открыть, по строкам, выполнить, закрыть.
+pub mod palette {
+    gpui_kit::actions!(palette, [Open, Next, Prev, Run, Close]);
 }
 
 pub mod calendar {
@@ -113,6 +119,9 @@ const MAILER: Option<&str> = Some("Mailer");
 const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
 /// Вкладка встречи, как окно письма.
 const MEETING: Option<&str> = Some("Meeting || (Meeting > Input)");
+/// Палитра команд, в том числе её поле ввода: ↑/↓, Enter, Esc поля — клавиши палитры (как у письма, `bind` — после
+/// `gpui_kit::init`).
+const PALETTE: Option<&str> = Some("Palette || (Palette > Input)");
 
 const fn cmd(id: &'static str, keys: &'static [&'static str], context: Option<&'static str>) -> Command {
     Command { id, keys, context }
@@ -184,6 +193,18 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.notifications", &[], None),
     cmd("search.focus", &["ctrl-e"], None),
     cmd("search.clear", &["escape"], None),
+    // Не Outlook (там «Область поиска» и «Уточнить» — лентой): охват и уточнения поиска — чипами и в палитре.
+    cmd("search.all", &[], MAIL),
+    cmd("search.folder", &[], MAIL),
+    cmd("search.attachments", &[], MAIL),
+    cmd("search.unread", &[], MAIL),
+    cmd("search.recent", &[], MAIL),
+    // Не Outlook (там Ctrl+K — «Проверить имена» в письме): палитра команд, как в новом Outlook и редакторах.
+    cmd("palette.open", &["ctrl-k"], MAILER),
+    cmd("palette.next", &["down"], PALETTE),
+    cmd("palette.prev", &["up"], PALETTE),
+    cmd("palette.run", &["enter"], PALETTE),
+    cmd("palette.close", &["escape"], PALETTE),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
     // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — Alt+Home (макет S5-11).
     cmd("calendar.prev_week", &["alt-up"], CALENDAR),

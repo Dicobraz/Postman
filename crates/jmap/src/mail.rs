@@ -329,6 +329,8 @@ pub enum Filter {
     From(String),
     To(String),
     Body(String),
+    /// Текст в теме (`subject`, S5-10).
+    Subject(String),
     /// Есть вложение (`hasAttachment`).
     HasAttachment(bool),
     /// Все условия (`operator: AND`).
@@ -339,6 +341,8 @@ pub enum Filter {
     Not(Vec<Filter>),
     /// Получено раньше (`before`, UTCDate `2026-10-21T00:00:00Z`).
     Before(String),
+    /// Получено не раньше (`after`, UTCDate; S5-10).
+    After(String),
 }
 
 impl Filter {
@@ -354,11 +358,13 @@ impl Filter {
             Filter::From(t) => json!({ "from": t }),
             Filter::To(t) => json!({ "to": t }),
             Filter::Body(t) => json!({ "body": t }),
+            Filter::Subject(t) => json!({ "subject": t }),
             Filter::HasAttachment(on) => json!({ "hasAttachment": on }),
             Filter::And(list) => op("AND", list),
             Filter::Or(list) => op("OR", list),
             Filter::Not(list) => op("NOT", list),
             Filter::Before(at) => json!({ "before": at }),
+            Filter::After(at) => json!({ "after": at }),
         }
     }
 }
@@ -767,6 +773,8 @@ mod tests {
         assert_eq!(Filter::To("me@x".into()).to_json(), json!({ "to": "me@x" }));
         assert_eq!(Filter::Body("@anna".into()).to_json(), json!({ "body": "@anna" }));
         assert_eq!(Filter::Before("2026-10-21T00:00:00Z".into()).to_json(), json!({ "before": "2026-10-21T00:00:00Z" }));
+        assert_eq!(Filter::After("2026-10-01T00:00:00Z".into()).to_json(), json!({ "after": "2026-10-01T00:00:00Z" }));
+        assert_eq!(Filter::Subject("ИБ".into()).to_json(), json!({ "subject": "ИБ" }));
     }
 
     /// Патч письма (S5-04): папки и слова путями, снять — `null`.

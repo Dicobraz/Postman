@@ -100,6 +100,8 @@ pub(crate) struct ReadingPane {
     pub(crate) save_all: Option<crate::preview::SaveAll>,
     /// Открытая папка: её вид беседы (лента, стопка, «как Outlook», S5-05б).
     pub(crate) folder: Option<String>,
+    /// Идёт поиск (S5-10): строка запроса и слова — подсветка в теме и тексте, строка «Совпадения».
+    pub(crate) marks: Option<(String, Arc<Vec<String>>)>,
 }
 
 /// Итог разбора и действий: уровень песочницы (строка состояния), тосты, запросы к серверу.
@@ -164,7 +166,41 @@ impl ReadingPane {
             scheduled: Vec::new(),
             save_all: None,
             folder: None,
+            marks: None,
         }
+    }
+
+    /// Поиск начался, сменился или закончился (`None`): подсветка — по нему.
+    pub(crate) fn set_marks(&mut self, marks: Option<(String, Arc<Vec<String>>)>, cx: &mut Context<Self>) {
+        if self.marks != marks {
+            self.marks = marks;
+            cx.notify();
+        }
+    }
+
+    /// Строка «Совпадения: N · «запрос»» над текстом письма во время поиска.
+    fn match_bar(&self, doc: Option<&postman_ir::Document>, l: &crate::roles::Look) -> Option<Div> {
+        let (query, marks) = self.marks.as_ref()?;
+        let subject = self.reading.as_ref().map_or(0, |r| postman_core::fuzzy::term_spans(&r.row.subject, marks).len());
+        let n = subject + doc.map_or(0, |d| ir_view::count_marks(&d.blocks, marks));
+        let count = if n == 0 { tr!("search-matches-none") } else { tr!("search-matches", n = n) };
+        Some(
+            div()
+                .h(px(34.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .rounded(l.px(pets_ui::theme::Metric::RadiusControl))
+                .bg(l.fill_passive())
+                .text_size(l.px(pets_ui::theme::Metric::TypeCaption))
+                .text_color(l.text2())
+                .child(crate::chrome::icon(crate::chrome::glyph::SEARCH, 14.))
+                .child(div().text_color(l.text()).child(count))
+                .child(div().flex_1())
+                .child(div().min_w_0().truncate().child(tr!("search-matches-query", query = query.clone()))),
+        )
     }
 
     /// Открытое письмо ждёт отправки на сервере: «Отправится ср 21.10 09:00 · Отменить отправку».
@@ -672,7 +708,13 @@ impl Render for ReadingPane {
             .pb(px(12.))
             .border_b_1()
             .border_color(l.border())
-            .child(div().text_size(l.px(pets_ui::theme::Metric::TypeSubtitle)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child(r.row.subject.clone()))
+            .child(
+                div()
+                    .text_size(l.px(pets_ui::theme::Metric::TypeSubtitle))
+                    .line_height(px(26.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(crate::search::marked(&r.row.subject, self.marks.as_ref().map(|(_, m)| m.as_slice()), &l)),
+            )
             .child(
                 div().flex().items_center().gap(px(12.)).child(avatar).child(
                     div()
@@ -757,9 +799,11 @@ impl Render for ReadingPane {
                             .child(tr!("reading-remote-blocked", n = doc.remote_images_blocked)),
                     );
                 }
-                col.children(ir_view::blocks(&doc.blocks, "doc", &r.images, cx)).into_any_element()
+                let marks: &[String] = self.marks.as_ref().map_or(&[], |(_, m)| m.as_slice());
+                col.children(ir_view::blocks_marked(&doc.blocks, "doc", &r.images, marks, cx)).into_any_element()
             }
         };
+        let matches = self.match_bar(r.doc.as_ref(), &l);
         div()
             .id("reading")
             .flex()
@@ -774,6 +818,7 @@ impl Render for ReadingPane {
             .children(bar)
             .children(strip)
             .children(card)
+            .children(matches)
             .child(body)
             .into_any_element()
     }

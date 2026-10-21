@@ -59,6 +59,8 @@ mod bulk;
 mod menu;
 mod states;
 mod notices;
+mod palette;
+mod search;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -100,6 +102,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/lifecycle.ftl")),
     ("ru", include_str!("../i18n/ru/bulk.ftl")),
     ("ru", include_str!("../i18n/ru/states.ftl")),
+    ("ru", include_str!("../i18n/ru/palette.ftl")),
+    ("ru", include_str!("../i18n/ru/search.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -121,6 +125,8 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/lifecycle.ftl")),
     ("en", include_str!("../i18n/en/bulk.ftl")),
     ("en", include_str!("../i18n/en/states.ftl")),
+    ("en", include_str!("../i18n/en/palette.ftl")),
+    ("en", include_str!("../i18n/en/search.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

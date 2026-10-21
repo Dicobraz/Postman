@@ -18,7 +18,44 @@ use crate::roles::{Look, Pm, look};
 pub type Images = HashMap<String, Arc<RenderImage>>;
 
 pub fn blocks(bs: &[Block], key: &str, images: &Images, cx: &mut App) -> Vec<AnyElement> {
-    bs.iter().enumerate().map(|(n, b)| block(b, &format!("{key}.{n}"), images, cx)).collect()
+    blocks_marked(bs, key, images, &[], cx)
+}
+
+/// Блоки с подсветкой совпадений поиска (S5-10): слова `marks` (`postman_core::fuzzy::term_spans`) — янтарной
+/// подложкой поверх своих выделений.
+pub fn blocks_marked(bs: &[Block], key: &str, images: &Images, marks: &[String], cx: &mut App) -> Vec<AnyElement> {
+    bs.iter().enumerate().map(|(n, b)| block(b, &format!("{key}.{n}"), images, marks, cx)).collect()
+}
+
+/// Сколько совпадений поиска в тексте письма (абзацы, заголовки, цитаты, списки, таблицы).
+pub fn count_marks(bs: &[Block], marks: &[String]) -> usize {
+    fn inl(items: &[Inline], out: &mut String) {
+        for i in items {
+            match i {
+                Inline::Text { text, .. } => out.push_str(text),
+                Inline::LineBreak => out.push('\n'),
+                Inline::Link { content, .. } => inl(content, out),
+                Inline::Image { .. } => {}
+            }
+        }
+    }
+    let count = |items: &[Inline]| {
+        let mut t = String::new();
+        inl(items, &mut t);
+        postman_core::fuzzy::term_spans(&t, marks).len()
+    };
+    if marks.is_empty() {
+        return 0;
+    }
+    bs.iter()
+        .map(|b| match b {
+            Block::Paragraph { content, .. } | Block::Heading { content, .. } => count(content),
+            Block::Quote(inner) => count_marks(inner, marks),
+            Block::List { items, .. } => items.iter().map(|i| count_marks(i, marks)).sum(),
+            Block::Table(rows) => rows.iter().flatten().map(|c| count(c)).sum(),
+            Block::Code(_) | Block::Rule => 0,
+        })
+        .sum()
 }
 
 /// Все `cid:` картинок документа, по порядку.
@@ -48,11 +85,11 @@ pub fn cids(doc: &Document) -> Vec<String> {
     out
 }
 
-fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
+fn block(b: &Block, key: &str, images: &Images, marks: &[String], cx: &mut App) -> AnyElement {
     let l = &*look(cx);
     match b {
         Block::Paragraph { align, content } => {
-            let d = div().child(paragraph(content, key, images, l));
+            let d = div().child(paragraph(content, key, images, marks, l));
             match align {
                 Align::Center => d.text_center(),
                 Align::End => d.text_right(),
@@ -67,7 +104,7 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
                 3 => 17.,
                 _ => 15.,
             };
-            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images, l)).into_any_element()
+            div().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(paragraph(content, key, images, marks, l)).into_any_element()
         }
         Block::Quote(inner) => div()
             .flex()
@@ -77,7 +114,7 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
             .border_l_2()
             .border_color(l.c(Role::StrokeStrong))
             .text_color(l.text2())
-            .children(blocks(inner, key, images, cx))
+            .children(blocks_marked(inner, key, images, marks, cx))
             .into_any_element(),
         Block::List { ordered, items } => div()
             .flex()
@@ -89,7 +126,7 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
                     .flex()
                     .gap_2()
                     .child(div().w(px(16.)).child(marker))
-                    .child(div().flex().flex_col().flex_1().children(blocks(item, &format!("{key}.{n}"), images, cx)))
+                    .child(div().flex().flex_col().flex_1().children(blocks_marked(item, &format!("{key}.{n}"), images, marks, cx)))
             }))
             .into_any_element(),
         Block::Code(code) => div().p_2().rounded_md().bg(l.fill()).font_family("Cascadia Mono").child(code.clone()).into_any_element(),
@@ -102,7 +139,7 @@ fn block(b: &Block, key: &str, images: &Images, cx: &mut App) -> AnyElement {
                     .flex()
                     .when(r % 2 == 1, |d| d.bg(l.fill_passive()))
                     .children(row.iter().enumerate().map(|(c, cell)| {
-                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images, l))
+                        div().min_w(px(90.)).px_2().py_1().child(paragraph(cell, &format!("{key}.{r}.{c}"), images, marks, l))
                     }))
             }))
             .into_any_element(),
@@ -201,17 +238,17 @@ fn pieces<'a>(items: &'a [Inline], shown: impl Fn(&str) -> bool) -> Vec<Piece<'a
     out
 }
 
-fn paragraph(items: &[Inline], key: &str, images: &Images, l: &Look) -> AnyElement {
+fn paragraph(items: &[Inline], key: &str, images: &Images, marks: &[String], l: &Look) -> AnyElement {
     let parts = pieces(items, |cid| images.contains_key(cid));
     if !parts.iter().any(|p| matches!(p, Piece::Image(_))) {
-        return text(items, key, l);
+        return text(items, key, marks, l);
     }
     div()
         .flex()
         .flex_col()
         .gap_1()
         .children(parts.into_iter().enumerate().map(|(n, p)| match p {
-            Piece::Text(t) => text(t, &format!("{key}.{n}"), l),
+            Piece::Text(t) => text(t, &format!("{key}.{n}"), marks, l),
             Piece::Image(cid) => match images.get(cid) {
                 Some(image) => picture(image),
                 None => div().into_any_element(),
@@ -226,9 +263,11 @@ fn picture(image: &Arc<RenderImage>) -> AnyElement {
     crate::preview::picture(image, px(size.width.0 as f32)).into_any_element()
 }
 
-fn text(items: &[Inline], key: &str, l: &Look) -> AnyElement {
+fn text(items: &[Inline], key: &str, marks: &[String], l: &Look) -> AnyElement {
     let (mut text, mut hl, mut links) = (String::new(), Vec::new(), Vec::new());
     flatten(items, &mut text, &mut hl, &mut links, l);
+    let hit = crate::search::hit_style(l);
+    hl.extend(postman_core::fuzzy::term_spans(&text, marks).into_iter().map(|r| (r, hit)));
     let styled = StyledText::new(text).with_highlights(normalize(hl));
     if links.is_empty() {
         return styled.into_any_element();

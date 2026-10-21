@@ -1,6 +1,7 @@
 //! Командная строка вместо ленты (S5-01, DESIGN «Главное окно»): одна акцентная кнопка «Новое письмо», действия
-//! с письмом — тихими кнопками, справа поиск с охватом «Везде | Текущая папка» и «…» (автоответы, правила).
-//! Кнопка — та же команда реестра, что и хоткей (S3-02).
+//! с письмом — тихими кнопками, справа поиск и «…» (автоответы, правила). Поле поиска в фокусе или с запросом —
+//! шире, с охватом «Везде | Текущая папка» внутри (S5-10, макет «Поиск»). Кнопка — та же команда реестра, что и
+//! хоткей (S3-02).
 
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::*;
@@ -26,14 +27,15 @@ const BUTTONS: [(char, &str, MakeAction); 5] = [
 
 /// Высота командной строки: кэшированное view не измеряется по содержимому, размер задаётся явно.
 pub(crate) const BAR_HEIGHT: f32 = 48.0;
-/// Ширина поля поиска (макет главного окна).
+/// Ширина поля поиска (макет главного окна) и во время поиска (макет «Поиск»).
 const SEARCH_W: f32 = 300.0;
+const SEARCH_W_ACTIVE: f32 = 420.0;
 
-/// Где искать: во всех папках или в открытой.
+/// Где искать: во всех папках или в открытой. По умолчанию — везде (макет «Поиск»).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) enum Scope {
-    All,
     #[default]
+    All,
     Folder,
 }
 
@@ -51,11 +53,13 @@ pub(crate) struct CommandBar {
     pub(crate) scope: Scope,
     /// Меню «…» открыто: кнопка нажата.
     pub(crate) more_open: bool,
+    /// Поле поиска в фокусе.
+    pub(crate) focused: bool,
 }
 
 impl CommandBar {
     pub(crate) fn new(search: Entity<InputState>) -> Self {
-        Self { search, scope: Scope::default(), more_open: false }
+        Self { search, scope: Scope::default(), more_open: false, focused: false }
     }
 
     fn scope_switch(&self, l: &Look, cx: &mut Context<Self>) -> impl IntoElement {
@@ -83,7 +87,7 @@ impl CommandBar {
         };
         div()
             .flex_none()
-            .h(px(28.))
+            .h(px(24.))
             .p(px(2.))
             .flex()
             .gap(px(2.))
@@ -129,9 +133,10 @@ impl Render for CommandBar {
             .text_size(px(11.))
             .text_color(l.text3())
             .child("Ctrl+E");
-        let search = Input::new(&self.search)
-            .prefix(chrome::icon(glyph::SEARCH, 14.).text_color(l.text3()))
-            .suffix(kbd);
+        // Во время поиска — шире, охват внутри поля; иначе — подсказка клавиши.
+        let active = self.focused || !self.search.read(cx).value().trim().is_empty();
+        let search = Input::new(&self.search).prefix(chrome::icon(glyph::SEARCH, 14.).text_color(l.text3()));
+        let search = if active { search.suffix(self.scope_switch(&l, cx)) } else { search.suffix(kbd) };
         let more = chrome::quiet_button("bar-more", &l)
             .when(self.more_open, |d| d.bg(l.pressed()))
             .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("frame-more")).build(window, cx))
@@ -147,8 +152,7 @@ impl Render for CommandBar {
             .child(new)
             .children(buttons)
             .child(div().flex_1())
-            .child(self.scope_switch(&l, cx))
-            .child(div().ml(px(8.)).w(px(SEARCH_W)).flex_none().child(search))
+            .child(div().ml(px(12.)).w(px(if active { SEARCH_W_ACTIVE } else { SEARCH_W })).flex_none().child(search))
             .child(div().ml(px(4.)).child(more))
     }
 }
