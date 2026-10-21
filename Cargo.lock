@@ -5597,6 +5597,7 @@ name = "postman-demo"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "png 0.17.16",
  "postman-cache",
  "postman-calendar",
 ]

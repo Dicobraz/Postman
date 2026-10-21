@@ -40,8 +40,15 @@ pub enum Request {
     /// Картинка (PNG/JPEG/GIF/WebP) в бинарной части; ответ — RGBA не больше `max_side` по стороне.
     Image { max_side: u32 },
     /// Встроенный просмотр вложения (S5-07): файл в бинарной части; `page` — страница PDF с нуля; ответ —
-    /// [`Preview`], пиксели картинки и страницы — RGBA в бинарной части.
-    Preview { kind: PreviewKind, page: u32, max_side: u32 },
+    /// [`Preview`], пиксели картинки и страницы — RGBA в бинарной части; `width` — ширина страницы PDF (0 — по
+    /// `max_side`).
+    Preview {
+        kind: PreviewKind,
+        page: u32,
+        max_side: u32,
+        #[serde(default)]
+        width: u32,
+    },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -215,9 +222,9 @@ pub fn serve() -> ! {
                 }
                 Err(e) => Response::Err(e),
             },
-            Ok(Request::Preview { kind, page, max_side }) => {
+            Ok(Request::Preview { kind, page, max_side, width }) => {
                 // Сбой разборщика на чужом файле — ошибка этого просмотра, а не смерть процесса.
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| preview::preview(kind, &bin, page, max_side)));
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| preview::preview(kind, &bin, page, max_side, width)));
                 match r {
                     Ok(Ok((p, pixels))) => {
                         out_bin = pixels;
@@ -334,13 +341,14 @@ impl Client {
         }
     }
 
-    /// Встроенный просмотр вложения в песочнице (S5-07): итог и пиксели картинки или страницы PDF.
-    pub fn preview(&mut self, kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32) -> Result<(Preview, Option<Rgba>), String> {
+    /// Встроенный просмотр вложения в песочнице (S5-07): итог и пиксели картинки или страницы PDF (`width` —
+    /// ширина страницы в пикселях, 0 — по `max_side`).
+    pub fn preview(&mut self, kind: PreviewKind, bytes: &[u8], page: u32, max_side: u32, width: u32) -> Result<(Preview, Option<Rgba>), String> {
         if bytes.len() > preview::MAX_INPUT {
             return Err("файл слишком большой для просмотра".into());
         }
         let timeout = self.timeout.max(PREVIEW_TIMEOUT);
-        match self.call_for(&Request::Preview { kind, page, max_side }, bytes, timeout)? {
+        match self.call_for(&Request::Preview { kind, page, max_side, width }, bytes, timeout)? {
             (Response::Preview(p), pixels) => match &p {
                 Preview::Image { width, height, .. } | Preview::Pdf { width, height, .. } => {
                     let img = preview::rgba(*width, *height, pixels)?;

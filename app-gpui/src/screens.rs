@@ -44,8 +44,12 @@ enum Scene {
     /// макросами (карточка «Открытие заблокировано»).
     PreviewImage,
     PreviewPdf,
+    /// Та же страница PDF, прокрученная до низа (S5-07б): обрезанный прокруткой кадр не сдвинут.
+    PreviewPdfEnd,
     PreviewZip,
     AttachMacro,
+    /// Письмо с большой картинкой в тексте (S5-07б): кадр 1600 px, уменьшен до ширины области чтения, целиком.
+    LetterImage,
     /// Письмо с приглашением: карточка встречи (S3-03), новое — с пересечением с моим днём (S5-11).
     Invite,
     /// Та же карточка: отвечено, изменено организатором, отменено, устарело (S5-11; подмена входов карточки).
@@ -110,14 +114,16 @@ enum Scene {
     SettingsSign,
 }
 
-const SCENES: [Scene; 38] = [
+const SCENES: [Scene; 40] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
     Scene::PreviewImage,
     Scene::PreviewPdf,
+    Scene::PreviewPdfEnd,
     Scene::PreviewZip,
     Scene::AttachMacro,
+    Scene::LetterImage,
     Scene::Invite,
     Scene::InviteAnswered,
     Scene::InviteUpdated,
@@ -179,6 +185,8 @@ impl Scene {
             Scene::Attachments => "attachments",
             Scene::PreviewImage => "preview-image",
             Scene::PreviewPdf => "preview-pdf",
+            Scene::PreviewPdfEnd => "preview-pdf-end",
+            Scene::LetterImage => "letter-image",
             Scene::PreviewZip => "preview-zip",
             Scene::AttachMacro => "attach-macro",
             Scene::Invite => "invite",
@@ -312,7 +320,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
         Scene::Letter => m.list.update(cx, |l, cx| l.select(0, cx)),
-        Scene::Attachments | Scene::Invite => {
+        Scene::Attachments | Scene::Invite | Scene::LetterImage => {
             let Some(i) = demo_row(m.list.read(cx), scene) else {
                 return Err("no such message in the first rows of the demo inbox".into());
             };
@@ -323,6 +331,13 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let blob = preview_blob(scene).to_string();
             m.reading.update(cx, |r, cx| r.toggle_preview(Some(blob), cx));
         }
+        Scene::PreviewPdfEnd => m.reading.update(cx, |r, cx| {
+            // Как прокрутка колесом до конца: смещение за край gpui прижимает к низу при раскладке.
+            if let Some(p) = r.reading.as_ref().and_then(|r| r.preview.as_ref()) {
+                p.scroll.set_offset(point(px(0.), px(-100_000.)));
+            }
+            cx.notify();
+        }),
         Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
             let which = scene.name().trim_start_matches("invite-");
             m.reading.update(cx, |r, cx| {
@@ -571,10 +586,10 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 && first.is_some()
                 && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == first)
         }
-        Scene::Attachments | Scene::Invite => {
+        Scene::Attachments | Scene::Invite | Scene::LetterImage => {
             let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
             let shown = |r: &crate::reading::Reading| match scene {
-                Scene::Attachments => r.doc.is_some() && !r.images.is_empty(),
+                Scene::Attachments | Scene::LetterImage => r.doc.is_some() && !r.images.is_empty(),
                 _ => r.doc.is_some() && r.invite.as_ref().is_some_and(|c| c.invitation().is_some() && c.day.is_some()),
             };
             target.is_some() && reading.is_some_and(|r| Some(r.row.id.as_str()) == target && shown(r))
@@ -590,6 +605,11 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 ready && (!matches!(scene, Scene::AttachMacro) || r.scans.contains_key(blob))
             })
         }
+        Scene::PreviewPdfEnd => reading.and_then(|r| r.preview.as_ref()).is_some_and(|p| {
+            // Прокручено до низа и страница не перерисовывается.
+            let (offset, max) = (p.scroll.offset().y, p.scroll.max_offset().y);
+            p.ready() && max > px(0.) && (offset + max).abs() < px(1.)
+        }),
         Scene::Search => list.search_ids.is_some() && rows_loaded,
         Scene::Calendar => {
             let c = m.cal.read(cx);
@@ -743,14 +763,16 @@ fn preview_blob(scene: Scene) -> &'static str {
     }
 }
 
-/// Первое прочитанное письмо демо-ящика для сцены: с картинкой `cid:` (и без приглашения) или с приглашением.
+/// Первое прочитанное письмо демо-ящика для сцены: с приглашением, с большой картинкой в тексте или с вложениями
+/// для просмотра и картинкой `cid:`.
 fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
     let (offset, rows) = &list.rows;
     let wanted = |a: &[postman_cache::AttachmentRow]| {
-        let invite = a.iter().any(crate::attachments::is_invite);
+        let has = |blob: &str| a.iter().any(|a| a.blob_id == blob);
         match scene {
-            Scene::Invite => invite,
-            _ => !invite && a.iter().any(|a| a.cid.is_some()),
+            Scene::Invite => a.iter().any(crate::attachments::is_invite),
+            Scene::LetterImage => has("chart"),
+            _ => has("pdf") && a.iter().any(|a| a.cid.is_some()),
         }
     };
     rows.iter().position(|r| wanted(&postman_demo::body(&r.id).attachments)).map(|p| p + offset)

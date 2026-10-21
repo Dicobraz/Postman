@@ -220,15 +220,10 @@ fn paragraph(items: &[Inline], key: &str, images: &Images, l: &Look) -> AnyEleme
         .into_any_element()
 }
 
-/// Картинка в своём размере, не шире области чтения.
+/// Картинка в своём размере, не шире области чтения; высота — по пропорции (родитель — flex-колонка абзаца).
 fn picture(image: &Arc<RenderImage>) -> AnyElement {
     let size = image.size(0);
-    img(image.clone())
-        .w(px(size.width.0 as f32))
-        .h(px(size.height.0 as f32))
-        .max_w_full()
-        .object_fit(ObjectFit::ScaleDown)
-        .into_any_element()
+    crate::preview::picture(image, px(size.width.0 as f32)).into_any_element()
 }
 
 fn text(items: &[Inline], key: &str, l: &Look) -> AnyElement {
