@@ -8,7 +8,7 @@
 //! Сообщения — по-английски: это диагностика для агентов, не текст интерфейса.
 //!
 //! `--screens <каталог> --live` (S3-04): живой ящик из окружения (`POSTMAN_URL`…) вместо демо — снимки `list`,
-//! `letter` и `reply` (S3-02) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
+//! `letter` и `reply-inline` (S3-02, S5-06б) после первого `EmailsChanged` синхронизации, `calendar` и `event` — после недели с
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
@@ -50,11 +50,13 @@ enum Scene {
     Event,
     /// Строка входа (нет учётной записи).
     SignIn,
-    /// Окно письма с заполненными полями (своё окно: снимается его HWND).
+    /// Новое письмо во вкладке (S5-06б): адресаты чипами (один внешний), текст, вложение, панель справа.
     Compose,
-    /// То же окно письма с открытым меню «Отправить позже» у кнопки «Отправить» (S5-06).
+    /// То же письмо с открытым меню «Отправить позже» у кнопки «Отправить» (S5-06).
     SendLater,
-    /// Ответ на письмо: окно письма с цитатой (S3-02).
+    /// Второе письмо — вторая вкладка: все замечания «Перед отправкой» (карта, вложение, внешние, сменённый адрес).
+    Checks,
+    /// Ответ в области чтения над письмом с цитатой (S3-02, S5-06б).
     Reply,
     /// Окно новой встречи с помощником планирования (своё окно, S3-05).
     Meeting,
@@ -75,7 +77,7 @@ enum Scene {
     Thread,
 }
 
-const SCENES: [Scene; 19] = [
+const SCENES: [Scene; 20] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -88,6 +90,7 @@ const SCENES: [Scene; 19] = [
     Scene::ContactEdit,
     Scene::Compose,
     Scene::SendLater,
+    Scene::Checks,
     Scene::Reply,
     Scene::Meeting,
     Scene::Vacation,
@@ -130,7 +133,8 @@ impl Scene {
             Scene::SignIn => "signin",
             Scene::Compose => "compose",
             Scene::SendLater => "send-later",
-            Scene::Reply => "reply",
+            Scene::Checks => "checks",
+            Scene::Reply => "reply-inline",
             Scene::Meeting => "meeting",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
@@ -161,8 +165,8 @@ pub struct Driver {
     live: bool,
     /// `--live` без учётной записи в окружении: снимок строки входа.
     signin: bool,
-    /// Окно письма, открытое до сцены `reply`: ответ — следующее окно.
-    composer: Option<EntityId>,
+    /// Последнее письмо до сцены (`checks`, `reply-inline`): готово, когда открылось следующее.
+    composer: Option<u64>,
     /// Окончание имён файлов: `-dark` для `--theme dark` (S5-01), иначе пусто.
     suffix: &'static str,
 }
@@ -283,25 +287,35 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 c.close_details(cx);
             });
             m.set_section(Section::Mail, cx);
-            // Окно — после кадра основного: не открывать его посреди отрисовки.
-            let mailer = cx.entity();
-            cx.defer(move |cx| mailer.update(cx, |m, cx| m.open_compose_screen(cx)));
+            // Как `mail.new`: письмо — вкладкой (поля ввода создаются после кадра).
+            let mut draft = crate::composer::scenes::compose_draft();
+            draft.attachments.push(crate::composer::scenes::sample_attachment());
+            m.open_compose(draft, cx);
         }
         Scene::SendLater => {
-            let Some(c) = m.compose.last() else { return Err("no compose window".into()) };
-            c.update(cx, |c, cx| c.toggle_later_menu(cx));
+            let Some(c) = m.compose.last().cloned() else { return Err("no compose tab".into()) };
+            // «Ждать ответа» включено — письмо изменено: у вкладки точка несохранённого.
+            c.update(cx, |c, cx| {
+                c.model.wait = Some(postman_core::marks::WAIT_DEFAULT);
+                c.toggle_later_menu(cx);
+            });
+        }
+        Scene::Checks => {
+            remember_composer(m, cx);
+            m.load_address_book(cx);
+            crate::composer::scenes::seed_book(&m.compose.book);
+            m.open_compose(crate::composer::scenes::checks_draft(), cx);
         }
         Scene::Reply => {
             // Демо — письмо с картинкой в тексте и цитатой Outlook; живой ящик — первое письмо.
             let live = m.screens.as_ref().is_some_and(|d| d.live);
             let i = if live { Some(0) } else { demo_row(m.list.read(cx), Scene::Attachments) };
             let Some(i) = i else { return Err("no message to reply to".into()) };
-            let composer = m.compose.last().map(|c| c.entity_id());
-            if let Some(d) = &mut m.screens {
-                d.composer = composer;
-            }
+            remember_composer(m, cx);
+            m.tabs.activate_kind(crate::tabs::TabKind::Mail);
+            m.set_section(Section::Mail, cx);
             m.list.update(cx, |l, cx| l.select(i, cx));
-            // Как `mail.reply`: окно — когда тело разобрано (ответ ждёт его сам), и не посреди отрисовки.
+            // Как `mail.reply`: ответ — когда тело разобрано (ответ ждёт его сам), и не посреди отрисовки.
             let mailer = cx.entity();
             cx.defer(move |cx| mailer.update(cx, |m, cx| m.respond(postman_compose::Mode::Reply, cx)));
         }
@@ -423,15 +437,21 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Calendar && (c.selected() || c.is_empty())
         }
         Scene::SignIn => m.live.signin.is_some(),
-        Scene::Compose => compose_hwnd(m, cx).is_some(),
-        Scene::SendLater => {
-            compose_hwnd(m, cx).is_some() && m.compose.last().is_some_and(|c| c.read(cx).later_menu_open())
+        Scene::Compose => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn()),
+        Scene::SendLater => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn() && c.read(cx).later_menu_open()),
+        Scene::Checks => {
+            // Новое письмо — вторая вкладка; замечания по адресатам считаются при отрисовке.
+            let before = m.screens.as_ref().and_then(|d| d.composer);
+            compose_tab(m, cx).is_some_and(|c| {
+                let c = c.read(cx);
+                Some(c.id) != before && c.drawn() && c.model.checks().count() >= 4
+            })
         }
         Scene::Reply => {
-            // Новое окно письма — ответ (окно сцены `compose` ещё открыто).
+            // Ответ — в области чтения над письмом (вкладки прошлых сцен ещё открыты).
             let before = m.screens.as_ref().and_then(|d| d.composer);
-            let reply = m.compose.last().is_some_and(|c| Some(c.entity_id()) != before);
-            reply && compose_hwnd(m, cx).is_some()
+            let reply = m.compose.inline_view().is_some_and(|c| Some(c.read(cx).id) != before && c.read(cx).drawn());
+            reply && m.tabs.is_active(crate::tabs::TabKind::Mail)
         }
         Scene::Meeting => meeting_hwnd(m, cx).is_some(),
         Scene::Contacts => {
@@ -509,7 +529,6 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     let name = format!("{}{}", scene.name(), d.suffix);
     let path = d.dir.join(format!("{name}.png"));
     let hwnd = match scene {
-        Scene::Compose | Scene::SendLater | Scene::Reply => compose_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no compose window")),
         Scene::Meeting => meeting_hwnd(m, cx).unwrap_or_else(|| fail(scene, "no meeting window")),
         _ => sys::window_id(window).unwrap_or_else(|e| fail(scene, &e)),
     };
@@ -533,9 +552,20 @@ fn capture(m: &Mailer, scene: Scene, window: &Window, cx: &mut Context<Mailer>) 
     .detach();
 }
 
-/// Окно письма открыто и нарисовано: его дескриптор.
-fn compose_hwnd(m: &Mailer, cx: &App) -> Option<isize> {
-    m.compose.last().and_then(|c| c.read(cx).screen_hwnd())
+/// Письмо в активной вкладке.
+fn compose_tab<'a>(m: &'a Mailer, _cx: &App) -> Option<&'a Entity<crate::composer::Composer>> {
+    match m.tabs.active().kind {
+        crate::tabs::TabKind::Compose(id) => m.compose.get(id),
+        _ => None,
+    }
+}
+
+/// Запомнить последнее письмо: сцена готова, когда откроется следующее.
+fn remember_composer(m: &mut Mailer, cx: &App) {
+    let last = m.compose.last().map(|c| c.read(cx).id);
+    if let Some(d) = &mut m.screens {
+        d.composer = last;
+    }
 }
 
 /// Окно встречи открыто, нарисовано, занятость получена: его дескриптор.

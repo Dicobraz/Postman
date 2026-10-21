@@ -71,7 +71,7 @@ async fn submit(c: &Client, subject: &str, release: Release) -> Submitted {
     let now = jiff::Timestamp::now().as_second();
     let raw = postman_compose::build(&d, now, &postman_compose::new_message_id(&d.from, now)).unwrap();
     let envelope = Envelope { mail_from: me, rcpt_to: vec![env("POSTMAN_STAND_USER3")] };
-    c.submit(raw, &identity.id, &envelope, &role(c, "drafts").await, &role(c, "sent").await, release).await.unwrap()
+    c.submit(raw, &identity.id, &envelope, &role(c, "drafts").await, &role(c, "sent").await, release, &[]).await.unwrap()
 }
 
 /// Письмо с темой во «Входящих» user3 (id сервера).

@@ -24,6 +24,8 @@ pub(crate) enum Pm {
     Text2,
     /// Подписи полей и кнопки панели письма, единые с «Отправить» (DESIGN «Новое письмо»).
     LabelAccent,
+    /// Кнопки панели форматирования письма: светлая — как подписи, тёмная — #8CC4F0 (DESIGN «Новое письмо»).
+    ToolbarAccent,
     /// Угроза (DESIGN: бледно-красная подложка с тёмно-красным текстом); красный — только безопасность.
     ThreatFg,
     ThreatBg,
@@ -66,6 +68,7 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::Text, "app.text", Color::argb(0xE400_0000), c(0xD2D2D2), Role::TextPrimary),
     (Pm::Text2, "app.text.secondary", Color::argb(0x9E00_0000), c(0xA6A6A6), Role::TextSecondary),
     (Pm::LabelAccent, "app.label.accent", c(0x0067C0), c(0x7DB8E8), Role::AccentText),
+    (Pm::ToolbarAccent, "app.toolbar.accent", c(0x0067C0), c(0x8CC4F0), Role::AccentText),
     (Pm::DeadlineFill, "app.deadline.fill", c(0xF8DEA8), c(0x6C5005), Role::CautionBg),
     (Pm::DeadlineOn, "app.deadline.on", c(0x5B4404), c(0xF7E2B8), Role::CautionFg),
     (Pm::Flag, "app.flag", c(0xC50F1F), c(0xD47C76), Role::TextPrimary),
@@ -131,6 +134,7 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::Text,
     Pm::Text2,
     Pm::LabelAccent,
+    Pm::ToolbarAccent,
     Pm::ThreatFg,
     Pm::ThreatBg,
     Pm::ThreatDot,

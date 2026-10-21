@@ -1275,7 +1275,8 @@ async fn send(
         }
         r => r,
     };
-    let sub = acc.client.submit(raw_message(draft)?, &sender.identity.id, &envelope, &drafts, &sent, release).await?;
+    let raw = raw_message(draft)?;
+    let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &draft.keywords).await?;
     if let Some(old) = replace {
         let (acc, id) = accounts.locate(old)?;
         acc.client.destroy_email(id).await?;
@@ -1361,7 +1362,7 @@ async fn save_draft(
         Some(old) => (None, Some(old)),
         None => (None, None),
     };
-    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same).await?;
+    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same, &draft.keywords).await?;
     if let Some(old) = other
         && let Ok((prev, old_id)) = accounts.locate(old)
     {
