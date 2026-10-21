@@ -114,6 +114,14 @@ enum Scene {
     Contacts,
     /// Форма правки первого контакта (демо).
     ContactEdit,
+    /// Модуль «Задачи» (S6-05): «Сегодня», карточка задачи с подзадачами и заметкой (демо).
+    Tasks,
+    /// «Сегодня» с выбранной просроченной задачей: «Просрочено» сверху, метка срока в карточке.
+    TasksToday,
+    /// Проект с прогрессом слева и его задачи.
+    TasksProject,
+    /// «Выполненные»: сегодня, вчера.
+    TasksDone,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
@@ -178,7 +186,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 66] = [
+const SCENES: [Scene; 70] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -211,6 +219,10 @@ const SCENES: [Scene; 66] = [
     Scene::Assistant,
     Scene::Contacts,
     Scene::ContactEdit,
+    Scene::Tasks,
+    Scene::TasksToday,
+    Scene::TasksProject,
+    Scene::TasksDone,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -308,6 +320,10 @@ impl Scene {
             Scene::MeetingBlue => "meeting-blue",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
+            Scene::Tasks => "tasks",
+            Scene::TasksToday => "tasks-today",
+            Scene::TasksProject => "tasks-project",
+            Scene::TasksDone => "tasks-done",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
@@ -727,6 +743,19 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
         }
         Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
+        Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
+            use postman_core::tasks::List;
+            m.set_section(Section::Tasks, cx);
+            m.tasks.update(cx, |t, cx| match scene {
+                Scene::TasksProject => t.set_nav(crate::tasks::Nav::Project(postman_demo::tasks::PROJECT.into()), cx),
+                Scene::TasksDone => t.set_nav(crate::tasks::Nav::List(List::Done), cx),
+                _ => {
+                    t.set_nav(crate::tasks::Nav::List(List::Today), cx);
+                    let title = if matches!(scene, Scene::Tasks) { postman_demo::tasks::MAIN } else { postman_demo::tasks::OVERDUE };
+                    t.select_title(title, cx);
+                }
+            });
+        }
         Scene::Shared => {
             m.set_section(Section::Mail, cx);
             let Some(id) = shared_inbox(m, cx) else { return Err("no shared mailbox in the folder tree".into()) };
@@ -1056,6 +1085,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Contacts && c.ready()
         }
         Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
+        Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
+            m.section == Section::Tasks && m.tasks.read(cx).ready()
+        }
         Scene::Vacation => {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);

@@ -275,7 +275,7 @@ impl Mailer {
             .child(caption("caption-close", glyph::CAPTION_CLOSE, WindowControlArea::Close, true))
     }
 
-    /// Рейл модулей: Почта, Календарь, Контакты; внизу — Настройки. Подписи — подсказкой.
+    /// Рейл модулей: Почта, Календарь, Контакты, Задачи; внизу — Настройки. Подписи — подсказкой.
     pub(crate) fn rail(&self, l: &Look, cx: &App) -> Div {
         let settings_tab = self.tabs.is_active(TabKind::Settings);
         // Команды кнопок рейла — для подсказки «Название (клавиша)» и KeyTips (S5-18).
@@ -283,6 +283,7 @@ impl Mailer {
             "frame-rail-mail" => "view.mail",
             "frame-rail-calendar" => "view.calendar",
             "frame-rail-contacts" => "view.contacts",
+            "frame-rail-tasks" => "view.tasks",
             _ => "settings.open",
         };
         let button = |id: &'static str, g: char, key: &'static str, on: bool, action: fn() -> Box<dyn Action>| {
@@ -318,6 +319,7 @@ impl Mailer {
             .child(button("rail-contacts", glyph::CONTACTS, "frame-rail-contacts", module(Section::Contacts), || {
                 Box::new(view::Contacts)
             }))
+            .child(button("rail-tasks", crate::tasks::g::TASKS, "frame-rail-tasks", module(Section::Tasks), || Box::new(view::Tasks)))
             .child(div().flex_1())
             .child(button("rail-settings", glyph::SETTINGS, "frame-rail-settings", settings_tab, || Box::new(settings::Open)))
     }

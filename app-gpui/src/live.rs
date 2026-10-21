@@ -307,6 +307,7 @@ impl Mailer {
         self.list.update(cx, |l, cx| l.forget_me(cx));
         // Контакты и справочник — с сервера (S4-02): поток синхронизации присылает их после входа.
         self.contacts.update(cx, |c, cx| c.go_live(cx));
+        self.tasks.update(cx, |t, cx| t.go_live(cx));
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));
@@ -403,6 +404,10 @@ impl Mailer {
         if plan.list {
             self.live.synced = true;
             self.list.update(cx, |l, cx| l.refresh(cx));
+            // Письма со сроком — задачи «Из почты» (S6-03).
+            if self.section == crate::Section::Tasks {
+                self.tasks.update(cx, |t, cx| t.letters_changed(cx));
+            }
         }
         for (ticket, ids) in plan.results {
             // Поиск командной строки (S5-10, `search.rs`) или фильтры «Все папки».
