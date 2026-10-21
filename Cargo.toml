@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "app-gpui"]
+members = ["crates/ir", "crates/smime", "crates/jmap", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "app-gpui"]
 
 [workspace.package]
 edition = "2024"
@@ -17,6 +17,7 @@ postman-demo = { path = "crates/demo" }
 postman-calendar = { path = "crates/calendar" }
 postman-core = { path = "crates/core" }
 postman-worker = { path = "crates/worker" }
+postman-smime = { path = "crates/smime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -54,6 +55,27 @@ opt-level = "s"
 [profile.release.package.pic-scale]
 opt-level = "s"
 
+# Проверка подписи S/MIME (S5-12, docs/SIZE.md «Воркер»): одна проверка на открытое письмо — холодный код, по
+# размеру (бюджет воркера ≤ 10 МиБ, решение №6). Кроме `der` и `const-oid` — только в воркере.
+[profile.release.package.postman-smime]
+opt-level = "s"
+[profile.release.package.cms]
+opt-level = "s"
+[profile.release.package.x509-cert]
+opt-level = "s"
+[profile.release.package.der]
+opt-level = "s"
+[profile.release.package.spki]
+opt-level = "s"
+[profile.release.package.rsa]
+opt-level = "s"
+[profile.release.package.crypto-bigint]
+opt-level = "s"
+[profile.release.package.crypto-primes]
+opt-level = "s"
+[profile.release.package.streebog]
+opt-level = "s"
+
 # «Не падать» (S2-03): вне тестов нет unwrap/expect/panic!; в тестах разрешены (clippy.toml).
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -71,3 +93,18 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# S/MIME (S5-12): хэши и длинная арифметика в отладочной сборке — с оптимизацией, иначе проверка письма на 60 МБ
+# в тестах песочницы упирается в сторожа воркера (8 с), а подписи RSA и ГОСТ в тестах идут секундами.
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.streebog]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.postman-smime]
+opt-level = 2

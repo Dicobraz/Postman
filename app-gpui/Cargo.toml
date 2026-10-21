@@ -18,6 +18,8 @@ alloc-count = []
 postman-ir.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
+# Типы итога проверки подписи S/MIME (S5-12); разбор — в воркере.
+postman-smime.workspace = true
 postman-demo.workspace = true
 postman-calendar.workspace = true
 gpui-kit = "0.7"

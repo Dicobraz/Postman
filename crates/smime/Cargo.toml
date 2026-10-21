@@ -1,0 +1,39 @@
+[package]
+name = "postman-smime"
+description = "S/MIME: разбор CMS и проверка подписи (RSA, ECDSA, ГОСТ Р 34.10-2012), цепочка к якорям. Без I/O."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# Тестовый набор: сертификаты, подписанты и сборка писем S/MIME для тестов воркера, ядра и демо-образцов.
+testkit = ["dep:p256", "dep:p384"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+# CMS (RFC 5652): решение владельца №13 — точная версия выпуска-кандидата.
+cms = { version = "=0.3.0-rc.0", default-features = false, features = ["std"] }
+der = { version = "0.8", features = ["std", "derive", "oid"] }
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
+spki = { version = "0.8", features = ["std"] }
+const-oid = { version = "0.10", features = ["db"] }
+# Открытые операции RSA (PKCS#1 v1.5, PSS); закрытых ключей здесь нет (RUSTSEC-2023-0071 не относится).
+rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["std", "encoding"] }
+crypto-bigint = { version = "0.7", default-features = false, features = ["alloc"] }
+digest = "0.11"
+sha1 = { version = "0.11", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
+streebog = "0.11"
+# Цепочка к якорям (ISC, решение №14); алгоритмы подписи — свои (`algs`), без ring и aws-lc.
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+pki-types = { package = "rustls-pki-types", version = "1.12", default-features = false, features = ["std"] }
+mail-parser = { version = "0.11", default-features = false }
+p256 = { version = "0.14", optional = true, features = ["ecdsa"] }
+p384 = { version = "0.14", optional = true, features = ["ecdsa"] }
+
+[dev-dependencies]
+postman-smime = { path = ".", features = ["testkit"] }
+
+[lints]
+workspace = true

@@ -13,7 +13,7 @@ pub mod mail {
         [
             Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete,
             Due, Remind, Wait, Expire, SelectAll, ClearSelection, SelectDown, SelectUp, ContextMenu, Move, Archive,
-            ReportPhishing
+            ReportPhishing, Signature
         ]
     );
 
@@ -164,6 +164,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.move", &["ctrl-shift-v"], LIST),
     cmd("mail.archive", &["backspace"], LIST),
     cmd("mail.report_phishing", &[], MAIL),
+    // Подпись S/MIME (S5-12): подробности — карточкой под шапкой; в Outlook — кнопка значка подписи, без клавиши.
+    cmd("mail.signature", &[], MAIL),
     // Не Outlook (DESIGN, «Беседы»): лента беседы и цитаты — кнопками; по письмам беседы — Ctrl+→ / Ctrl+←
     // (в поле поиска эти клавиши — по словам).
     cmd("thread.toggle", &[], MAIL),

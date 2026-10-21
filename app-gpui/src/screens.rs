@@ -69,6 +69,12 @@ enum Scene {
     InviteUpdated,
     InviteCancelled,
     InviteOutdated,
+    /// Подписанные письма демо (S5-12 Ф1), карточка подписи раскрыта: подпись RSA верна (корпоративный УЦ), ГОСТ Р
+    /// 34.10-2012 (проверено Postman, без СКЗИ), текст изменён после подписи, издатель не доверен.
+    Smime,
+    SmimeGost,
+    SmimeBad,
+    SmimeUntrusted,
     /// Поиск «Везде» (S5-10): результаты группами по папкам, подсветка, чипы «Уточнить».
     Search,
     /// Письмо из результатов поиска: подсветка в теме и тексте, строка «Совпадения».
@@ -156,7 +162,7 @@ enum Scene {
     Toasts,
 }
 
-const SCENES: [Scene; 54] = [
+const SCENES: [Scene; 58] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -171,6 +177,10 @@ const SCENES: [Scene; 54] = [
     Scene::InviteUpdated,
     Scene::InviteCancelled,
     Scene::InviteOutdated,
+    Scene::Smime,
+    Scene::SmimeGost,
+    Scene::SmimeBad,
+    Scene::SmimeUntrusted,
     Scene::Search,
     Scene::SearchLetter,
     Scene::SearchNext,
@@ -251,6 +261,10 @@ impl Scene {
             Scene::InviteUpdated => "invite-updated",
             Scene::InviteCancelled => "invite-cancelled",
             Scene::InviteOutdated => "invite-outdated",
+            Scene::Smime => "smime",
+            Scene::SmimeGost => "smime-gost",
+            Scene::SmimeBad => "smime-bad",
+            Scene::SmimeUntrusted => "smime-untrusted",
             Scene::Search => "search",
             Scene::SearchLetter => "search-letter",
             Scene::SearchNext => "search-next",
@@ -404,7 +418,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
         Scene::Letter => m.list.update(cx, |l, cx| l.select(0, cx)),
-        Scene::Attachments | Scene::Invite | Scene::LetterImage => {
+        Scene::Attachments | Scene::Invite | Scene::LetterImage | Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted => {
             let Some(i) = demo_row(m.list.read(cx), scene) else {
                 return Err("no such message in the first rows of the demo inbox".into());
             };
@@ -822,6 +836,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::InviteAnswered | Scene::InviteUpdated | Scene::InviteCancelled | Scene::InviteOutdated => {
             reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
         }
+        Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted => {
+            // Подпись проверена воркером, карточка раскрыта, тело разобрано.
+            let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
+            reading.is_some_and(|r| {
+                let done = r.smime.as_ref().is_some_and(|s| s.open && matches!(s.seal, crate::smime::Seal::Done(_)));
+                Some(r.row.id.as_str()) == target && r.doc.is_some() && done
+            })
+        }
         Scene::PreviewImage | Scene::PreviewPdf | Scene::PreviewZip | Scene::AttachMacro => {
             // Просмотр разобран воркером; у книги с макросами — и проверка для щитка в ленте.
             let blob = preview_blob(scene);
@@ -1008,6 +1030,15 @@ const THREAD_CHILD: &str = "chain1";
 
 /// Шаг ожидания сцены (перед проверкой готовности): то, что можно сделать только после фоновой работы.
 fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
+    if let Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted = scene {
+        // Подпись проверена — раскрыть карточку, как щелчок по значку.
+        m.reading.update(cx, |r, cx| {
+            let closed = r.reading.as_ref().and_then(|r| r.smime.as_ref()).is_some_and(|s| !s.open && matches!(s.seal, crate::smime::Seal::Done(_)));
+            if closed {
+                r.toggle_smime(cx);
+            }
+        });
+    }
     if let Scene::ThreadList = scene {
         // Беседы посчитаны — выбрать письмо под головой, как щелчок по нему.
         m.list.update(cx, |l, cx| {
@@ -1095,15 +1126,21 @@ fn preview_blob(scene: Scene) -> &'static str {
 /// для просмотра и картинкой `cid:`.
 fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
     let (offset, rows) = &list.rows;
-    let wanted = |a: &[postman_cache::AttachmentRow]| {
+    let wanted = |body: &postman_cache::BodyRow| {
+        let a = &body.attachments;
         let has = |blob: &str| a.iter().any(|a| a.blob_id == blob);
+        let signed = |kind: &str| body.blob_id.as_deref() == Some(format!("smime-{kind}").as_str());
         match scene {
+            Scene::Smime => signed("rsa"),
+            Scene::SmimeGost => signed("gost"),
+            Scene::SmimeBad => signed("bad"),
+            Scene::SmimeUntrusted => signed("untrusted"),
             Scene::Invite => a.iter().any(crate::attachments::is_invite),
             Scene::LetterImage => has("chart"),
             _ => has("pdf") && a.iter().any(|a| a.cid.is_some()),
         }
     };
-    rows.iter().position(|r| wanted(&postman_demo::body(&r.id).attachments)).map(|p| p + offset)
+    rows.iter().position(|r| wanted(&postman_demo::body(&r.id))).map(|p| p + offset)
 }
 
 /// PrintWindow — в фоновом потоке: он шлёт сообщения окну, и в потоке окна это повторный вход в оконную

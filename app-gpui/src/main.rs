@@ -61,6 +61,7 @@ mod states;
 mod notices;
 mod palette;
 mod search;
+mod smime;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -104,6 +105,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/states.ftl")),
     ("ru", include_str!("../i18n/ru/palette.ftl")),
     ("ru", include_str!("../i18n/ru/search.ftl")),
+    ("ru", include_str!("../i18n/ru/smime.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -127,6 +129,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/states.ftl")),
     ("en", include_str!("../i18n/en/palette.ftl")),
     ("en", include_str!("../i18n/en/search.ftl")),
+    ("en", include_str!("../i18n/en/smime.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {

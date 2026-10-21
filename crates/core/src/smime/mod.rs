@@ -1,0 +1,381 @@
+//! S/MIME в ядре (S5-12 Ф1, `docs/SMIME.md` §6.3): якоря доверия, подтверждение цепочки Windows, кэш итогов и
+//! сертификатов адресатов.
+//!
+//! Порядок: подпись проверяет воркер (чужие байты — только там, решение владельца №1); ядро передаёт ему якоря
+//! (`Root`, `AuthRoot`, `CA`, `Disallowed` Windows — данные машины, не письма) и для цепочки, которую воркер **уже
+//! довёл до доверенного корня**, подтверждает её в Windows: `CertGetCertificateChain` с проверкой отзыва (CRL/OCSP по
+//! адресам CA, не отправителя) и политика `CERT_CHAIN_POLICY_BASE` — решение №3. Требование к любому CA — адреса
+//! HTTP CDP/AIA в сертификатах; AD CS не предполагается.
+//!
+//! ГОСТ — движок выбирается сам (решение владельца 2026-10-21): есть сертифицированное СКЗИ (КриптоПро CSP, ViPNet
+//! CSP — провайдеры ГОСТ в CryptoAPI) — цепочку и отзыв ГОСТ подтверждает Windows тем же путём, что RSA; нет — только
+//! своя проверка Postman, отзыв «не проверен (ГОСТ без СКЗИ)». Подпись CMS в обоих случаях проверяет воркер (своя
+//! реализация); проверка подписи средствами СКЗИ — задача 12.1е, своя проверка CRL ГОСТ — 12.1д (`docs/SMIME.md` §8).
+//! Обнаружение СКЗИ — за трейтом [`GostProvider`], тесты подменяют оба режима.
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as sys;
+
+#[cfg(not(windows))]
+mod other;
+#[cfg(not(windows))]
+use other as sys;
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+use postman_cache::Cache;
+use postman_smime::{Report, Trust};
+use serde::{Deserialize, Serialize};
+
+/// Отзыв перепроверяется, если прошлой проверке больше суток (`docs/SMIME.md` §6.3, п. 4).
+pub const RECHECK_AFTER: i64 = 24 * 3600;
+
+/// Итог проверки отзыва и подтверждения цепочки в Windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Revocation {
+    /// Не отозван (ответ CRL или OCSP получен).
+    Good,
+    /// Сертификат цепочки отозван.
+    Revoked,
+    /// Не удалось проверить: CA недоступен или в сертификате нет адресов CRL/OCSP.
+    Unknown,
+    /// Windows не подтвердила цепочку, которую принял воркер (корень убран, политика, запрет): текст — для журнала.
+    Rejected(Confirm),
+    /// ГОСТ: Windows без СКЗИ подпись не проверяет, отзыв не проверен (12.1д — своя проверка CRL).
+    NotCheckedGost,
+    /// Не проверялся: цепочка не доверена, подпись недействительна или демо-ящик.
+    NotChecked,
+}
+
+/// Что сказала Windows о цепочке (кроме отзыва).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Confirm {
+    Untrusted,
+    Distrusted,
+    Expired,
+    WrongUsage,
+    BadSignature,
+    Failed,
+}
+
+/// Чем проверен ГОСТ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GostEngine {
+    /// Своя реализация Postman, без СКЗИ (не сертифицирована).
+    Postman,
+    /// Цепочку и отзыв подтвердило СКЗИ (имя провайдера CryptoAPI); подпись — Postman (12.1е).
+    Skzi(String),
+}
+
+/// Есть ли в системе СКЗИ с ГОСТ Р 34.10-2012 (провайдер CryptoAPI). Трейт — чтобы тесты подменяли оба режима.
+pub trait GostProvider: Send + Sync {
+    /// Имя провайдера ГОСТ («Crypto-Pro GOST R 34.10-2012 Cryptographic Service Provider»…) или `None`.
+    fn provider(&self) -> Option<String>;
+}
+
+/// Провайдеры CryptoAPI этой машины (перечисление — один раз на процесс).
+pub struct SystemGost;
+
+impl GostProvider for SystemGost {
+    fn provider(&self) -> Option<String> {
+        static FOUND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        FOUND
+            .get_or_init(|| {
+                let p = sys::gost_provider();
+                tracing::info!(provider = ?p, "GOST CSP detection");
+                p
+            })
+            .clone()
+    }
+}
+
+/// Заданный ответ (тесты, демо).
+pub struct FixedGost(pub Option<String>);
+
+impl GostProvider for FixedGost {
+    fn provider(&self) -> Option<String> {
+        self.0.clone()
+    }
+}
+
+/// Итог по письму: отчёт воркера, отзыв, когда проверено.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verdict {
+    pub report: Report,
+    /// DER цепочки (из отчёта воркера): для перепроверки отзыва без воркера.
+    pub chain: Vec<Vec<u8>>,
+    pub revocation: Revocation,
+    /// Unix-время последней проверки (отзыва — у доверенной цепочки).
+    pub checked_at: i64,
+    /// У подписи ГОСТ — чем проверено.
+    pub gost: Option<GostEngine>,
+}
+
+impl Verdict {
+    /// Отзыв пора перепроверить (доверенная цепочка, отзыв проверялся в Windows).
+    pub fn stale(&self, now: i64) -> bool {
+        let windows = !matches!(self.revocation, Revocation::NotChecked | Revocation::NotCheckedGost);
+        self.report.trusted() && windows && now - self.checked_at > RECHECK_AFTER
+    }
+}
+
+/// Сертификат адресата из проверенной подписи (для шифрования — Ф4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownCert {
+    pub fingerprint: String,
+    pub der: Vec<u8>,
+    pub not_after: i64,
+    /// OID шифров `SMIMECapabilities` последнего подписанного письма.
+    pub capabilities: Vec<String>,
+    pub seen_at: i64,
+    /// Откуда: «signed» — подпись входящего письма (Ф1); AddressBook, контакты, LDAP — Ф4–Ф5.
+    pub source: String,
+}
+
+/// Откуда якоря: Windows (живой ящик) или переданные (демо, тесты) — тогда без подтверждения в Windows.
+#[derive(Clone)]
+pub enum Anchors {
+    Windows,
+    Fixed(Arc<Trust>),
+}
+
+/// Окружение проверки: якоря и СКЗИ ГОСТ.
+#[derive(Clone)]
+pub struct Context {
+    pub anchors: Anchors,
+    pub gost: Arc<dyn GostProvider>,
+}
+
+impl Context {
+    /// Живой ящик: хранилища и провайдеры Windows.
+    pub fn system() -> Self {
+        Context { anchors: Anchors::Windows, gost: Arc::new(SystemGost) }
+    }
+
+    /// Демо и тесты: свои якоря, без Windows и без СКЗИ.
+    pub fn fixed(trust: Trust) -> Self {
+        Context { anchors: Anchors::Fixed(Arc::new(trust)), gost: Arc::new(FixedGost(None)) }
+    }
+}
+
+static WINDOWS_TRUST: Mutex<Option<Arc<Trust>>> = Mutex::new(None);
+
+/// Отпечатки корпоративных CA (SHA-256, hex) сверх хранилищ групповой политики: `POSTMAN_CORPORATE_CA` через `;` —
+/// MDM ставит переменную машины [проверить на стенде MDM].
+fn corporate_extra() -> Vec<String> {
+    std::env::var("POSTMAN_CORPORATE_CA")
+        .unwrap_or_default()
+        .split([';', ','])
+        .map(|s| s.trim().replace(':', "").to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+impl Anchors {
+    /// Якоря (из хранилищ Windows — один раз на процесс; [`Anchors::reload`] — заново).
+    pub fn trust(&self) -> Arc<Trust> {
+        match self {
+            Anchors::Fixed(t) => t.clone(),
+            Anchors::Windows => {
+                let mut cached = WINDOWS_TRUST.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(t) = cached.as_ref() {
+                    return t.clone();
+                }
+                let t = Arc::new(sys::load_trust(&corporate_extra()));
+                tracing::info!(roots = t.roots.len(), intermediates = t.intermediates.len(), disallowed = t.disallowed.len(), "S/MIME trust anchors loaded");
+                *cached = Some(t.clone());
+                t
+            }
+        }
+    }
+
+    /// Хранилища изменились (импорт сертификата): перечитать при следующей проверке.
+    pub fn reload() {
+        *WINDOWS_TRUST.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    fn windows(&self) -> bool {
+        matches!(self, Anchors::Windows)
+    }
+}
+
+/// Подтвердить цепочку в Windows и проверить отзыв (доверенная цепочка; ГОСТ — только при СКЗИ).
+fn revocation(report: &Report, chain: &[Vec<u8>], ctx: &Context, skzi: Option<&str>) -> Revocation {
+    if !report.trusted() || chain.is_empty() {
+        return Revocation::NotChecked;
+    }
+    if report.is_gost() && skzi.is_none() {
+        return Revocation::NotCheckedGost;
+    }
+    if !ctx.anchors.windows() {
+        return Revocation::NotChecked;
+    }
+    sys::confirm(chain, None)
+}
+
+/// Движок ГОСТ и отзыв для отчёта.
+fn confirm(report: &Report, chain: &[Vec<u8>], ctx: &Context) -> (Revocation, Option<GostEngine>) {
+    if !report.is_gost() {
+        return (revocation(report, chain, ctx, None), None);
+    }
+    let skzi = ctx.gost.provider();
+    let rev = revocation(report, chain, ctx, skzi.as_deref());
+    let engine = match skzi {
+        Some(name) if report.trusted() => GostEngine::Skzi(name),
+        _ => GostEngine::Postman,
+    };
+    (rev, Some(engine))
+}
+
+/// Итог по письму из кэша: свежий — как есть; с устаревшим отзывом — перепроверка отзыва в Windows (без воркера).
+/// `None` — проверки не было (нужны байты письма и воркер).
+pub fn cached(cache: &Cache, id: &str, ctx: &Context, now: i64) -> Option<Verdict> {
+    let mut v: Verdict = cache.smime(id).ok().flatten()?;
+    if v.stale(now) {
+        (v.revocation, v.gost) = confirm(&v.report, &v.chain, ctx);
+        v.checked_at = now;
+        store(cache, id, &v);
+    }
+    v.report.chain = v.chain.clone();
+    Some(v)
+}
+
+fn store(cache: &Cache, id: &str, v: &Verdict) {
+    if let Err(e) = cache.set_smime(id, v) {
+        tracing::warn!("S/MIME verdict is not cached: {e}");
+    }
+}
+
+/// Отчёт воркера → итог: подтверждение в Windows, запись в кэш, сертификат подписанта — в сертификаты адресата.
+pub fn finish(cache: &Cache, id: &str, report: Report, ctx: &Context, now: i64) -> Verdict {
+    let chain = report.chain.clone();
+    let (revocation, gost) = confirm(&report, &chain, ctx);
+    let v = Verdict { report, chain, revocation, checked_at: now, gost };
+    if v.report.status.signature_ok() || matches!(v.report.status, postman_smime::Status::Invalid) {
+        store(cache, id, &v);
+    }
+    if v.report.trusted() && v.report.address_ok && !matches!(v.revocation, Revocation::Revoked | Revocation::Rejected(_)) {
+        remember(cache, &v, now);
+    }
+    v
+}
+
+/// Сертификат подписанта — в кэш сертификатов адресата (по адресу «От», совпавшему с сертификатом).
+fn remember(cache: &Cache, v: &Verdict, now: i64) {
+    let (Some(info), Some(der)) = (v.report.certs.first(), v.chain.first()) else { return };
+    let address = v.report.from.as_str();
+    let mut list: Vec<KnownCert> = cache.certs(address).ok().flatten().unwrap_or_default();
+    list.retain(|c| c.fingerprint != info.fingerprint);
+    list.push(KnownCert {
+        fingerprint: info.fingerprint.clone(),
+        der: der.clone(),
+        not_after: info.not_after,
+        capabilities: v.report.capabilities.clone(),
+        seen_at: now,
+        source: "signed".into(),
+    });
+    if let Err(e) = cache.set_certs(address, &list) {
+        tracing::warn!("recipient certificate is not cached: {e}");
+    }
+}
+
+/// Сертификаты адресата, собранные из подписей (Ф4 выберет из них сертификат шифрования).
+pub fn known_certs(cache: &Cache, address: &str) -> Vec<KnownCert> {
+    cache.certs(address).ok().flatten().unwrap_or_default()
+}
+
+#[cfg(windows)]
+pub use windows::confirm_with_root;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use postman_smime::testkit::{self, Head, NOW, Pki, Sign};
+
+    fn letter_report(pki: &Pki) -> Report {
+        let m = testkit::signed_letter(
+            &Head { from: "user1@itt.test", to: "me@itt.test", subject: "s", date: "Wed, 21 Oct 2026 10:00:00 +0300" },
+            "<p>x</p>",
+            &pki.user,
+            &pki.user_key,
+            &[&pki.root],
+            &Sign::default(),
+        );
+        postman_smime::verify(&m, &pki.trust(), NOW)
+    }
+
+    /// Повторное открытие — из кэша без воркера; сертификат подписанта запомнен по адресу.
+    #[test]
+    fn verdict_is_cached_and_certificate_remembered() {
+        let cache = Cache::open_in_memory().unwrap();
+        let pki = Pki::rsa("Root", "User", "user1@itt.test");
+        let anchors = Context::fixed(pki.trust());
+        assert!(cached(&cache, "m1", &anchors, NOW as i64).is_none());
+        let v = finish(&cache, "m1", letter_report(&pki), &anchors, NOW as i64);
+        assert_eq!(v.report.status, postman_smime::Status::Valid);
+        assert_eq!(v.revocation, Revocation::NotChecked, "переданные якоря — без Windows");
+        let again = cached(&cache, "m1", &anchors, NOW as i64 + 10).unwrap();
+        assert_eq!(again.report.status, v.report.status);
+        assert_eq!(again.report.chain, v.chain, "цепочка — из кэша");
+        let certs = known_certs(&cache, "USER1@itt.test");
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].der, pki.user.der);
+        // Повтор не дублирует сертификат.
+        finish(&cache, "m2", letter_report(&pki), &anchors, NOW as i64);
+        assert_eq!(known_certs(&cache, "user1@itt.test").len(), 1);
+    }
+
+    #[test]
+    fn stale_only_for_trusted_non_gost() {
+        let pki = Pki::rsa("Root", "User", "user1@itt.test");
+        let report = letter_report(&pki);
+        let v = Verdict { report, chain: vec![], revocation: Revocation::Unknown, checked_at: 0, gost: None };
+        assert!(v.stale(RECHECK_AFTER + 1));
+        assert!(!v.stale(RECHECK_AFTER - 1));
+        let mut v2 = v.clone();
+        v2.revocation = Revocation::NotChecked;
+        assert!(!v2.stale(RECHECK_AFTER * 10));
+    }
+
+    /// Запрещённый сертификат (Disallowed) — «не доверен» уже в воркере: Windows не спрашиваем.
+    #[test]
+    fn disallowed_is_not_confirmed() {
+        let cache = Cache::open_in_memory().unwrap();
+        let pki = Pki::rsa("Root", "User", "user1@itt.test");
+        let mut trust = pki.trust();
+        trust.disallowed.push(pki.root.der.clone());
+        let m = testkit::signed_letter(
+            &Head { from: "user1@itt.test", to: "me@itt.test", subject: "s", date: "Wed, 21 Oct 2026 10:00:00 +0300" },
+            "<p>x</p>",
+            &pki.user,
+            &pki.user_key,
+            &[&pki.root],
+            &Sign::default(),
+        );
+        let report = postman_smime::verify(&m, &trust, NOW);
+        let v = finish(&cache, "m", report, &Context::system(), NOW as i64);
+        assert_eq!(v.report.status, postman_smime::Status::Distrusted);
+        assert_eq!(v.revocation, Revocation::NotChecked);
+        assert!(known_certs(&cache, "user1@itt.test").is_empty());
+    }
+
+    /// ГОСТ: движок по СКЗИ (провайдер подменён) — без СКЗИ «Postman», отзыв не проверен; с СКЗИ — его имя. Обычная
+    /// подпись RSA — без движка ГОСТ.
+    #[test]
+    fn gost_engine_follows_the_provider() {
+        let cache = Cache::open_in_memory().unwrap();
+        let set = postman_smime::oid::TC26_256_A;
+        let pki = Pki::build(testkit::Key::gost("r", set), testkit::Key::gost("u", set), "ГОСТ Корень", "Сидоров", "user1@itt.test");
+        let without = Context::fixed(pki.trust());
+        let v = finish(&cache, "g1", letter_report(&pki), &without, NOW as i64);
+        assert_eq!((v.gost, v.revocation), (Some(GostEngine::Postman), Revocation::NotCheckedGost));
+        let with = Context { gost: Arc::new(FixedGost(Some("Crypto-Pro GOST R 34.10-2012 CSP".into()))), ..Context::fixed(pki.trust()) };
+        let v = finish(&cache, "g2", letter_report(&pki), &with, NOW as i64);
+        assert_eq!(v.gost, Some(GostEngine::Skzi("Crypto-Pro GOST R 34.10-2012 CSP".into())));
+        assert_eq!(v.revocation, Revocation::NotChecked, "переданные якоря — Windows не спрашиваем");
+        let rsa = Pki::rsa("Root", "User", "user1@itt.test");
+        assert_eq!(finish(&cache, "r", letter_report(&rsa), &with, NOW as i64).gost, None);
+    }
+}

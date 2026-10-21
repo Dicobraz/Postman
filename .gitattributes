@@ -2,3 +2,8 @@
 *.pdf binary
 *.xlsm binary
 *.zip binary
+# S/MIME (S5-12): подпись считается над точными байтами письма — концы строк не трогать.
+*.eml binary
+*.pem binary
+*.pk8 binary
+*.der binary
