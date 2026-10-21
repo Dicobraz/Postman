@@ -709,4 +709,14 @@ mod tests {
         let info = png::Decoder::new(std::io::Cursor::new(data)).read_info().unwrap();
         assert_eq!((info.info().width, info.info().height), CHART_SIZE);
     }
+
+    /// Приглашение демо — на завтра, тот же размер файла; фиксированной даты в нём нет.
+    #[test]
+    fn demo_invite_is_tomorrow() {
+        let ics = String::from_utf8(invite()).unwrap();
+        assert_eq!(ics.len(), INVITE.len());
+        assert!(!ics.contains(INVITE_DAY));
+        let t = jiff::Zoned::now().date().tomorrow().unwrap();
+        assert!(ics.contains(&format!("DTSTART;TZID=Russian Standard Time:{:04}{:02}{:02}T110000", t.year(), t.month(), t.day())));
+    }
 }
