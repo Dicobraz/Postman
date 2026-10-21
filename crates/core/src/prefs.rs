@@ -235,6 +235,18 @@ pub struct Lifecycle {
     pub expire_codes_hours: u16,
     /// Просроченный срок — наверх списка.
     pub overdue_first: bool,
+    /// Куда уходят письма, когда наступает «Исчезнет» (свой срок и коды подтверждения).
+    pub expire_to: ExpireTo,
+}
+
+/// Куда уходит письмо, у которого наступило «Исчезнет».
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpireTo {
+    Archive,
+    /// В «Удалённые» (по умолчанию: коды подтверждения — в корзину, макет настроек).
+    #[default]
+    Trash,
 }
 
 /// Пределы сроков: дни ожидания и архива, часы кодов.
@@ -251,6 +263,7 @@ impl Default for Lifecycle {
             expire_codes: true,
             expire_codes_hours: 24,
             overdue_first: true,
+            expire_to: ExpireTo::Trash,
         }
     }
 }

@@ -124,7 +124,7 @@ pub(crate) struct Model {
     pub(crate) body: String,
     /// Метка «Конфиденциально» (`marks::CONFIDENTIAL`; шифрования нет — S5-12).
     pub(crate) confidential: bool,
-    /// «Ждать ответа · N дней»: ключевое слово со сроком (`marks::wait_keyword`).
+    /// «Ждать ответа · N дней»: общее слово `pm.wait` и слово со сроком (`marks::wait_keyword`, S5-04).
     pub(crate) wait: Option<u8>,
     /// Категория письма — её ключевое слово (`pm.cat.<id>`).
     pub(crate) category: Option<String>,
@@ -191,6 +191,8 @@ impl Model {
             } else if let Some(due) = marks::parse_wait(k) {
                 let days = today.until(due).ok().map_or(1, |s| s.get_days()).clamp(1, 99);
                 wait = u8::try_from(days).ok();
+            } else if k.eq_ignore_ascii_case(marks::WAIT) {
+                // Общее слово «Ждём ответа» (S5-04) — ставится заново вместе со сроком.
             } else if matches!(labels::classify(k), Keyword::Category(_) | Keyword::Thunderbird(_)) {
                 category.get_or_insert_with(|| labels::normalize(k));
             } else {
@@ -318,6 +320,7 @@ impl Model {
             out.push(marks::CONFIDENTIAL.to_owned());
         }
         if let Some(due) = self.wait.and_then(|d| marks::wait_due(today, d)) {
+            out.push(marks::WAIT.to_owned());
             out.push(marks::wait_keyword(due));
         }
         out
@@ -1325,9 +1328,9 @@ mod tests {
         m.wait = Some(3);
         m.category = Some("pm.cat.clients".into());
         let today: jiff::civil::Date = "2026-10-21".parse().unwrap();
-        assert_eq!(m.keywords(today), ["pm.cat.clients", "pm.conf", "pm.wait.2026-10-24"]);
+        assert_eq!(m.keywords(today), ["pm.cat.clients", "pm.conf", "pm.wait", "pm.wait.2026-10-24"]);
         let d = m.draft(false).unwrap();
-        assert_eq!(d.keywords.len(), 3);
+        assert_eq!(d.keywords.len(), 4);
         let back = Model::new(
             Draft { keywords: [d.keywords.clone(), vec!["$label9".into(), "other".into()]].concat(), ..d },
             None,

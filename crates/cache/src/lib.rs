@@ -231,6 +231,41 @@ pub struct Recipients {
     pub cc: Vec<String>,
 }
 
+/// Правка письма до ответа сервера (жизненный цикл, S5-04): ключевые слова и папки — поставить (`true`) или
+/// снять; `$seen` и `$flagged` — в свои поля ([`EmailRow::set_keyword`]). Папки — ключи кэша.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Patch {
+    pub id: String,
+    pub keywords: Vec<(String, bool)>,
+    pub mailboxes: Vec<(String, bool)>,
+}
+
+impl Patch {
+    pub fn is_empty(&self) -> bool {
+        self.keywords.is_empty() && self.mailboxes.is_empty()
+    }
+
+    /// Применить к строке письма. Последней папки письмо не лишается: в JMAP письмо всегда в какой-то папке.
+    pub fn apply(&self, row: &mut EmailRow) {
+        for (k, on) in &self.keywords {
+            row.set_keyword(k, *on);
+        }
+        let mut boxes = row.mailbox_ids.clone();
+        for (m, on) in &self.mailboxes {
+            match (*on, boxes.iter().position(|b| b == m)) {
+                (true, None) => boxes.push(m.clone()),
+                (false, Some(i)) => {
+                    boxes.remove(i);
+                }
+                _ => {}
+            }
+        }
+        if !boxes.is_empty() {
+            row.mailbox_ids = boxes;
+        }
+    }
+}
+
 /// Где перебирать письма ([`Cache::scan`]): одна папка (новые сверху) или все письма аккаунта (`None` — основного).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scan {
@@ -497,6 +532,42 @@ impl Cache {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Правки писем одной записью (S5-04): папки, индексы и счётчики — как при записи с сервера. Ответ — новые
+    /// строки; писем, которых нет, в нём нет.
+    pub fn patch_emails(&self, patches: &[Patch]) -> Result<Vec<EmailRow>> {
+        let tx = self.db.begin_write()?;
+        let mut out = Vec::new();
+        {
+            let mut email = tx.open_table(EMAIL)?;
+            let mut by = tx.open_table(BY_MAILBOX)?;
+            let mut count = tx.open_table(COUNT)?;
+            let mut by_kw = tx.open_table(BY_KEYWORD)?;
+            let mut kw_count = tx.open_table(KEYWORD_COUNT)?;
+            for p in patches.iter().filter(|p| !p.is_empty()) {
+                let old: Option<EmailRow> = email.get(p.id.as_str())?.map(|v| dec(v.value())).transpose()?;
+                let Some(old) = old else { continue };
+                let mut row = old.clone();
+                p.apply(&mut row);
+                for mb in old.mailbox_ids.iter().filter(|m| !row.mailbox_ids.contains(m)) {
+                    if by.remove((mb.as_str(), -old.received_at, old.id.as_str()))?.is_some() {
+                        add(&mut count, mb, -1)?;
+                    }
+                }
+                for mb in row.mailbox_ids.iter().filter(|m| !old.mailbox_ids.contains(m)) {
+                    if by.insert((mb.as_str(), -row.received_at, row.id.as_str()), ())?.is_none() {
+                        add(&mut count, mb, 1)?;
+                    }
+                }
+                index_keywords(&mut by_kw, &mut kw_count, &old, false)?;
+                index_keywords(&mut by_kw, &mut kw_count, &row, true)?;
+                email.insert(row.id.as_str(), enc(&row)?.as_slice())?;
+                out.push(row);
+            }
+        }
+        tx.commit()?;
+        Ok(out)
     }
 
     /// Перенести письмо из ящика `from` в `to` (удаление в «Удалённые» — до ответа сервера, чтобы список
@@ -826,6 +897,34 @@ impl Cache {
         Ok(by.range((mailbox_id, i64::MIN, "")..=(mailbox_id, -since, MAX_ID))?.count())
     }
 
+    /// Письма со словом, которое начинается с `prefix` (`pm.due` — и `pm.due.2026-10-24`), в папке или во всех
+    /// папках аккаунта; до `limit` писем, без повторов (S5-04: сроки жизненного цикла — слова с датой).
+    pub fn keyword_prefix(&self, prefix: &str, mailbox: &str, limit: usize) -> Result<Vec<EmailRow>> {
+        let tx = self.db.begin_read()?;
+        let by = tx.open_table(BY_KEYWORD)?;
+        let email = tx.open_table(EMAIL)?;
+        let p = prefix.to_ascii_lowercase();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for r in by.range((p.as_str(), "", i64::MIN, "")..)? {
+            let (key, _) = r?;
+            let (kw, place, _, id) = key.value();
+            if !kw.starts_with(p.as_str()) {
+                break;
+            }
+            if place != mailbox || !seen.insert(id.to_owned()) {
+                continue;
+            }
+            if let Some(v) = email.get(id)? {
+                out.push(dec(v.value())?);
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Окно писем с ключевым словом в папке (или во всех папках аккаунта), новые сверху.
     pub fn keyword_page(&self, keyword: &str, mailbox: &str, offset: usize, limit: usize) -> Result<Vec<EmailRow>> {
         let tx = self.db.begin_read()?;
@@ -931,6 +1030,38 @@ mod tests {
 
     fn ids(rows: Vec<EmailRow>) -> Vec<String> {
         rows.into_iter().map(|e| e.id).collect()
+    }
+
+    /// Правка жизненного цикла (S5-04): перенос, «непрочитано», слова — одной записью, со счётчиками и индексами.
+    #[test]
+    fn patch_moves_and_marks() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut a = email("a", 10, &["in"]);
+        a.seen = true;
+        c.upsert_emails(&[a, email("b", 20, &["in"])]).unwrap();
+        let hide = Patch {
+            id: "a".into(),
+            keywords: vec![("pm.remind".into(), true), ("pm.remind.2026-10-29t0900".into(), true)],
+            mailboxes: vec![("in".into(), false), ("arch".into(), true)],
+        };
+        let rows = c.patch_emails(&[hide, Patch { id: "zz".into(), ..Patch::default() }]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((c.count("in").unwrap(), c.count("arch").unwrap()), (1, 1));
+        assert_eq!(c.keyword_count("pm.remind", "arch").unwrap(), 1);
+        assert_eq!(ids(c.keyword_page("pm.remind", &all_folders(None), 0, 10).unwrap()), ["a"]);
+        let back = Patch {
+            id: "a".into(),
+            keywords: vec![("pm.remind.2026-10-29t0900".into(), false), ("$seen".into(), false)],
+            mailboxes: vec![("arch".into(), false), ("in".into(), true)],
+        };
+        let row = c.patch_emails(&[back]).unwrap().pop().unwrap();
+        assert!(!row.seen && row.keywords == ["pm.remind"]);
+        assert_eq!(ids(c.page("in", 0, 10).unwrap()), ["b", "a"]);
+        assert_eq!((c.count("in").unwrap(), c.count("arch").unwrap()), (2, 0));
+        // Последней папки письмо не лишается.
+        let mut r = email("x", 1, &["in"]);
+        Patch { id: "x".into(), keywords: vec![], mailboxes: vec![("in".into(), false)] }.apply(&mut r);
+        assert_eq!(r.mailbox_ids, ["in"]);
     }
 
     /// Фильтры (S5-03): перебор папки и аккаунта с получателями, группы по датам без чтения строк.
