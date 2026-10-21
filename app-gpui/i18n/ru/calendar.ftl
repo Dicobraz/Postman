@@ -152,6 +152,7 @@ meeting-legend-busy = Занято
 meeting-legend-unknown = Неизвестно
 meeting-legend-external = Внешний
 meeting-not-counted-n = Не учтены: { $n } — занятость неизвестна
+meeting-slots-hint = { $prev } { $next } — по свободным окнам, { $pick } — выбрать
 meeting-participants-n = Участники · { $n }
 meeting-everyone = Все участники
 meeting-known = { $known } из { $n } с данными о занятости

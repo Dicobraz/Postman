@@ -579,7 +579,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "compose.bullets" | "compose.numbers" => BULLETS,
         "compose.link" => LINK,
         "compose.expand" => EXPAND,
-        "contacts.new" => ADD_CONTACT,
+        "contacts.new" | "meeting.add_person" => ADD_CONTACT,
         "contacts.edit" => EDIT,
         "contacts.copy_address" => COPY,
         "invite.accept" => CHECK,
@@ -596,10 +596,21 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
 }
 
 /// Команды, которых в палитре нет: сама палитра, клавиши с данными (категория — клавишей 1–9) и шаги по списку и
-/// вложениям — это клавиши, а не действия.
+/// вложениям и окнам встречи — это клавиши, а не действия.
 fn hidden(id: &str) -> bool {
-    const STEPS: [&str; 8] =
-        ["mail.next", "mail.prev", "mail.first", "mail.last", "mail.page_down", "mail.page_up", "attach.next", "attach.prev"];
+    const STEPS: [&str; 11] = [
+        "mail.next",
+        "mail.prev",
+        "mail.first",
+        "mail.last",
+        "mail.page_down",
+        "mail.page_up",
+        "attach.next",
+        "attach.prev",
+        "meeting.next_slot",
+        "meeting.prev_slot",
+        "meeting.pick_slot",
+    ];
     id.starts_with("palette.") || id == "mail.categorize" || STEPS.contains(&id)
 }
 

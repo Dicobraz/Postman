@@ -47,7 +47,8 @@ pub(crate) enum Pm {
     EventBgTentative,
     EventBorder,
     EventBorderSelected,
-    /// Занятость (помощник планирования): занят, под вопросом, нет на месте, нет данных, нерабочее время.
+    /// Занятость (помощник планирования): занят, под вопросом, нет на месте (серый, S5-23), нет данных, нерабочее
+    /// время. «Нет данных» и внешний — во встрече заливкой с прозрачностью (макет встречи).
     FbBusy,
     FbTentative,
     FbOof,
@@ -95,12 +96,12 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::EventBorderSelected, "app.event.border.selected", c(0x1B4F8A), c(0xAFD1FC), Role::TextPrimary),
     (Pm::FbBusy, "app.fb.busy", c(0x2F6DB5), c(0x4C82C4), Role::AccentFill),
     (Pm::FbTentative, "app.fb.tentative", c(0x9CC3EE), c(0x2F4C6E), Role::AccentSubtle),
-    (Pm::FbOof, "app.fb.oof", c(0x7B3FA0), c(0x9466B0), Role::TextPrimary),
-    (Pm::FbUnknown, "app.fb.unknown", c(0xC8C8C8), c(0x5A5A5A), Role::TextDisabled),
+    (Pm::FbOof, "app.fb.oof", c(0x6E6E6E), c(0x4F4F4F), Role::TextPrimary),
+    (Pm::FbUnknown, "app.fb.unknown", c(0xB7B7B7), c(0x727272), Role::TextDisabled),
     (Pm::FbOff, "app.fb.off", c(0xF0F0F0), c(0x2C2C2C), Role::BgBase),
     (Pm::FbMute, "app.fb.mute", c(0xE3E3E3), c(0x3A3A3A), Role::TextDisabled),
     (Pm::FbFreeOn, "app.fb.free.on", c(0xFFFFFF), c(0xFFFFFF), Role::AccentOn),
-    (Pm::FbExt, "app.fb.ext", c(0x009F99), c(0x00837E), Role::TextSecondary),
+    (Pm::FbExt, "app.fb.ext", c(0x177CAA), c(0x5FA8D3), Role::TextSecondary),
     (Pm::ConflictFg, "app.conflict.fg", c(0x5C2E91), c(0xDFC1EE), Role::TextPrimary),
     (Pm::ConflictBg, "app.conflict.bg", c(0xF3EEFA), c(0x3F2D47), Role::LayerPanel),
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),

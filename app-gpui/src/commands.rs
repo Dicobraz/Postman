@@ -72,7 +72,7 @@ pub mod calendar {
 
 /// Вкладка встречи (S3-05, вкладкой — S5-11).
 pub mod meeting {
-    gpui_kit::actions!(meeting, [Send, Close]);
+    gpui_kit::actions!(meeting, [Send, Close, NextSlot, PrevSlot, PickSlot, AddPerson]);
 }
 
 /// Контакты (S5-11): новый, изменить, удалить, написать, встреча, копировать адрес.
@@ -121,6 +121,8 @@ const MAILER: Option<&str> = Some("Mailer");
 const COMPOSER: Option<&str> = Some("Composer || (Composer > Input)");
 /// Вкладка встречи, как окно письма.
 const MEETING: Option<&str> = Some("Meeting || (Meeting > Input)");
+/// Вкладка встречи вне полей ввода (S5-23): ←/→ и Enter в поле — курсор и ввод, а не окна помощника.
+const MEETING_GRID: Option<&str> = Some("Meeting && !Input");
 /// Палитра команд, в том числе её поле ввода: ↑/↓, Enter, Esc поля — клавиши палитры (как у письма, `bind` — после
 /// `gpui_kit::init`).
 const PALETTE: Option<&str> = Some("Palette || (Palette > Input)");
@@ -245,6 +247,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("compose.discard", &[], COMPOSER),
     cmd("meeting.send", &["ctrl-enter"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
+    // Не Outlook (там подбор — мышью): ←/→ — по общим свободным окнам, Enter — встреча в окно (S5-23).
+    cmd("meeting.next_slot", &["right"], MEETING_GRID),
+    cmd("meeting.prev_slot", &["left"], MEETING_GRID),
+    cmd("meeting.pick_slot", &["enter"], MEETING_GRID),
+    // Outlook: Ctrl+Shift+B — «Адресная книга»; здесь — к полю участников с подсказками справочника.
+    cmd("meeting.add_person", &["ctrl-shift-b"], MEETING),
     // Контакты (S5-11): Outlook — Ctrl+Shift+C новый контакт; F2 — правка, Delete — удалить (после «Да»).
     cmd("contacts.new", &["ctrl-shift-c"], CONTACTS_ANY),
     cmd("contacts.edit", &["f2"], CONTACTS),
