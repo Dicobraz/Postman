@@ -43,7 +43,6 @@ pub(crate) struct Live {
     pending_store: bool,
     index: Index,
     extractor: Option<Extractor>,
-    search: Option<LiveSearch>,
     next_ticket: u64,
     /// Последняя показанная ошибка (её род): тот же род подряд (сервер недоступен при каждом опросе) — без нового
     /// тоста, пока сервер снова не ответит.
@@ -73,18 +72,10 @@ impl Live {
         self.next_ticket
     }
 
-    /// Поиск сброшен (другая папка): поздний ответ сервера список не трогает.
-    pub(crate) fn clear_search(&mut self) {
-        self.search = None;
+    /// Индекс поиска учётной записи (демо и до входа — нет: поиск по кэшу).
+    pub(crate) fn index(&self) -> Index {
+        self.index.clone()
     }
-}
-
-/// Поиск в живом ящике: локальный индекс и сервер, результаты — по мере ответа.
-struct LiveSearch {
-    ticket: u64,
-    query: String,
-    local: Option<Vec<String>>,
-    server: Option<Vec<String>>,
 }
 
 /// Что сделать с экраном по пачке событий синхронизации (чистая функция — тестируется без окна).
@@ -232,7 +223,7 @@ pub(crate) fn bench_store(warm: bool, keep: bool, start: &mut std::time::Instant
 }
 
 /// Поиск по своим данным (в фоне): индекс, пока он пуст (строится) — кэш.
-fn local_search(index: &Index, cache: &Cache, query: &str, mailbox: Option<&str>) -> Vec<String> {
+pub(crate) fn local_search(index: &Index, cache: &Cache, query: &str, mailbox: Option<&str>) -> Vec<String> {
     match index.as_ref().filter(|i| !i.is_empty()) {
         Some(i) => {
             // Строки, записанные синхронизацией, видны в поиске после коммита.
@@ -408,10 +399,8 @@ impl Mailer {
             self.list.update(cx, |l, cx| l.refresh(cx));
         }
         for (ticket, ids) in plan.results {
-            if let Some(s) = self.live.search.as_mut().filter(|s| s.ticket == ticket) {
-                s.server = Some(ids);
-                self.show_live_results(cx);
-            } else if self.live.filter_ticket == Some(ticket) {
+            // Поиск командной строки (S5-10, `search.rs`) или фильтры «Все папки».
+            if !self.on_search_results(ticket, &ids, cx) && self.live.filter_ticket == Some(ticket) {
                 // Фильтры «Все папки»: письма сервера уже в кэше — список пересчитывается с ними.
                 self.list.update(cx, |l, cx| l.set_server_hits(ids, cx));
             }
@@ -695,65 +684,6 @@ impl Mailer {
             });
         })
         .detach();
-    }
-
-    /// Поиск в живом ящике: локальный индекс (в фоне) и сервер (`Search`) — результаты в списке по мере ответа.
-    pub(crate) fn run_live_search(&mut self, q: &str, cx: &mut Context<Self>) {
-        let query = q.trim().to_owned();
-        self.reading.update(cx, |r, cx| r.clear(cx));
-        if query.is_empty() {
-            self.live.search = None;
-            self.folders.update(cx, |f, cx| {
-                f.results = None;
-                cx.notify();
-            });
-            self.list.update(cx, |l, cx| l.show_search(None, cx));
-            return;
-        }
-        let mailbox = self.search_mailbox(cx);
-        let ticket = self.live.ticket();
-        let sent = self.backend.send(Command::Search { query: query.clone(), mailbox: mailbox.clone(), ticket });
-        if !sent {
-            self.sync_stopped(cx);
-        }
-        self.live.search =
-            Some(LiveSearch { ticket, query: query.clone(), local: None, server: (!sent).then(Vec::new) });
-        let (index, cache) = (self.live.index.clone(), self.cache.clone());
-        let task = cx.background_spawn(async move { local_search(&index, &cache, &query, mailbox.as_deref()) });
-        cx.spawn(async move |this, cx| {
-            let ids = task.await;
-            let _ = this.update(cx, |m, cx| {
-                if let Some(s) = m.live.search.as_mut().filter(|s| s.ticket == ticket) {
-                    s.local = Some(ids);
-                    m.show_live_results(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn show_live_results(&mut self, cx: &mut Context<Self>) {
-        let Some(s) = &self.live.search else { return };
-        let ids = merge(s.local.as_deref().unwrap_or_default(), s.server.as_deref().unwrap_or_default());
-        if s.local.is_some() && s.server.is_some() && ids.is_empty() {
-            let text = tr!("search-nothing", query = s.query.clone());
-            self.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
-        }
-        let n = ids.len();
-        self.folders.update(cx, |f, cx| {
-            f.results = Some(n);
-            cx.notify();
-        });
-        self.list.update(cx, |l, cx| {
-            // Первый ответ — новый список без выделения и сверху (прокрутка папки запомнена); второй дополняет его,
-            // выделение остаётся.
-            if l.search_ids.is_none() {
-                l.begin_search(ids);
-            } else {
-                l.search_ids = Some(ids);
-            }
-            l.refresh(cx);
-        });
     }
 
     /// Нет учётной записи (первый запуск): добавление аккаунта на месте экрана почты.

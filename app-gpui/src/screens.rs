@@ -12,7 +12,8 @@
 //! сервера, `meeting` — после ответа о занятости участников из `POSTMAN_SCREENS_ATTENDEES` (адреса через `;`, S3-05),
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
-//! `thread` (лента беседы, S5-05), `lifecycle` и `overdue` (сроки, S5-04) — только демо;
+//! `thread` (лента беседы, S5-05), `lifecycle` и `overdue` (сроки, S5-04), `search`, `search-letter`, `palette` и
+//! `palette-query` (поиск и палитра команд, S5-10) — только демо;
 //! вкладка «Настройки» (S5-09): `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts` и первый
 //! запуск `firstrun` — демо; `--live` без `POSTMAN_URL` — первый запуск (`firstrun`).
 
@@ -29,8 +30,13 @@ use crate::{Mailer, Section, sys};
 const SETTLE_FRAMES: u32 = 3;
 /// Сцена не готова за это время (воркер не ответил, страница не прочиталась) — ошибка.
 const SCENE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Запрос с результатами в демо-ящике: тема «Pipeline failed» (`crates/demo`).
-const SEARCH_QUERY: &str = "pipeline";
+/// Запрос с результатами в демо-ящике (S5-10): последнее слово первой темы демо («Отчёт за квартал») — письма во
+/// «Входящих», «Архиве» и «Отправленных», в тексте писем Outlook — «итоги квартала».
+fn search_query() -> &'static str {
+    postman_demo::SUBJECTS.first().and_then(|s| s.rsplit(' ').next()).unwrap_or("pipeline")
+}
+/// Палитра с запросом: «от», набранное в английской раскладке, — команды, папки и письма (S5-10).
+const PALETTE_QUERY: &str = "jn";
 
 #[derive(Clone, Copy)]
 enum Scene {
@@ -57,8 +63,14 @@ enum Scene {
     InviteUpdated,
     InviteCancelled,
     InviteOutdated,
-    /// Результаты поиска.
+    /// Поиск «Везде» (S5-10): результаты группами по папкам, подсветка, чипы «Уточнить».
     Search,
+    /// Письмо из результатов поиска: подсветка в теме и тексте, строка «Совпадения».
+    SearchLetter,
+    /// Палитра команд Ctrl+K с пустым запросом: недавние — первыми.
+    Palette,
+    /// Палитра с запросом в другой раскладке.
+    PaletteQuery,
     /// Раздел «Календарь»: неделя и приглашение без ответа в подробностях (S5-11).
     Calendar,
     /// Вкладка встречи: помощник с занятостью каждого (без «Только общее свободное время»).
@@ -119,7 +131,7 @@ enum Scene {
     SettingsSign,
 }
 
-const SCENES: [Scene; 42] = [
+const SCENES: [Scene; 45] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -135,6 +147,9 @@ const SCENES: [Scene; 42] = [
     Scene::InviteCancelled,
     Scene::InviteOutdated,
     Scene::Search,
+    Scene::SearchLetter,
+    Scene::Palette,
+    Scene::PaletteQuery,
     Scene::Calendar,
     Scene::Event,
     Scene::Meeting,
@@ -202,6 +217,9 @@ impl Scene {
             Scene::InviteCancelled => "invite-cancelled",
             Scene::InviteOutdated => "invite-outdated",
             Scene::Search => "search",
+            Scene::SearchLetter => "search-letter",
+            Scene::Palette => "palette",
+            Scene::PaletteQuery => "palette-query",
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
@@ -361,13 +379,31 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
         }
         Scene::Search => {
-            m.search.update(cx, |s, cx| s.set_value(SEARCH_QUERY, window, cx));
-            m.run_search(SEARCH_QUERY, cx);
-            if m.list.read(cx).count == 0 {
-                return Err(format!("search \"{SEARCH_QUERY}\" found nothing"));
-            }
+            // Как «Везде» и ввод запроса с Enter.
+            m.bar.update(cx, |b, _| b.scope = crate::bar::Scope::All);
+            m.search.update(cx, |s, cx| s.set_value(search_query(), window, cx));
+            m.run_search(search_query(), cx);
+        }
+        Scene::SearchLetter => {
+            let Some(i) = demo_row(m.list.read(cx), Scene::Attachments) else {
+                return Err(format!("no Outlook letter among the results of \"{}\"", search_query()));
+            };
+            m.list.update(cx, |l, cx| l.select(i, cx));
+        }
+        Scene::Palette => {
+            // Недавние — как после трёх запусков из палитры.
+            m.recent = vec!["cmd:mail.due".into(), "folder:archive".into(), "cmd:mail.reply_all".into()];
+            m.toggle_palette(window, cx);
+        }
+        Scene::PaletteQuery => {
+            let Some(p) = m.palette.as_ref().map(|p| p.view.clone()) else { return Err("palette is not open".into()) };
+            let input = p.read(cx).input.clone();
+            input.update(cx, |s, cx| s.set_value(PALETTE_QUERY, window, cx));
+            // Как набор: `set_value` не шлёт `Change`.
+            p.update(cx, |p, cx| p.typed(cx));
         }
         Scene::Calendar => {
+            m.close_palette(window, cx);
             // Как `search::Clear`: календарь снимается без следов поиска в папках.
             m.search.update(cx, |s, cx| s.set_value("", window, cx));
             m.run_search("", cx);
@@ -635,7 +671,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let (offset, max) = (p.scroll.offset().y, p.scroll.max_offset().y);
             p.ready() && max > px(0.) && (offset + max).abs() < px(1.)
         }),
-        Scene::Search => list.search_ids.is_some() && rows_loaded,
+        Scene::Search => list.found.as_ref().is_some_and(|f| !f.chips.is_empty()) && rows_loaded,
+        Scene::SearchLetter => {
+            let selected = list.selected.and_then(|i| list.row(i)).map(|r| r.id.as_str());
+            let marked = m.reading.read(cx).marks.is_some();
+            marked && selected.is_some() && reading.is_some_and(|r| r.doc.is_some() && Some(r.row.id.as_str()) == selected)
+        }
+        Scene::Palette => m.palette.as_ref().is_some_and(|p| p.view.read(cx).shown() > 0),
+        Scene::PaletteQuery => m.palette.as_ref().is_some_and(|p| p.view.read(cx).has_letters()),
         Scene::Calendar => {
             let c = m.cal.read(cx);
             // Живой ящик: неделя пришла с сервера.

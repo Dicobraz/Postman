@@ -289,6 +289,7 @@ settings-keys-where-calendar = календарь
 settings-keys-where-composer = окно письма
 settings-keys-where-meeting = вкладка встречи
 settings-keys-where-contacts = контакты
+settings-keys-where-palette = палитра команд
 settings-keys-area-mail = Письма
 settings-keys-area-thread = Беседы
 settings-keys-area-attach = Вложения

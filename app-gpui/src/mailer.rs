@@ -78,6 +78,11 @@ pub(crate) struct Mailer {
     pub(crate) tabs: crate::tabs::Tabs,
     /// Меню «…» командной строки.
     pub(crate) more: crate::chrome::MoreMenu,
+    /// Поиск в командной строке (S5-10, `search.rs`).
+    pub(crate) find: crate::search::Find,
+    /// Палитра команд Ctrl+K (S5-10, `palette.rs`) и недавние её строки (новые первыми).
+    pub(crate) palette: Option<crate::palette::Open>,
+    pub(crate) recent: Vec<String>,
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
@@ -90,8 +95,21 @@ impl Mailer {
                 let q = state.read(cx).value().to_string();
                 this.run_search(&q, cx);
             }
-            InputEvent::Change if keylog => println!("search \"{}\"", state.read(cx).value()),
-            _ => {}
+            // Поиск по мере набора — после паузы (S5-10).
+            InputEvent::Change => {
+                let q = state.read(cx).value().to_string();
+                if keylog {
+                    println!("search \"{q}\"");
+                }
+                this.search_typed(q, cx);
+            }
+            InputEvent::Focus | InputEvent::Blur => {
+                let on = matches!(ev, InputEvent::Focus);
+                this.bar.update(cx, |b, cx| {
+                    b.focused = on;
+                    cx.notify();
+                });
+            }
         });
         let mailboxes = cache.mailboxes().unwrap_or_default();
         let accounts = cache.accounts().unwrap_or_default();
@@ -129,6 +147,8 @@ impl Mailer {
             }),
             Self::observe_keys(cx),
             cx.subscribe(&list, |this, _, OpenRow(row), cx| this.open_letter(row.clone(), cx)),
+            // Чип «Уточнить» (S5-10): условие — в строку поиска.
+            cx.subscribe_in(&list, window, |this, _, crate::search::RefineChip(r), window, cx| this.refine(r, window, cx)),
             cx.subscribe(&list, |this, _, NeedMore(mailbox), cx| this.load_more(mailbox.clone(), cx)),
             cx.subscribe(&list, |this, _, _: &ReadOnly, cx| {
                 this.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("shared-read-only-flags"), cx));
@@ -221,6 +241,9 @@ impl Mailer {
             lifecycle: Default::default(),
             tabs: Default::default(),
             more: Default::default(),
+            find: Default::default(),
+            palette: None,
+            recent: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -260,7 +283,7 @@ impl Mailer {
     }
 
     pub(crate) fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
-        self.live.clear_search();
+        self.drop_search(cx);
         self.folders.update(cx, |f, cx| {
             f.current = Some(id.clone());
             f.results = None;
@@ -268,26 +291,6 @@ impl Mailer {
         });
         self.list.update(cx, |l, cx| l.show_mailbox(id, cx));
         self.sync_total(cx);
-        self.reading.update(cx, |r, cx| r.clear(cx));
-    }
-
-    pub(crate) fn run_search(&mut self, q: &str, cx: &mut Context<Self>) {
-        if self.backend.is_live() {
-            return self.run_live_search(q, cx);
-        }
-        let q = q.trim();
-        let mailbox = self.search_mailbox(cx);
-        let ids = (!q.is_empty()).then(|| self.cache.search(q, mailbox.as_deref(), 1000).unwrap_or_default());
-        let results = ids.as_ref().map(Vec::len);
-        if results == Some(0) {
-            let text = tr!("search-nothing", query = q.to_string());
-            self.toasts.update(cx, |t, cx| t.push(Toast::Info, text, cx));
-        }
-        self.folders.update(cx, |f, cx| {
-            f.results = results;
-            cx.notify();
-        });
-        self.list.update(cx, |l, cx| l.show_search(ids, cx));
         self.reading.update(cx, |r, cx| r.clear(cx));
     }
 
@@ -423,6 +426,17 @@ impl Render for Mailer {
                 }
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
+            // Поиск (S5-10): охват и уточнения командами — как переключатель и чипы.
+            .on_action(cx.listener(|this, _: &search::All, _, cx| this.set_scope(crate::bar::Scope::All, cx)))
+            .on_action(cx.listener(|this, _: &search::Folder, _, cx| this.set_scope(crate::bar::Scope::Folder, cx)))
+            .on_action(cx.listener(|this, _: &search::Attachments, window, cx| {
+                this.refine(&postman_core::query::Refine::Attachment, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &search::Unread, window, cx| this.refine(&postman_core::query::Refine::Unread, window, cx)))
+            .on_action(cx.listener(|this, _: &search::Recent, window, cx| {
+                this.refine(&postman_core::query::Refine::Within(30), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &commands::palette::Open, window, cx| this.toggle_palette(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Open, window, cx| this.open_settings(None, window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Vacation, window, cx| this.open_vacation(window, cx)))
             .on_action(cx.listener(|this, _: &commands::settings::Rules, window, cx| this.open_rules(window, cx)))
@@ -520,6 +534,8 @@ impl Render for Mailer {
             })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
+            // Палитра команд (S5-10) — поверх строки команд, под заголовком окна.
+            .children(self.palette_overlay(window, cx))
             // Окно «Отменить» отправки — внизу, над строкой состояния; над ним — напоминания (S5-04).
             .children(self.undo_card(cx))
             .children(self.reminder_cards(cx))

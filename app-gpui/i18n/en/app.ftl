@@ -1,5 +1,4 @@
 # Mail screen.
-search-nothing = Nothing found: “{ $query }”
 folders-results = 🔍 Results ({ $n })
 reading-empty = Select a message
 reading-from = From:

@@ -127,7 +127,7 @@ fn row_h(l: &Look) -> f32 {
 }
 
 /// Значок папки по роли JMAP.
-fn folder_glyph(role: Option<&str>) -> char {
+pub(crate) fn folder_glyph(role: Option<&str>) -> char {
     use crate::chrome::glyph;
     match role {
         Some("inbox") => glyph::MAIL,
