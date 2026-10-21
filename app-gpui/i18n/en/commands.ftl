@@ -57,3 +57,4 @@ cmd-invite-tentative = Answer tentative
 cmd-invite-decline = Decline invitation
 cmd-settings-vacation = Automatic replies
 cmd-settings-rules = Rules
+cmd-settings-open = Settings

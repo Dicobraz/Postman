@@ -61,9 +61,9 @@ pub mod invite {
     gpui_kit::actions!(invite, [Accept, Tentative, Decline]);
 }
 
-/// Настройки ящика на сервере (S4-05, S4-07): в Outlook — меню «Файл», клавиши нет.
+/// Вкладка «Настройки» (S5-09); автоответы и правила (S4-05, S4-07) — её разделы, в Outlook — меню «Файл».
 pub mod settings {
-    gpui_kit::actions!(settings, [Vacation, Rules]);
+    gpui_kit::actions!(settings, [Open, Vacation, Rules]);
 }
 
 /// Письмо — вкладка или ответ в области чтения (S3-01, S5-06б): отправка, разметка, «Развернуть», удалить черновик.
@@ -169,19 +169,35 @@ pub const COMMANDS: &[Command] = &[
     cmd("invite.accept", &["a"], LIST),
     cmd("invite.tentative", &["t"], LIST),
     cmd("invite.decline", &["n"], LIST),
+    // Не Outlook (там «Файл → Параметры»): Ctrl+, — как в новом Outlook и редакторах (S5-09).
+    cmd("settings.open", &["ctrl-,"], None),
     // Outlook: «Файл → Автоматические ответы», без клавиши.
     cmd("settings.vacation", &[], None),
     // Outlook: «Файл → Правила и оповещения», без клавиши.
     cmd("settings.rules", &[], None),
 ];
 
-/// Привязать клавиши всех команд. Действие или сочетание, которое не собралось, — в журнал
-/// (тесты ловят это раньше), остальные команды работают.
-pub fn bind(cx: &mut App) {
+/// Привязать клавиши всех команд с учётом своих (`overrides`, «Настройки → Клавиатура»): привязки команд
+/// собираются заново на лету, чужие (gpui-kit: поля ввода и т. п.) остаются. Действие или сочетание, которое не
+/// собралось, — в журнал (тесты ловят это раньше), остальные команды работают.
+pub fn bind(cx: &mut App, overrides: &crate::keymap::Overrides) {
+    let ours: Vec<String> = COMMANDS.iter().map(|c| c.action_name()).collect();
+    let (others, had_ours) = {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let all: Vec<KeyBinding> = keymap.bindings().cloned().collect();
+        let had = all.iter().any(|b| ours.iter().any(|n| n == b.action().name()));
+        (all.into_iter().filter(|b| !ours.iter().any(|n| n == b.action().name())).collect::<Vec<_>>(), had)
+    };
+    if had_ours {
+        cx.clear_key_bindings();
+        cx.bind_keys(others);
+    }
     let mut bindings = Vec::new();
     for c in COMMANDS {
         let context = c.context.and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
-        for keys in c.keys {
+        for keys in crate::keymap::effective(c, overrides) {
+            let keys = keys.as_str();
             let action = match keyed_action(c, keys) {
                 Some(a) => a,
                 None => match cx.build_action(&c.action_name(), None) {

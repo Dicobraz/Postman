@@ -21,6 +21,7 @@ use pets_ui::theme::{Metric, Role};
 use postman_compose::{Address, Attachment, Draft, parse_addresses};
 use postman_core::checks::{self, Check, Secret};
 use postman_core::marks;
+use postman_core::prefs::AccountPrefs;
 use postman_core::send_later::{self, Choice, Reject};
 use postman_core::sync::{Command, Event, Sender};
 use postman_ir::Document;
@@ -73,6 +74,8 @@ pub(crate) struct Open {
     pub(crate) categories: Vec<(String, String, &'static str)>,
     pub(crate) place: Place,
     pub(crate) screens: bool,
+    /// Подписи учётной записи (S5-09): подпись по умолчанию — вместо подписи Identity, все — в меню «Подпись».
+    pub(crate) prefs: AccountPrefs,
 }
 
 enum Preview {
@@ -143,6 +146,8 @@ pub(crate) struct Composer {
     /// Слепок адресатов и метки, по которому посчитаны замечания по адресатам.
     recipients_key: u64,
     later: Later,
+    /// Подписи учётной записи (Настройки → Подписи и шаблоны).
+    prefs: AccountPrefs,
     /// `--screens`: сколько раз письмо нарисовано.
     screens: Option<u32>,
     _subscriptions: Vec<Subscription>,
@@ -169,6 +174,7 @@ impl Composer {
         {
             model.set_from(first.address.clone());
         }
+        default_signature(&mut model, &open.prefs, open.place == Place::Inline);
         let mut line = |value: String, placeholder: &str, cx: &mut Context<Self>| {
             let placeholder = tr!(placeholder);
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value))
@@ -242,6 +248,7 @@ impl Composer {
             own,
             recipients_key: 0,
             later,
+            prefs: open.prefs,
             screens: open.screens.then_some(0),
             _subscriptions: subscriptions,
         }
@@ -465,7 +472,11 @@ impl Composer {
                 self.model.on_failed(*ticket, error.clone());
             }
             Event::Me { address, signature } => {
-                self.sync_inputs |= self.model.set_identity(address.clone(), signature);
+                // Нетронутое письмо получило подпись Identity — своя по умолчанию (настройки) сильнее.
+                if self.model.set_identity(address.clone(), signature) {
+                    default_signature(&mut self.model, &self.prefs, self.place == Place::Inline);
+                    self.sync_inputs = true;
+                }
                 self.own = own_domains(&self.senders, Some(address));
             }
             Event::Senders(list) => {
@@ -751,9 +762,16 @@ impl Composer {
         cx.notify();
     }
 
-    /// Подписи на выбор: «без подписи» и подписи адресов «От» (своя и общих ящиков) без повторов.
+    /// Подписи на выбор: «без подписи», свои подписи для адреса «От» (настройки, S5-09) и подписи адресов «От»
+    /// (своя и общих ящиков) без повторов.
     fn signatures(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        for s in self.prefs.signatures_for(&self.model.from().email) {
+            let s = s.text.trim_end();
+            if !s.is_empty() && !out.iter().any(|o| o == s) {
+                out.push(s.to_owned());
+            }
+        }
         for s in &self.senders {
             let s = s.signature.trim_end();
             if !s.is_empty() && !out.iter().any(|o| o == s) {
@@ -766,6 +784,17 @@ impl Composer {
         }
         out
     }
+}
+
+/// Подпись по умолчанию из настроек (новые письма или ответы и пересылка) для адреса «От»; `true` — текст изменился.
+fn default_signature(model: &mut Model, prefs: &AccountPrefs, reply: bool) -> bool {
+    let Some(s) = prefs.signature(&model.from().email, reply) else { return false };
+    let text = s.text.trim_end().to_owned();
+    if model.signature == text {
+        return false;
+    }
+    model.set_signature(&text);
+    true
 }
 
 // --- отрисовка ---

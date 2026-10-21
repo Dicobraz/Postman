@@ -13,7 +13,8 @@
 //! `contacts` — после контактов и справочника с сервера (S4-02);
 //! `vacation` и `rules` — после автоответа и правил с сервера (S4-05, S4-07), `shared` — «Входящие» общего ящика (S4-06);
 //! `thread` (лента беседы, S5-05) — только демо;
-//! без `POSTMAN_URL` — строка входа (`signin`).
+//! вкладка «Настройки» (S5-09): `settings-general`, `settings-categories`, `settings-keys`, `settings-accounts` и первый
+//! запуск `firstrun` — демо; `--live` без `POSTMAN_URL` — первый запуск (`firstrun`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 use postman_core::bench;
 
+use crate::settings_tab::Section as SettingsSection;
 use crate::{Mailer, Section, sys};
 
 /// Кадров с выполненным условием до снимка: первые кадры после смены состояния ещё могут быть прежними.
@@ -80,9 +82,23 @@ enum Scene {
     Labels,
     /// Лента беседы (S5-05): письмо цепочки демо с ответами из разных клиентов, только новый текст.
     Thread,
+    /// Вкладка «Настройки», раздел «Общие» (S5-09).
+    SettingsGeneral,
+    /// «Настройки → Категории» с правкой новой категории: палитра с перечёркнутыми близкими цветами.
+    SettingsCategories,
+    /// «Настройки → Клавиатура»: своё сочетание у одной команды и конфликт у другой.
+    SettingsKeys,
+    /// «Настройки → Аккаунты» с карточкой «Добавить аккаунт» на месте.
+    SettingsAccounts,
+    /// «Настройки → Быстрые фильтры и сроки».
+    SettingsQuick,
+    /// «Настройки → Чтение».
+    SettingsReading,
+    /// «Настройки → Подписи и шаблоны» с образцом подписи и шаблона (демо — без файла).
+    SettingsSign,
 }
 
-const SCENES: [Scene; 24] = [
+const SCENES: [Scene; 32] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -104,8 +120,17 @@ const SCENES: [Scene; 24] = [
     Scene::Reply,
     Scene::Vacation,
     Scene::Rules,
+    Scene::SettingsGeneral,
+    Scene::SettingsCategories,
+    Scene::SettingsKeys,
+    Scene::SettingsAccounts,
+    Scene::SettingsQuick,
+    Scene::SettingsReading,
+    Scene::SettingsSign,
     Scene::Shared,
     Scene::Labels,
+    // Первый запуск (S5-09): добавление аккаунта на месте экрана почты.
+    Scene::SignIn,
     // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
     Scene::Thread,
 ];
@@ -143,7 +168,7 @@ impl Scene {
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
-            Scene::SignIn => "signin",
+            Scene::SignIn => "firstrun",
             Scene::Compose => "compose",
             Scene::SendLater => "send-later",
             Scene::Checks => "checks",
@@ -156,6 +181,13 @@ impl Scene {
             Scene::Shared => "shared",
             Scene::Labels => "labels",
             Scene::Thread => "thread",
+            Scene::SettingsGeneral => "settings-general",
+            Scene::SettingsCategories => "settings-categories",
+            Scene::SettingsKeys => "settings-keys",
+            Scene::SettingsAccounts => "settings-accounts",
+            Scene::SettingsQuick => "settings-quick",
+            Scene::SettingsReading => "settings-reading",
+            Scene::SettingsSign => "settings-sign",
         }
     }
 }
@@ -302,7 +334,14 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.cal.update(cx, |c, cx| c.select_busiest(cx));
             m.set_section(Section::Calendar, cx);
         }
-        Scene::SignIn => m.set_section(Section::Mail, cx),
+        Scene::SignIn => {
+            m.close_settings(window, cx);
+            m.set_section(Section::Mail, cx);
+            // Демо: первый запуск без учётной записи — так же, как без `POSTMAN_URL` и сохранённого входа.
+            if m.live.signin.is_none() {
+                m.show_signin(None, window, cx);
+            }
+        }
         Scene::Compose => {
             m.cal.update(cx, |c, cx| c.close_details(cx));
             m.set_section(Section::Mail, cx);
@@ -380,6 +419,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
         }
         Scene::Thread => {
+            m.live.signin = None;
             m.set_section(Section::Mail, cx);
             m.open_mailbox("inbox".into(), cx);
             let row = m.cache.rows_by_ids(&[postman_demo::CHAIN_OPEN.into()]).map_err(|e| e.to_string())?.pop();
@@ -404,12 +444,43 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         Scene::Rules => {
             m.open_rules(window, cx);
             // Демо: редактор первого правила открыт — снимок показывает и список, и редактор.
-            if let (false, Some(crate::settings::Panel::Rules(p))) = (m.backend.is_live(), &m.settings.panel) {
+            if let (false, Some(p)) = (m.backend.is_live(), m.settings.rules_panel.clone()) {
                 p.update(cx, |p, cx| {
                     let first = p.state.as_ref().and_then(|s| s.rules.first().cloned());
                     if let Some(r) = first {
                         p.edit(crate::rules::Draft::of(0, &r), cx);
                     }
+                });
+            }
+        }
+        Scene::SettingsGeneral => m.open_settings(Some(SettingsSection::General), window, cx),
+        Scene::SettingsCategories => {
+            m.open_settings(Some(SettingsSection::Categories), window, cx);
+            if let Some(v) = m.settings.view.clone() {
+                v.update(cx, |v, cx| v.edit_category(None, window, cx));
+            }
+        }
+        Scene::SettingsKeys => {
+            // Своё сочетание у «Флаг» и конфликт: «Сегодня в календаре» на Ctrl+2, как «Календарь».
+            crate::prefs::update(cx, |p| {
+                p.keys.insert("mail.toggle_flag".into(), vec!["ctrl-shift-g".into()]);
+                p.keys.insert("calendar.today".into(), vec!["ctrl-2".into()]);
+            });
+            m.open_settings(Some(SettingsSection::Keys), window, cx);
+        }
+        Scene::SettingsAccounts => {
+            crate::prefs::update(cx, |p| p.keys.clear());
+            m.open_settings(Some(SettingsSection::Accounts), window, cx);
+            m.on_settings(&crate::settings_tab::SettingsEvent::AddAccount, window, cx);
+        }
+        Scene::SettingsQuick => m.open_settings(Some(SettingsSection::Quick), window, cx),
+        Scene::SettingsReading => m.open_settings(Some(SettingsSection::Reading), window, cx),
+        Scene::SettingsSign => {
+            m.open_settings(Some(SettingsSection::Signatures), window, cx);
+            if let Some(v) = m.settings.view.clone() {
+                v.update(cx, |v, cx| {
+                    v.sign.prefs = crate::settings_sign::screen_sample(&v.info.identities);
+                    cx.notify();
                 });
             }
         }
@@ -470,7 +541,34 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let c = m.cal.read(cx);
             m.section == Section::Calendar && (c.selected() || c.is_empty())
         }
-        Scene::SignIn => m.live.signin.is_some(),
+        Scene::SignIn => m.live.signin.is_some() && !m.tabs.is_active(crate::tabs::TabKind::Settings),
+        Scene::SettingsGeneral
+        | Scene::SettingsCategories
+        | Scene::SettingsKeys
+        | Scene::SettingsAccounts
+        | Scene::SettingsQuick
+        | Scene::SettingsReading
+        | Scene::SettingsSign => {
+            let want = match scene {
+                Scene::SettingsGeneral => SettingsSection::General,
+                Scene::SettingsCategories => SettingsSection::Categories,
+                Scene::SettingsKeys => SettingsSection::Keys,
+                Scene::SettingsQuick => SettingsSection::Quick,
+                Scene::SettingsReading => SettingsSection::Reading,
+                Scene::SettingsSign => SettingsSection::Signatures,
+                _ => SettingsSection::Accounts,
+            };
+            settings_on(m, want, cx)
+                && m.settings.view.as_ref().is_some_and(|v| {
+                    let v = v.read(cx);
+                    match scene {
+                        Scene::SettingsCategories => v.cat_edit.is_some(),
+                        Scene::SettingsAccounts => v.add.is_some(),
+                        Scene::SettingsSign => !v.sign.prefs.signatures.is_empty(),
+                        _ => true,
+                    }
+                })
+        }
         Scene::Compose => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn()),
         Scene::SendLater => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn() && c.read(cx).later_menu_open()),
         Scene::Checks => {
@@ -497,12 +595,12 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);
             let state = if live { m.settings.vacation.is_some() } else { m.settings.bar.is_some() };
-            matches!(m.settings.panel, Some(crate::settings::Panel::Vacation(_))) && state
+            settings_on(m, SettingsSection::Vacation, cx) && m.settings.vacation_panel.is_some() && state
         }
         Scene::Rules => {
             let live = m.screens.as_ref().is_some_and(|d| d.live);
-            match &m.settings.panel {
-                Some(crate::settings::Panel::Rules(p)) => {
+            match &m.settings.rules_panel {
+                Some(p) if settings_on(m, SettingsSection::Rules, cx) => {
                     let p = p.read(cx);
                     if live { p.state.is_some() } else { p.editor.is_some() }
                 }
@@ -531,6 +629,11 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Mail && opened && (list.count == 0 || letter)
         }
     }
+}
+
+/// Вкладка «Настройки» открыта на разделе `section`.
+fn settings_on(m: &Mailer, section: SettingsSection, cx: &App) -> bool {
+    m.tabs.is_active(crate::tabs::TabKind::Settings) && m.settings.view.as_ref().is_some_and(|v| v.read(cx).section == section)
 }
 
 /// «Входящие» первого общего ящика, где можно писать (иначе первого любого), — сцена `shared`.

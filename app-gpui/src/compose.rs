@@ -776,6 +776,8 @@ pub(crate) struct Composers {
     book_started: bool,
     /// Сколько сервер держит письма (`Event::Scheduled`); 0 — «Отправить позже» нет.
     max_delay: u64,
+    /// Подписи учётной записи и подписи по умолчанию (Настройки → Подписи и шаблоны, S5-09).
+    pub(crate) prefs: postman_core::prefs::AccountPrefs,
 }
 
 /// Отправленное письмо: что вернуть в композер, если отправку отменят (S5-06).
@@ -820,6 +822,17 @@ impl Composers {
     /// Мой адрес и подпись из Identity (живой ящик), если сервер их уже прислал.
     pub(crate) fn me(&self) -> Option<&(Address, String)> {
         self.me.as_ref()
+    }
+
+    /// Адреса, от которых можно отправить (свой и общих ящиков), без повторов — для подписей в настройках (S5-09).
+    pub(crate) fn sender_addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.me.iter().map(|(a, _)| a.email.clone()).collect();
+        for s in &self.senders {
+            if !out.iter().any(|e| e.eq_ignore_ascii_case(&s.address.email)) {
+                out.push(s.address.email.clone());
+            }
+        }
+        out
     }
 
     /// Отправитель общего ящика `account` (ответ на письмо из него уходит от его имени), если сервер его дал.
@@ -902,6 +915,7 @@ impl Mailer {
             categories,
             place,
             screens: self.screens.is_some(),
+            prefs: self.compose.prefs.clone(),
         };
         let (handle, mailer) = (self.window, cx.entity());
         cx.defer(move |cx| {

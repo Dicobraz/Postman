@@ -57,3 +57,4 @@ cmd-invite-tentative = Ответить «Под вопросом»
 cmd-invite-decline = Отклонить приглашение
 cmd-settings-vacation = Автоматические ответы
 cmd-settings-rules = Правила
+cmd-settings-open = Настройки

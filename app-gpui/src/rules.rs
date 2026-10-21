@@ -160,7 +160,6 @@ pub(crate) enum RulesEvent {
         rules: Vec<Rule>,
         replace: bool,
     },
-    Close,
 }
 
 impl EventEmitter<RulesEvent> for RulesPanel {}
@@ -526,18 +525,13 @@ impl Render for RulesPanel {
         let editor = self.editor.clone().map(|d| self.render_editor(&d, cx));
         let foreign = self.state.as_ref().map(|s| s.foreign.clone()).unwrap_or_default();
         let active = self.state.as_ref().is_some_and(|s| s.active);
+        // Раздел вкладки «Настройки» (S5-09): заголовок и пояснение — у вкладки, здесь — список и редактор.
         let card = div()
-            .w(px(760.))
+            .w_full()
+            .max_w(px(820.))
             .flex()
             .flex_col()
             .gap_3()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(l.border())
-            .bg(l.panel())
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr!("rules-title")))
-            .child(div().text_color(l.text2()).child(tr!("rules-hint")))
             .when(!self.live, |d| d.child(div().text_color(l.text2()).child(tr!("rules-demo"))))
             .when(self.live && self.state.is_none(), |d| {
                 d.child(div().text_color(l.text2()).child(tr!("rules-loading")))
@@ -592,10 +586,6 @@ impl Render for RulesPanel {
                             this.edit(draft, cx)
                         })))
                     })
-                    .child(
-                        button("rules-close", tr!("rules-close"), false)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(RulesEvent::Close))),
-                    )
                     .when_some(self.note.clone(), |d, n| d.child(div().text_color(l.success()).child(n))),
             )
             .when(!foreign.is_empty(), |d| {
@@ -619,7 +609,7 @@ impl Render for RulesPanel {
                         )
                     }))
             });
-        div().id("rules-panel").flex().items_start().flex_1().min_w_0().h_full().overflow_y_scroll().p_4().child(card)
+        div().id("rules-panel").flex().items_start().flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().child(card)
     }
 }
 

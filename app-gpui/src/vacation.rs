@@ -124,7 +124,6 @@ pub(crate) fn bar_text(v: &VacationResponse, tz: &TimeZone) -> String {
 /// Что панель просит у экрана.
 pub(crate) enum VacationEvent {
     Save(VacationResponse),
-    Close,
 }
 
 impl EventEmitter<VacationEvent> for VacationPanel {}
@@ -336,18 +335,13 @@ impl Render for VacationPanel {
             .child(div().text_color(l.text2()).child(tr!("vacation-to")))
             .child(div().w(px(170.)).child(Input::new(&self.to)));
         let busy = self.busy || self.loading;
+        // Раздел вкладки «Настройки» (S5-09): заголовок и пояснение — у вкладки, здесь — поля.
         let card = div()
-            .w(px(640.))
+            .w_full()
+            .max_w(px(720.))
             .flex()
             .flex_col()
             .gap_3()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(l.border())
-            .bg(l.panel())
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr!("vacation-title")))
-            .child(div().text_color(l.text2()).child(tr!("vacation-hint")))
             .when(!self.live, |d| d.child(div().text_color(l.text2()).child(tr!("vacation-demo"))))
             .when(self.loading, |d| d.child(div().text_color(l.text2()).child(tr!("vacation-loading"))))
             .child(
@@ -384,10 +378,6 @@ impl Render for VacationPanel {
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )
-                    .child(
-                        button("vacation-close", tr!("vacation-close"), false)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(VacationEvent::Close))),
-                    )
                     .when_some(self.note.clone(), |d, n| d.child(div().text_color(l.success()).child(n))),
             );
         div()
@@ -398,7 +388,8 @@ impl Render for VacationPanel {
             .min_w_0()
             .h_full()
             .overflow_y_scroll()
-            .p_4()
+            .px_6()
+            .py_4()
             .child(card)
     }
 }
