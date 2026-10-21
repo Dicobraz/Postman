@@ -406,7 +406,7 @@ async fn contacts_are_read() {
 
 /// Контакты (S4-02) методами клиента, как в приложении: user3 создаёт карточку с телефоном, организацией и
 /// должностью → правит её патчем (новый адрес, без телефона, другое имя) → удаляет; справочник (Principals)
-/// отдаёт сотрудников стенда с адресами.
+/// отдаёт сотрудников стенда с адресами и ФИО (`description`; `name` у Stalwart — логин).
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn contacts_are_edited_and_directory_is_listed() {
@@ -450,6 +450,7 @@ async fn contacts_are_edited_and_directory_is_listed() {
             .find(|p| p.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&email)))
             .unwrap_or_else(|| panic!("{email} нет в справочнике: {people:?}"));
         assert_eq!(p.kind, "individual", "{p:?}");
+        assert!(!p.display_name().is_empty() && !p.display_name().eq_ignore_ascii_case(&email), "имя — не ФИО: {p:?}");
     }
 }
 

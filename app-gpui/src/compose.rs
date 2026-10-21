@@ -806,7 +806,7 @@ impl Composers {
             }
             // Сотрудники, переговорные и ресурсы (S4-02).
             Event::DirectoryLoaded(people) => {
-                let items = people.iter().filter_map(|p| Some((p.name.as_str(), p.email.as_deref()?)));
+                let items = people.iter().filter_map(|p| Some((p.display_name(), p.email.as_deref()?)));
                 self.book.borrow_mut().add_directory(items);
             }
             _ => {}

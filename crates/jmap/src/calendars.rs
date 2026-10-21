@@ -40,12 +40,26 @@ fn yes() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Principal {
     pub id: String,
+    /// У Stalwart — логин (адрес), а не ФИО (`docs/STALWART.md` п. 9); показывать — [`Principal::display_name`].
     #[serde(default)]
     pub name: String,
+    /// У Stalwart — ФИО учётной записи («Test user1»).
+    #[serde(default)]
+    pub description: Option<String>,
     pub email: Option<String>,
     /// individual, group, resource, location…
     #[serde(rename = "type", default)]
     pub kind: String,
+}
+
+impl Principal {
+    /// Имя для людей: `description` (ФИО), а если его нет — `name`.
+    pub fn display_name(&self) -> &str {
+        match self.description.as_deref().map(str::trim) {
+            Some(d) if !d.is_empty() => d,
+            _ => &self.name,
+        }
+    }
 }
 
 /// Период занятости из `Principal/getAvailability`.
@@ -245,5 +259,15 @@ mod tests {
         assert_eq!(a.list[0].busy_status.as_deref(), Some("tentative"));
         let c: Calendar = serde_json::from_value(json!({ "id": "c1", "name": "Рабочий" })).unwrap();
         assert!(c.is_visible);
+    }
+
+    #[test]
+    fn principal_shows_description_then_name() {
+        let p = |v: Value| serde_json::from_value::<Principal>(v).unwrap();
+        // Stalwart: `name` — логин, ФИО — в `description`.
+        let full = p(json!({ "id": "a", "type": "individual", "name": "user1@itt.test", "description": "Test user1", "email": "user1@itt.test" }));
+        assert_eq!(full.display_name(), "Test user1");
+        assert_eq!(p(json!({ "id": "b", "name": "user2@itt.test", "description": "  " })).display_name(), "user2@itt.test");
+        assert_eq!(p(json!({ "id": "c", "name": "admin", "description": null })).display_name(), "admin");
     }
 }

@@ -45,9 +45,9 @@ impl Client {
         self.session().accounts.get(account).is_some_and(|a| a.account_capabilities.contains_key(FILENODE))
     }
 
-    /// Узел с именем `name` в папке `parent` (`None` — корень) и состояние FileNode аккаунта. Имя сравнивается
-    /// точно. Stalwart не принимает в фильтре `parentId: null` (весь запрос — `notRequest`), поэтому корень —
-    /// фильтром только по имени и отбором `parentId` здесь.
+    /// Узел с именем `name` в папке `parent` (`None` — корень) и состояние FileNode аккаунта. Корень — условие
+    /// `isTopLevel: true` (draft-ietf-jmap-filenode-18: `parentId` там типа `Id`, `null` по спецификации отвергается).
+    /// Фильтр `name` у Stalwart — точное совпадение с учётом регистра (`docs/STALWART.md` п. 30).
     pub async fn file_node(
         &self,
         account: &str,
@@ -56,7 +56,7 @@ impl Client {
     ) -> Result<(Option<FileNode>, String)> {
         let filter = match parent {
             Some(p) => json!({ "parentId": p, "name": name }),
-            None => json!({ "name": name }),
+            None => json!({ "isTopLevel": true, "name": name }),
         };
         let calls = [
             inv("FileNode/query", json!({ "accountId": account, "filter": filter }), "q"),
@@ -72,8 +72,7 @@ impl Client {
         ];
         let mut r = self.call(USING, &calls).await?;
         let g: GetResponse<FileNode> = take(&mut r, "g")?;
-        let node = g.list.into_iter().find(|n| n.name == name && n.parent_id.as_deref() == parent);
-        Ok((node, g.state))
+        Ok((g.list.into_iter().next(), g.state))
     }
 
     /// Создать папку `name` в `parent` (`None` — корень). Ответ — id папки и, если создал этот вызов, новое

@@ -1,6 +1,7 @@
 //! Поиск в командной строке (S5-10) против живого Stalwart: условия запроса (`postman_core::query`) — `text`,
 //! `from`, `to`, `subject`, `after`/`before`, `notKeyword $seen` — становятся `Email/query`, и сервер находит
 //! ровно то, что ждёт «Везде». Что сервер делает не так — печатается и идёт строкой в `docs/STALWART-GAPS.md`.
+//! Русские словоформы сервер находит, когда слово уходит с языком (`ru:договоры`, `query::with_language`).
 //!
 //! Два письма создаются прямо во «Входящих» user1 (`Email/set create`, без SMTP) и в конце удаляются. Без стенда
 //! тест пропускается (`#[ignore]`).
@@ -71,7 +72,11 @@ async fn query_conditions_find_on_server() {
     let (boxes, _) = c.mailboxes().await.unwrap();
     let inbox = boxes.into_iter().find(|m| m.role.as_deref() == Some("inbox")).map(|m| m.id).expect("входящие");
     let run = stamp();
-    let a = create(&c, &inbox, "alpha@itt.test", &format!("Postman search {run} договор ИБ"), "Итоги квартала по договору.", "2026-01-10T09:00:00Z", false).await;
+    // Текст подлиннее: язык письма Stalwart определяет по тексту; по одной фразе он не уверен и индексирует
+    // языком по умолчанию, без русских основ.
+    let text = "Итоги квартала по договору. Просим подтвердить условия поставки и сроки оплаты до конца месяца, \
+                а также согласовать график отгрузки с отделом логистики и сообщить о готовности документов.";
+    let a = create(&c, &inbox, "alpha@itt.test", &format!("Postman search {run} договор ИБ"), text, "2026-01-10T09:00:00Z", false).await;
     let b = create(&c, &inbox, "beta@itt.test", &format!("Postman search {run} отчёт"), "Отчёт готов.", "2026-03-10T09:00:00Z", true).await;
     // Полнотекстовый индекс Stalwart строится в фоне: подождать.
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -85,8 +90,10 @@ async fn query_conditions_find_on_server() {
         (format!("{run} is:unread"), (true, false)),
         (format!("{run} after:2026-02-01"), (false, true)),
         (format!("{run} before:2026-02-01"), (true, false)),
-        // Словоформа: «договоры» — «договор» в теме, «договору» в тексте.
+        // Словоформы (GAPS 33): «договоры» — «договор» в теме, «договору» в тексте; «поставкой» — «поставки».
+        // Слово по-русски уходит с языком (`ru:договоры`), иначе короткий запрос сервер разбирает языком по умолчанию.
         (format!("{run} договоры"), (true, false)),
+        (format!("{run} поставкой"), (true, false)),
         // Слово только в тексте письма.
         (format!("{run} квартала"), (true, false)),
     ] {
@@ -95,19 +102,28 @@ async fn query_conditions_find_on_server() {
             wrong.push(format!("{input}: {got:?}, ждали {want:?}"));
         }
     }
-    // Текст письма напрямую (`body`) и та же форма слова, что в теме, — отличить «нет словоформ» от «нет текста».
-    for (what, f) in [
-        ("body:квартала", Filter::Body("квартала".into())),
-        ("body:Итоги", Filter::Body("Итоги".into())),
-        ("text:договору", Filter::Text("договору".into())),
-        ("subject:договора", Filter::Subject("договора".into())),
+    // Условия напрямую, с языком и без. `None` — только печать: без языка словоформа не находится, пока у сервера
+    // `Search.defaultLanguage` en-US; словоформу в теме (`subject: "ru:договора"` при теме «… договор …») сервер
+    // не находит, точную форму — находит [проверить: тема индексируется без основ?].
+    for (what, f, want) in [
+        ("body:квартала", Filter::Body("квартала".into()), Some(true)),
+        ("text:договору", Filter::Text("договору".into()), Some(true)),
+        ("body:поставкой", Filter::Body("поставкой".into()), None),
+        ("body:ru:поставкой", Filter::Body("ru:поставкой".into()), Some(true)),
+        ("body:ru:договоры", Filter::Body("ru:договоры".into()), Some(true)),
+        ("text:ru:договоров", Filter::Text("ru:договоров".into()), Some(true)),
+        ("text:ru:итоги квартала", Filter::Text("ru:итоги квартала".into()), Some(true)),
+        ("subject:ru:договор", Filter::Subject("ru:договор".into()), Some(true)),
+        ("subject:ru:договора", Filter::Subject("ru:договора".into()), None),
     ] {
         let ids = c.query_ids(&Filter::And(vec![Filter::InMailbox(inbox.clone()), Filter::Text(run.clone()), f]), 100).await.unwrap();
-        println!("{what:<55} → a={}", ids.contains(&a));
+        let got = ids.contains(&a);
+        println!("{what:<55} → a={got}");
+        if want.is_some_and(|w| w != got) {
+            wrong.push(format!("{what}: {got}, ждали {want:?}"));
+        }
     }
     c.destroy_email(&a).await.unwrap();
     c.destroy_email(&b).await.unwrap();
-    println!("не так: {wrong:#?}");
-    // Всё, кроме словоформ: их у Stalwart нет (`docs/STALWART-GAPS.md`), их находит свой индекс.
-    assert!(wrong.iter().all(|w| w.contains("договоры")), "{wrong:#?}");
+    assert!(wrong.is_empty(), "не так: {wrong:#?}");
 }

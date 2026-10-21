@@ -115,6 +115,11 @@ async fn table_is_shared_between_sessions_last_writer_wins() {
     let (folder, _) = a.file_node(&acc, None, FOLDER).await.unwrap();
     let folder = folder.expect("папка .postman создана");
     assert_eq!((folder.parent_id.as_deref(), folder.blob_id.as_deref()), (None, None), "папка в корне");
+    // Корень — `isTopLevel: true`: папка с тем же именем внутри `.postman` в ответ не попадает.
+    let (nested, _) = a.create_folder(&acc, Some(&folder.id), FOLDER).await.unwrap();
+    let (top, _) = a.file_node(&acc, None, FOLDER).await.unwrap();
+    assert_eq!(top.map(|n| n.id), Some(folder.id.clone()), "в корне — только верхняя папка");
+    a.destroy_file_nodes(&acc, &[nested]).await.unwrap();
 
     // Последовательно: A правит team позже, B (со старой копией) — tenders и team раньше.
     let mut ta = base.clone();

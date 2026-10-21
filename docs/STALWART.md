@@ -1,6 +1,6 @@
 # Стенд Stalwart и поведение сервера
 
-Чего сервер не умеет или делает неверно — сводным списком для issues и своих правок: `docs/STALWART-GAPS.md`.
+Чего сервер не умеет или делает неверно — сводным списком для отчётов и настройки: `docs/STALWART-GAPS.md`.
 
 Что проверено на живом сервере и как клиент это учитывает. Стенд: Stalwart v0.16.27 (Docker на ВМ),
 домен `itt.test`, пользователи `user1…user3`; доступ, пароли и эталонная коллекция — у владельца
@@ -59,13 +59,30 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_send_later::send_later_through_sync` | S5-06, через поток синхронизации: `Scheduled` при входе (`max_delay` 7 дней) → `Send` с `Release::At` (+2 мин) → `Sent` со сроком → `Scheduled` с ним → `Unsend` → `Unsent`, в `Scheduled` его нет → убрано |
 | `stand_threads::reply_chain_is_one_thread_with_new_text_only` | S5-05: user1 → user3 → user1 цепочкой ответов (In-Reply-To, цитата Postman) → у user3 `Command::Thread` (`Thread/get` + `Email/get`) — одна беседа из трёх писем, своё — из «Отправленных», по времени; «только новый текст» — в каждом письме только его строки → письма убраны |
 
-Последний прогон — 2026-10-20, напрямую по HTTPS: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_are_edited_and_directory_is_listed` и `contacts_through_sync` (user3, S4-02) — 2026-10-20, отдельно.
+Последний прогон — 2026-10-21, напрямую по HTTPS: `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
+(словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
+
+## Настройка сервера
+
+Что решается конфигурацией Stalwart, а не кодом клиента (разбор `docs/STALWART-GAPS.md` 2026-10-21). На стенде —
+задача владельца стенда; на рабочем сервере — при развёртывании.
+
+| Что | Настройка | Строка GAPS |
+|---|---|---|
+| Адреса сессии — на публичное имя | переменная окружения контейнера `STALWART_PUBLIC_URL=https://<публичное имя>`; из неё строятся `apiUrl`, `uploadUrl`, `downloadUrl`, `eventSourceUrl` и websocket (заголовок `Host` не используется) | 6 |
+| Квота загрузки блобов | синглтон Jmap: `maxUploadCount` (1000), `uploadQuota` (50 МБ), `uploadTtl` (1 ч) | 7 |
+| Ограничение входящих | правило «Sender address to recipient throttle» (создаётся при установке): 25 в час на пару «домен отправителя × получатель»; поднять порог или ограничить `match` внешними отправителями | 4 |
+| Русские словоформы | `x:Search/set` → `defaultLanguage: "ru-RU"` (и русский в `supportedLanguages`, если его там нет): язык короткого запроса и короткого письма сервер не угадывает и берёт язык по умолчанию. Клиент и так шлёт русские слова с `ru:` | 33 |
+| Условие `header` в поиске | `x:Search/set` → `"headers": true` в `indexEmailFields`, затем переиндексация (по умолчанию заголовки не индексируются) | 29 |
+| Занятость для всех | `Sharing.maxShares` по умолчанию — 10 получателей на календарь: открывать занятость группе «все», а не каждому коллеге | 3 |
+| Сертификат, квоты, NTP, «Архив» в шаблоне ящика | см. строки GAPS | 11, 12, 21, 31 |
 
 ## Поведение сервера
 
 1. **Адреса в сессии — внутренние** (даже при входе по HTTPS 443 сессия объявляет `http://…:8080`). `apiUrl`, `downloadUrl`, `uploadUrl`, `eventSourceUrl` абсолютные, на адрес
    из настроек сервера (за туннелем или прокси недоступен). Клиент переносит их на адрес подключения
-   (`Session::resolve_urls`): заодно пароль и токен не уходят на другой хост.
+   (`Session::resolve_urls`): заодно пароль и токен не уходят на другой хост. На сервере — `STALWART_PUBLIC_URL`
+   («Настройка сервера»).
 2. **Capabilities v0.16.27:** core, mail, submission, vacationresponse, calendars (+parse), contacts (+parse),
    principals, principals:availability, websocket, sieve, blob, quota, filenode, mail:share, emailpush,
    webpush-vapid. `.well-known/jmap` → 307 на `/jmap/session`.
@@ -77,7 +94,8 @@ cargo test -p postman-core --test stand -- --ignored
    организатор видит статус и получает письмо «Accepted: …». Удаление организатором с рассылкой — CANCEL.
 5. **Занятость — только после шаринга.** `Principal/getAvailability` отдаёт периоды, если календарь открыт
    запрашивающему (`shareWith/<principal>`: `mayReadFreeBusy` или `mayReadItems`); без шаринга — пустой список
-   без ошибки. Для «все видят занятость всех» нужен общий шаринг (группа) — настройка сервера, один раз.
+   без ошибки. Для «все видят занятость всех» нужен общий шаринг (группа) — настройка сервера, один раз
+   (`Sharing.maxShares` — 10 получателей на календарь, по одному коллеге не хватит).
    Клиент: `share_calendar`, `principal_by_email`, `availability` (с capability `principals:availability`).
 6. **CalDAV free-busy (Thunderbird, Apple Calendar)** в v0.16.27 требует сразу оба права, `mayReadFreeBusy` и
    `mayReadItems` (баг сервера; JMAP — любое одно). Отсюда пустая «Доступность» у Apple и Thunderbird при
@@ -88,8 +106,9 @@ cargo test -p postman-core --test stand -- --ignored
    карточку одним полем «Имя». Патч `ContactCard/set` по свойствам целиком (`emails`, `phones`, `organizations`,
    `titles`); `null` убирает свойство. Клиент шлёт только изменённые свойства (`ContactCard::patch`).
 9. **Справочник:** `Principal/query` без фильтра отдаёт всех (сотрудники и `admin`);
-   `name` — логин (адрес), а не ФИО: имя из каталога организации появится, когда сервер возьмёт его из OIDC/LDAP
-   [проверить]. Группы и записи без адреса клиент не показывает (`postman_core::contacts::directory`).
+   `name` — логин (адрес), а ФИО — в `description` («Test user1»). Клиент показывает `description`, без него —
+   `name` (`Principal::display_name`: справочник, подсказки адресов, участники и переговорные встречи). Группы и
+   записи без адреса клиент не показывает (`postman_core::contacts::directory`).
 
 10. **Push по типам.** Событие `state` перечисляет изменившиеся типы по аккаунтам (`changed.<аккаунт>.<тип>`):
    почта — `Email`, `Mailbox`, `Thread`, `EmailDelivery`; календарь — `CalendarEvent` (и `Calendar`,
@@ -100,7 +119,8 @@ cargo test -p postman-core --test stand -- --ignored
 12. **Квота загрузки блобов** — 1000 файлов или 50 МБ на учётную запись (`overQuota` у `Blob/upload` и `/upload`),
     импортированные письма в ней остаются, пока не истечёт срок временных блобов. Поэтому большой ящик заполняется
     через `Email/set create` (сервер сам собирает MIME), а не `Email/import`. Для пользователей важно: вложения в
-    окне письма загружаются блобами — тысячи вложений подряд упрутся в эту квоту [проверить на рабочем сервере].
+    окне письма загружаются блобами — тысячи вложений подряд упрутся в эту квоту. Пределы — синглтон Jmap:
+    `maxUploadCount`, `uploadQuota`, `uploadTtl` («Настройка сервера»).
 13. **Пачка `Email/set create` на 250 писем** проходит (~380 писем/с с рабочей машины по HTTPS).
 
 14. **Автоответ — Sieve-скрипт `vacation`** (S4-05). `VacationResponse/set` пишет скрипт `vacation` (даты —
@@ -126,7 +146,9 @@ cargo test -p postman-core --test stand -- --ignored
     Stalwart пишет в журнал `smtp.rate-limit-exceeded` и **молча** не доставляет следующие, в том числе приглашения
     (iTIP): у отправителя `CalendarEvent/set` успешен, у получателя ни события, ни письма. Тесты стенда, которые шлют
     user2 много писем (`stand`, `stand_settings`), лучше не гонять подряд; при сбое `invitation_round_trip` — смотреть
-    журнал сервера. Для клиента: «приглашение отправлено» не значит «доставлено» [проверить порог на рабочем сервере].
+    журнал сервера. Для клиента: «приглашение отправлено» не значит «доставлено». Порог — правило «Sender address to
+    recipient throttle», созданное при установке: 25 в час на пару «домен отправителя × получатель» («Настройка
+    сервера»); приглашение при этом теряется насовсем — ошибка сервера (GAPS 4).
 
 18. **Общий ящик группы** (S4-06). Группа (`x:Account/set` `@type: Group`; участник — `memberGroupIds` у пользователя)
     даёт участнику в `session.accounts` аккаунт группы: `isPersonal: false`, `isReadOnly: false`, capabilities почты
@@ -135,8 +157,8 @@ cargo test -p postman-core --test stand -- --ignored
     своего ящика (`a`, `b`…): клиент хранит в кэше ключи `<аккаунт>/<id>` (`postman_cache::scoped`), свои — без префикса.
 19. **Папка, открытая другому** (`Mailbox/set` `shareWith: { <principal>: { mayReadItems, maySetSeen } }` у владельца):
     у получателя в сессии — аккаунт владельца, в нём только эта папка; `isReadOnly` аккаунта — `false` и при шаринге
-    «только чтение», права — только в `myRights` папки. Stalwart ставит и `maySetKeywords: true`, хотя его не давали
-    [проверить: правило ACL или баг]; `mayAddItems`, `mayRemoveItems`, `maySubmit` — `false`. Клиент: папка без
+    «только чтение», права — только в `myRights` папки. Stalwart ставит и `maySetKeywords: true`, хотя его не давали:
+    в его ACL `maySetSeen` и `maySetKeywords` — одно право (GAPS 9); `mayAddItems`, `mayRemoveItems`, `maySubmit` — `false`. Клиент: папка без
     добавления и удаления — «только чтение» (удалять нельзя, флаги — по своим правам), ветка, где так все папки, —
     с подписью «только чтение».
 20. **Отправка от имени общего ящика.** В аккаунте группы `Identity/get` отдаёт Identity с адресом группы;
@@ -197,9 +219,10 @@ cargo test -p postman-core --test stand -- --ignored
     `.postman` и `categories.json` — в WebDAV (`PROPFIND /dav/file/<ящик>/`, Depth 1); скрытых или служебных
     узлов у FileNode нет (`role: null`). Пользователь может удалить таблицу — Postman тогда вернётся к умолчанию.
 30. **`FileNode/query`:** фильтр `name` — точное совпадение (без подстроки, с учётом регистра), `parentId: "<id>"` —
-    работает; `parentId: null` («в корне») — весь запрос отклоняется (HTTP 400 `notRequest`), `hasParentId: false`
-    молча игнорируется (отдаёт и вложенные). Клиент ищет узел в корне фильтром по имени и сам отбирает `parentId: null`
-    (`Client::file_node`).
+    работает; корень — `isTopLevel: true` (draft-ietf-jmap-filenode-18; узел с тем же именем во вложенной папке в ответ
+    не попадает — тест `stand_categories`). `parentId: null` отвергается по спецификации (`parentId` — тип `Id`;
+    сейчас `invalidArguments`), `hasParentId` из прежних версий черновика в draft-18 нет — сервер молча игнорирует
+    неизвестное условие (GAPS 24). Клиент: `Client::file_node`.
 31. **Замена содержимого и `ifInState`.** `FileNode/set update { blobId }` заменяет содержимое (у узла — свой новый
     `blobId`, `modified` меняется); `ifInState` у `FileNode/set` поддержан: не то состояние — ошибка метода
     `stateMismatch`. Состояние — одно на все файлы аккаунта: любая правка в «Файлах» пользователя сдвигает его, и
@@ -227,10 +250,11 @@ cargo test -p postman-core --test stand -- --ignored
     и по общему — `hasKeyword` ищет слово целиком, поэтому общее слово ставится рядом). Двоеточие (`t09:00`) сервер тоже
     принимает, но формат Postman — без него. Заглавная `T` — отдельное слово (п. 23).
     **Рассылки:** условие `header` в `Email/query` (RFC 8621 §4.4.1) не находит ни одного письма — ни `["List-Unsubscribe"]`,
-    ни `["Subject"]`, ни с значением, и через 10 с после загрузки (тест `header_filter_finds_nothing`); ошибки нет.
-    `header:List-Id:asText` — `null`, сырой `header:List-Id` и `header:List-Unsubscribe` — есть (и у письма из
-    `Email/import`, и из `Email/set create`; у второго `List-Id` не сохраняется вовсе). Поэтому рассылки узнаются по
-    сырым заголовкам в `Email/get` (`Client::list_letters`). `before` работает.
+    ни `["Subject"]`, ни с значением, и через 10 с после загрузки (тест `header_filter_finds_nothing`); ошибки нет:
+    заголовки по умолчанию не индексируются — нужен `headers` в `Search.indexEmailFields` и переиндексация («Настройка
+    сервера»). `header:List-Id:asText` — `null`, сырой `header:List-Id` и `header:List-Unsubscribe` — есть (и у письма
+    из `Email/import`, и из `Email/set create`: заголовок сохраняется, `null` — только при чтении `asText`, GAPS 30).
+    Поэтому рассылки узнаются по сырым заголовкам в `Email/get` (`Client::list_letters`). `before` работает.
     **«Архив»:** у ящиков стенда папки с ролью `archive` нет; `Mailbox/set create` с `role: "archive"` принят — Postman
     создаёт «Архив» при первой правке, которой он нужен («Напомнить», рассылки, «Исчезнет» в архив). Перенос между
     папками и `$seen` — одним `Email/set` патчем (`mailboxIds/<id>`, `keywords/<слово>`).
@@ -246,9 +270,13 @@ cargo test -p postman-core --test stand -- --ignored
     (адрес и имя), `to`, `subject`, `notKeyword: $seen`, `after`/`before` (UTCDate), `text` — находят ровно ожидаемое.
     Но: **`text` из нескольких слов** ищет все слова в одном поле — «<метка из темы> квартала» (слово из текста письма)
     не находит ничего, а те же слова двумя условиями `text` в `AND` — находят; поэтому Postman шлёт по `text` на слово.
-    **Словоформ нет:** «договоры» не находит тему «договор», `subject: договора` — тоже; точная форма находится и в
-    теме, и в тексте (`body`). Словоформы находит свой индекс (tantivy, Snowball), сервер дополняет найденное точными
-    совпадениями по всему ящику.
+    **Словоформы — с языком запроса.** Язык короткого запроса сервер не угадывает и берёт `Search.defaultLanguage`
+    (на стенде en-US): «договоры» без языка не находит «договору». С префиксом языка (синтаксис Stalwart) —
+    находит: `text`/`body: "ru:договоры"` и `"ru:договоров"` → «договору», `"ru:поставкой"` → «поставки». Поэтому
+    Postman шлёт слова и тему с кириллицей с `ru:` (`query::with_language`), латиницу — как есть. Язык письма сервер
+    определяет по его тексту: у письма в одну фразу словоформы не находятся и с языком (индекс — языком по умолчанию),
+    тест берёт текст в несколько предложений. В теме с языком находится точная форма (`subject: "ru:договор"`), а
+    словоформа — нет (`"ru:договора"`) [проверить]. Свой индекс (tantivy, Snowball) находит словоформы и без сервера.
 
 ## Общие ящики на стенде (S4-06)
 

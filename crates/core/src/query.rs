@@ -160,6 +160,15 @@ fn quote(v: &str) -> String {
     if v.chars().any(char::is_whitespace) { format!("\"{v}\"") } else { v.to_owned() }
 }
 
+/// Полнотекстовое условие с языком для Stalwart: с кириллицей — `ru:<текст>`, остальное — как есть. Язык запроса
+/// Stalwart угадывает по самому запросу; у короткого запроса уверенность мала, и он берёт язык по умолчанию
+/// (`Search.defaultLanguage`, на стенде en-US) — тогда русских словоформ нет (`docs/STALWART-GAPS.md`, 33).
+/// Префикс языка — синтаксис запроса Stalwart: `ru:договоры` находит «договор» и «договору».
+pub fn with_language(term: &str) -> String {
+    let cyrillic = term.chars().any(|c| matches!(c, '\u{0400}'..='\u{052F}'));
+    if cyrillic { format!("ru:{term}") } else { term.to_owned() }
+}
+
 fn contains(hay: &str, needle: &str) -> bool {
     folded(hay).contains(&folded(needle))
 }
@@ -247,10 +256,11 @@ impl Query {
 
     /// Условие `Email/query` (RFC 8621 §4.4.1); пустой запрос — `None`. `to:me` без моих адресов — без условия.
     /// Слова — каждое своим `text`: одним `text` из нескольких слов Stalwart ищет все слова в одном поле (тема или
-    /// текст), слово из темы и слово из текста письма вместе не находятся (`docs/STALWART-GAPS.md`).
+    /// текст), слово из темы и слово из текста письма вместе не находятся (`docs/STALWART-GAPS.md`). Слова и тема
+    /// по-русски — с языком запроса ([`with_language`]), иначе сервер не находит словоформ.
     pub fn server_filter(&self, env: &Env) -> Option<Filter> {
         let mut and = Vec::new();
-        and.extend(self.words.iter().map(|w| Filter::Text(w.clone())));
+        and.extend(self.words.iter().map(|w| Filter::Text(with_language(w))));
         and.extend(self.from.iter().map(|v| Filter::From(v.clone())));
         for v in &self.to {
             match (is_me(v), env.me.as_slice()) {
@@ -260,7 +270,7 @@ impl Query {
                 (false, _) => and.push(Filter::To(v.clone())),
             }
         }
-        and.extend(self.subject.iter().map(|v| Filter::Subject(v.clone())));
+        and.extend(self.subject.iter().map(|v| Filter::Subject(with_language(v))));
         if self.attachment {
             and.push(Filter::HasAttachment(true));
         }
@@ -532,10 +542,10 @@ mod tests {
         assert_eq!(
             q.server_filter(&env),
             Some(Filter::And(vec![
-                Filter::Text("договор".into()),
+                Filter::Text("ru:договор".into()),
                 Filter::From("Ирина".into()),
                 Filter::Or(vec![Filter::To("me@corp.example".into()), Filter::To("boss@corp.example".into())]),
-                Filter::Subject("ИБ".into()),
+                Filter::Subject("ru:ИБ".into()),
                 Filter::HasAttachment(true),
                 Filter::NotKeyword("$seen".into()),
                 Filter::HasKeyword("$flagged".into()),
@@ -544,15 +554,25 @@ mod tests {
             ]))
         );
         let q = Query::parse("отчёт");
-        assert_eq!(q.server_filter(&q.env(&now, |_| None, &[])), Some(Filter::Text("отчёт".into())));
+        assert_eq!(q.server_filter(&q.env(&now, |_| None, &[])), Some(Filter::Text("ru:отчёт".into())));
         // Слова — по одному `text` (слово темы и слово текста вместе), фраза в кавычках — одним.
         let q = Query::parse(r#"итоги квартала "точная фраза""#);
         assert_eq!(
             q.server_filter(&q.env(&now, |_| None, &[])),
             Some(Filter::And(vec![
-                Filter::Text("итоги".into()),
-                Filter::Text("квартала".into()),
-                Filter::Text("точная фраза".into()),
+                Filter::Text("ru:итоги".into()),
+                Filter::Text("ru:квартала".into()),
+                Filter::Text("ru:точная фраза".into()),
+            ]))
+        );
+        // Латиница — без языка; слово, где есть кириллица, — по-русски.
+        let q = Query::parse("report subject:Q3 ИБ-2026");
+        assert_eq!(
+            q.server_filter(&q.env(&now, |_| None, &[])),
+            Some(Filter::And(vec![
+                Filter::Text("report".into()),
+                Filter::Text("ru:ИБ-2026".into()),
+                Filter::Subject("Q3".into()),
             ]))
         );
         assert_eq!(Query::parse("").server_filter(&Env::default()), None);
