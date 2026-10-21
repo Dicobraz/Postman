@@ -50,9 +50,9 @@ pub mod filters {
     gpui_kit::actions!(filters, [Reset]);
 }
 
-/// Вкладки в заголовке окна (S5-01): следующая, предыдущая, закрыть.
+/// Вкладки в заголовке окна (S5-01): следующая, предыдущая, закрыть; новая вкладка почты (S5-16).
 pub mod tab {
-    gpui_kit::actions!(tab, [Next, Prev, Close]);
+    gpui_kit::actions!(tab, [New, Next, Prev, Close]);
 }
 
 /// Поиск в командной строке (S5-10): охват «Везде | Текущая папка» и уточнения — как чипы «Уточнить»; по
@@ -80,7 +80,8 @@ pub mod contacts {
     gpui_kit::actions!(contacts, [New, Edit, Delete, Write, Meeting, CopyAddress]);
 }
 
-/// Ответ на приглашение в письме (S5-11): клавиши A / T / N, когда карточка ждёт ответа.
+/// Ответ на приглашение в письме (S5-11): кнопки карточки; клавиши A / T / N — только в схеме «Одиночные клавиши»
+/// (S5-17).
 pub mod invite {
     gpui_kit::actions!(invite, [Accept, Tentative, Decline]);
 }
@@ -106,8 +107,8 @@ const LIST: Option<&str> = Some("MailView && !Input && !Composer && !ContextMenu
 /// Раздел «Почта», включая поле поиска, но не письмо: в ответе в области чтения (S5-06б) Ctrl+R, Ctrl+F, Ctrl+U —
 /// клавиши письма, а не списка.
 const MAIL: Option<&str> = Some("MailView && !Composer && !ContextMenu");
-/// Раздел «Календарь».
-const CALENDAR: Option<&str> = Some("CalendarView");
+/// Раздел «Календарь» вне полей ввода: PgUp/PgDn и Home в поле поиска (S5-21) — правка текста.
+const CALENDAR: Option<&str> = Some("CalendarView && !Input");
 /// Раздел «Контакты» вне полей ввода (Delete, F2 в поиске — правка текста).
 const CONTACTS: Option<&str> = Some("ContactsView && !Input");
 /// Раздел «Контакты», включая поле поиска.
@@ -128,17 +129,21 @@ const fn cmd(id: &'static str, keys: &'static [&'static str], context: Option<&'
     Command { id, keys, context }
 }
 
-/// Все команды Postman. Хоткеи — как в classic Outlook (`docs/HANDOFF.md` §2a) плюс j/k.
+/// Все команды Postman. Хоткеи — схема «Outlook» по правилу одного модификатора (`docs/DESIGN.md` «Хоткеи», S5-16;
+/// тест `hotkeys_follow_the_one_modifier_rule`): Ctrl + буква или цифра — команды, без модификатора — навигация и
+/// действие над выделенным, Alt нет; два модификатора — только `rule::TWO_MODIFIERS`. J/K, A/T/N — схема «Одиночные
+/// клавиши» (S5-17).
 pub const COMMANDS: &[Command] = &[
-    cmd("mail.next", &["j", "down"], LIST),
-    cmd("mail.prev", &["k", "up"], LIST),
+    cmd("mail.next", &["down"], LIST),
+    cmd("mail.prev", &["up"], LIST),
     cmd("mail.first", &["home"], LIST),
     cmd("mail.last", &["end"], LIST),
     cmd("mail.page_down", &["pagedown"], LIST),
     cmd("mail.page_up", &["pageup"], LIST),
     cmd("mail.mark_read", &["ctrl-q"], MAIL),
     cmd("mail.mark_unread", &["ctrl-u"], MAIL),
-    cmd("mail.toggle_flag", &["insert"], LIST),
+    // Флаг — кнопкой, меню и панелью выделения; Insert — «Срок» (решение владельца 2026-10-21, S5.md, вопрос 1).
+    cmd("mail.toggle_flag", &[], LIST),
     // Не Outlook (там Ctrl+F2…F12 по назначению): клавиши 1–9 — категории таблицы (DESIGN.md, «Настройки»).
     cmd("mail.categorize", &["1", "2", "3", "4", "5", "6", "7", "8", "9"], LIST),
     cmd("mail.new", &["ctrl-n"], MAILER),
@@ -146,9 +151,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
     cmd("mail.forward", &["ctrl-f"], MAIL),
     cmd("mail.delete", &["delete"], LIST),
-    // Жизненный цикл (S5-04): выбор — панелью на месте. «Срок…» — Ctrl+Shift+G, как «К исполнению → Настраиваемый»
-    // в Outlook (флаг со сроком); у «Напомнить», «Ждать ответа», «Исчезнет» в Outlook клавиш нет — здесь тоже.
-    cmd("mail.due", &["ctrl-shift-g"], MAIL),
+    // Жизненный цикл (S5-04): выбор — панелью на месте. «Срок…» — Insert (DESIGN «Хоткеи»: действие над выделенным;
+    // в classic Outlook Insert — флаг, у нас срок вместо флага); у «Напомнить», «Ждать ответа», «Исчезнет» клавиш нет.
+    cmd("mail.due", &["insert"], LIST),
     cmd("mail.remind", &[], MAIL),
     cmd("mail.wait", &[], MAIL),
     cmd("mail.expire", &[], MAIL),
@@ -188,7 +193,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),
-    // Вкладки окна (S5-01): как в браузере и новом Outlook; «Почта» не закрывается.
+    // Вкладки окна (S5-01): как в браузере и новом Outlook; «Почта» не закрывается. Ctrl+T — ещё вкладка почты на
+    // текущей папке и фильтрах (S5-16); Ctrl+Shift+Tab — исключение правила, пара к Ctrl+Tab.
+    cmd("tab.new", &["ctrl-t"], MAILER),
     cmd("tab.next", &["ctrl-tab"], MAILER),
     cmd("tab.prev", &["ctrl-shift-tab"], MAILER),
     cmd("tab.close", &["ctrl-w"], MAILER),
@@ -213,13 +220,16 @@ pub const COMMANDS: &[Command] = &[
     cmd("palette.run", &["enter"], PALETTE),
     cmd("palette.close", &["escape"], PALETTE),
     cmd("calendar.new_meeting", &["ctrl-shift-q"], None),
-    // Outlook: предыдущая и следующая неделя — Alt+↑ и Alt+↓; «Сегодня» — Alt+Home (макет S5-11).
-    cmd("calendar.prev_week", &["alt-up"], CALENDAR),
-    cmd("calendar.next_week", &["alt-down"], CALENDAR),
-    cmd("calendar.today", &["alt-home"], CALENDAR),
-    cmd("compose.send", &["ctrl-enter", "alt-s"], COMPOSER),
+    // DESIGN «Хоткеи»: период — PgUp / PgDn, «Сегодня» — Home (Alt не используется; в Outlook — Alt+↑/↓, Alt+Home).
+    // Виды 1…4 — с видами календаря (S5-21), в схеме «Одиночные клавиши» (S5-17).
+    cmd("calendar.prev_week", &["pageup"], CALENDAR),
+    cmd("calendar.next_week", &["pagedown"], CALENDAR),
+    cmd("calendar.today", &["home"], CALENDAR),
+    // Отправить — Ctrl+Enter (Alt+S Outlook не берём: Alt не используется).
+    cmd("compose.send", &["ctrl-enter"], COMPOSER),
     // Не Outlook: вложить файл — кнопкой или перетаскиванием, без клавиши.
     cmd("compose.attach", &[], COMPOSER),
+    // Ctrl+Shift+P — исключение до живого отображения Markdown (S5-27), с ним команда уходит.
     cmd("compose.preview", &["ctrl-shift-p"], COMPOSER),
     cmd("compose.close", &["escape"], COMPOSER),
     // Панель форматирования (S5-06б): как в Outlook — Ctrl+B, Ctrl+I, Ctrl+U; списки, ссылка и цитата — кнопками.
@@ -233,7 +243,7 @@ pub const COMMANDS: &[Command] = &[
     // Не Outlook (там «Открыть в новом окне»): ответ из области чтения — во вкладку.
     cmd("compose.expand", &[], COMPOSER),
     cmd("compose.discard", &[], COMPOSER),
-    cmd("meeting.send", &["ctrl-enter", "alt-s"], MEETING),
+    cmd("meeting.send", &["ctrl-enter"], MEETING),
     cmd("meeting.close", &["escape"], MEETING),
     // Контакты (S5-11): Outlook — Ctrl+Shift+C новый контакт; F2 — правка, Delete — удалить (после «Да»).
     cmd("contacts.new", &["ctrl-shift-c"], CONTACTS_ANY),
@@ -242,10 +252,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("contacts.write", &[], CONTACTS_ANY),
     cmd("contacts.meeting", &[], CONTACTS_ANY),
     cmd("contacts.copy_address", &[], CONTACTS_ANY),
-    // Не Outlook (макет «Приглашение в письме»): A / T / N — ответ, если открыто приглашение без ответа.
-    cmd("invite.accept", &["a"], LIST),
-    cmd("invite.tentative", &["t"], LIST),
-    cmd("invite.decline", &["n"], LIST),
+    // Ответ на приглашение — кнопками карточки (схема «Outlook»: буквы без модификатора не допускаются); A / T / N —
+    // в схеме «Одиночные клавиши» (S5-17, решение владельца 2026-10-21, вопрос 3).
+    cmd("invite.accept", &[], LIST),
+    cmd("invite.tentative", &[], LIST),
+    cmd("invite.decline", &[], LIST),
     // Не Outlook (там «Файл → Параметры»): Ctrl+, — как в новом Outlook и редакторах (S5-09).
     cmd("settings.open", &["ctrl-,"], None),
     // Outlook: «Файл → Автоматические ответы», без клавиши.
@@ -254,8 +265,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("settings.rules", &[], None),
     // Outlook: «Файл → Параметры → Календарь», без клавиши (S5-20).
     cmd("settings.calendar", &[], None),
-    // Фильтры (S5-03). Ctrl+Shift+F — в Outlook «Расширенный поиск», здесь — панель фильтров на месте папок.
-    cmd("view.filters", &["ctrl-shift-f"], MAIL),
+    // Фильтры (S5-03): панель на месте папок — воронкой и из палитры, без клавиши (S5-16, вопрос 2).
+    cmd("view.filters", &[], MAIL),
     // Вид → Быстрые фильтры: вернуть скрытые закладки; сортировка — меню над списком; без клавиш.
     cmd("view.quick_filters", &[], MAIL),
     cmd("view.sort_by_date", &[], MAIL),
@@ -310,6 +321,59 @@ fn keyed_action(c: &Command, keys: &str) -> Option<Box<dyn Action>> {
     match c.id {
         "mail.categorize" => keys.parse::<u8>().ok().map(|key| Box::new(mail::Categorize { key }) as Box<dyn Action>),
         _ => None,
+    }
+}
+
+/// Правило одного модификатора (DESIGN «Хоткеи», S5-16) — для тестов реестра; схема «Одиночные клавиши» (S5-17)
+/// проверяет свои клавиши здесь же.
+#[cfg(test)]
+pub(crate) mod rule {
+    /// Исключения правила одного модификатора (DESIGN «Хоткеи»): ради привычки Outlook и стандарта Windows.
+    /// Ctrl+Shift+B — встреча (S5-23); Ctrl+Shift+P — предпросмотр письма до живого отображения (S5-27).
+    pub(crate) const TWO_MODIFIERS: &[&str] =
+        &["ctrl-shift-r", "ctrl-shift-q", "ctrl-shift-c", "ctrl-shift-b", "ctrl-shift-v", "ctrl-shift-tab", "ctrl-shift-p"];
+
+    /// Клавиши без модификатора (DESIGN «Хоткеи»): навигация и действие над выделенным; 1–9 — категории (решение №6);
+    /// End — пара к Home в списке; «Меню» — контекстное меню, как Shift+F10. Буквы без модификатора — только в схеме
+    /// «Одиночные клавиши» (S5-17).
+    pub(crate) const BARE_KEYS: &[&str] = &[
+        "up", "down", "left", "right", "enter", "escape", "delete", "insert", "f2", "f3", "home", "end", "pageup", "pagedown",
+        "backspace", "menu", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    ];
+
+    /// Сочетания, которые держит дизайн за будущими командами: привязать их раньше — нельзя (тест правила).
+    /// Ctrl+J — «Взять в работу» в общих ящиках (S5-28).
+    pub(crate) const RESERVED: &[&str] = &["ctrl-j"];
+
+    /// Сочетание по правилу одного модификатора: `Err` — чем нарушает. Клавиши — в записи gpui, одно нажатие.
+    pub(crate) fn rule_check(keys: &str) -> Result<(), String> {
+        let canonical = pets_commands::parse_keys(keys)?;
+        if canonical.contains(' ') {
+            return Err(format!("{keys}: chords are not used"));
+        }
+        if TWO_MODIFIERS.iter().any(|k| pets_commands::parse_keys(k).is_ok_and(|k| k == canonical)) {
+            return Ok(());
+        }
+        let mut parts: Vec<&str> = canonical.split('-').collect();
+        // `ctrl--` — клавиша «минус».
+        if parts.len() > 1 && parts.last() == Some(&"") {
+            parts.pop();
+            if let Some(last) = parts.last_mut() {
+                *last = "-";
+            }
+        }
+        let key = parts.pop().unwrap_or_default();
+        let mods = parts;
+        if mods.contains(&"alt") {
+            return Err(format!("{keys}: Alt is not used"));
+        }
+        if mods.len() > 1 {
+            return Err(format!("{keys}: more than one modifier"));
+        }
+        if mods.is_empty() && !BARE_KEYS.contains(&key) {
+            return Err(format!("{keys}: a key without a modifier is not navigation"));
+        }
+        Ok(())
     }
 }
 
@@ -398,7 +462,54 @@ mod tests {
             assert_eq!(got, Some(super::mail::Categorize { key: n as u8 + 1 }));
         }
         let next = pets_commands::find(COMMANDS, "mail.next").unwrap();
-        assert!(super::keyed_action(next, "j").is_none());
+        assert!(super::keyed_action(next, "down").is_none());
+    }
+
+    /// Правило схемы «Outlook» (S5-16, DESIGN «Хоткеи») по всему реестру: не больше одного модификатора, кроме
+    /// исключений; Alt нет; без модификатора — только навигация и действие над выделенным; зарезервированные
+    /// сочетания свободны.
+    #[test]
+    fn hotkeys_follow_the_one_modifier_rule() {
+        for c in COMMANDS {
+            for keys in c.keys {
+                assert_eq!(super::rule::rule_check(keys), Ok(()), "{}", c.id);
+            }
+        }
+        for keys in super::rule::RESERVED {
+            assert!(pets_commands::bound_to(COMMANDS, keys).is_empty(), "{keys} — за будущей командой");
+        }
+        // Исключения — те, что в DESIGN; каждое — два модификатора (иначе это не исключение).
+        for keys in super::rule::TWO_MODIFIERS {
+            assert_eq!(keys.matches('-').count(), 2, "{keys}");
+        }
+    }
+
+    #[test]
+    fn the_rule_rejects_what_the_design_forbids() {
+        use super::rule::rule_check;
+        for bad in ["alt-s", "alt-up", "alt-home", "ctrl-shift-g", "ctrl-shift-f", "ctrl-alt-r", "j", "k", "a", "t", "n", "/", "shift-ctrl-k", "ctrl-k ctrl-s"] {
+            assert!(rule_check(bad).is_err(), "{bad} прошло правило");
+        }
+        for ok in ["ctrl-t", "ctrl-1", "ctrl-,", "shift-f3", "shift-down", "shift-f10", "insert", "pagedown", "home", "1", "shift-ctrl-r", "ctrl-shift-tab", "f2", "ctrl--"] {
+            assert_eq!(rule_check(ok), Ok(()), "{ok}");
+        }
+    }
+
+    /// S5-16: клавиши, которые схема «Outlook» больше не держит, не привязаны; новые — у своих команд.
+    #[test]
+    fn keys_moved_by_s5_16() {
+        for gone in ["j", "k", "a", "t", "n", "alt-up", "alt-down", "alt-home", "alt-s", "ctrl-shift-g", "ctrl-shift-f"] {
+            assert!(pets_commands::bound_to(COMMANDS, gone).is_empty(), "{gone} всё ещё привязана");
+        }
+        let keys = |id: &str| pets_commands::find(COMMANDS, id).map(|c| c.keys.to_vec()).unwrap_or_default();
+        assert_eq!(keys("mail.due"), ["insert"]);
+        assert!(keys("mail.toggle_flag").is_empty());
+        assert_eq!(keys("tab.new"), ["ctrl-t"]);
+        assert_eq!(keys("calendar.prev_week"), ["pageup"]);
+        assert_eq!(keys("calendar.next_week"), ["pagedown"]);
+        assert_eq!(keys("calendar.today"), ["home"]);
+        assert_eq!(keys("compose.send"), ["ctrl-enter"]);
+        assert_eq!(keys("meeting.send"), ["ctrl-enter"]);
     }
 
     /// Хоткеи classic Outlook из `docs/HANDOFF.md` §2a.

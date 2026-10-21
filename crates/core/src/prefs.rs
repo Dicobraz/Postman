@@ -49,6 +49,10 @@ pub struct Prefs {
     /// Свои клавиши: id команды → сочетания в записи gpui (`ctrl-shift-r`); пустой список — без клавиши. Нет id —
     /// клавиши по умолчанию из реестра команд.
     pub keys: BTreeMap<String, Vec<String>>,
+    /// Ревизия клавиш по умолчанию, к которой приведены `keys`: интерфейс переводит свои клавиши со старой ревизии
+    /// (S5-16 сняла Alt, J/K, A/T/N и др.). Нет в файле — 0 (до S5-16).
+    #[serde(default)]
+    pub keys_rev: u32,
 }
 
 impl Default for Prefs {
@@ -61,6 +65,7 @@ impl Default for Prefs {
             reading: Reading::default(),
             calendar: Calendar::default(),
             keys: BTreeMap::new(),
+            keys_rev: 0,
         }
     }
 }
@@ -422,28 +427,31 @@ impl CalendarView {
     }
 }
 
-/// Цвет свободного времени: общие свободные окна во встрече (DESIGN «Настройки → Календарь»). Цвета ролей —
+/// Цвет свободного времени: общие свободные окна во встрече (DESIGN «Настройки → Календарь»). Только цвета бренда
+/// (решение владельца 2026-10-21): розовый, синий и серо-голубой; зелёный, синий Fluent и бирюзовый отменены —
+/// в файле прежних версий `green` и `teal` читаются розовым, `blue` — синим бренда. Цвета ролей —
 /// `app.fb.free.<id>.*` в интерфейсе.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreeColor {
     /// Розовый бренда #E4107F.
     #[default]
+    #[serde(alias = "green", alias = "teal")]
     Brand,
-    Green,
+    /// Синий бренда #3A9BD5.
     Blue,
-    Teal,
+    /// Серо-голубой бренда #7A8FA6.
+    Slate,
 }
 
 impl FreeColor {
-    pub const ALL: [FreeColor; 4] = [FreeColor::Brand, FreeColor::Green, FreeColor::Blue, FreeColor::Teal];
+    pub const ALL: [FreeColor; 3] = [FreeColor::Brand, FreeColor::Blue, FreeColor::Slate];
 
     pub fn id(self) -> &'static str {
         match self {
             FreeColor::Brand => "brand",
-            FreeColor::Green => "green",
             FreeColor::Blue => "blue",
-            FreeColor::Teal => "teal",
+            FreeColor::Slate => "slate",
         }
     }
 }
@@ -902,7 +910,7 @@ mod tests {
             reminder: 0,
             start_late: false,
             with_optional: true,
-            free_color: FreeColor::Teal,
+            free_color: FreeColor::Slate,
             owner_colors: false,
             owner_names: false,
             tentative_invites: false,
@@ -932,7 +940,13 @@ mod tests {
         assert_eq!((c.step, c.duration, c.reminder), (30, 30, 15));
         assert_eq!(c.zone, None, "неизвестный пояс — пояс Windows");
         assert_eq!(c.second_zone, def.second_zone);
-        assert_eq!((c.free_color, c.with_optional), (FreeColor::Green, true));
+        assert_eq!((c.free_color, c.with_optional), (FreeColor::Brand, true), "отменённый зелёный — розовым");
+        // Отменённые цвета прежних версий: бирюзовый — розовым, синий — синим бренда.
+        for (old, now) in [("teal", FreeColor::Brand), ("blue", FreeColor::Blue), ("slate", FreeColor::Slate)] {
+            let text = format!(r#"{{"version":1,"calendar":{{"free_color":"{old}"}}}}"#);
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(Prefs::load(&path).unwrap().calendar.free_color, now, "{old}");
+        }
         // Конец суток — допустим, позже — нет.
         let edge = Calendar { work_start: 22 * 60, work_end: 24 * 60, ..Calendar::default() }.normalized();
         assert_eq!((edge.work_start, edge.work_end), (1320, 1440));

@@ -16,7 +16,7 @@ use pets_ui::theme::Metric;
 
 use crate::commands::{settings, view};
 use crate::roles::{Look, Pm};
-use crate::tabs::{Tab, TabKind};
+use crate::tabs::{MailState, Tab, TabKind};
 use crate::{Mailer, Section};
 
 /// Шрифт значков ОС (базис Pets): Segoe Fluent Icons, Windows 11.
@@ -165,7 +165,8 @@ impl Mailer {
     /// Название вкладки и есть ли в ней несохранённое (письмо — точка после названия).
     fn tab_title(&self, t: &Tab, cx: &App) -> (String, bool) {
         match t.kind {
-            TabKind::Mail => (tr!("frame-tab-mail"), false),
+            TabKind::Main => (tr!("frame-tab-mail"), false),
+            TabKind::Mail => (self.mail_tab_title(t.id, cx), false),
             TabKind::Settings => (tr!("frame-tab-settings"), false),
             TabKind::Meeting => (self.meetings.title(t.id, cx), false),
             TabKind::Compose(id) => {
@@ -217,6 +218,7 @@ impl Mailer {
                 .when(!on, |d| d.text_color(l.text2()).hover(|d| d.bg(l.hover())))
                 .when(letter, |d| d.child(icon(glyph::NEW_MAIL, 12.)))
                 .when(t.kind == TabKind::Meeting, |d| d.child(icon(crate::calendar::g::CALENDAR, 13.)))
+                .when(t.kind == TabKind::Mail, |d| d.child(icon(glyph::MAIL, 12.)))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 // Несохранённый черновик — точка (DESIGN «Новое письмо», макет вкладки).
                 .when(dirty, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(l.text2())))
@@ -284,7 +286,7 @@ impl Mailer {
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(key)).build(window, cx))
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
         };
-        let module = |s: Section| self.tabs.is_active(TabKind::Mail) && self.section == s;
+        let module = |s: Section| self.tabs.active().kind.shows_mail() && self.section == s;
         div()
             .w(px(W_RAIL))
             .h_full()
@@ -454,6 +456,7 @@ impl Mailer {
 
     pub(crate) fn activate_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
+            self.sync_mail_tab(cx);
             self.focus_active_tab(window, cx);
             cx.notify();
         }
@@ -475,7 +478,12 @@ impl Mailer {
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == id).copied() else { return };
         match tab.kind {
-            TabKind::Mail => {}
+            TabKind::Main => {}
+            TabKind::Mail => {
+                self.tabs.close(id);
+                self.sync_mail_tab(cx);
+                self.focus_active_tab(window, cx);
+            }
             TabKind::Settings => {
                 self.close_settings(window, cx);
             }
@@ -488,8 +496,110 @@ impl Mailer {
     /// Ctrl+Tab / Ctrl+Shift+Tab.
     pub(crate) fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.step(delta);
+        self.sync_mail_tab(cx);
         self.focus_active_tab(window, cx);
         cx.notify();
+    }
+
+    // --- вкладки почты (S5-16) ---
+
+    /// Ctrl+T: ещё вкладка почты — на текущей папке, фильтрах и письме; дальше у неё своё состояние. Поиск в новую
+    /// вкладку не переходит.
+    pub(crate) fn new_mail_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.mail_state(cx);
+        self.tabs.open_mail(state);
+        self.sync_mail_tab(cx);
+        if self.find.active() {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+            self.end_search(cx);
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Показать почту: активная вкладка уже с почтой — она; иначе — вкладка, чья почта в частях экрана, или главная.
+    pub(crate) fn show_mail_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.tabs.active().kind.shows_mail() {
+            let back = self.tabs.owner().is_some_and(|id| self.tabs.activate(id));
+            if !back {
+                self.tabs.activate_kind(TabKind::Main);
+            }
+        }
+        self.sync_mail_tab(cx);
+        cx.notify();
+    }
+
+    /// Состояние почты в частях экрана: папка, фильтры, панель слева, выбранное (или открытое) письмо.
+    pub(crate) fn mail_state(&self, cx: &App) -> MailState {
+        let list = self.list.read(cx);
+        let f = self.filters.read(cx);
+        let open = || self.reading.read(cx).reading.as_ref().map(|r| r.row.id.clone());
+        let letter = list.selected_row().map(|r| r.id).or_else(open);
+        MailState { mailbox: list.mailbox.clone(), query: f.query.clone(), panel: f.panel, letter }
+    }
+
+    /// Активная вкладка сменилась: во вкладке почты раздел — «Почта» (раздел главной запоминается до возврата в неё),
+    /// части почты — с состоянием активной вкладки. Та же вкладка — ничего.
+    pub(crate) fn sync_mail_tab(&mut self, cx: &mut Context<Self>) {
+        match self.tabs.active().kind {
+            TabKind::Mail if self.section != Section::Mail => {
+                self.main_section = Some(self.section);
+                self.section = Section::Mail;
+            }
+            TabKind::Main => {
+                if let Some(s) = self.main_section.take() {
+                    self.section = s;
+                }
+            }
+            _ => {}
+        }
+        // Кадр за кадром здесь ничего не меняется: та же вкладка или не почта — без перерисовки.
+        let active = self.tabs.active();
+        if !active.kind.shows_mail() || self.tabs.owner() == Some(active.id) {
+            return;
+        }
+        let current = self.mail_state(cx);
+        if let Some(state) = self.tabs.hand_over(|| current) {
+            self.restore_mail(state, cx);
+        }
+        cx.notify();
+    }
+
+    /// Поставить состояние вкладки почты в части экрана — теми же путями, что щелчок по папке и фильтрам.
+    fn restore_mail(&mut self, state: MailState, cx: &mut Context<Self>) {
+        if self.find.active() {
+            self.end_search(cx);
+            // Поле поиска — после кадра: ему нужно окно.
+            let (search, window) = (self.search.clone(), self.window);
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| search.update(cx, |s, cx| s.set_value("", window, cx)));
+            });
+        }
+        if let Some(mailbox) = state.mailbox {
+            self.open_mailbox(mailbox, cx);
+        }
+        self.filters.update(cx, |m, cx| {
+            m.set(cx, |m| m.panel = state.panel);
+            m.change(cx, |q| *q = state.query);
+        });
+        let Some(id) = state.letter else { return };
+        self.list.update(cx, |l, cx| l.reselect_id(id.clone(), cx));
+        if let Some(row) = self.cache.rows_by_ids(std::slice::from_ref(&id)).ok().and_then(|mut r| r.pop()) {
+            self.open_letter(row, cx);
+        }
+    }
+
+    /// Название вкладки почты: открытая папка или «Все папки».
+    fn mail_tab_title(&self, id: u64, cx: &App) -> String {
+        let list = self.list.read(cx);
+        let (mailbox, all) = match self.tabs.saved(id) {
+            Some(s) if self.tabs.owner() != Some(id) => (s.mailbox.clone(), s.query.scope == crate::filters::Where::All),
+            _ => (list.mailbox.clone(), self.filters.read(cx).query.scope == crate::filters::Where::All),
+        };
+        if all {
+            return tr!("filters-all-folders");
+        }
+        mailbox.and_then(|m| list.names.get(&m).cloned()).unwrap_or_else(|| tr!("frame-tab-mail"))
     }
 }
 

@@ -776,7 +776,7 @@ impl crate::Mailer {
         use postman_core::prefs::Pane;
         let m = self.filters.read(cx);
         let tabs = Self::quick_tabs(cx);
-        let mail = self.section == crate::Section::Mail && self.tabs.is_active(crate::tabs::TabKind::Mail);
+        let mail = self.section == crate::Section::Mail && self.tabs.active().kind.shows_mail();
         if !mail || tabs.is_empty() || self.live.signin.is_some() || self.list.read(cx).search_ids.is_some() {
             return None;
         }

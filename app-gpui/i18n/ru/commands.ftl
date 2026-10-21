@@ -56,6 +56,7 @@ cmd-palette-prev = Палитра: предыдущая строка
 cmd-palette-run = Палитра: выполнить
 cmd-palette-close = Палитра: закрыть
 cmd-calendar-new-meeting = Новая встреча (помощник планирования)
+cmd-tab-new = Новая вкладка почты
 cmd-tab-next = Следующая вкладка
 cmd-tab-prev = Предыдущая вкладка
 cmd-tab-close = Закрыть вкладку

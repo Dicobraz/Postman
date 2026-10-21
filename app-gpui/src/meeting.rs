@@ -1676,7 +1676,7 @@ impl MeetingView {
                 .text_size(px(12.))
                 .text_color(free.fg)
                 .cursor_pointer()
-                .hover(|d| d.bg(free.bg))
+                .hover(|d| d.bg(free.hover))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_slot(pick, cx)))
         });

@@ -384,7 +384,7 @@ impl SettingsView {
             ))
     }
 
-    /// Цвет свободного времени: четыре образца и полоса-пример — занятость участников и общее окно выбранным цветом.
+    /// Цвет свободного времени: три образца (цвета бренда) и полоса-пример — занятость участников и общее окно выбранным цветом.
     fn free_card(&self, c: &Calendar, l: &Look, cx: &mut Context<Self>) -> Div {
         let swatches = FreeColor::ALL.into_iter().enumerate().map(|(i, color)| {
             let on = c.free_color == color;
