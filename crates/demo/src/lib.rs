@@ -1,6 +1,7 @@
 //! Синтетический ящик для замеров памяти/FPS без сервера.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, scoped};
 
@@ -354,7 +355,10 @@ pub fn body(id: &str) -> BodyRow {
         cid: cid.map(Into::into),
         inline: cid.is_some(),
     };
-    let (html, attachments) = if n.is_multiple_of(10) {
+    let (html, attachments) = if n % 100 == CHART_EVERY {
+        // Большая картинка в тексте (S5-07б): кадр больше 1024 px по стороне.
+        (CHART_HTML, vec![att("chart", "chart.png", "image/png", chart().len() as u64, Some("chart@corp"))])
+    } else if n.is_multiple_of(10) {
         (INVITE_HTML, vec![att("ics", "invite.ics", "text/calendar", INVITE.len() as u64, None)])
     } else if n.is_multiple_of(2) {
         (OUTLOOK, vec![
@@ -391,10 +395,68 @@ const PHOTO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.jpg");
 const INVITE: &[u8] = include_bytes!("../../worker/tests/fixtures/invite-outlook.ics");
 const INVITE_HTML: &str = "<p>Иван Петров приглашает вас на встречу «Обсуждение пилота SIEM».</p>";
 
+/// Письмо с большой картинкой в тексте — `demo4`, `demo104`… (одно на сотню: бенч открытия писем их почти не видит).
+const CHART_EVERY: usize = 4;
+const CHART_HTML: &str = r#"<p>Коллеги, график загрузки стенда за неделю — ниже.</p>
+<p><img src="cid:chart@corp" alt="График загрузки"></p>
+<p>Пики — по вторникам, подробности — в отчёте.</p>"#;
+/// Сторона большой картинки: шире предела кадра в тексте письма (1600) — воркер её уменьшает.
+pub const CHART_SIZE: (u32, u32) = (2400, 1500);
+
+/// Большая картинка (PNG): рамка и цветные углы — на снимке видно, что кадр целиком и не сдвинут. Собирается один
+/// раз при первом запросе; ошибка кодировщика — пустой файл (просмотр покажет ошибку разбора).
+fn chart() -> &'static [u8] {
+    static CHART: OnceLock<Vec<u8>> = OnceLock::new();
+    CHART.get_or_init(|| chart_png(CHART_SIZE.0, CHART_SIZE.1).unwrap_or_default())
+}
+
+fn chart_png(w: u32, h: u32) -> Option<Vec<u8>> {
+    const BORDER: u32 = 24;
+    const CORNER: u32 = 220;
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let left = x < CORNER;
+            let top = y < CORNER;
+            let right = x >= w - CORNER;
+            let bottom = y >= h - CORNER;
+            let px: [u8; 3] = if x < BORDER || y < BORDER || x >= w - BORDER || y >= h - BORDER {
+                [0x33, 0x33, 0x44]
+            } else if left && top {
+                [0xD1, 0x34, 0x38]
+            } else if right && top {
+                [0x10, 0x7C, 0x10]
+            } else if left && bottom {
+                [0x00, 0x78, 0xD4]
+            } else if right && bottom {
+                [0xFF, 0x8C, 0x00]
+            } else if x.abs_diff(w / 2) < 8 || y.abs_diff(h / 2) < 8 {
+                [0x33, 0x33, 0x44]
+            } else if x % 150 < 3 || y % 150 < 3 {
+                [0xB0, 0xC4, 0xDE]
+            } else {
+                // Сверху вниз — от голубого к белому.
+                let t = (y * 255 / h) as u8;
+                [0xC8u8.saturating_add(t / 5), 0xDCu8.saturating_add(t / 8), 0xF5]
+            };
+            rgb.extend_from_slice(&px);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w, h);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header().ok()?;
+    writer.write_image_data(&rgb).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
 /// Содержимое демо-вложений.
 pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
     match blob_id {
         "logo" => Some(LOGO.to_vec()),
+        "chart" => Some(chart().to_vec()),
         "ics" => Some(INVITE.to_vec()),
         "pdf" => Some(REPORT.to_vec()),
         "zip" => Some(SCREENS.to_vec()),
@@ -590,5 +652,21 @@ pub mod contacts {
 
     pub fn directory() -> &'static [(&'static str, &'static str, &'static str)] {
         DIRECTORY
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_letter_has_a_large_inline_png() {
+        let b = body("demo104");
+        assert!(b.html.as_deref().is_some_and(|h| h.contains("cid:chart@corp")));
+        assert_eq!(b.attachments.len(), 1);
+        let data = blob("chart").unwrap();
+        assert_eq!(b.attachments[0].size, data.len() as u64);
+        let info = png::Decoder::new(std::io::Cursor::new(data)).read_info().unwrap();
+        assert_eq!((info.info().width, info.info().height), CHART_SIZE);
     }
 }

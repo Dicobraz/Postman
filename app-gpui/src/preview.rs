@@ -24,11 +24,15 @@ use crate::chrome::icon;
 use crate::reading::{ReadingEvent, ReadingPane, render_image};
 use crate::roles::{Look, Pm};
 
-/// Сторона картинки и страницы PDF в пикселях (страница — по высоте панели, шириной до [`PAGE_W`]). Не больше 1024:
-/// кадр больше страницы атласа gpui на Windows (1024 × 1024) не рисуется — на снимке вместо страницы пусто.
-const IMAGE_SIDE: u32 = 1024;
-const PDF_SIDE: u32 = 1024;
-const PAGE_W: f32 = 620.;
+/// Длинная сторона картинки и страницы PDF в пикселях. Кадр живёт дважды: пиксели в `RenderImage` и текстура атласа
+/// gpui (на встроенной графике — тоже память процесса): 2048 × 2048 RGBA — 16 МиБ, вместе ~32 МиБ, в запасе бюджета
+/// 150 МБ (`docs/HANDOFF.md` §2c, пик 105–115 МБ); 4096 — уже ~128 МиБ. Фото 4:3 — 2048 × 1536, ~24 МиБ.
+const IMAGE_SIDE: u32 = 2048;
+const PDF_SIDE: u32 = 2048;
+/// Ширина страницы PDF в пикселях, пока ширина панели не известна (первый показ).
+const PDF_FALLBACK_W: u32 = 1000;
+/// Поля холста просмотра.
+const CANVAS_PAD: f32 = 16.;
 /// Документы Office больше не проверяем при открытии письма (только по «Просмотр»).
 const SCAN_MAX: u64 = 25 * 1024 * 1024;
 
@@ -45,6 +49,10 @@ pub(crate) struct Pv {
     pub(crate) state: PvState,
     /// Идёт разбор следующей страницы: прежняя ещё видна.
     pub(crate) busy: bool,
+    /// Прокрутка холста картинки и PDF; её `bounds` — ширина холста для страницы PDF.
+    pub(crate) scroll: ScrollHandle,
+    /// Ширина страницы PDF в пикселях, с которой её просили у воркера (0 — ещё не просили).
+    pub(crate) fit_w: u32,
 }
 
 pub(crate) enum PvState {
@@ -151,6 +159,9 @@ impl ReadingPane {
             data: None,
             state: PvState::Loading,
             busy: false,
+            scroll: ScrollHandle::new(),
+            // Ширина панели — от прежнего просмотра: страницу не придётся перерисовывать.
+            fit_w: r.preview.as_ref().map_or(0, |p| p.fit_w),
         };
         // Карточка за «+N» — лента разворачивается, выбранное видно.
         let index = attachments::items(r).iter().position(|i| i.row.blob_id == blob).unwrap_or(0);
@@ -253,7 +264,7 @@ impl ReadingPane {
         let worker = self.worker.clone();
         let task = cx.background_spawn(async move {
             let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
-            w.preview(PreviewKind::Office, &data, 0, 0)
+            w.preview(PreviewKind::Office, &data, 0, 0, 0)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -288,19 +299,24 @@ impl ReadingPane {
     }
 
     fn run_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(r) = &self.reading else { return };
-        let Some(p) = &r.preview else { return };
+        let Some(r) = &mut self.reading else { return };
+        let Some(p) = &mut r.preview else { return };
         let (Some(kind), Some(data)) = (p.kind(), p.data.clone()) else { return };
         let (id, blob, page) = (r.row.id.clone(), p.row.blob_id.clone(), p.page);
-        let side = match kind {
-            PreviewKind::Pdf => PDF_SIDE,
-            _ => IMAGE_SIDE,
+        let (side, width) = match kind {
+            PreviewKind::Pdf => {
+                if p.fit_w == 0 {
+                    p.fit_w = PDF_FALLBACK_W;
+                }
+                (PDF_SIDE, p.fit_w)
+            }
+            _ => (IMAGE_SIDE, 0),
         };
         let worker = self.worker.clone();
         let task = cx.background_spawn(async move {
             let result = {
                 let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
-                w.preview(kind, &data, page, side)
+                w.preview(kind, &data, page, side, width)
             };
             // Пиксели — в кадр gpui здесь же, в фоне.
             result.and_then(|(p, rgba)| {
@@ -346,6 +362,18 @@ impl ReadingPane {
             return;
         }
         p.page = next;
+        p.busy = true;
+        self.run_preview(cx);
+        cx.notify();
+    }
+
+    /// Ширина холста изменилась заметно (первый показ, ресайз окна): страницу PDF — заново под ширину `want`.
+    fn refit_pdf(&mut self, want: u32, cx: &mut Context<Self>) {
+        let Some(p) = self.reading.as_mut().and_then(|r| r.preview.as_mut()) else { return };
+        if p.busy || !matches!(p.state, PvState::Ready(Shown::Pdf { .. })) || !needs_refit(p.fit_w, want) {
+            return;
+        }
+        p.fit_w = want;
         p.busy = true;
         self.run_preview(cx);
         cx.notify();
@@ -429,7 +457,7 @@ impl ReadingPane {
     // --- отрисовка ---
 
     /// Панель просмотра на месте текста письма.
-    pub(crate) fn preview_pane(&self, p: &Pv, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn preview_pane(&self, p: &Pv, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let l = crate::roles::look(cx);
         let note = match (&p.state, p.viewer) {
             (_, Viewer::Archive) => tr!("att-pv-note-archive"),
@@ -484,19 +512,11 @@ impl ReadingPane {
                     .child(div().px(px(6.)).text_color(l.text2()).child(tr!("att-pv-image-info", w = source.0, h = source.1, format = format.as_str())))
                     .child(div().flex_1())
                     .children(self.file_buttons(p, &l, cx));
-                // Картинка целиком в панели, без прокрутки: кадр, обрезанный краем прокрутки, Windows-платформа
-                // gpui рисует со сдвигом.
-                let pic = img(image.clone()).w_full().flex_1().min_h_0().object_fit(ObjectFit::ScaleDown);
-                let canvas = div()
-                    .flex_1()
-                    .min_h_0()
-                    .bg(l.base())
-                    .p(px(16.))
-                    .flex()
-                    .flex_col()
-                    .items_center()
+                // В своём размере, не шире холста; выше — прокрутка.
+                let size = image.size(0);
+                let canvas = pv_canvas(&p.scroll, "pv-image", &l)
                     .gap(px(10.))
-                    .child(pic)
+                    .child(picture(image, px(size.width.0 as f32)).justify_center())
                     .child(
                         div()
                             .text_size(l.px(Metric::TypeCaption))
@@ -526,15 +546,14 @@ impl ReadingPane {
                     .child(div().w(px(1.)).h(px(16.)).mx(px(6.)).bg(l.border()))
                     .child(div().flex_1().min_w_0().truncate().text_color(l.text2()).child(title.clone().unwrap_or_default()))
                     .children(self.file_buttons(p, &l, cx));
-                // Страница целиком по высоте панели (листание — кнопками): без прокрутки и обрезки, как у картинки.
-                let canvas = div()
-                    .flex_1()
-                    .min_h_0()
-                    .bg(l.base())
-                    .p(px(16.))
-                    .flex()
-                    .justify_center()
-                    .child(img(image.clone()).size_full().max_w(px(PAGE_W)).object_fit(ObjectFit::Contain));
+                // Страница по ширине холста, вниз — прокрутка (макет); листание — кнопками. Пикселей — по ширине
+                // холста на экране: заметно другая ширина (первый показ, ресайз) — страница заново.
+                let width = p.scroll.bounds().size.width - px(2. * CANVAS_PAD);
+                let want = (f32::from(width) * window.scale_factor()).round().max(0.) as u32;
+                if want > 0 && !p.busy && needs_refit(p.fit_w, want) {
+                    cx.defer_in(window, move |this, _, cx| this.refit_pdf(want, cx));
+                }
+                let canvas = pv_canvas(&p.scroll, "pv-pdf", &l).child(picture(image, relative(1.)));
                 div().flex_1().min_h_0().flex().flex_col().child(bar).child(canvas).into_any_element()
             }
             PvState::Ready(Shown::Archive(list)) => archive(list, &l),
@@ -728,6 +747,38 @@ fn tool_button(id: &'static str, g: char, text: String, l: &Look) -> Stateful<Di
         .hover(|d| d.bg(l.hover()))
         .child(icon(g, 12.))
         .child(text)
+}
+
+/// Холст картинки и страницы PDF: колонка по центру с прокруткой вниз.
+fn pv_canvas(scroll: &ScrollHandle, id: &'static str, l: &Look) -> Stateful<Div> {
+    div()
+        .id(id)
+        .track_scroll(scroll)
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .bg(l.base())
+        .p(px(CANVAS_PAD))
+        .flex()
+        .flex_col()
+        .items_center()
+}
+
+/// Кадр шириной родителя, но не шире `max_w`; высота — по пропорции кадра. Высоту задаёт обёртка: у `img` без
+/// абсолютной ширины gpui ставит высоту родного кадра, и `Contain` сдвигает картинку вниз (pets, gpui-pitfalls
+/// «Картинки»). Обёртка — в flex-строке: в колонке с `stretch` taffy берёт высоту по пропорции от ширины до
+/// `max_w`, и под узкой картинкой остаётся пустота. Итог — строка во всю ширину, кадр слева (`justify_center` —
+/// по центру).
+pub(crate) fn picture(image: &Arc<RenderImage>, max_w: impl Into<Length> + Clone) -> Div {
+    let size = image.size(0);
+    let ratio = size.width.0.max(1) as f32 / size.height.0.max(1) as f32;
+    let frame = div().flex_1().min_w_0().max_w(max_w).aspect_ratio(ratio).child(img(image.clone()).size_full());
+    div().flex_none().w_full().flex().child(frame)
+}
+
+/// Перерисовать страницу под ширину `want`: отличается от прежней больше чем на восьмую.
+fn needs_refit(fit_w: u32, want: u32) -> bool {
+    want.abs_diff(fit_w) > fit_w / 8
 }
 
 fn centered(inner: Div, l: &Look) -> AnyElement {

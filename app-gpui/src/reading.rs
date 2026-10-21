@@ -685,7 +685,7 @@ impl Render for ReadingPane {
         let strip = self.ribbon(r, cx);
         // Открыт просмотр вложения — он на месте текста письма и карточки приглашения (DESIGN «Вложения»).
         if let Some(p) = &r.preview {
-            let pane = self.preview_pane(p, cx);
+            let pane = self.preview_pane(p, window, cx);
             return div()
                 .id("reading")
                 .flex()
