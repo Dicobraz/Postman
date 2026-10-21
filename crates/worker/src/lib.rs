@@ -49,10 +49,45 @@ pub enum Request {
         #[serde(default)]
         width: u32,
     },
+    /// Проверка подписи S/MIME (S5-12 Ф1): в бинарной части — якоря доверия и письмо целиком
+    /// (`postman_smime::wire`); `now` — Unix-время проверки. Ответ — [`postman_smime::Report`], тело письма с
+    /// подписью внутри (`signed-data`) — IR, DER цепочки — в бинарной части.
+    SmimeVerify { now: u64 },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     Probe(Probe),
+}
+
+/// Сколько клиент ждёт проверки подписи (письмо до 62 МБ): сторож воркера срабатывает раньше.
+pub const SMIME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Почему проверка подписи не состоялась.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmimeFailure {
+    /// Письмо больше предела безопасной проверки (`postman_smime::MAX_MESSAGE`).
+    TooLarge,
+    /// Воркер не ответил или ответил ошибкой.
+    Worker(String),
+}
+
+/// Тело `signed-data` → IR (в песочнице).
+fn inner_document(content: &[u8]) -> Option<Document> {
+    match postman_smime::inner_body(content) {
+        (Some(html), _) => Some(postman_ir::from_html(&html)),
+        (None, Some(text)) => Some(postman_ir::from_plain(&text)),
+        (None, None) => None,
+    }
+}
+
+fn smime_verify(bin: &[u8], now: u64) -> (Response, Vec<u8>) {
+    let Some((trust, message)) = postman_smime::wire::decode_request(bin) else {
+        return (Response::Err("запрос проверки подписи повреждён".into()), Vec::new());
+    };
+    let report = postman_smime::verify(message, &trust, now);
+    let doc = report.content.as_deref().and_then(inner_document);
+    let out = postman_smime::wire::encode_response(&report.chain, None);
+    (Response::Smime { report: Box::new(report), doc }, out)
 }
 
 #[cfg(debug_assertions)]
@@ -88,6 +123,8 @@ enum Response {
     Image { width: u32, height: u32 },
     Calendar(serde_json::Value),
     Preview(Preview),
+    /// Итог проверки подписи; DER цепочки — в бинарной части.
+    Smime { report: Box<postman_smime::Report>, doc: Option<Document> },
     Err(String),
 }
 
@@ -234,6 +271,11 @@ pub fn serve() -> ! {
                     Err(_) => Response::Err("файл не разобран: сбой разборщика".into()),
                 }
             }
+            Ok(Request::SmimeVerify { now }) => {
+                let (resp, bin) = smime_verify(&bin, now);
+                out_bin = bin;
+                resp
+            }
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
@@ -325,7 +367,7 @@ impl Client {
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
         match self.call(req, &[])?.0 {
             Response::Ok(doc) => Ok(doc),
-            Response::Image { .. } | Response::Calendar(_) | Response::Preview(_) => Err("неожиданный ответ".into()),
+            Response::Image { .. } | Response::Calendar(_) | Response::Preview(_) | Response::Smime { .. } => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
@@ -358,6 +400,29 @@ impl Client {
             },
             (Response::Err(e), _) => Err(e),
             _ => Err("неожиданный ответ".into()),
+        }
+    }
+
+    /// Проверить подпись S/MIME письма `raw` (RFC 5322 целиком) к якорям `trust` в песочнице (S5-12 Ф1). DER цепочки
+    /// — в `Report::chain`; тело письма с подписью внутри — IR.
+    pub fn smime_verify(&mut self, raw: &[u8], trust: &postman_smime::Trust, now: u64) -> Result<(postman_smime::Report, Option<Document>), SmimeFailure> {
+        if raw.len() > postman_smime::MAX_MESSAGE {
+            return Err(SmimeFailure::TooLarge);
+        }
+        let bin = postman_smime::wire::encode_request(trust, raw);
+        if bin.len() > MAX_FRAME {
+            return Err(SmimeFailure::TooLarge);
+        }
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimeVerify { now }, &bin, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Smime { report, doc }, out) => {
+                let mut report = *report;
+                let (chain, _) = postman_smime::wire::decode_response(&out).ok_or_else(|| SmimeFailure::Worker("неожиданный ответ".into()))?;
+                report.chain = chain;
+                Ok((report, doc))
+            }
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
         }
     }
 

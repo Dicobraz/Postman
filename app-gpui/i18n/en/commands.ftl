@@ -26,6 +26,7 @@ cmd-mail-context-menu = Context menu
 cmd-mail-move = Move to folder…
 cmd-mail-archive = Archive
 cmd-mail-report-phishing = Report phishing
+cmd-mail-signature = Signature details
 cmd-thread-toggle = Conversation: show as a feed
 cmd-thread-quotes = Conversation: show quotes
 cmd-thread-next = Next message in the conversation

@@ -1926,6 +1926,7 @@ fn body_row(b: EmailBody, scope: Option<&str>) -> BodyRow {
         references: b.references,
         html: b.html,
         text: b.text,
+        blob_id: b.blob_id.as_deref().map(|id| scoped(scope, id)),
         attachments: b
             .attachments
             .iter()

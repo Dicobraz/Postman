@@ -48,6 +48,8 @@ pub(crate) struct Reading {
     pub(crate) preview: Option<crate::preview::Pv>,
     /// Лента вложений развёрнута («+N»).
     pub(crate) expanded: bool,
+    /// Подпись S/MIME (S5-12): итог и карточка; `None` — письмо не подписано (или тело ещё не пришло).
+    pub(crate) smime: Option<crate::smime::State>,
 }
 
 impl Reading {
@@ -63,6 +65,7 @@ impl Reading {
             scanning: HashSet::new(),
             preview: None,
             expanded: false,
+            smime: None,
         }
     }
 }
@@ -303,6 +306,7 @@ impl ReadingPane {
         self.render_body(cx);
         self.ensure_invite(cx);
         self.ensure_scans(cx);
+        self.ensure_smime(cx);
         self.sync_thread(cx);
         cx.notify();
     }
@@ -325,6 +329,7 @@ impl ReadingPane {
         self.render_body(cx);
         self.ensure_invite(cx);
         self.ensure_scans(cx);
+        self.ensure_smime(cx);
         cx.notify();
     }
 
@@ -373,6 +378,11 @@ impl ReadingPane {
     pub(crate) fn not_sent(&mut self, req: &SyncRequest, cx: &mut Context<Self>) {
         match req {
             SyncRequest::Blob(a) => {
+                if self.smime_waits(&a.blob_id)
+                    && let Some(id) = self.reading.as_ref().map(|r| r.row.id.clone())
+                {
+                    self.smime_failed(&id, tr!("reading-blob-unavailable"), cx);
+                }
                 self.in_flight.remove(&a.blob_id);
                 self.pending_files.retain(|(p, _)| p.blob_id != a.blob_id);
                 self.attachment_failed(&a.blob_id, &tr!("reading-blob-unavailable"), cx);
@@ -496,6 +506,9 @@ impl ReadingPane {
     /// Байты пришли: приглашение — на разбор, картинки — на декодирование, ждущие действия — выполнить.
     fn blob_ready(&mut self, blob_id: &str, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         self.in_flight.remove(blob_id);
+        if self.smime_waits(blob_id) {
+            self.smime_verify(data.clone(), cx);
+        }
         if let Some(r) = &self.reading {
             let id = r.row.id.clone();
             let invite = r.invite.as_ref().is_some_and(|c| c.waits_for(blob_id));
@@ -525,6 +538,12 @@ impl ReadingPane {
 
     fn blob_failed(&mut self, blob_id: &str, error: String, cx: &mut Context<Self>) {
         self.in_flight.remove(blob_id);
+        if self.smime_waits(blob_id)
+            && let Some(id) = self.reading.as_ref().map(|r| r.row.id.clone())
+        {
+            self.smime_failed(&id, error.clone(), cx);
+            return;
+        }
         let mut user = self.pending_files.iter().any(|(a, _)| a.blob_id == blob_id);
         self.pending_files.retain(|(a, _)| a.blob_id != blob_id);
         if let Some(card) = self.reading.as_mut().and_then(|r| r.invite.as_mut()).filter(|c| c.waits_for(blob_id)) {
@@ -765,6 +784,9 @@ impl Render for ReadingPane {
             .bg(neutral.bg)
             .text_color(neutral.text)
             .child(crate::list::initials(&name));
+        // Подпись S/MIME (S5-12): значок справа от отправителя и даты, карточка — под шапкой.
+        let seal = self.smime_badge(&l, cx);
+        let seal_card = self.smime_card(&l);
         // Шапка (макет главного окна): тема, затем аватар, отправитель с адресом, «Кому: … · дата».
         let header = div()
             .flex()
@@ -802,7 +824,8 @@ impl Render for ReadingPane {
                                 .text_color(l.text2())
                                 .child(tr!("frame-reading-to", to = to, date = format_date(r.row.received_at))),
                         ),
-                ),
+                )
+                .children(seal),
             )
             // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
             .child(crate::lifecycle::header_row(&r.row, &l));
@@ -823,6 +846,7 @@ impl Render for ReadingPane {
                 .gap(px(12.))
                 .overflow_y_scroll()
                 .child(header)
+                .children(seal_card)
                 .children(scheduled)
                 .children(bar)
                 .child(feed)
@@ -843,6 +867,7 @@ impl Render for ReadingPane {
                 .gap(px(12.))
                 .overflow_y_scroll()
                 .child(header)
+                .children(seal_card)
                 .children(scheduled)
                 .children(bar)
                 .children(strip)
@@ -882,6 +907,7 @@ impl Render for ReadingPane {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(header)
+            .children(seal_card)
             .children(scheduled)
             .children(bar)
             .children(strip)

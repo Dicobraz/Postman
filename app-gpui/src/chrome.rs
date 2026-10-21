@@ -28,6 +28,8 @@ pub(crate) mod glyph {
     pub(crate) const CALENDAR: char = '\u{E787}';
     pub(crate) const CONTACTS: char = '\u{E77B}';
     pub(crate) const SETTINGS: char = '\u{E713}';
+    /// Сертификат: подробности подписи S/MIME (S5-12).
+    pub(crate) const CERTIFICATE: char = '\u{EB95}';
     pub(crate) const NEW_MAIL: char = '\u{E70F}';
     pub(crate) const REPLY: char = '\u{E97A}';
     pub(crate) const REPLY_ALL: char = '\u{E8C2}';

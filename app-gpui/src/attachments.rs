@@ -111,7 +111,10 @@ pub(crate) fn items(r: &Reading) -> Vec<Item> {
     let Some(body) = r.body.as_ref() else { return Vec::new() };
     let shown: HashSet<String> = r.doc.as_ref().map(|d| crate::ir_view::cids(d).into_iter().collect()).unwrap_or_default();
     let card = r.invite.as_ref().is_some_and(|c| c.invitation().is_some());
-    listed(&body.attachments, &shown, card, &r.scans)
+    // Подпись S/MIME (S5-12): `smime.p7s` — значком в шапке, не вложением; `smime.p7m` с подписью внутри — телом.
+    let opaque = r.smime.as_ref().is_some_and(|s| matches!(&s.seal, crate::smime::Seal::Done(v) if v.report.kind == postman_smime::Kind::Opaque));
+    let all: Vec<AttachmentRow> = body.attachments.iter().filter(|a| !crate::smime::hidden(a, opaque)).cloned().collect();
+    listed(&all, &shown, card, &r.scans)
 }
 
 /// Вложение — приглашение на встречу (`text/calendar`, `.ics`).
@@ -189,6 +192,7 @@ pub(crate) fn visible(total: usize, expanded: bool) -> (usize, usize) {
 /// «как Outlook» (свернуть, развернуть; S5-05б), не нужны и ей — действие уходит дальше (`propagate`).
 pub(crate) fn handlers(root: Div, cx: &mut Context<Mailer>) -> Div {
     root.on_action(cx.listener(|this, _: &attach::Preview, _, cx| this.reading.update(cx, |r, cx| r.toggle_preview(None, cx))))
+        .on_action(cx.listener(|this, _: &crate::commands::mail::Signature, _, cx| this.reading.update(cx, |r, cx| r.toggle_smime(cx))))
         .on_action(cx.listener(|this, _: &attach::SaveAll, _, cx| this.reading.update(cx, |r, cx| r.save_all(cx))))
         .on_action(cx.listener(|this, _: &attach::Next, _, cx| {
             if !this.reading.update(cx, |r, cx| r.step_preview(1, cx)) && !this.thread_arrow(crate::outline::Fold::Expand, cx) {

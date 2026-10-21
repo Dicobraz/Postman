@@ -140,6 +140,8 @@ struct RawBody {
     html_body: Vec<BodyPart>,
     #[serde(default)]
     attachments: Vec<BodyPart>,
+    /// Письмо целиком (RFC 5322) — для проверки подписи S/MIME (S5-12).
+    blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +170,7 @@ impl RawBody {
             to: self.to.clone().unwrap_or_default(),
             cc: self.cc.clone().unwrap_or_default(),
             attachments: self.attachments.clone(),
+            blob_id: self.blob_id.clone(),
         }
     }
 }
@@ -186,6 +189,8 @@ pub struct EmailBody {
     pub html: Option<String>,
     pub text: Option<String>,
     pub attachments: Vec<BodyPart>,
+    /// `Email.blobId`: письмо целиком (подпись S/MIME проверяется по точным байтам, S5-12).
+    pub blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -491,7 +496,7 @@ impl Client {
         let args = json!({
             "accountId": acc,
             "ids": ids,
-            "properties": ["id", "messageId", "references", "replyTo", "sentAt", "to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
+            "properties": ["id", "blobId", "messageId", "references", "replyTo", "sentAt", "to", "cc", "bodyValues", "textBody", "htmlBody", "attachments"],
             "fetchTextBodyValues": true,
             "fetchHTMLBodyValues": true,
             "maxBodyValueBytes": max_bytes,
