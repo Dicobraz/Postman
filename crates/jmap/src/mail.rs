@@ -63,7 +63,7 @@ impl EmailAddress {
 }
 
 pub const SUMMARY_PROPERTIES: &[&str] = &[
-    "id", "threadId", "mailboxIds", "keywords", "receivedAt", "subject", "from", "preview",
+    "id", "threadId", "mailboxIds", "keywords", "receivedAt", "subject", "from", "to", "cc", "preview",
     "hasAttachment", "size",
 ];
 
@@ -78,6 +78,11 @@ pub struct EmailSummary {
     pub received_at: String,
     pub subject: Option<String>,
     pub from: Option<Vec<EmailAddress>>,
+    /// Получатели (S5-03: быстрый фильтр «Мне» — мой адрес в To).
+    #[serde(default)]
+    pub to: Option<Vec<EmailAddress>>,
+    #[serde(default)]
+    pub cc: Option<Vec<EmailAddress>>,
     #[serde(default)]
     pub preview: String,
     #[serde(default)]
@@ -257,10 +262,18 @@ pub enum Filter {
     HasKeyword(String),
     NotKeyword(String),
     Text(String),
+    /// Текст в From, To, теле (RFC 8621: поиск подстроки в заголовке или тексте).
+    From(String),
+    To(String),
+    Body(String),
+    /// Есть вложение (`hasAttachment`).
+    HasAttachment(bool),
     /// Все условия (`operator: AND`).
     And(Vec<Filter>),
     /// Любое из условий (`operator: OR`): закладки быстрых фильтров между собой.
     Or(Vec<Filter>),
+    /// Ни одно из условий (`operator: NOT`): «внешние» — отправитель не из своих доменов.
+    Not(Vec<Filter>),
 }
 
 impl Filter {
@@ -273,8 +286,13 @@ impl Filter {
             Filter::HasKeyword(k) => json!({ "hasKeyword": k }),
             Filter::NotKeyword(k) => json!({ "notKeyword": k }),
             Filter::Text(t) => json!({ "text": t }),
+            Filter::From(t) => json!({ "from": t }),
+            Filter::To(t) => json!({ "to": t }),
+            Filter::Body(t) => json!({ "body": t }),
+            Filter::HasAttachment(on) => json!({ "hasAttachment": on }),
             Filter::And(list) => op("AND", list),
             Filter::Or(list) => op("OR", list),
+            Filter::Not(list) => op("NOT", list),
         }
     }
 }
@@ -576,6 +594,13 @@ mod tests {
             ]})
         );
         assert_eq!(Filter::Text("x".into()).to_json(), json!({ "text": "x" }));
+        assert_eq!(
+            Filter::Not(vec![Filter::From("@corp.example".into())]).to_json(),
+            json!({ "operator": "NOT", "conditions": [{ "from": "@corp.example" }] })
+        );
+        assert_eq!(Filter::HasAttachment(true).to_json(), json!({ "hasAttachment": true }));
+        assert_eq!(Filter::To("me@x".into()).to_json(), json!({ "to": "me@x" }));
+        assert_eq!(Filter::Body("@anna".into()).to_json(), json!({ "body": "@anna" }));
     }
 
     #[test]

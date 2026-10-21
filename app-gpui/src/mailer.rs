@@ -35,6 +35,8 @@ pub(crate) struct Mailer {
     pub(crate) focus: FocusHandle,
     pub(crate) list: Entity<MailList>,
     pub(crate) folders: Entity<Folders>,
+    /// Фильтры (S5-03): общая модель панели папок и списка.
+    pub(crate) filters: Entity<crate::filters::FilterModel>,
     pub(crate) reading: Entity<ReadingPane>,
     pub(crate) bar: Entity<CommandBar>,
     pub(crate) search: Entity<InputState>,
@@ -92,15 +94,16 @@ impl Mailer {
         let mailboxes = cache.mailboxes().unwrap_or_default();
         let accounts = cache.accounts().unwrap_or_default();
         let inbox = crate::live::inbox(&mailboxes);
+        let filters = cx.new(|_| crate::filters::FilterModel::new());
         let list = cx.new(|cx| {
-            let mut l = MailList::new(cache.clone());
+            let mut l = MailList::new(cache.clone(), filters.clone(), cx);
             l.set_rights(&mailboxes);
             if let Some(id) = inbox.clone() {
                 l.show_mailbox(id, cx);
             }
             l
         });
-        let folders = cx.new(|_| Folders::new(mailboxes, accounts, inbox));
+        let folders = cx.new(|cx| Folders::new(mailboxes, accounts, inbox).watch(filters.clone(), cx));
         let reading = cx.new(|_| ReadingPane::new(cache.clone()));
         let bar = cx.new(|_| CommandBar::new(search.clone()));
         let toasts = cx.new(|_| Toasts::new());
@@ -173,6 +176,11 @@ impl Mailer {
                     cx.notify();
                 }
             }),
+            // Фильтры «Все папки» живого ящика — ещё и на сервер (S5-03).
+            cx.subscribe(&filters, |this, _, _: &crate::filters::Changed, cx| this.filters_changed(cx)),
+            // Закладки быстрых фильтров рисует экран почты; какие — по настройкам.
+            cx.observe(&filters, |_, _, cx| cx.notify()),
+            crate::prefs::observe_with(cx, |this: &mut Self, cx| this.prune_quick(cx)),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -181,6 +189,7 @@ impl Mailer {
             focus,
             list,
             folders,
+            filters,
             reading,
             bar,
             search,
@@ -226,6 +235,7 @@ impl Mailer {
     /// поиск) — `live.rs`.
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
+        self.list.update(cx, |l, cx| l.on_sync(ev, cx));
         let sent = self.compose.on_sync(ev, cx);
         self.on_send_sync(ev, sent, cx);
         self.cal.update(cx, |c, cx| c.on_sync(ev, cx));
@@ -408,6 +418,12 @@ impl Render for Mailer {
                 let id = this.tabs.active().id;
                 this.close_tab(id, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &view::Filters, _, cx| this.toggle_filter_panel(cx)))
+            .on_action(cx.listener(|this, _: &view::QuickFilters, _, cx| this.toggle_quick_filters(cx)))
+            .on_action(cx.listener(|this, _: &view::SortByDate, _, cx| this.sort_by(postman_core::filters::Sort::Date, cx)))
+            .on_action(cx.listener(|this, _: &view::SortBySender, _, cx| this.sort_by(postman_core::filters::Sort::Sender, cx)))
+            .on_action(cx.listener(|this, _: &view::SortBySize, _, cx| this.sort_by(postman_core::filters::Sort::Size, cx)))
+            .on_action(cx.listener(|this, _: &commands::filters::Reset, _, cx| this.reset_filters(cx)))
             .on_action(cx.listener(|this, _: &view::Notifications, _, cx| {
                 this.toasts.update(cx, |t, cx| t.toggle_history(cx));
             }))
@@ -420,6 +436,10 @@ impl Render for Mailer {
                 // …затем меню «…».
                 if this.close_more(cx) {
                     return;
+                }
+                // …затем панель фильтров (S5-03) — назад к папкам.
+                if this.filters.read(cx).panel {
+                    return this.toggle_filter_panel(cx);
                 }
                 // …затем строку «Удалить навсегда?».
                 if this.cancel_purge(cx) {
@@ -474,7 +494,8 @@ impl Render for Mailer {
                         .px(px(8.))
                         .child(card(&l).flex_1().child(view.cached(StyleRefinement::default().size_full()))),
                 ),
-                (None, None) => d.child(self.body(&l, settings, free, cx)),
+                // Закладки быстрых фильтров — поверх карточки списка (S5-03).
+                (None, None) => d.child(self.body(&l, settings, free, cx).relative().children(self.quick_overlay(&l, cx))),
             })
             .child(self.status_bar(&l, cx))
             .children(self.more_menu(&l, cx))
@@ -492,8 +513,8 @@ impl Render for Mailer {
 // --- раскладка (DESIGN «Главное окно»): рейл | папки | список | чтение ---
 
 /// Ширина панели папок и карточки списка (макет главного окна).
-const W_FOLDERS: f32 = 236.0;
-const W_LIST: f32 = 452.0;
+pub(crate) const W_FOLDERS: f32 = 236.0;
+pub(crate) const W_LIST: f32 = 452.0;
 /// Доля высоты области чтения под ответом (остальное — письмо, на которое отвечают).
 const INLINE_SHARE: f32 = 0.6;
 

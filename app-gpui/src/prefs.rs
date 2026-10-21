@@ -49,6 +49,14 @@ pub(crate) fn observe<T: 'static>(cx: &mut gpui_kit::Context<T>) -> gpui_kit::Su
     cx.observe_global::<Store>(|_, cx| cx.notify())
 }
 
+/// Настройки изменились — `f` у view `T` (экран почты снимает фильтры скрытых закладок, S5-03).
+pub(crate) fn observe_with<T: 'static>(
+    cx: &mut gpui_kit::Context<T>,
+    f: impl Fn(&mut T, &mut gpui_kit::Context<T>) + 'static,
+) -> gpui_kit::Subscription {
+    cx.observe_global::<Store>(move |this, cx| f(this, cx))
+}
+
 /// Изменить настройки: запись — в фоне; изменились свои клавиши — привязки заново.
 pub(crate) fn update(cx: &mut App, f: impl FnOnce(&mut Prefs)) {
     if !cx.has_global::<Store>() {

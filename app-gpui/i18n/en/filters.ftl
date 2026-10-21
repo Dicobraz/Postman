@@ -1,0 +1,47 @@
+# Filters and quick filters (S5-03).
+filters-title = Filters
+filters-back = Back to folders
+filters-reset = Reset
+filters-where = Look in
+filters-all-folders = All folders
+filters-group-state = Status
+filters-group-sender = Sender
+filters-group-category = Category
+filters-unread = Unread
+filters-mentions = Mentions
+filters-attachments = With attachments
+filters-flagged = Flagged
+filters-external = External
+# Chip above the list: panel filters, comma-separated.
+filters-chip-unread = unread
+filters-chip-mentions = mentions
+filters-chip-attachments = attachments
+filters-chip-flagged = flagged
+filters-chip-external = external
+filters-chip-reset = Reset filters
+filters-shown = { $n } of { $total }
+filters-funnel = Folder filters (Ctrl+Shift+F)
+filters-empty = No messages match these filters.
+filters-sort-date = By date
+filters-sort-sender = By sender
+filters-sort-size = By size
+filters-day-today = Today
+filters-day-yesterday = Yesterday
+filters-day-week = This week
+filters-day-last-week = Last week
+filters-day-earlier = Earlier
+# Tabs: short name on the tab, full name in the hover panel.
+filters-quick-threats = Threats
+filters-quick-threats-long = Threats
+filters-quick-due = Due
+filters-quick-due-long = Due soon
+filters-quick-waiting = Waiting
+filters-quick-waiting-long = Awaiting reply
+filters-quick-to-me = To me
+filters-quick-to-me-long = To me directly
+filters-quick-expiring = Expiring
+filters-quick-expiring-long = Expiring
+filters-quick-hide = Hide quick filters
+filters-quick-hidden = Quick filters are hidden. To restore: View → Quick filters
+filters-menu-view = View
+filters-menu-quick = Quick filters

@@ -59,6 +59,12 @@ pub(crate) mod glyph {
     pub(crate) const CHECK: char = '\u{E73E}';
     pub(crate) const EXPAND: char = '\u{E8A7}';
     pub(crate) const PREVIEW: char = '\u{E7B3}';
+    // Фильтры (S5-03).
+    pub(crate) const FILTER: char = '\u{E71C}';
+    pub(crate) const BACK: char = '\u{E72B}';
+    pub(crate) const CHEVRON_DOWN: char = '\u{E70D}';
+    pub(crate) const CHEVRON_RIGHT: char = '\u{E76C}';
+    pub(crate) const SORT: char = '\u{E8CB}';
 }
 
 /// Ширина кнопки «─ □ ✕» (Windows 11).
@@ -301,7 +307,9 @@ impl Mailer {
         if !self.more.open {
             return None;
         }
-        let item = |id: &'static str, g: char, key: &'static str, action: fn() -> Box<dyn Action>| {
+        // Вид → Быстрые фильтры (S5-03): галочка — закладки видны.
+        let quick_on = !crate::prefs::get(cx).quick.hidden;
+        let item =|id: &'static str, g: char, key: &'static str, action: fn() -> Box<dyn Action>| {
             div()
                 .id(id)
                 .h(l.px(Metric::HMenuItem))
@@ -323,6 +331,19 @@ impl Mailer {
                     window.dispatch_action(action(), cx);
                 }))
         };
+        let view_caption = div()
+            .mt(px(4.))
+            .pt(px(6.))
+            .px(px(10.))
+            .pb(px(2.))
+            .border_t_1()
+            .border_color(l.border())
+            .text_size(l.px(Metric::TypeCaption))
+            .text_color(l.text2())
+            .child(tr!("filters-menu-view"));
+        let quick = item("more-quick", if quick_on { glyph::CHECK } else { ' ' }, "filters-menu-quick", || {
+            Box::new(view::QuickFilters)
+        });
         let top = l.m(Metric::HTitlebar) + crate::bar::BAR_HEIGHT - 6.;
         let menu = div()
             .id("more-menu")
@@ -342,6 +363,8 @@ impl Mailer {
             .child(item("more-vacation", glyph::VACATION, "frame-vacation", || Box::new(settings::Vacation)))
             .child(item("more-rules", glyph::RULES, "frame-rules", || Box::new(settings::Rules)))
             .child(item("more-settings", glyph::SETTINGS, "frame-settings", || Box::new(settings::Open)))
+            .child(view_caption)
+            .child(quick)
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.close_more(cx);
             }));
