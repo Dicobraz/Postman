@@ -2,6 +2,7 @@
 //! Интерфейс шлёт команды и получает события; данные читает из хранилища.
 
 pub mod attach;
+pub mod bulk;
 pub mod bench;
 pub mod categories;
 pub mod checks;
@@ -13,6 +14,7 @@ pub mod indexer;
 pub mod invite;
 pub mod labels;
 pub mod lifecycle;
+pub mod link;
 pub mod marks;
 pub mod palette;
 pub mod prefs;

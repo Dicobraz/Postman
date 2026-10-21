@@ -111,6 +111,8 @@ pub(crate) struct MailList {
     pub(crate) positions: Positions,
     /// Строка «Удалить навсегда? Да / Нет» над списком: письмо из «Удалённых» и его номер.
     pub(crate) confirm: Option<(usize, EmailRow)>,
+    /// То же для выделения (S5-08): письма из «Удалённых» — насовсем.
+    pub(crate) confirm_many: Option<Vec<String>>,
     /// Догрузка с сервера при прокрутке (живой ящик, S4-03).
     pub(crate) more: More,
     /// Папки с урезанными правами (общие ящики, S4-06): id → права. Своих папок здесь нет.
@@ -133,7 +135,7 @@ pub(crate) struct MailList {
     pub(crate) collapsed: HashSet<Group>,
     pub(crate) layout: Layout,
     /// Высоты элементов списка и для чего они посчитаны (высота строки, место под закладками).
-    sizes: Rc<Vec<Size<Pixels>>>,
+    pub(crate) sizes: Rc<Vec<Size<Pixels>>>,
     sizes_for: Option<(f32, bool)>,
     /// Пересчёт фильтров: номер запроса, устаревшие ответы отбрасываются; `computing` — ответа ещё нет.
     compute_gen: u64,
@@ -147,6 +149,20 @@ pub(crate) struct MailList {
     pub(crate) order: Vec<String>,
     /// Меню сортировки открыто.
     pub(crate) sort_open: bool,
+    /// Выделенные письма (S5-08, `select.rs`); пусто — выделения нет, флажки только по наведению.
+    pub(crate) selection: crate::select::Selection,
+    /// Сводка выделения для области чтения и меню (считается в фоне, `bulk.rs`); номер запроса.
+    pub(crate) summary: Option<Arc<crate::bulk::Selected>>,
+    pub(crate) summary_gen: u64,
+    /// Строка с открытым контекстным меню — с рамкой (S5-08).
+    pub(crate) menu_row: Option<usize>,
+    /// Открытый выпадающий список панели массовых действий: «Категория ▾» или «В папку ▾».
+    pub(crate) bulk_menu: Option<crate::bulk::Drop>,
+    /// Полоса «Нет подключения…» над списком (S5-08, `states.rs`): сервер и правок в очереди; скрыта крестиком.
+    pub(crate) offline: Option<(String, usize)>,
+    pub(crate) offline_hidden: bool,
+    /// Где список в окне (последний кадр): контекстное меню с клавиатуры — у выбранной строки.
+    pub(crate) bounds: Rc<std::cell::Cell<Bounds<Pixels>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -305,6 +321,11 @@ pub(crate) struct Purge {
 
 impl EventEmitter<Purge> for MailList {}
 
+/// «Да» в строке «Удалить навсегда N писем?» (выделение, S5-08).
+pub(crate) struct PurgeMany(pub(crate) Vec<String>);
+
+impl EventEmitter<PurgeMany> for MailList {}
+
 /// Письмо открыто (строка уже помечена прочитанной).
 pub(crate) struct OpenRow(pub(crate) EmailRow);
 
@@ -391,6 +412,7 @@ impl MailList {
             scroll: VirtualListScrollHandle::new(),
             positions: Positions::default(),
             confirm: None,
+            confirm_many: None,
             more: More::default(),
             rights: HashMap::new(),
             labels: crate::labels::default_book(),
@@ -412,6 +434,14 @@ impl MailList {
             server_hits: Arc::new(HashSet::new()),
             order: Vec::new(),
             sort_open: false,
+            selection: Default::default(),
+            summary: None,
+            summary_gen: 0,
+            menu_row: None,
+            bulk_menu: None,
+            offline: None,
+            offline_hidden: false,
+            bounds: Rc::new(std::cell::Cell::new(Bounds::default())),
             _subscriptions: subscriptions,
         };
         list.me = list.who_am_i();
@@ -653,6 +683,8 @@ impl MailList {
         self.server_hits = Arc::new(HashSet::new());
         self.switch_view(Some(id), None);
         self.selected = None;
+        // Другая папка — выделение снято (S5-08).
+        self.clear_selection(cx);
         self.reload();
         self.recompute(cx);
         cx.notify();
@@ -662,6 +694,7 @@ impl MailList {
         let mailbox = self.mailbox.clone();
         self.switch_view(mailbox, ids);
         self.selected = None;
+        self.clear_selection(cx);
         self.reload();
         cx.notify();
     }
@@ -671,6 +704,8 @@ impl MailList {
         let mailbox = self.mailbox.clone();
         self.switch_view(mailbox, Some(ids));
         self.selected = None;
+        self.selection.clear();
+        self.summary = None;
     }
 
     /// Другая папка или поиск: запомнить прокрутку прежнего вида, поставить прокрутку нового.
@@ -685,6 +720,7 @@ impl MailList {
         self.mailbox = mailbox;
         self.search_ids = search;
         self.confirm = None;
+        self.confirm_many = None;
         self.set_offset_y(y);
         self.visible = rows_at(y, self.visible.len(), self.row_h);
     }
@@ -709,6 +745,11 @@ impl MailList {
 
     /// Ответ на «Удалить навсегда?»; `false` — «Нет» и Esc.
     pub(crate) fn answer_purge(&mut self, yes: bool, cx: &mut Context<Self>) {
+        if let Some(ids) = self.confirm_many.take()
+            && yes
+        {
+            cx.emit(PurgeMany(ids));
+        }
         if let Some((index, row)) = self.confirm.take()
             && yes
         {
@@ -788,6 +829,8 @@ impl MailList {
                         m.select(i.min(count - 1), cx);
                     }
                 }
+                // Выделение — по id: письма, которых в списке больше нет, уходят из него (S5-08).
+                m.prune_selection(cx);
                 cx.notify();
             });
         })
@@ -861,6 +904,8 @@ impl MailList {
             return;
         }
         let i = i.min(self.count - 1);
+        // Щелчок по письму (без Ctrl и Shift) и стрелки — одно письмо: выделение снято (S5-08).
+        self.clear_selection(cx);
         // Другое письмо — вопрос об удалении прежнего снят.
         if self.confirm.as_ref().is_some_and(|(c, _)| *c != i) {
             self.confirm = None;
@@ -1056,7 +1101,7 @@ impl Render for MailList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = look(cx);
         self.row_h = row_height(l.density());
-        let confirm = self.confirm.as_ref().map(|_| {
+        let confirm = (self.confirm.is_some() || self.confirm_many.is_some()).then(|| {
             let button = |id: &'static str, text: String, yes: bool| {
                 div()
                     .id(id)
@@ -1079,11 +1124,18 @@ impl Render for MailList {
                 .bg(l.warning_bg())
                 .border_b_1()
                 .border_color(l.border())
-                .child(div().flex_1().child(tr!("actions-purge-confirm")))
+                .child(div().flex_1().child(match &self.confirm_many {
+                    Some(ids) => tr!("bulk-purge-confirm", n = ids.len()),
+                    None => tr!("actions-purge-confirm"),
+                }))
                 .child(button("purge-yes", tr!("actions-purge-yes"), true))
                 .child(button("purge-no", tr!("actions-purge-no"), false))
         });
-        let header = self.header(&l, cx);
+        // Что-то выделено — панель массовых действий на месте строки над списком (S5-08).
+        let header =
+            if self.selection.is_empty() { self.header(&l, cx).into_any_element() } else { self.bulk_header(&l, cx).into_any_element() };
+        let banner = self.offline_banner(&l, cx);
+        let dropdown = self.bulk_dropdown(&l, cx);
         let quick = self.quick_shown(cx);
         let sizes = self.sizes(quick);
         let empty = self.count == 0 && self.search_ids.is_none() && self.view.is_some() && !self.query.criteria.is_empty();
@@ -1113,7 +1165,15 @@ impl Render for MailList {
                                 let text = tr!("send-scheduled-row", time = crate::send_later::short(at));
                                 labels.chips.insert(0, (text, postman_core::palette::NEUTRAL));
                             }
-                            list_row(i, &r, labels, this.selected == Some(i), &l, cx)
+                            // Выделение (S5-08): флажки у всех строк, пока что-то выделено; подсветка — выделенных.
+                            let boxes = !this.selection.is_empty();
+                            let state = RowState {
+                                open: !boxes && this.selected == Some(i),
+                                picked: this.selection.contains(&r.id),
+                                boxes,
+                                menu: this.menu_row == Some(i),
+                            };
+                            list_row(i, &r, labels, state, &l, cx)
                         }
                         None => empty_row(i, &l),
                     },
@@ -1127,7 +1187,13 @@ impl Render for MailList {
         // Полоса прокрутки видна всегда и перетаскивается; кадры — только пока её двигают.
         // Закладки быстрых фильтров рисует экран почты поверх карточки (`Mailer::quick_overlay`): панель по
         // наведению шире списка. Здесь — только место под ними в конце списка.
-        let mut body = div().relative().flex_1().min_h_0();
+        let bounds = self.bounds.clone();
+        let mut body = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            // Где список в окне — для контекстного меню с клавиатуры (Shift+F10) у выбранной строки.
+            .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
         body = if empty {
             let model = self.filters.clone();
             body.child(
@@ -1183,9 +1249,11 @@ impl Render for MailList {
             .flex_col()
             .text_color(l.text())
             .child(header)
+            .children(banner)
             .children(confirm)
             .child(body)
             .children(sort_menu)
+            .children(dropdown)
     }
 }
 
@@ -1235,14 +1303,40 @@ pub(crate) fn initials(name: &str) -> String {
         .collect()
 }
 
+/// Как рисовать строку: открыта (курсор), выделена, флажки видны у всех (что-то выделено), под контекстным меню.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RowState {
+    pub(crate) open: bool,
+    pub(crate) picked: bool,
+    pub(crate) boxes: bool,
+    pub(crate) menu: bool,
+}
+
+/// Группа наведения строки: флажок на месте аватара по наведению (S5-08).
+const ROW_GROUP: &str = "mail-row";
+
+/// Флажок выделения (18 px): выделено — заливка акцентом с галочкой, иначе — рамка.
+pub(crate) fn checkbox(on: bool, l: &Look) -> Div {
+    div()
+        .size(px(18.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .when(on, |d| d.bg(l.accent()).text_color(l.on_accent()).child(crate::chrome::icon(crate::chrome::glyph::CHECK, 12.)))
+        .when(!on, |d| d.bg(l.panel()).border_1().border_color(l.c(pets_ui::theme::Role::TextTertiary)))
+}
+
 /// Строка письма (DESIGN «Строка письма и метки»): слева полоса категории; отправитель (сокращается, ≥ 60 px),
 /// справа метки (обрезаются слева, категория первой), вложение, флаг и время; ниже тема; при обычной плотности —
-/// аватар и превью.
+/// аватар и превью. Выделение (S5-08): флажок на месте аватара — по наведению и у всех строк, пока что-то выделено;
+/// Ctrl+щелчок — добавить или убрать, Shift+щелчок — диапазон, правая кнопка — контекстное меню.
 pub(crate) fn list_row(
     i: usize,
     r: &EmailRow,
     labels: crate::labels::RowLabels,
-    selected: bool,
+    state: RowState,
     l: &Look,
     cx: &mut Context<MailList>,
 ) -> AnyElement {
@@ -1261,8 +1355,38 @@ pub(crate) fn list_row(
             .bg(c.bg)
             .text_color(c.text)
             .text_size(px(12.))
+            .when(!state.boxes, |d| d.group_hover(ROW_GROUP, |s| s.invisible()))
+            .when(state.boxes, |d| d.invisible())
             .child(initials(&from))
     });
+    // Флажок — поверх аватара (при компактной плотности — на его месте, 18 px).
+    let check = div()
+        .id(("pick", i))
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .when(!state.boxes, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
+        .child(checkbox(state.picked, l))
+        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("bulk-pick")).build(window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.pick(i, false, cx);
+        }));
+    let slot = div()
+        .relative()
+        .flex_none()
+        .w(px(if roomy { 32. } else { 18. }))
+        .h(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .children(avatar)
+        .child(check);
     let chips = div()
         .flex_1()
         .min_w_0()
@@ -1295,8 +1419,10 @@ pub(crate) fn list_row(
         .child(r.subject.clone());
     let preview = roomy
         .then(|| div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(r.preview.clone()));
+    let lit = state.open || state.picked;
     div()
         .id(i)
+        .group(ROW_GROUP)
         .w_full()
         .h(px(row_height(l.density())))
         .flex()
@@ -1304,13 +1430,15 @@ pub(crate) fn list_row(
         .pr(px(12.))
         .border_b_1()
         .border_color(l.border())
-        .when(selected, |d| d.bg(l.picked()))
-        .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
+        .when(lit, |d| d.bg(l.picked()))
+        .when(!lit, |d| d.hover(|d| d.bg(l.hover())))
+        // Строка под контекстным меню — с рамкой акцента (макет «Выделение»).
+        .when(state.menu, |d| d.border_1().border_color(l.accent_text()))
         .cursor_pointer()
         // Слева — полоса категории (S5-02). Синей полосы «не прочитано» нет: её не отличить от синей категории;
         // непрочитанное — жирным отправителем и цветной темой (DESIGN.md).
         .child(div().w(px(4.)).h_full().flex_none().rounded_r(px(2.)).when_some(stripe, |d, c| d.bg(c)))
-        .when_some(avatar, |d, a| d.child(div().flex_none().flex().items_center().child(a)))
+        .child(div().flex_none().flex().items_center().child(slot))
         .child(
             div()
                 .flex_1()
@@ -1324,7 +1452,23 @@ pub(crate) fn list_row(
                 .child(subject)
                 .children(preview),
         )
-        .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
+        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
+            let m = ev.modifiers();
+            if m.shift {
+                this.extend_to(i, cx);
+            } else if m.control {
+                this.pick(i, true, cx);
+            } else {
+                this.select(i, cx);
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |_, ev: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(crate::bulk::OpenMenu { index: i, at: Some(ev.position) });
+            }),
+        )
         .into_any_element()
 }
 

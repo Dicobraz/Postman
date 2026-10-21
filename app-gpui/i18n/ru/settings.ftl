@@ -317,3 +317,10 @@ settings-account-revocation = Сертификат сервера и его от
 settings-account-secrets = Пароли
 settings-account-secrets-1 = Пароль — только в Диспетчере учётных данных Windows или нигде.
 settings-account-secrets-2 = На диск Postman пишет лишь адрес сервера и логин.
+
+# «Общие → Безопасность» (S5-08): адрес для писем «Сообщить о фишинге».
+settings-security-group = Безопасность
+settings-phishing = Сообщения о фишинге
+settings-phishing-hint = Письмо уйдёт вложением на этот адрес. Пусто — только в «Нежелательные» с меткой.
+settings-phishing-bad = Это не адрес почты: пересылки не будет.
+settings-phishing-placeholder = security@company.example

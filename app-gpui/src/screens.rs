@@ -117,9 +117,19 @@ enum Scene {
     SettingsReading,
     /// «Настройки → Подписи и шаблоны» с образцом подписи и шаблона (демо — без файла).
     SettingsSign,
+    /// Выделение (S5-08): три письма с флажками, панель массовых действий над списком, сводка в области чтения.
+    Bulk,
+    /// Контекстное меню над выделением с открытым подменю «Категория».
+    ContextMenu,
+    /// «Сообщить о фишинге»: тост «Отменить» после сообщения и меню у другого письма на пункте с красной маской.
+    Phishing,
+    /// Нет связи: строка состояния с обратным отсчётом, метка у аккаунта, полоса над списком.
+    Offline,
+    /// Стопка тостов (три и «+N ещё») рядом с открытой историей уведомлений.
+    Toasts,
 }
 
-const SCENES: [Scene; 42] = [
+const SCENES: [Scene; 47] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -160,6 +170,11 @@ const SCENES: [Scene; 42] = [
     Scene::Quick,
     Scene::Lifecycle,
     Scene::Overdue,
+    Scene::Bulk,
+    Scene::ContextMenu,
+    Scene::Phishing,
+    Scene::Offline,
+    Scene::Toasts,
     // Первый запуск (S5-09): добавление аккаунта на месте экрана почты (сроки прошлых сцен сняты).
     Scene::SignIn,
     // Последней: лента остаётся включённой, прежние сцены снимаются без неё.
@@ -229,6 +244,11 @@ impl Scene {
             Scene::SettingsQuick => "settings-quick",
             Scene::SettingsReading => "settings-reading",
             Scene::SettingsSign => "settings-sign",
+            Scene::Bulk => "bulk",
+            Scene::ContextMenu => "context-menu",
+            Scene::Phishing => "phishing",
+            Scene::Offline => "offline",
+            Scene::Toasts => "toasts",
         }
     }
 }
@@ -274,11 +294,19 @@ impl Driver {
         self.signin = true;
     }
 
-    fn scenes(&self) -> &'static [Scene] {
-        match (self.live, self.signin) {
+    /// Сцены прогона; `POSTMAN_SCREENS_ONLY=bulk,offline` — только эти (отладка сцен; сцена, которой нужны
+    /// прежние, без них может не собраться).
+    fn scenes(&self) -> Vec<Scene> {
+        let all: &[Scene] = match (self.live, self.signin) {
             (_, true) => &SIGNIN_SCENES,
             (true, false) => &LIVE_SCENES,
             (false, false) => &SCENES,
+        };
+        match std::env::var("POSTMAN_SCREENS_ONLY") {
+            Ok(only) if !only.trim().is_empty() => {
+                all.iter().copied().filter(|s| only.split(',').any(|o| o.trim() == s.name())).collect()
+            }
+            _ => all.to_vec(),
         }
     }
 
@@ -400,7 +428,85 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.list.update(cx, |l, cx| l.select(0, cx));
             m.open_letter(row, cx);
         }
+        Scene::Bulk => {
+            m.set_section(Section::Mail, cx);
+            m.reset_filters(cx);
+            m.filters.update(cx, |f, cx| f.set(cx, |f| f.quick_open = false));
+            m.close_picker(cx);
+            m.reading.update(cx, |r, cx| r.clear(cx));
+            let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes).ok_or("no inbox")?;
+            m.open_mailbox(inbox, cx);
+            // Как Ctrl+щелчки по второй, третьей и пятой строкам.
+            m.list.update(cx, |l, cx| {
+                for i in [1, 2, 4] {
+                    l.pick(i, false, cx);
+                }
+            });
+        }
+        Scene::ContextMenu => {
+            // Как правая кнопка по третьей строке (она в выделении), затем наведение на «Категория».
+            m.open_menu_at_row(2, None, cx);
+            m.screen_menu_sub(crate::menu::Sub::Category);
+        }
+        Scene::Phishing => {
+            m.close_menu(cx);
+            m.list.update(cx, |l, cx| {
+                l.clear_selection(cx);
+            });
+            // Как «Сообщить о фишинге» у первого письма (план — тот же, что у действия; «Отменить» — после снимков).
+            let rows: Vec<postman_cache::EmailRow> = m.list.read(cx).rows.1.iter().take(2).cloned().collect();
+            let Some(first) = rows.first().cloned() else { return Err("no letters in the inbox".into()) };
+            let boxes = m.folders.read(cx).mailboxes.clone();
+            let act = postman_core::bulk::Act::Phishing;
+            let plan = postman_core::bulk::plan(std::slice::from_ref(&first), &act, &boxes, |_, _| true);
+            if let Some(d) = &mut m.screens {
+                d.undo.extend(plan.undo.clone());
+            }
+            m.bulk_planned(act, plan, 1, cx);
+            // …и меню у второго письма на пункте «Сообщить о фишинге».
+            m.open_menu_at_row(1, None, cx);
+            m.screen_menu_last();
+        }
+        Scene::Offline => {
+            m.close_menu(cx);
+            m.toasts.update(cx, |t, cx| t.hide_all(cx));
+            let own = postman_demo::ME.to_owned();
+            m.folders.update(cx, |f, cx| {
+                f.own = Some(own);
+                cx.notify();
+            });
+            // Как событие синхронизации: связи нет, повтор через 25 с, две правки в очереди.
+            m.on_connection(postman_core::link::Connection::Offline { retry_in: 25, queued: 2 }, cx);
+        }
+        Scene::Toasts => {
+            // Связь вернулась (запись в истории), затем пять уведомлений: видно три и «+2 ещё»; история открыта.
+            m.on_connection(postman_core::link::Connection::Online, cx);
+            m.folders.update(cx, |f, cx| {
+                f.own = None;
+                cx.notify();
+            });
+            use pets_ui::{Level, ToastAction};
+            let undo = || ToastAction::new(pets_i18n::tr!("bulk-undo"), |_, _| {});
+            let weak = crate::reading::sandbox_label(postman_worker::Level::Partial);
+            m.toasts.update(cx, |t, cx| {
+                t.push_action(Level::Success, pets_i18n::tr!("bulk-done-archive", n = 3), undo(), cx);
+                t.push(Level::Info, pets_i18n::tr!("bulk-done-read", n = 12), cx);
+                t.push(Level::Error, pets_i18n::tr!("bulk-phishing-failed", error = String::from("552")), cx);
+                t.push(Level::Warning, pets_i18n::tr!("sandbox-weak", level = weak), cx);
+                t.push_action(Level::Success, pets_i18n::tr!("bulk-done-archive", n = 14), undo(), cx);
+                if !t.is_history_open() {
+                    t.toggle_history(cx);
+                }
+            });
+        }
         Scene::SignIn => {
+            // Уведомления сцены `toasts` — убрать: первый запуск без них.
+            m.toasts.update(cx, |t, cx| {
+                t.hide_all(cx);
+                if t.is_history_open() {
+                    t.toggle_history(cx);
+                }
+            });
             // Сроки сцены `lifecycle` — снять: дальше снимки без них.
             let undo = m.screens.as_mut().map(|d| std::mem::take(&mut d.undo)).unwrap_or_default();
             m.apply_patches(undo, cx);
@@ -758,6 +864,13 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let picker = m.lifecycle.picker.is_some() == matches!(scene, Scene::Lifecycle);
             marked >= 6 && top && list.view.is_some() && !list.computing && rows_loaded && open && picker
         }
+        Scene::Bulk => {
+            let s = list.summary.as_ref().map(|s| s.summary.count);
+            m.section == Section::Mail && list.selection.len() == 3 && s == Some(3) && rows_loaded
+        }
+        Scene::ContextMenu | Scene::Phishing => m.menu.is_some() && rows_loaded,
+        Scene::Offline => m.offline.is_down() && list.offline.is_some(),
+        Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
         Scene::Thread => {
             let r = m.reading.read(cx);
             let open = r.reading.as_ref().is_some_and(|r| r.row.id == postman_demo::CHAIN_OPEN);

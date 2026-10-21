@@ -316,3 +316,10 @@ settings-account-revocation = Windows checks the server certificate and its revo
 settings-account-secrets = Passwords
 settings-account-secrets-1 = The password goes only to Windows Credential Manager, or nowhere.
 settings-account-secrets-2 = Postman writes only the server address and login to disk.
+
+# General → Security (S5-08): where "Report phishing" forwards messages.
+settings-security-group = Security
+settings-phishing = Phishing reports
+settings-phishing-hint = The message is forwarded as an attachment to this address. Empty — only moved to Junk and marked.
+settings-phishing-bad = Not an email address: nothing will be forwarded.
+settings-phishing-placeholder = security@company.example

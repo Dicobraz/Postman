@@ -1,0 +1,219 @@
+//! Офлайн (S5-08, DESIGN «Действия и состояния», макет «Состояния»): сервер не отвечает — строка состояния
+//! «Нет связи · повтор через N с», метка «нет связи» у аккаунта в дереве папок, тонкая полоса над списком с
+//! «Повторить сейчас». Правки писем без связи копятся в очереди синхронизации (`postman_core::link`) и уходят, когда
+//! связь вернётся, — так и сказано в полосе. Связь вернулась — всё снимается. Вместо прежнего тоста «Нет связи…».
+//!
+//! Состояние — [`Offline`] (без gpui, тесты); обратный отсчёт — один таймер раз в секунду, только пока связи нет.
+
+use std::time::{Duration, Instant};
+
+use postman_core::link::Connection;
+
+/// Что изменилось с событием связи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// Связь только что пропала.
+    Lost,
+    /// Связи по-прежнему нет: новый срок повтора или число правок в очереди.
+    Still,
+    /// Связь вернулась.
+    Back,
+    /// Связь была и есть.
+    None,
+}
+
+/// Связи нет: когда повтор и сколько правок ждёт отправки.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Offline {
+    down: bool,
+    retry_at: Option<Instant>,
+    queued: usize,
+}
+
+impl Offline {
+    pub(crate) fn is_down(&self) -> bool {
+        self.down
+    }
+
+    pub(crate) fn queued(&self) -> usize {
+        self.queued
+    }
+
+    /// Событие синхронизации о связи, полученное в `now`.
+    pub(crate) fn on(&mut self, c: Connection, now: Instant) -> Change {
+        match c {
+            Connection::Offline { retry_in, queued } => {
+                let was = self.down;
+                self.down = true;
+                self.retry_at = Some(now + Duration::from_secs(retry_in));
+                self.queued = queued;
+                if was { Change::Still } else { Change::Lost }
+            }
+            Connection::Online if self.down => {
+                *self = Offline::default();
+                Change::Back
+            }
+            Connection::Online => Change::None,
+        }
+    }
+
+    /// Секунд до повтора; `Some(0)` — попытка идёт (срок прошёл, ответа ещё нет); связь есть — `None`.
+    pub(crate) fn left(&self, now: Instant) -> Option<u64> {
+        if !self.down {
+            return None;
+        }
+        Some(self.retry_at.map_or(0, |t| t.saturating_duration_since(now).as_secs_f32().ceil() as u64))
+    }
+
+    /// «Повторить сейчас»: попытка уже идёт (до ответа синхронизации).
+    pub(crate) fn retry_now(&mut self, now: Instant) {
+        if self.down {
+            self.retry_at = Some(now);
+        }
+    }
+}
+
+/// Текст строки состояния без связи: «Нет связи · повтор через 25 с», попытка — «Нет связи · подключение…»; в
+/// очереди правки — «· изменений в очереди: 3».
+pub(crate) fn status_text(o: &Offline, now: Instant) -> Option<String> {
+    let left = o.left(now)?;
+    let head = if left > 0 { pets_i18n::tr!("states-offline-retry", n = left as i64) } else { pets_i18n::tr!("states-offline-trying") };
+    Some(match o.queued() {
+        0 => head,
+        n => format!("{head} · {}", pets_i18n::tr!("states-offline-queued", n = n as i64)),
+    })
+}
+
+/// Сервер из адреса учётной записи — для полосы «Нет подключения к mail.example.ru».
+pub(crate) fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    host.to_owned()
+}
+
+impl crate::Mailer {
+    /// Событие связи от синхронизации: строка состояния, метка у аккаунта, полоса над списком; пропала и вернулась —
+    /// записью в истории уведомлений (без тоста).
+    pub(crate) fn on_connection(&mut self, c: Connection, cx: &mut gpui_kit::Context<Self>) {
+        use pets_ui::Level;
+        let change = self.offline.on(c, Instant::now());
+        let host = self.server_host();
+        match change {
+            Change::Lost => {
+                let text = pets_i18n::tr!("states-lost", host = host.clone());
+                self.toasts.update(cx, |t, cx| t.note(Level::Warning, text, cx));
+            }
+            Change::Back => {
+                let text = pets_i18n::tr!("states-back", host = host.clone());
+                self.toasts.update(cx, |t, cx| t.note(Level::Success, text, cx));
+            }
+            Change::Still | Change::None => {}
+        }
+        self.show_offline(host, change == Change::Lost, cx);
+        self.offline_tick(cx);
+        cx.notify();
+    }
+
+    /// Метка у аккаунта и полоса над списком — по состоянию связи (`fresh` — связь только что пропала: полосу
+    /// показать снова, даже если её скрывали).
+    pub(crate) fn show_offline(&mut self, host: String, fresh: bool, cx: &mut gpui_kit::Context<Self>) {
+        let down = self.offline.is_down();
+        let queued = self.offline.queued();
+        self.folders.update(cx, |f, cx| {
+            if f.offline != down {
+                f.offline = down;
+                cx.notify();
+            }
+        });
+        self.list.update(cx, |l, cx| {
+            l.offline = down.then_some((host, queued));
+            if fresh || !down {
+                l.offline_hidden = false;
+            }
+            cx.notify();
+        });
+    }
+
+    /// Раз в секунду, пока связи нет: «повтор через N с». Таймер один.
+    fn offline_tick(&mut self, cx: &mut gpui_kit::Context<Self>) {
+        if !self.offline.is_down() || self.offline_ticking {
+            return;
+        }
+        self.offline_ticking = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |m, cx| {
+                m.offline_ticking = false;
+                m.offline_tick(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Сервер учётной записи (демо — сервер демо-ящика, для снимков).
+    pub(crate) fn server_host(&self) -> String {
+        match self.live_account() {
+            Some(a) => host_of(&a.url),
+            None => format!("mail.{}", postman_demo::ME.rsplit('@').next().unwrap_or_default()),
+        }
+    }
+
+    /// «Повторить сейчас»: синхронизация пробует сразу.
+    pub(crate) fn retry_now(&mut self, cx: &mut gpui_kit::Context<Self>) {
+        self.offline.retry_now(Instant::now());
+        if self.backend.is_live() && !self.backend.send(postman_core::sync::Command::Reconnect) {
+            self.sync_stopped(cx);
+        }
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Change, Offline, host_of};
+    use postman_core::link::Connection;
+    use std::time::{Duration, Instant};
+
+    /// Связь пропала → по-прежнему нет (новый срок, очередь растёт) → вернулась: всё снято.
+    #[test]
+    fn offline_state_transitions() {
+        let mut o = Offline::default();
+        let now = Instant::now();
+        assert_eq!(o.on(Connection::Online, now), Change::None);
+        assert_eq!(o.left(now), None);
+        assert_eq!(o.on(Connection::Offline { retry_in: 5, queued: 0 }, now), Change::Lost);
+        assert!(o.is_down());
+        assert_eq!(o.left(now), Some(5));
+        assert_eq!(o.left(now + Duration::from_millis(2500)), Some(3));
+        // Срок прошёл, ответа нет — «подключение…».
+        assert_eq!(o.left(now + Duration::from_secs(6)), Some(0));
+        let later = now + Duration::from_secs(6);
+        assert_eq!(o.on(Connection::Offline { retry_in: 10, queued: 2 }, later), Change::Still);
+        assert_eq!((o.left(later), o.queued()), (Some(10), 2));
+        o.retry_now(later + Duration::from_secs(1));
+        assert_eq!(o.left(later + Duration::from_secs(1)), Some(0));
+        assert_eq!(o.on(Connection::Online, later), Change::Back);
+        assert_eq!((o.is_down(), o.left(later), o.queued()), (false, None, 0));
+        assert_eq!(o.on(Connection::Online, later), Change::None);
+    }
+
+    #[test]
+    fn host_is_taken_from_the_account_url() {
+        assert_eq!(host_of("https://mail.corp.example/jmap/session"), "mail.corp.example");
+        assert_eq!(host_of("http://10.0.0.5:8080"), "10.0.0.5:8080");
+        assert_eq!(host_of("mail.corp.example"), "mail.corp.example");
+    }
+
+    #[test]
+    fn status_texts() {
+        let (ru, problems) = pets_i18n::I18n::new(&[crate::TEXTS], "ru");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(ru.fmt("states-offline-retry", &{
+            let mut a = pets_i18n::FluentArgs::new();
+            a.set("n", 25);
+            a
+        }), "Нет связи · повтор через 25 с");
+    }
+}

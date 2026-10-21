@@ -97,6 +97,16 @@ impl EmailSummary {
     }
 }
 
+/// Письмо как сообщение целиком (`Client::email_blobs`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailBlob {
+    pub id: String,
+    pub blob_id: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BodyPart {
@@ -561,6 +571,16 @@ impl Client {
                 id: e.id,
             })
             .collect())
+    }
+
+    /// Письма целиком (S5-08, пересылка вложением — «Сообщить о фишинге»): id, `blobId` сообщения RFC 5322 и тема.
+    /// Писем, которых нет, в ответе нет.
+    pub async fn email_blobs(&self, ids: &[String]) -> Result<Vec<EmailBlob>> {
+        let acc = self.mail_account()?;
+        let args = json!({ "accountId": acc, "ids": ids, "properties": ["id", "blobId", "subject"] });
+        let mut r = self.call(USING, &[inv("Email/get", args, "g")]).await?;
+        let g: GetResponse<EmailBlob> = take(&mut r, "g")?;
+        Ok(g.list)
     }
 
     /// Создать папку верхнего уровня с ролью (`archive` — «Архив» для жизненного цикла, S5-04) → id.

@@ -72,6 +72,9 @@ pub struct General {
     pub density: Option<u16>,
     /// `ru`, `en`; `None` — язык Windows.
     pub language: Option<String>,
+    /// «Сообщить о фишинге» (S5-08): письмо ещё и вложением на этот адрес (служба безопасности); `None` — только в
+    /// «Нежелательные» с меткой.
+    pub phishing_report: Option<String>,
 }
 
 /// Плотности, которые можно выбрать (высота строки, px).
@@ -110,8 +113,17 @@ impl Prefs {
         self.quick = std::mem::take(&mut self.quick).normalized();
         self.lifecycle = self.lifecycle.clamped();
         self.keys.retain(|id, _| !id.is_empty());
+        // Адрес для фишинга: пробелы по краям — прочь, пустой и без «@» — нет адреса.
+        self.general.phishing_report = phishing_address(self.general.phishing_report.as_deref());
         self
     }
+}
+
+/// Адрес «Сообщить о фишинге» (S5-08) из введённого текста: обрезанный, с «@» и без пробелов внутри; иначе `None`.
+pub fn phishing_address(text: Option<&str>) -> Option<String> {
+    let t = text?.trim();
+    let ok = t.contains('@') && !t.starts_with('@') && !t.ends_with('@') && !t.chars().any(char::is_whitespace);
+    ok.then(|| t.to_owned())
 }
 
 // --- быстрые фильтры ---
@@ -558,7 +570,12 @@ mod tests {
         let path = d.path().join(FILE);
         assert_eq!(Prefs::load(&path).unwrap(), Prefs::default(), "нет файла — по умолчанию");
         let mut p = Prefs {
-            general: General { theme: Some("fluent-dark".into()), density: Some(20), language: Some("en".into()) },
+            general: General {
+                theme: Some("fluent-dark".into()),
+                density: Some(20),
+                language: Some("en".into()),
+                phishing_report: Some("soc@corp.example".into()),
+            },
             ..Prefs::default()
         };
         p.quick.toggle(Quick::Expiring);
@@ -579,6 +596,18 @@ mod tests {
         assert_eq!(back.lifecycle.archive_newsletters(), Some(Duration::from_secs(14 * DAY)));
         // Временного файла не остаётся.
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    /// Адрес «Сообщить о фишинге» (S5-08): обрезается; не адрес — нет пересылки.
+    #[test]
+    fn phishing_address_is_checked() {
+        assert_eq!(phishing_address(Some("  soc@corp.example ")), Some("soc@corp.example".into()));
+        for bad in ["", "   ", "soc", "@corp", "soc@", "so c@corp.example"] {
+            assert_eq!(phishing_address(Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(phishing_address(None), None);
+        let p = Prefs { general: General { phishing_report: Some("nope".into()), ..General::default() }, ..Prefs::default() };
+        assert_eq!(p.normalized().general.phishing_report, None);
     }
 
     /// Чужие и испорченные значения — к допустимым; файл новее версии — ошибка, а не тихое затирание.
