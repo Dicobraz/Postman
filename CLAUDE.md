@@ -87,10 +87,10 @@ cargo run --release -p postman-gpui -- --screens <каталог>
 ```
 
 Агенты проверяют интерфейс снимками, а не нажатиями в окне: демо-ящик (свежая копия на 2000 писем, удаляется
-в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite` (и состояния карточки `invite-answered`, `invite-updated`, `invite-cancelled`, `invite-outdated`, S5-11), `search`, `calendar`, `event`, `meeting` и `assistant` (вкладка встречи: общие окна и занятость каждого, S5-11), `contacts`, `contact-edit`, `compose`, `send-later` (меню «Отправить позже», S5-06), `reply` (окно письма — своё окно), `vacation` (автоответ), `rules` (правила), `shared` (общий ящик в дереве папок, S4-06), `labels` (полосы категорий и метки, S5-02), `thread` (лента беседы, S5-05);
+в конце; `--keep` — оставить), PNG через PrintWindow — `list`, `letter`, `attachments`, `invite` (и состояния карточки `invite-answered`, `invite-updated`, `invite-cancelled`, `invite-outdated`, S5-11), `search`, `calendar`, `event`, `meeting` и `assistant` (вкладка встречи: общие окна и занятость каждого, S5-11), `contacts`, `contact-edit`, `compose` (письмо вкладкой, S5-06б), `send-later` (меню «Отправить позже», S5-06), `checks` (замечания «Перед отправкой»), `reply-inline` (ответ в области чтения), `vacation` (автоответ), `rules` (правила), `shared` (общий ящик в дереве папок, S4-06), `labels` (полосы категорий и метки, S5-02), `thread` (лента беседы, S5-05);
 на каждый файл строка `screen <имя> <путь> <ш>x<в>` в stdout, выход 0; ошибка (в том числе снимок одного цвета) —
 stderr и код 1. Только Windows.
-`--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list`, `letter` и `reply` после первой синхронизации,
+`--screens <каталог> --live` — живой ящик из `POSTMAN_URL`… (стенд): `list`, `letter` и `reply-inline` после первой синхронизации,
 `calendar` — неделя с сервера, `contacts` — контакты и справочник с сервера, `vacation` и `rules` — автоответ и правила с сервера,
 `shared` — «Входящие» первого общего ящика;
 без учётной записи в окружении — `signin` (строка входа).

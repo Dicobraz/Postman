@@ -120,11 +120,18 @@ impl Client {
         Ok(up.blob_id)
     }
 
-    /// Сохранить черновик; прежняя версия (`replace`) удаляется тем же запросом.
-    pub async fn save_draft(&self, raw: Vec<u8>, drafts: &str, replace: Option<&str>) -> Result<String> {
+    /// Сохранить черновик с ключевыми словами `keywords` (сверх `$draft`, `$seen`); прежняя версия (`replace`)
+    /// удаляется тем же запросом.
+    pub async fn save_draft(
+        &self,
+        raw: Vec<u8>,
+        drafts: &str,
+        replace: Option<&str>,
+        keywords: &[String],
+    ) -> Result<String> {
         let acc = self.mail_account()?.to_string();
         let blob = self.upload(&acc, raw, "message/rfc822").await?;
-        let mut calls = vec![import_call(&acc, &blob, drafts)];
+        let mut calls = vec![import_call(&acc, &blob, drafts, keywords)];
         if let Some(old) = replace {
             calls.push(inv("Email/set", json!({ "accountId": acc, "destroy": [old] }), "d"));
         }
@@ -134,11 +141,13 @@ impl Client {
 
     /// Отправить собранное письмо. Возвращает id письма (оно окажется в `sent`).
     pub async fn send(&self, raw: Vec<u8>, identity: &str, envelope: &Envelope, drafts: &str, sent: &str) -> Result<String> {
-        Ok(self.submit(raw, identity, envelope, drafts, sent, Release::Now).await?.email_id)
+        Ok(self.submit(raw, identity, envelope, drafts, sent, Release::Now, &[]).await?.email_id)
     }
 
     /// Отправить собранное письмо с задержкой `release` (FUTURERELEASE). Письмо сразу переносится в `sent` — и
     /// при отложенной отправке: `onSuccessUpdateEmail` сервер применяет при создании отправки, а не при выпуске.
+    /// `keywords` — ключевые слова письма (категория, «Ждать ответа»): остаются у него в `sent`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit(
         &self,
         raw: Vec<u8>,
@@ -147,6 +156,7 @@ impl Client {
         drafts: &str,
         sent: &str,
         release: Release,
+        keywords: &[String],
     ) -> Result<Submitted> {
         let acc = self.mail_account()?.to_string();
         let blob = self.upload(&acc, raw, "message/rfc822").await?;
@@ -160,7 +170,7 @@ impl Client {
         on_success.insert(format!("mailboxIds/{sent}"), Value::Bool(true));
         on_success.insert("keywords/$draft".into(), Value::Null);
         let calls = [
-            import_call(&acc, &blob, drafts),
+            import_call(&acc, &blob, drafts, keywords),
             inv(
                 "EmailSubmission/set",
                 json!({
@@ -274,19 +284,24 @@ pub fn unix_to_utc(t: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
-fn import_call(acc: &str, blob: &str, drafts: &str) -> crate::Invocation {
-    inv(
-        "Email/import",
-        json!({
-            "accountId": acc,
-            "emails": { "draft": {
-                "blobId": blob,
-                "mailboxIds": { drafts: true },
-                "keywords": { "$draft": true, "$seen": true },
-            }},
-        }),
-        "i",
-    )
+/// `Email/import` черновика: `$draft`, `$seen` и свои ключевые слова.
+fn import_call(acc: &str, blob: &str, drafts: &str, keywords: &[String]) -> crate::Invocation {
+    inv("Email/import", json!({ "accountId": acc, "emails": { "draft": import_email(blob, drafts, keywords) } }), "i")
+}
+
+/// Письмо для `Email/import`; ключевые слова — в нижнем регистре, неверные для JMAP (RFC 8621 §4.1.1) пропускаются.
+fn import_email(blob: &str, drafts: &str, keywords: &[String]) -> Value {
+    let mut kw = Map::new();
+    kw.insert("$draft".into(), Value::Bool(true));
+    kw.insert("$seen".into(), Value::Bool(true));
+    for k in keywords.iter().map(|k| k.to_ascii_lowercase()) {
+        let valid = (1..=255).contains(&k.len())
+            && k.bytes().all(|b| (0x21..=0x7e).contains(&b) && !b"(){]%*\"\\".contains(&b));
+        if valid {
+            kw.insert(k, Value::Bool(true));
+        }
+    }
+    json!({ "blobId": blob, "mailboxIds": { drafts: true }, "keywords": kw })
 }
 
 fn imported_id(r: &mut [crate::Invocation]) -> Result<String> {
@@ -300,7 +315,7 @@ fn imported_id(r: &mut [crate::Invocation]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Release, unix_to_utc};
+    use super::{Release, import_email, unix_to_utc};
     use crate::utc_to_unix;
     use serde_json::json;
 
@@ -310,6 +325,15 @@ mod tests {
             assert_eq!(utc_to_unix(&unix_to_utc(t)), Some(t), "{t}");
         }
         assert_eq!(unix_to_utc(1_792_240_200), "2026-10-17T12:30:00Z");
+    }
+
+    /// S5-06б: свои ключевые слова черновика — рядом с `$draft`; неверные для JMAP пропускаются.
+    #[test]
+    fn draft_keywords_go_into_the_import() {
+        let kw = ["pm.conf".to_string(), "PM.Wait.2026-10-24".into(), "bad word".into(), "pm(x".into()];
+        let v = import_email("b1", "d1", &kw);
+        assert_eq!(v["keywords"], json!({ "$draft": true, "$seen": true, "pm.conf": true, "pm.wait.2026-10-24": true }));
+        assert_eq!(v["mailboxIds"], json!({ "d1": true }));
     }
 
     #[test]

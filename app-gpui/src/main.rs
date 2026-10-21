@@ -29,6 +29,7 @@ mod account;
 mod live;
 mod signin;
 mod compose;
+mod composer;
 mod actions;
 mod meeting;
 mod settings;
@@ -65,6 +66,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/commands.ftl")),
     ("ru", include_str!("../i18n/ru/reading.ftl")),
     ("ru", include_str!("../i18n/ru/compose.ftl")),
+    ("ru", include_str!("../i18n/ru/composetab.ftl")),
     ("ru", include_str!("../i18n/ru/account.ftl")),
     ("ru", include_str!("../i18n/ru/actions.ftl")),
     ("ru", include_str!("../i18n/ru/calendar.ftl")),
@@ -80,6 +82,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
     ("en", include_str!("../i18n/en/compose.ftl")),
+    ("en", include_str!("../i18n/en/composetab.ftl")),
     ("en", include_str!("../i18n/en/account.ftl")),
     ("en", include_str!("../i18n/en/actions.ftl")),
     ("en", include_str!("../i18n/en/calendar.ftl")),

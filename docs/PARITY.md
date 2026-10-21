@@ -4,7 +4,7 @@
 > Руками не править. Обновить: `POSTMAN_UPDATE_DOCS=1 cargo test -p postman-gpui parity`.
 > «есть» — у действия команды есть обработчик на экране; доля сделанного только растёт (тест).
 
-Сделано: 49 из 49 (100 %).
+Сделано: 58 из 58 (100 %).
 
 | Функция | Команда | Хоткей | Статус |
 |---|---|---|---|
@@ -43,7 +43,16 @@
 | Отправить письмо | `compose.send` | `ctrl-enter`, `alt-s` | есть |
 | Вложить файл | `compose.attach` |  | есть |
 | Предпросмотр письма | `compose.preview` | `ctrl-shift-p` | есть |
-| Закрыть окно письма | `compose.close` | `escape` | есть |
+| Закрыть письмо | `compose.close` | `escape` | есть |
+| Жирный | `compose.bold` | `ctrl-b` | есть |
+| Курсив | `compose.italic` | `ctrl-i` | есть |
+| Подчёркнутый | `compose.underline` | `ctrl-u` | есть |
+| Маркированный список | `compose.bullets` |  | есть |
+| Нумерованный список | `compose.numbers` |  | есть |
+| Ссылка | `compose.link` |  | есть |
+| Цитата | `compose.quote` |  | есть |
+| Развернуть ответ во вкладку | `compose.expand` |  | есть |
+| Удалить черновик | `compose.discard` |  | есть |
 | Отправить приглашения | `meeting.send` | `ctrl-enter`, `alt-s` | есть |
 | Закрыть вкладку встречи | `meeting.close` | `escape` | есть |
 | Новый контакт | `contacts.new` | `ctrl-shift-c` | есть |
