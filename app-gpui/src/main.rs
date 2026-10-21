@@ -21,6 +21,7 @@ mod list;
 mod folders;
 mod reading;
 mod attachments;
+mod preview;
 mod invite_card;
 mod backend;
 mod bar;
@@ -72,6 +73,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/app.ftl")),
     ("ru", include_str!("../i18n/ru/commands.ftl")),
     ("ru", include_str!("../i18n/ru/reading.ftl")),
+    ("ru", include_str!("../i18n/ru/attachments.ftl")),
     ("ru", include_str!("../i18n/ru/compose.ftl")),
     ("ru", include_str!("../i18n/ru/composetab.ftl")),
     ("ru", include_str!("../i18n/ru/account.ftl")),
@@ -88,6 +90,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
+    ("en", include_str!("../i18n/en/attachments.ftl")),
     ("en", include_str!("../i18n/en/compose.ftl")),
     ("en", include_str!("../i18n/en/composetab.ftl")),
     ("en", include_str!("../i18n/en/account.ftl")),

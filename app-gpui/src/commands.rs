@@ -29,6 +29,11 @@ pub mod thread {
     gpui_kit::actions!(thread, [Toggle, Quotes, Next, Prev]);
 }
 
+/// Вложения открытого письма (S5-07): встроенный просмотр, «Сохранить все», по вложениям в просмотре.
+pub mod attach {
+    gpui_kit::actions!(attach, [Preview, SaveAll, Next, Prev]);
+}
+
 pub mod view {
     gpui_kit::actions!(view, [Mail, Calendar, Contacts, Notifications]);
 }
@@ -124,6 +129,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("thread.quotes", &[], MAIL),
     cmd("thread.next", &["ctrl-right"], LIST),
     cmd("thread.prev", &["ctrl-left"], LIST),
+    // Не Outlook (там просмотр — щелчком по вложению): просмотр и «Сохранить все» — кнопками ленты; в открытом
+    // просмотре ← / → — по вложениям письма, Esc — закрыть (как поиск: `search.clear`).
+    cmd("attach.preview", &[], MAIL),
+    cmd("attach.save_all", &[], MAIL),
+    cmd("attach.next", &["right"], LIST),
+    cmd("attach.prev", &["left"], LIST),
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),

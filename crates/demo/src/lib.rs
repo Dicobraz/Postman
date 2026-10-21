@@ -316,7 +316,12 @@ pub fn body(id: &str) -> BodyRow {
     } else if n.is_multiple_of(2) {
         (OUTLOOK, vec![
             att("logo", "logo.png", "image/png", LOGO.len() as u64, Some("logo@corp")),
+            // Встроенный просмотр (S5-07): PDF, архив с опасными файлами, книга с макросами, фото.
+            att("pdf", "Отчёт за квартал.pdf", "application/pdf", REPORT.len() as u64, None),
+            att("zip", "Снимки экрана.zip", "application/zip", SCREENS.len() as u64, None),
+            att("xlsm", "Бюджет.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12", BUDGET.len() as u64, None),
             att("xlsx", "Итоги Q3.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 18_432, None),
+            att("photo", "Фото стенда.jpg", "image/jpeg", PHOTO.len() as u64, None),
         ])
     } else {
         (HOSTILE, vec![
@@ -334,6 +339,11 @@ pub fn body(id: &str) -> BodyRow {
 }
 
 const LOGO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.png");
+/// Вложения для встроенного просмотра (S5-07): синтетические, из тестов воркера.
+const REPORT: &[u8] = include_bytes!("../../worker/tests/fixtures/report.pdf");
+const SCREENS: &[u8] = include_bytes!("../../worker/tests/fixtures/screens.zip");
+const BUDGET: &[u8] = include_bytes!("../../worker/tests/fixtures/budget.xlsm");
+const PHOTO: &[u8] = include_bytes!("../../worker/tests/fixtures/img.jpg");
 /// Приглашение Outlook (iMIP REQUEST) — каждое десятое демо-письмо.
 const INVITE: &[u8] = include_bytes!("../../worker/tests/fixtures/invite-outlook.ics");
 const INVITE_HTML: &str = "<p>Иван Петров приглашает вас на встречу «Обсуждение пилота SIEM».</p>";
@@ -343,6 +353,10 @@ pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
     match blob_id {
         "logo" => Some(LOGO.to_vec()),
         "ics" => Some(INVITE.to_vec()),
+        "pdf" => Some(REPORT.to_vec()),
+        "zip" => Some(SCREENS.to_vec()),
+        "xlsm" => Some(BUDGET.to_vec()),
+        "photo" => Some(PHOTO.to_vec()),
         "xlsx" | "exe" | "rtlo" => Some(b"demo".to_vec()),
         _ => None,
     }

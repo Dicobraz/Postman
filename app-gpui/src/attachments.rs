@@ -1,11 +1,47 @@
-//! Вложения в области чтения: что показать полосой под шапкой, значок, размер и действия
-//! «Открыть» / «Сохранить как» (`postman_core::files`: безопасное имя, метка «из Интернета»).
+//! Вложения в области чтения (S5-07, макет «Просмотр вложений»): лента карточек 40 px под шапкой, действия
+//! «Просмотр» / «Открыть» / «Сохранить как» по наведению, «Сохранить все…», «+N» — развернуть.
+//!
+//! Что можно делать с файлом — `postman_core::attach` (имя) и проверка содержимого в воркере (макросы в OLE и
+//! OOXML): документ с макросами — красный щиток и полоса, «Открыть» заменено на «Сохранить»; исполняемые — только
+//! сохранить. Файлы на диске — `postman_core::files` (безопасное имя, метка «из Интернета»).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use gpui_kit::prelude::*;
+use gpui_kit::*;
 use pets_i18n::tr;
+use pets_ui::theme::Metric;
 use postman_cache::AttachmentRow;
+use postman_core::attach::{self, Risk, Viewer};
 use postman_core::files;
+use postman_worker::OfficeScan;
+
+use crate::Mailer;
+use crate::chrome::icon;
+use crate::commands::attach as cmd;
+use crate::reading::{Reading, ReadingPane};
+use crate::roles::{Look, Pm};
+
+/// Карточек в одном ряду ленты (макет: сетка в 4 колонки).
+pub(crate) const PER_ROW: usize = 4;
+/// Высота карточки.
+const CARD_H: f32 = 40.;
+
+/// Значки Segoe Fluent Icons ленты и просмотра.
+pub(crate) mod glyph {
+    pub(crate) const SHIELD: char = '\u{EA18}';
+    pub(crate) const SAVE: char = '\u{E74E}';
+    pub(crate) const OPEN: char = '\u{E8A7}';
+    pub(crate) const PREVIEW: char = '\u{E7B3}';
+    pub(crate) const ATTACH: char = '\u{E723}';
+    pub(crate) const CLOSE: char = '\u{E711}';
+    pub(crate) const PREV: char = '\u{E76B}';
+    pub(crate) const NEXT: char = '\u{E76C}';
+    pub(crate) const INFO: char = '\u{E946}';
+    pub(crate) const LOCK: char = '\u{E72E}';
+    pub(crate) const WARNING: char = '\u{E7BA}';
+    pub(crate) const DOCUMENT: char = '\u{E8A5}';
+}
 
 /// Действие с вложением; ждёт байты, если их ещё нет.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +50,7 @@ pub(crate) enum FileAct {
     SaveAs,
 }
 
-/// Вид файла — для значка.
+/// Вид файла — для плашки карточки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Image,
@@ -31,29 +67,51 @@ pub(crate) enum Kind {
     Other,
 }
 
-/// Строка полосы вложений.
+/// Строка ленты вложений.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Item {
     pub(crate) row: AttachmentRow,
     /// Имя без путей, управляющих и bidi-символов: подмена `счёт<U+202E>fdp.exe` видна как есть.
     pub(crate) name: String,
     pub(crate) kind: Kind,
+    /// Опасность с учётом проверки содержимого в воркере.
+    pub(crate) risk: Risk,
+    pub(crate) viewer: Viewer,
+    /// «Открыть» системным приложением: обычный файл без макросов.
     pub(crate) can_open: bool,
 }
 
-/// Вложения для полосы под шапкой: картинки, показанные в тексте (`cid:`), и приглашение, показанное
-/// карточкой, — не дублируются (как в Outlook).
-pub(crate) fn listed(all: &[AttachmentRow], shown_cids: &HashSet<String>, invite_card: bool) -> Vec<Item> {
+/// Вложения для ленты под шапкой: картинки, показанные в тексте (`cid:`), и приглашение, показанное карточкой, —
+/// не дублируются (как в Outlook). `scans` — проверки Office в воркере по `blob_id`.
+pub(crate) fn listed(
+    all: &[AttachmentRow],
+    shown_cids: &HashSet<String>,
+    invite_card: bool,
+    scans: &HashMap<String, OfficeScan>,
+) -> Vec<Item> {
     all.iter()
         .filter(|a| a.cid.as_ref().is_none_or(|c| !shown_cids.contains(c)))
         .filter(|a| !(invite_card && is_invite(a)))
-        .map(|a| Item {
-            row: a.clone(),
-            name: files::safe_name(&a.name),
-            kind: kind(&a.name, &a.mime),
-            can_open: files::can_open(&a.name),
+        .map(|a| {
+            let risk = attach::risk_with(&a.name, scans.get(&a.blob_id).map(|s| s.macros));
+            Item {
+                row: a.clone(),
+                name: files::safe_name(&a.name),
+                kind: kind(&a.name, &a.mime),
+                risk,
+                viewer: attach::viewer(&a.name, &a.mime),
+                can_open: risk == Risk::Safe && files::can_open(&a.name),
+            }
         })
         .collect()
+}
+
+/// Вложения ленты открытого письма.
+pub(crate) fn items(r: &Reading) -> Vec<Item> {
+    let Some(body) = r.body.as_ref() else { return Vec::new() };
+    let shown: HashSet<String> = r.doc.as_ref().map(|d| crate::ir_view::cids(d).into_iter().collect()).unwrap_or_default();
+    let card = r.invite.as_ref().is_some_and(|c| c.invitation().is_some());
+    listed(&body.attachments, &shown, card, &r.scans)
 }
 
 /// Вложение — приглашение на встречу (`text/calendar`, `.ics`).
@@ -66,14 +124,13 @@ pub(crate) fn kind(name: &str, mime: &str) -> Kind {
     if !files::can_open(name) && name.contains('.') {
         return Kind::Blocked;
     }
-    let safe = files::safe_name(name);
-    let ext = safe.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let ext = extension(name);
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" => Kind::Image,
         "pdf" => Kind::Pdf,
-        "doc" | "docx" | "odt" | "rtf" => Kind::Document,
-        "xls" | "xlsx" | "ods" | "csv" => Kind::Sheet,
-        "ppt" | "pptx" | "odp" => Kind::Slides,
+        "doc" | "docx" | "docm" | "dot" | "dotx" | "dotm" | "odt" | "rtf" => Kind::Document,
+        "xls" | "xlsx" | "xlsm" | "xlsb" | "xlt" | "xltx" | "xltm" | "xlam" | "ods" | "csv" => Kind::Sheet,
+        "ppt" | "pptx" | "pptm" | "pps" | "ppsx" | "ppsm" | "pot" | "potx" | "potm" | "odp" => Kind::Slides,
         "zip" | "7z" | "rar" | "gz" | "tar" => Kind::Archive,
         "ics" => Kind::Calendar,
         "eml" | "msg" => Kind::Mail,
@@ -85,20 +142,23 @@ pub(crate) fn kind(name: &str, mime: &str) -> Kind {
     }
 }
 
-pub(crate) fn icon(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Image => "🖼",
-        Kind::Pdf => "📕",
-        Kind::Document => "📝",
-        Kind::Sheet => "📊",
-        Kind::Slides => "📽",
-        Kind::Archive => "🗜",
-        Kind::Calendar => "📅",
-        Kind::Mail => "✉",
-        Kind::Text => "📄",
-        Kind::Blocked => "⚠",
-        Kind::Other => "📎",
+fn extension(name: &str) -> String {
+    let safe = files::safe_name(name);
+    safe.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
+}
+
+/// Подпись плашки: расширение заглавными, до 4 знаков («PDF», «XLSM»); без расширения — по виду.
+pub(crate) fn tile_label(item: &Item) -> String {
+    let ext = extension(&item.name);
+    if !ext.is_empty() && ext.chars().count() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return ext.to_ascii_uppercase();
     }
+    match item.kind {
+        Kind::Image => "IMG",
+        Kind::Text => "TXT",
+        _ => "FILE",
+    }
+    .to_string()
 }
 
 /// Размер для показа: (единица для `.ftl`, число). Байты и КБ — целые, МБ — с одним знаком.
@@ -116,9 +176,250 @@ pub(crate) fn size_text(n: u64) -> String {
     tr!("reading-att-size", unit = unit, n = n)
 }
 
+/// Сколько карточек показать в свёрнутой ленте: всё, что влезает в ряд; не влезает — ряд без последней и «+N».
+pub(crate) fn visible(total: usize, expanded: bool) -> (usize, usize) {
+    if expanded || total <= PER_ROW {
+        (total, 0)
+    } else {
+        (PER_ROW - 1, total - (PER_ROW - 1))
+    }
+}
+
+/// Команды вложений — на корне экрана почты (`Mailer::render`). ← / → без открытого просмотра не нужны:
+/// действие уходит дальше (`propagate`).
+pub(crate) fn handlers(root: Div, cx: &mut Context<Mailer>) -> Div {
+    root.on_action(cx.listener(|this, _: &cmd::Preview, _, cx| this.reading.update(cx, |r, cx| r.toggle_preview(None, cx))))
+        .on_action(cx.listener(|this, _: &cmd::SaveAll, _, cx| this.reading.update(cx, |r, cx| r.save_all(cx))))
+        .on_action(cx.listener(|this, _: &cmd::Next, _, cx| {
+            if !this.reading.update(cx, |r, cx| r.step_preview(1, cx)) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &cmd::Prev, _, cx| {
+            if !this.reading.update(cx, |r, cx| r.step_preview(-1, cx)) {
+                cx.propagate();
+            }
+        }))
+}
+
+/// Тихая кнопка-значок 24 px (действия карточки).
+fn act_button(id: impl Into<ElementId>, g: char, l: &Look) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(l.px(Metric::RadiusControl))
+        .text_color(l.text2())
+        .cursor_pointer()
+        .hover(|d| d.bg(l.hover()).text_color(l.text()))
+        .child(icon(g, 12.))
+}
+
+fn tip(text: String) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |window: &mut Window, cx: &mut App| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+}
+
+impl ReadingPane {
+    /// Лента под шапкой: «Вложения · N · размер» и «Сохранить все…», ниже — карточки по 4 в ряд.
+    pub(crate) fn ribbon(&self, r: &Reading, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let items = items(r);
+        if items.is_empty() {
+            return None;
+        }
+        let l = crate::roles::look(cx);
+        let total: u64 = items.iter().map(|i| i.row.size).sum();
+        let picked = r.preview.as_ref().map(|p| p.row.blob_id.clone());
+        let saving = self.save_all.is_some();
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(l.px(Metric::TypeCaption))
+            .text_color(l.text2())
+            .child(icon(glyph::ATTACH, 12.))
+            .child(div().flex_1().child(tr!("att-ribbon", n = items.len(), size = size_text(total))))
+            .child(
+                div()
+                    .id("att-save-all")
+                    .h(px(22.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .rounded(l.px(Metric::RadiusControl))
+                    .text_color(if saving { l.text3() } else { l.accent_text() })
+                    .cursor_pointer()
+                    .hover(|d| d.bg(l.hover()))
+                    .child(if saving { tr!("att-loading") } else { tr!("att-save-all") })
+                    .on_click(cx.listener(|this, _, _, cx| this.save_all(cx))),
+            );
+        let (shown, more) = visible(items.len(), r.expanded);
+        let mut cards: Vec<AnyElement> =
+            items.iter().take(shown).enumerate().map(|(n, item)| self.card(n, item, picked.as_deref(), &l, cx)).collect();
+        if more > 0 {
+            cards.push(
+                div()
+                    .id("att-more")
+                    .h(px(CARD_H))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(l.stroke())
+                    .bg(l.panel())
+                    .text_color(l.text2())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(l.hover()))
+                    .child(tr!("att-more", n = more))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_expanded(true, cx)))
+                    .into_any_element(),
+            );
+        } else if r.expanded && items.len() > PER_ROW {
+            cards.push(
+                div()
+                    .id("att-less")
+                    .h(px(CARD_H))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .text_color(l.accent_text())
+                    .cursor_pointer()
+                    .hover(|d| d.bg(l.hover()))
+                    .child(tr!("att-less"))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_expanded(false, cx)))
+                    .into_any_element(),
+            );
+        }
+        let grid = div().grid().grid_cols(PER_ROW as u16).gap(px(8.)).children(cards);
+        Some(div().flex().flex_col().gap(px(6.)).child(head).child(grid).into_any_element())
+    }
+
+    /// Карточка 40 px: плашка типа, имя и размер, справа — щиток опасности; по наведению — действия.
+    fn card(&self, n: usize, item: &Item, picked: Option<&str>, l: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let on = picked == Some(item.row.blob_id.as_str());
+        let danger = item.risk != Risk::Safe;
+        let pending = self.pending_files.iter().any(|(p, _)| p.blob_id == item.row.blob_id);
+        let group: SharedString = format!("att-card-{n}").into();
+        let tile = div()
+            .w(px(28.))
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .bg(if danger { l.pm(Pm::ThreatBg) } else { l.fill() })
+            .text_color(if danger { l.pm(Pm::ThreatFg) } else { l.text2() })
+            .text_size(px(9.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(tile_label(item));
+        let size = if pending { tr!("att-loading") } else { size_text(item.row.size) };
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(div().truncate().text_size(px(13.)).line_height(px(17.)).text_color(l.text()).child(item.name.clone()))
+            .child(div().text_size(px(11.)).line_height(px(14.)).text_color(l.text2()).child(size));
+        let status = match item.risk {
+            Risk::Macros => Some((tr!("att-status-macros"), glyph::SHIELD)),
+            Risk::Blocked => Some((tr!("att-status-blocked"), glyph::SHIELD)),
+            Risk::Safe => None,
+        };
+        let row = item.row.clone();
+        let blob = item.row.blob_id.clone();
+        let mut actions = div()
+            .absolute()
+            .top(px(7.))
+            .right(px(4.))
+            .flex()
+            .gap(px(2.))
+            .bg(if on { l.picked() } else { l.panel() })
+            .opacity(0.)
+            .group_hover(group.clone(), |s| s.opacity(1.));
+        if item.viewer != Viewer::None || danger {
+            let b = blob.clone();
+            actions = actions.child(
+                act_button(("att-pv", n), glyph::PREVIEW, l)
+                    .tooltip(tip(tr!("att-preview")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_preview(Some(b.clone()), cx);
+                    })),
+            );
+        }
+        if item.can_open {
+            let r = row.clone();
+            actions = actions.child(
+                act_button(("att-open", n), glyph::OPEN, l)
+                    .tooltip(tip(tr!("att-open")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.file_action(r.clone(), FileAct::Open, cx);
+                    })),
+            );
+        }
+        actions = actions.child(
+            act_button(("att-save", n), glyph::SAVE, l)
+                .tooltip(tip(tr!("att-save")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.file_action(row.clone(), FileAct::SaveAs, cx);
+                })),
+        );
+        let mut card = div()
+            .id(("att-card", n))
+            .group(group)
+            .relative()
+            .h(px(CARD_H))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(if danger { 11. } else { 8. }))
+            .pr(px(8.))
+            .rounded(px(6.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(if on { l.accent_text() } else { l.stroke() })
+            .bg(if on { l.picked() } else { l.panel() })
+            .cursor_pointer()
+            .tooltip(tip(format!("{} · {}", item.name, size_text(item.row.size))))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_preview(Some(blob.clone()), cx)))
+            .child(tile)
+            .child(text);
+        if let Some((text, g)) = status {
+            card = card.child(
+                div()
+                    .id(("att-risk", n))
+                    .flex_none()
+                    .text_color(l.pm(Pm::ThreatFg))
+                    .tooltip(tip(text))
+                    .child(icon(g, 14.)),
+            );
+        }
+        if danger {
+            // Тонкая красная полоса слева (DESIGN «Вложения»).
+            card = card.child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(l.pm(Pm::ThreatDot)));
+        }
+        card.child(actions).into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Не `use super::*`: вместе с gpui пришёл бы атрибут `gpui::test`, он перекрывает `#[test]`.
+    use std::collections::{HashMap, HashSet};
+
+    use postman_cache::AttachmentRow;
+    use postman_core::attach::{Risk, Viewer};
+    use postman_worker::OfficeScan;
+
+    use super::{Item, Kind, is_invite, kind, listed, size_parts, tile_label, visible};
 
     fn att(name: &str, mime: &str, cid: Option<&str>) -> AttachmentRow {
         AttachmentRow {
@@ -140,24 +441,38 @@ mod tests {
             att("invite.ics", "text/calendar", None),
         ];
         let shown: HashSet<String> = ["logo@corp".to_string()].into();
+        let none = HashMap::new();
         let names = |v: Vec<Item>| v.into_iter().map(|i| i.name).collect::<Vec<_>>();
-        assert_eq!(names(listed(&all, &shown, true)), ["other.png", "Итоги Q3.xlsx"]);
+        assert_eq!(names(listed(&all, &shown, true, &none)), ["other.png", "Итоги Q3.xlsx"]);
         // Карточка не разобралась — приглашение остаётся файлом.
-        assert_eq!(names(listed(&all, &shown, false)), ["other.png", "Итоги Q3.xlsx", "invite.ics"]);
-        assert_eq!(listed(&all, &HashSet::new(), true).len(), 3);
+        assert_eq!(names(listed(&all, &shown, false, &none)), ["other.png", "Итоги Q3.xlsx", "invite.ics"]);
+        assert_eq!(listed(&all, &HashSet::new(), true, &none).len(), 3);
     }
 
     #[test]
     fn dangerous_names_are_shown_safe_and_cannot_be_opened() {
         let all = [att("счёт\u{202e}fdp.exe", "application/octet-stream", None), att("invoice.pdf.exe", "", None)];
-        let items = listed(&all, &HashSet::new(), false);
+        let items = listed(&all, &HashSet::new(), false, &HashMap::new());
         assert_eq!(items[0].name, "счётfdp.exe");
-        assert!(items.iter().all(|i| !i.can_open && i.kind == Kind::Blocked));
+        assert!(items.iter().all(|i| !i.can_open && i.kind == Kind::Blocked && i.risk == Risk::Blocked));
+    }
+
+    /// Макросы: по имени (`.xlsm`) и по проверке воркера (`.xlsx` с `vbaProject.bin`) — открыть нельзя.
+    #[test]
+    fn macro_documents_cannot_be_opened() {
+        let all = [att("Расчёт.xlsm", "", None), att("Итоги.xlsx", "", None), att("Отчёт.docx", "", None)];
+        let scan = |macros| OfficeScan { macros, ..OfficeScan::default() };
+        let scans: HashMap<String, OfficeScan> = [("Итоги.xlsx".into(), scan(true)), ("Отчёт.docx".into(), scan(false))].into();
+        let items = listed(&all, &HashSet::new(), false, &scans);
+        assert_eq!(items.iter().map(|i| i.risk).collect::<Vec<_>>(), [Risk::Macros, Risk::Macros, Risk::Safe]);
+        assert_eq!(items.iter().map(|i| i.can_open).collect::<Vec<_>>(), [false, false, true]);
+        assert!(items.iter().all(|i| i.viewer == Viewer::Office));
     }
 
     #[test]
-    fn kinds() {
+    fn kinds_and_tiles() {
         assert_eq!(kind("Итоги Q3.xlsx", ""), Kind::Sheet);
+        assert_eq!(kind("Расчёт.xlsm", ""), Kind::Sheet);
         assert_eq!(kind("scan.PDF", ""), Kind::Pdf);
         assert_eq!(kind("photo", "image/jpeg"), Kind::Image);
         assert_eq!(kind("invite.ics", "text/calendar"), Kind::Calendar);
@@ -166,6 +481,19 @@ mod tests {
         assert!(is_invite(&att("x", "text/calendar; method=REQUEST", None)));
         assert!(is_invite(&att("Meeting.ICS", "application/octet-stream", None)));
         assert!(!is_invite(&att("a.txt", "text/plain", None)));
+        let tile = |name: &str, mime: &str| tile_label(&listed(&[att(name, mime, None)], &HashSet::new(), false, &HashMap::new())[0]);
+        assert_eq!(tile("Отчёт.pdf", ""), "PDF");
+        assert_eq!(tile("Расчёт.xlsm", ""), "XLSM");
+        assert_eq!(tile("photo", "image/png"), "IMG");
+        assert_eq!(tile("data.backup", ""), "FILE");
+    }
+
+    #[test]
+    fn overflow_shows_plus_n() {
+        assert_eq!(visible(3, false), (3, 0));
+        assert_eq!(visible(4, false), (4, 0));
+        assert_eq!(visible(6, false), (3, 3));
+        assert_eq!(visible(6, true), (6, 0));
     }
 
     #[test]
