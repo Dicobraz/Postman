@@ -17,6 +17,7 @@ use postman_jmap::{CALENDARS, CORE, Client, Error, Invocation, Result};
 use serde_json::{Map, Value, json};
 
 use crate::labels::{Categories, Category};
+pub use crate::taskparse::{Chip, ChipKind, Hours, Lang, Parsed, parse};
 
 /// Ключ состояния `CalendarEvent` задач в кэше (своё, не календаря недели).
 pub const STATE_KEY: &str = "tasks/CalendarEvent";
@@ -328,6 +329,11 @@ pub enum Request {
     Delete(String),
     /// Отправить правки, не дошедшие до сервера (связь вернулась).
     Flush,
+    /// «Время в календаре» (S6-08): событие «занят» `[start, end)` в своём календаре со ссылкой на задачу
+    /// (`relatedTo`), у задачи — `X-POSTMAN-BLOCK` → `Changed`.
+    Block { uid: String, start: i64, end: i64 },
+    /// Убрать блок задачи (событие удаляется) → `Changed`.
+    Unblock { uid: String },
     /// Сверить задачи со ссылкой на письмо с письмами кэша (S6-03, `mailtask::reconcile`): срок у письма снят —
     /// задача выполнена, письмо удалено — без ссылки → `Changed`, затем отправка. Без сервера, если менять нечего.
     Reconcile,
@@ -340,7 +346,8 @@ impl Request {
     pub fn replayable(&self) -> Option<Request> {
         match self {
             Request::Save(_) | Request::Delete(_) | Request::Flush => Some(self.clone()),
-            Request::Load | Request::Refresh | Request::Reconcile => None,
+            // Блок времени создаёт событие: повтор после обрыва мог бы поставить его дважды.
+            Request::Load | Request::Refresh | Request::Reconcile | Request::Block { .. } | Request::Unblock { .. } => None,
         }
     }
 }
@@ -454,6 +461,35 @@ pub async fn handle(store: &impl TaskStore, cache: &Cache, request: Request, not
             flush(store, cache, notify).await
         }
         Request::Flush => flush(store, cache, notify).await,
+        Request::Block { uid, start, end } => {
+            let Some(mut t) = cache.task(&uid).map_err(db)?.as_ref().and_then(from_row) else { return Ok(()) };
+            let calendar = match t.calendar_ids.first() {
+                Some(c) => c.clone(),
+                None => store.default_calendar().await?,
+            };
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let event = block_event(&t, &new_uid(nanos), &calendar, start, end);
+            match store.create(&event).await {
+                Ok(id) => {
+                    t.block = Some(postman_calendar::TimeBlock { event_id: id, start, end });
+                    notify(Reply::Changed(vec![save_local(cache, t).map_err(db)?]));
+                    flush(store, cache, notify).await
+                }
+                Err(e) if is_network(&e) => Err(e),
+                Err(e) => {
+                    notify(Reply::Failed { uid: Some(uid), error: e.to_string() });
+                    Ok(())
+                }
+            }
+        }
+        Request::Unblock { uid } => {
+            let Some(mut t) = cache.task(&uid).map_err(db)?.as_ref().and_then(from_row) else { return Ok(()) };
+            if let Some(b) = t.block.take() {
+                store.destroy(&b.event_id).await?;
+            }
+            notify(Reply::Changed(vec![save_local(cache, t).map_err(db)?]));
+            flush(store, cache, notify).await
+        }
         Request::Reconcile => {
             if reconcile(cache, notify).map_err(db)? {
                 flush(store, cache, notify).await?;
@@ -461,6 +497,24 @@ pub async fn handle(store: &impl TaskStore, cache: &Cache, request: Request, not
             Ok(())
         }
     }
+}
+
+/// Событие блока времени задачи (S6-08): «занят», без участников, со ссылкой на задачу (`relatedTo` — задача как
+/// родитель), метка `pm.task`.
+pub fn block_event(task: &Task, uid: &str, calendar: &str, start: i64, end: i64) -> Value {
+    let at = jiff::Timestamp::from_second(start).map(|t| t.strftime("%Y-%m-%dT%H:%M:%S").to_string()).unwrap_or_default();
+    json!({
+        "@type": "Event",
+        "uid": uid,
+        "calendarIds": { calendar: true },
+        "title": task.title,
+        "start": at,
+        "timeZone": "Etc/UTC",
+        "duration": postman_calendar::format_duration((end - start).max(60)),
+        "freeBusyStatus": "busy",
+        "keywords": { "pm.task": true },
+        "relatedTo": { task.uid.clone(): { "@type": "Relation", "relation": { "parent": true } } },
+    })
 }
 
 /// Задачи со ссылкой на письмо — по письмам кэша; `true` — что-то изменилось (записано у себя).
@@ -917,6 +971,27 @@ mod tests {
         assert!(cached(&c).is_empty());
         run(async { handle(&server, &c, Request::Flush, &quiet).await.unwrap() });
         assert!(server.items.borrow().is_empty() && c.all_tasks().unwrap().is_empty());
+    }
+
+    /// Блок времени: событие «занят» со ссылкой на задачу, у задачи — блок; «Убрать» — событие удалено.
+    #[test]
+    fn time_block_creates_and_removes_event() {
+        let server = Mem::default();
+        let c = Cache::open_in_memory().unwrap();
+        let quiet = |_: Reply| {};
+        run(async {
+            handle(&server, &c, Request::Save(Box::new(Task::new("u1", "b", "Отчёт"))), &quiet).await.unwrap();
+            handle(&server, &c, Request::Block { uid: "u1".into(), start: 1_800_000_000, end: 1_800_003_600 }, &quiet).await.unwrap();
+        });
+        let t = cached(&c).into_iter().find(|t| t.uid == "u1").unwrap();
+        let b = t.block.clone().expect("блок у задачи");
+        let ev = server.items.borrow().get(&b.event_id).cloned().expect("событие на сервере");
+        assert_eq!((ev["@type"].as_str(), ev["duration"].as_str()), (Some("Event"), Some("PT1H")));
+        assert_eq!(ev["relatedTo"]["u1"]["relation"]["parent"], true);
+        assert_eq!(ev["start"], "2027-01-15T08:00:00");
+        run(async { handle(&server, &c, Request::Unblock { uid: "u1".into() }, &quiet).await.unwrap() });
+        assert!(server.items.borrow().get(&b.event_id).is_none());
+        assert!(cached(&c)[0].block.is_none());
     }
 
     /// Отказ сервера: правка не повторяется вечно — серверная версия обратно и `Failed`.
