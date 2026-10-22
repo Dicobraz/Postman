@@ -124,6 +124,16 @@ enum Scene {
     TasksProject,
     /// «Выполненные»: сегодня, вчера.
     TasksDone,
+    /// «Добавить задачу» с фразой (S6-04): распознанное — чипами, итог строкой.
+    TaskQuickAdd,
+    /// Карточка задачи (S6-06): варианты проекта открыты, подзадачи с полем «Добавить подзадачу».
+    TaskCard,
+    /// Карточка задачи со ссылкой на письмо (блок письма с «Открыть»).
+    TaskCardMail,
+    /// Заметки задачи — Markdown с живым отображением, фокус в поле.
+    TaskNotes,
+    /// «Время в календаре» (S6-08): блок поставлен в ближайшее свободное окно.
+    TaskTimeblock,
     /// «Настройки → Автоответ» (S4-05, S5-29; демо — образец со своими текстами коллегам и внешним).
     Vacation,
     /// Ящик заполнен на 94 % (S5-29): индикатор в строке состояния и тост «Очистить вложения…».
@@ -234,6 +244,11 @@ const SCENES: &[Scene] = &[
     Scene::TasksToday,
     Scene::TasksProject,
     Scene::TasksDone,
+    Scene::TaskQuickAdd,
+    Scene::TaskCard,
+    Scene::TaskCardMail,
+    Scene::TaskNotes,
+    Scene::TaskTimeblock,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -340,6 +355,11 @@ impl Scene {
             Scene::TasksToday => "tasks-today",
             Scene::TasksProject => "tasks-project",
             Scene::TasksDone => "tasks-done",
+            Scene::TaskQuickAdd => "task-quickadd",
+            Scene::TaskCard => "task-card",
+            Scene::TaskCardMail => "task-card-mail",
+            Scene::TaskNotes => "task-notes",
+            Scene::TaskTimeblock => "task-timeblock",
             Scene::Vacation => "vacation",
             Scene::Quota => "quota",
             Scene::Rules => "rules",
@@ -798,6 +818,26 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.contacts_frequent(cx);
             m.contacts.update(cx, |c, cx| c.show_frequent(cx));
         }
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
+            use postman_core::tasks::List;
+            m.set_section(Section::Tasks, cx);
+            let first = m.list.read(cx).row(0).cloned();
+            m.tasks.update(cx, |t, cx| {
+                t.set_nav(crate::tasks::Nav::List(List::Today), cx);
+                t.select_title(postman_demo::tasks::MAIN, cx);
+                match scene {
+                    Scene::TaskQuickAdd => t.set_quick(postman_demo::tasks::QUICK, window, cx),
+                    Scene::TaskCard => t.toggle_field(crate::tasks::Field::Project, cx),
+                    Scene::TaskCardMail => {
+                        if let Some(row) = first {
+                            t.attach_demo_letter(row, cx);
+                        }
+                    }
+                    Scene::TaskNotes => t.focus_notes(window, cx),
+                    _ => t.demo_block(cx),
+                }
+            });
+        }
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             use postman_core::tasks::List;
             m.set_section(Section::Tasks, cx);
@@ -1149,6 +1189,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
         Scene::ContactsFrequent => m.contacts.read(cx).frequent_shown() && m.contacts.read(cx).ready(),
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
+            m.section == Section::Tasks && m.tasks.read(cx).ready()
+        }
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
         Scene::Vacation => {

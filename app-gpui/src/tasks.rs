@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState, TextDecoration, TextDecorationCollection};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,12 +25,12 @@ use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use pets_ui::theme::Metric;
 use postman_cache::{Cache, EmailRow};
-use postman_calendar::{Moment, Progress, Task};
+use postman_calendar::{Alert, Anchor, Busy, Moment, Progress, Span, Task, TimeBlock, Trigger, WorkHours};
 use postman_core::labels::Categories;
 use postman_core::lifecycle::{self as cycle, Badge, Patch, Pick};
 use postman_core::mailtask;
 use postman_core::marks::{self, Kind, When};
-use postman_core::tasks::{self as model, List, Reply, Request};
+use postman_core::tasks::{self as model, ChipKind, Hours, Lang, List, Parsed, Reply, Request};
 
 use crate::chrome::icon;
 use crate::roles::Look;
@@ -102,6 +102,17 @@ pub(crate) enum Group {
     DoneYesterday,
     DoneEarlier,
 }
+
+/// Поле карточки с вариантами (S6-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Field {
+    Remind,
+    Project,
+    Category,
+}
+
+/// Напоминание: за столько секунд до срока (0 — в срок).
+const REMINDERS: [i64; 4] = [0, -15 * 60, -3600, -86_400];
 
 /// Строка списка.
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +291,8 @@ pub(crate) struct TasksView {
     pub(crate) tasks: Vec<Task>,
     /// Письма со сроком (свой аккаунт): задачи «Из почты».
     letters: Vec<EmailRow>,
+    /// Письма задач со ссылкой (без срока у письма) — из кэша по выбору задачи: блок письма в карточке.
+    linked: Vec<EmailRow>,
     pub(crate) nav: Nav,
     shown: Vec<Task>,
     items: Vec<Item>,
@@ -297,6 +310,27 @@ pub(crate) struct TasksView {
     title: Option<Entity<InputState>>,
     /// Варианты срока в карточке открыты (Insert).
     pub(crate) due_open: bool,
+    /// Открытые варианты поля карточки (S6-06): напоминание, проект, категория.
+    pub(crate) open: Option<Field>,
+    /// Новый проект — строкой в вариантах проекта.
+    project_input: Entity<InputState>,
+    /// «Добавить подзадачу»: Enter — подзадача, поле остаётся для следующей.
+    sub_input: Entity<InputState>,
+    /// Заметки — поле с живым отображением Markdown (как письмо, S5-27).
+    notes: Entity<EditorState>,
+    notes_marks: Option<TextDecorationCollection>,
+    /// Чьи заметки в поле; сохранение — с задержкой после набора.
+    notes_uid: Option<String>,
+    notes_loading: bool,
+    notes_save: Option<gpui_kit::Task<()>>,
+    /// Шрифт интерфейса для поля заметок (по умолчанию у поля — моноширинный).
+    font: SharedString,
+    /// Разбор строки «Добавить задачу» (S6-04) и снятые крестиком чипы.
+    pub(crate) parsed: Parsed,
+    ignored: Vec<String>,
+    /// «Время в календаре» (S6-08): занятость сегодня из своего календаря и выбранное окно.
+    busy: Vec<Busy>,
+    pub(crate) slot: usize,
     tz: TimeZone,
     /// Задачи пришли (снимки ждут их).
     pub(crate) loaded: bool,
@@ -316,12 +350,61 @@ impl TasksView {
                 this.reshow(cx);
             }
         });
-        let on_quick = cx.subscribe_in(&quick, window, |this: &mut Self, state, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
+        let on_quick = cx.subscribe_in(&quick, window, |this: &mut Self, state, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => {
                 let text = state.read(cx).value().to_string();
                 if this.quick_add(&text, cx) {
                     state.update(cx, |s, cx| s.set_value("", window, cx));
+                    this.ignored.clear();
+                    this.parsed = Parsed::default();
                 }
+            }
+            InputEvent::Change => {
+                let text = state.read(cx).value().to_string();
+                if text.trim().is_empty() {
+                    this.ignored.clear();
+                }
+                this.parsed = this.parse(&text, cx);
+                cx.notify();
+            }
+            _ => {}
+        });
+        let project_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("tasks-project-new")));
+        let on_project = cx.subscribe_in(&project_input, window, |this: &mut Self, state, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let name = state.read(cx).value().trim().to_string();
+                if !name.is_empty() {
+                    this.set_project(Some(name), cx);
+                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+            }
+        });
+        let sub_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("tasks-sub-add")));
+        let on_sub = cx.subscribe_in(&sub_input, window, |this: &mut Self, state, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let title = state.read(cx).value().trim().to_string();
+                if !title.is_empty() {
+                    this.add_subtask(title, cx);
+                    state.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+            }
+        });
+        let notes = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .line_number(false)
+                .folding(false)
+                .indent_guides(false)
+                .searchable(false)
+                .auto_close(false)
+                .soft_wrap(true)
+                .placeholder(tr!("tasks-notes-placeholder"))
+        });
+        let on_notes = cx.subscribe(&notes, |this: &mut Self, _, ev: &InputEvent, cx| {
+            if let InputEvent::Change = ev
+                && !this.notes_loading
+            {
+                this.paint_notes(cx);
+                this.schedule_notes(cx);
             }
         });
         let mut this = Self {
@@ -329,6 +412,7 @@ impl TasksView {
             cache,
             tasks: demo(jiff::Timestamp::now().as_second(), &crate::prefs::get(cx).calendar.zone()),
             letters: Vec::new(),
+            linked: Vec::new(),
             nav: Nav::List(List::Today),
             shown: Vec::new(),
             items: Vec::new(),
@@ -342,10 +426,23 @@ impl TasksView {
             draft: None,
             title: None,
             due_open: false,
+            open: None,
+            project_input,
+            sub_input,
+            notes,
+            notes_marks: None,
+            notes_uid: None,
+            notes_loading: false,
+            notes_save: None,
+            font: SharedString::default(),
+            parsed: Parsed::default(),
+            ignored: Vec::new(),
+            busy: Vec::new(),
+            slot: 0,
             tz: crate::prefs::get(cx).calendar.zone(),
             loaded: true,
             timer: None,
-            _subscriptions: vec![on_search, on_quick],
+            _subscriptions: vec![on_search, on_quick, on_project, on_sub, on_notes],
         };
         this.load_letters(cx);
         this.reshow(cx);
@@ -447,10 +544,208 @@ impl TasksView {
     fn select(&mut self, uid: String, cx: &mut Context<Self>) {
         if self.selected.as_deref() != Some(uid.as_str()) {
             self.draft = None;
+            self.open = None;
+            self.slot = 0;
+            self.load_linked(cx);
             self.selected = Some(uid);
             self.due_open = false;
             self.title = None;
             cx.notify();
+        }
+    }
+
+    /// Разбор строки «Добавить задачу» (S6-04): язык интерфейса, «утром» / «вечером» — из рабочих часов.
+    fn parse(&self, text: &str, cx: &App) -> Parsed {
+        let lang = if pets_i18n::current().lang().starts_with("en") { Lang::En } else { Lang::Ru };
+        let cal = &crate::prefs::get(cx).calendar;
+        let at = |m: u16| jiff::civil::Time::new((m / 60).min(23) as i8, (m % 60) as i8, 0, 0).unwrap_or(jiff::civil::Time::midnight());
+        let hours = Hours { morning: at(cal.work_start), evening: at(cal.work_end) };
+        let now = jiff::Zoned::now().with_time_zone(self.tz.clone());
+        model::parse(text, lang, now.date(), now.time(), hours, &self.categories, &self.ignored)
+    }
+
+    /// Крестик на чипе: кусок — снова часть названия.
+    fn unchip(&mut self, text: String, cx: &mut Context<Self>) {
+        self.ignored.push(text);
+        let value = self.quick.read(cx).value().to_string();
+        self.parsed = self.parse(&value, cx);
+        cx.notify();
+    }
+
+    /// Снимок: строка «Добавить задачу» с текстом.
+    pub(crate) fn set_quick(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        self.parsed = self.parse(text, cx);
+        cx.notify();
+    }
+
+    /// Поле карточки (S6-06): открыть или закрыть его варианты.
+    pub(crate) fn toggle_field(&mut self, f: Field, cx: &mut Context<Self>) {
+        self.open = if self.open == Some(f) { None } else { Some(f) };
+        self.due_open = false;
+        cx.notify();
+    }
+
+    fn edit_selected(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Task)) {
+        let Some(mut t) = self.selected_task().cloned() else { return };
+        if mailtask::is_letter(&t) {
+            return;
+        }
+        f(&mut t);
+        self.open = None;
+        self.save(vec![t], cx);
+    }
+
+    fn set_remind(&mut self, secs: Option<i64>, cx: &mut Context<Self>) {
+        self.edit_selected(cx, |t| {
+            t.alerts = secs.map(|s| vec![Alert { trigger: Trigger::Offset { secs: s, from: Anchor::Due }, email: false }]).unwrap_or_default();
+        });
+    }
+
+    fn set_project(&mut self, p: Option<String>, cx: &mut Context<Self>) {
+        self.edit_selected(cx, |t| t.project = p);
+    }
+
+    fn set_category(&mut self, k: Option<String>, cx: &mut Context<Self>) {
+        let table = self.categories.clone();
+        self.edit_selected(cx, |t| {
+            // Категории таблицы снимаются, чужие метки остаются.
+            t.keywords.retain(|x| table.for_event(std::slice::from_ref(x)).is_none());
+            t.keywords.extend(k);
+            t.keywords.sort();
+        });
+    }
+
+    /// Подзадача в конец списка подзадач выбранной.
+    fn add_subtask(&mut self, title: String, cx: &mut Context<Self>) {
+        let Some(parent) = self.selected_task().cloned().filter(|t| !mailtask::is_letter(t)) else { return };
+        let order = model::subtasks(&self.tasks, &parent.uid).iter().filter_map(|s| s.order).max().map_or(0, |o| o + 1);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let mut s = Task::new(&model::new_uid(nanos), parent.calendar_ids.first().map(String::as_str).unwrap_or(""), &title);
+        s.parent = Some(parent.uid.clone());
+        s.order = Some(order);
+        s.project = parent.project.clone();
+        self.save(vec![s], cx);
+    }
+
+    /// Заметки выбранной — в поле (при смене задачи); прежние несохранённые — записать.
+    fn sync_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let uid = self.selected_task().filter(|t| !mailtask::is_letter(t)).map(|t| t.uid.clone());
+        if uid == self.notes_uid {
+            return;
+        }
+        if self.notes_save.take().is_some() {
+            self.save_notes(cx);
+        }
+        let text = self.selected_task().map(|t| t.notes.clone()).unwrap_or_default();
+        self.notes_loading = true;
+        self.notes.update(cx, |s, cx| s.replace_all(text, window, cx));
+        self.notes_loading = false;
+        self.notes_uid = uid;
+        self.paint_notes(cx);
+    }
+
+    /// Живое отображение Markdown заметок — как в письме (`postman_compose::display`, роли темы).
+    fn paint_notes(&mut self, cx: &mut Context<Self>) {
+        let l = crate::roles::look(cx);
+        let text = self.notes.read(cx).value().to_string();
+        let marks: Vec<TextDecoration> = postman_compose::display::display(&text)
+            .into_iter()
+            .map(|s| TextDecoration::new(s.range, crate::composer::md_style(&s.look, &l)))
+            .collect();
+        match &self.notes_marks {
+            Some(c) => c.set(marks, cx),
+            None => {
+                let c = self.notes.update(cx, |s, cx| s.create_decorations_collection(marks, cx));
+                self.notes_marks = Some(c);
+            }
+        }
+    }
+
+    fn schedule_notes(&mut self, cx: &mut Context<Self>) {
+        self.notes_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(800)).await;
+            let _ = this.update(cx, |v, cx| {
+                v.notes_save = None;
+                v.save_notes(cx);
+            });
+        }));
+    }
+
+    fn save_notes(&mut self, cx: &mut Context<Self>) {
+        let Some(uid) = self.notes_uid.clone() else { return };
+        let text = self.notes.read(cx).value().to_string();
+        let Some(mut t) = self.tasks.iter().find(|t| t.uid == uid).cloned() else { return };
+        if t.notes != text {
+            t.notes = text;
+            self.save(vec![t], cx);
+        }
+    }
+
+    /// Занятость сегодня (своё «занят» и «под вопросом») — от календаря экрана.
+    pub(crate) fn set_busy(&mut self, busy: Vec<Busy>, cx: &mut Context<Self>) {
+        if self.busy != busy {
+            self.busy = busy;
+            cx.notify();
+        }
+    }
+
+    /// Свободные окна сегодня от «сейчас» в рабочие часы под оценку задачи (по умолчанию — длительность из
+    /// «Настройки → Календарь»).
+    fn slots(&self, t: &Task, cx: &App) -> (Vec<Span>, WorkHours, i64) {
+        let cal = &crate::prefs::get(cx).calendar;
+        let hours = cal.work_hours(self.tz.clone());
+        let len = t.estimate.unwrap_or(i64::from(cal.duration) * 60).max(15 * 60);
+        let now = self.now();
+        // Ближайшее свободное окно: сегодня, а вечером и в выходные — в следующие рабочие дни (до недели).
+        let end = day_of(now, &self.tz).and_then(|d| add_days(d, 8).at(0, 0, 0, 0).to_zoned(self.tz.clone()).ok()).map_or(now, |z| z.timestamp().as_second());
+        let step = i64::from(cal.step.max(5)) * 60;
+        let mine: Vec<Busy> = self
+            .busy
+            .iter()
+            .copied()
+            .chain(self.tasks.iter().filter(|x| x.uid != t.uid).filter_map(|x| x.block.as_ref()).map(|b| Busy { span: Span::new(b.start, b.end), kind: postman_calendar::BusyKind::Busy }))
+            .collect();
+        let slots = postman_calendar::find_slots(&[mine], &[], Span::new(now, end), len, step, &hours, 24);
+        (slots, hours, len)
+    }
+
+    /// ←/→: соседнее свободное окно.
+    pub(crate) fn step_slot(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(t) = self.selected_task().cloned() else { return };
+        if t.block.is_some() {
+            return;
+        }
+        let n = self.slots(&t, cx).0.len();
+        if n > 0 {
+            self.slot = (self.slot as isize + delta).rem_euclid(n as isize) as usize;
+            cx.notify();
+        }
+    }
+
+    /// Поставить блок в выбранное окно (S6-08): событие «занят» в своём календаре со ссылкой на задачу.
+    pub(crate) fn place_block(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.selected_task().cloned().filter(|t| !mailtask::is_letter(t) && t.block.is_none()) else { return };
+        let (slots, _, _) = self.slots(&t, cx);
+        let Some(s) = slots.get(self.slot.min(slots.len().saturating_sub(1))).copied() else { return };
+        if self.live {
+            cx.emit(TasksAction::Send(Request::Block { uid: t.uid.clone(), start: s.start, end: s.end }));
+        } else {
+            let mut t = t;
+            t.block = Some(TimeBlock { event_id: "demo".into(), start: s.start, end: s.end });
+            self.save(vec![t], cx);
+        }
+        cx.emit(TasksAction::Toast(Toast::Success, tr!("tasks-block-placed", when = slot_label(s, &self.tz))));
+    }
+
+    fn remove_block(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.selected_task().cloned().filter(|t| t.block.is_some()) else { return };
+        if self.live {
+            cx.emit(TasksAction::Send(Request::Unblock { uid: t.uid.clone() }));
+        } else {
+            let mut t = t;
+            t.block = None;
+            self.save(vec![t], cx);
         }
     }
 
@@ -484,7 +779,51 @@ impl TasksView {
     }
 
     fn letter(&self, key: &str) -> Option<&EmailRow> {
-        self.letters.iter().find(|r| r.id == key)
+        self.letters.iter().chain(self.linked.iter()).find(|r| r.id == key)
+    }
+
+    /// Письмо выбранной задачи — из кэша (в фоне), если его нет среди писем со сроком.
+    fn load_linked(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_task().and_then(mailtask::letter_key).map(str::to_owned) else { return };
+        if self.letter(&key).is_some() {
+            return;
+        }
+        let cache = self.cache.clone();
+        let task = cx.background_spawn(async move { cache.rows_by_ids(std::slice::from_ref(&key)) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(rows) = task.await {
+                let _ = this.update(cx, |v, cx| {
+                    for r in rows {
+                        if v.letter(&r.id).is_none() {
+                            v.linked.push(r);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Снимок `task-card-mail`: задача демо со ссылкой на письмо ящика (первое во «Входящих»).
+    pub(crate) fn attach_demo_letter(&mut self, row: EmailRow, cx: &mut Context<Self>) {
+        let Some(t) = self.tasks.iter_mut().find(|t| t.title == postman_demo::tasks::MAIN) else { return };
+        t.mail = Some(postman_calendar::MailLink { message_id: String::new(), email_id: Some(row.id.clone()) });
+        let uid = t.uid.clone();
+        self.linked.push(row);
+        self.reshow(cx);
+        self.select(uid, cx);
+    }
+
+    /// Снимок `task-timeblock`: блок в выбранное окно.
+    pub(crate) fn demo_block(&mut self, cx: &mut Context<Self>) {
+        self.place_block(cx);
+    }
+
+    /// Снимок `task-notes`: фокус в заметки.
+    pub(crate) fn focus_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_notes(window, cx);
+        self.notes.update(cx, |s, cx| s.focus(window, cx));
     }
 
     /// Записать задачи у себя и отправить; демо — только в памяти.
@@ -759,7 +1098,24 @@ impl TasksView {
         if title.is_empty() {
             return false;
         }
-        let t = self.draft_for_nav(title);
+        let p = self.parse(text, cx);
+        let mut t = self.draft_for_nav(&p.title);
+        if t.title.trim().is_empty() {
+            t.title = title.to_owned();
+        }
+        if let Some(date) = p.date {
+            let w = match p.time {
+                Some(time) => When::at(date, time),
+                None => When::day(date),
+            };
+            let (m, all_day) = mailtask::due_moment(w);
+            t.due = Some(m);
+            t.all_day = all_day;
+        }
+        if let Some(k) = p.category {
+            t.keywords = vec![k];
+        }
+        t.important = p.important;
         let uid = t.uid.clone();
         self.save(vec![t], cx);
         self.select(uid, cx);
@@ -984,10 +1340,11 @@ impl TasksView {
             .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(self.title_of()))
             .child(div().pt(px(3.)).text_color(l.text2()).truncate().child(self.summary()));
         let quick_shown = !matches!(self.nav, Nav::List(List::Done) | Nav::List(List::FromMail));
+        let chips = if quick_shown { self.quick_chips(&l, cx) } else { None };
         let quick = quick_shown.then(|| {
             div().flex_none().px(px(14.)).pb(px(10.)).child(
                 Input::new(&self.quick).prefix(icon(g::ADD, 14.).text_color(l.accent_text())),
-            )
+            ).children(chips)
         });
         let empty = self.shown.is_empty().then(|| {
             div().px(px(24.)).py(px(48.)).text_center().text_color(l.text2()).line_height(px(20.)).child(tr!(empty_key(&self.nav)))
@@ -1139,6 +1496,181 @@ impl TasksView {
             .child(div().flex_none().flex().items_center().gap(px(4.)).when(two, |d| d.self_start().mt(px(12.))).children(chips))
             .on_click(cx.listener(move |this, _, _, cx| this.select(uid.clone(), cx)))
             .into_any_element()
+    }
+
+    /// «Время в календаре» (S6-08, макет): оценка, ближайшее свободное окно сегодня кнопкой (←/→ — соседние),
+    /// поставленный блок — со «Убрать»; ниже — рабочий день полосой: занятость, окно, «сейчас».
+    fn block_view(&self, t: &Task, l: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let (slots, hours, len) = self.slots(t, cx);
+        let est = crate::calendar::duration_text(len);
+        let now = self.now();
+        let chosen = t.block.as_ref().map(|b| Span::new(b.start, b.end)).or_else(|| slots.get(self.slot.min(slots.len().saturating_sub(1))).copied());
+        // Полоса — день выбранного окна (сегодня, если окна нет).
+        let today = chosen.and_then(|s| day_of(s.start, &self.tz)).or_else(|| day_of(now, &self.tz)).unwrap_or_default();
+        let at = |time: jiff::civil::Time| today.to_datetime(time).to_zoned(self.tz.clone()).map_or(now, |z| z.timestamp().as_second());
+        let (day_from, day_to) = (at(hours.start), at(hours.end).max(at(hours.start) + 3600));
+        let span = (day_to - day_from) as f32;
+        let x = |ts: i64| ((ts.clamp(day_from, day_to) - day_from) as f32 / span).clamp(0., 1.);
+        let head = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(div().font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(tr!("tasks-block")))
+            .child(div().text_size(px(12.)).text_color(l.text2()).whitespace_nowrap().child(est))
+            .child(div().flex_1());
+        let head = match (&t.block, chosen) {
+            (Some(b), _) => head
+                .child(div().text_size(px(12.)).text_color(l.accent_text()).child(slot_label(Span::new(b.start, b.end), &self.tz)))
+                .child(
+                    div()
+                        .id("block-remove")
+                        .text_size(px(12.))
+                        .text_color(l.text2())
+                        .cursor_pointer()
+                        .child(tr!("tasks-block-remove"))
+                        .on_click(cx.listener(|this, _, _, cx| this.remove_block(cx))),
+                ),
+            (None, Some(s)) => head
+                .child(crate::calendar::icon_button("slot-prev", crate::calendar::g::PREV, l).on_click(cx.listener(|this, _, _, cx| this.step_slot(-1, cx))))
+                .child(
+                    div()
+                        .id("block-place")
+                        .h(px(26.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(l.stroke())
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(l.hover()))
+                        .child(slot_label(s, &self.tz))
+                        .on_click(cx.listener(|this, _, _, cx| this.place_block(cx))),
+                )
+                .child(crate::calendar::icon_button("slot-next", crate::calendar::g::NEXT, l).on_click(cx.listener(|this, _, _, cx| this.step_slot(1, cx)))),
+            (None, None) => head.child(div().text_size(px(12.)).text_color(l.text3()).child(tr!("tasks-block-none"))),
+        };
+        let mut bar = div().relative().h(px(22.)).rounded(px(4.)).bg(l.fill()).overflow_hidden();
+        for b in &self.busy {
+            let (a, z) = (x(b.span.start), x(b.span.end));
+            if z > a {
+                bar = bar.child(div().absolute().top(px(3.)).bottom(px(3.)).left(relative(a)).w(relative(z - a)).rounded(px(3.)).bg(l.text3()));
+            }
+        }
+        if let Some(s) = chosen {
+            let (a, z) = (x(s.start), x(s.end));
+            bar = bar.child(
+                div()
+                    .absolute()
+                    .top(px(2.))
+                    .bottom(px(2.))
+                    .left(relative(a))
+                    .w(relative((z - a).max(0.01)))
+                    .rounded(px(3.))
+                    .border_2()
+                    .border_color(l.accent_text())
+                    .when(t.block.is_some(), |d| d.bg(l.picked())),
+            );
+        }
+        let nx = x(now);
+        bar = bar
+            .child(div().absolute().top_0().bottom_0().left_0().w(relative(nx)).bg(l.panel()).opacity(0.5))
+            .child(div().absolute().top_0().bottom_0().left(relative(nx)).w(px(2.)).bg(l.text()));
+        let mut ticks = div().relative().h(px(13.)).text_size(px(11.)).text_color(l.text2());
+        let mut h = hours.start.hour();
+        while h <= hours.end.hour() && h < 24 {
+            let ts = at(jiff::civil::Time::new(h, 0, 0, 0).unwrap_or(jiff::civil::Time::midnight()));
+            ticks = ticks.child(div().absolute().top_0().left(relative(x(ts))).child(format!("{h}")));
+            h += 2;
+        }
+        div()
+            .mx(px(20.))
+            .py(px(10.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(l.border())
+            .child(head)
+            .child(bar)
+            .child(ticks)
+            .into_any_element()
+    }
+
+    /// Чипы распознанного под строкой «Добавить задачу» (S6-04): × — снять распознавание; ниже — итог.
+    fn quick_chips(&self, l: &Look, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = &self.parsed;
+        if p.chips.is_empty() {
+            return None;
+        }
+        let chips = p.chips.iter().enumerate().map(|(i, c)| {
+            let text = c.text.clone();
+            let label = match c.kind {
+                ChipKind::Category => p.category.as_ref().and_then(|k| self.categories.list.iter().find(|x| &x.keyword == k)).map(|x| format!("#{}", x.name)).unwrap_or_else(|| c.text.clone()),
+                _ => c.text.clone(),
+            };
+            let color = match c.kind {
+                ChipKind::Category => p.category.as_ref().and_then(|k| self.categories.list.iter().find(|x| &x.keyword == k)).map(|x| l.cat(&x.color)),
+                _ => None,
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .h(px(24.))
+                .pl(px(7.))
+                .pr(px(4.))
+                .rounded(px(4.))
+                .text_size(px(13.))
+                .map(|d| match (&color, c.kind) {
+                    (Some(cat), _) => d.bg(cat.bg).text_color(cat.text),
+                    (None, ChipKind::Important) => d.bg(l.fill()).text_color(l.accent_text()).font_weight(FontWeight::BOLD),
+                    _ => d.bg(l.fill()).text_color(l.text()),
+                })
+                .when(c.kind == ChipKind::Due, |d| d.child(icon(crate::calendar::g::CALENDAR, 11.)))
+                .child(label)
+                .child(
+                    div()
+                        .id(("unchip", i))
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(l.hover()))
+                        .child(icon(crate::calendar::g::CANCEL, 8.))
+                        .on_click(cx.listener(move |this, _, _, cx| this.unchip(text.clone(), cx))),
+                )
+                .into_any_element()
+        });
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(d) = p.date {
+            let day = crate::calendar::long_day(d);
+            parts.push(match p.time {
+                Some(t) => tr!("tasks-due-at", day = day, time = t.strftime("%H:%M").to_string()),
+                None => day,
+            });
+        }
+        if let Some(name) = p.category.as_ref().and_then(|k| self.categories.list.iter().find(|x| &x.keyword == k)).map(|x| x.name.clone()) {
+            parts.push(name);
+        }
+        if p.important {
+            parts.push(tr!("tasks-important"));
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .pt(px(6.))
+                .child(div().flex().flex_wrap().gap(px(4.)).children(chips))
+                .child(div().flex().items_center().gap(px(6.)).pl(px(2.)).text_size(px(12.)).text_color(l.text2()).child(icon(g::CHECK, 11.)).child(parts.join(" · ")))
+                .into_any_element(),
+        )
     }
 
     fn card_pane(&self, t: &Task, cx: &mut Context<Self>) -> AnyElement {
@@ -1332,7 +1864,11 @@ impl TasksView {
             );
             div().flex().flex_wrap().gap(px(6.)).pl(px(26.)).pt(px(4.)).pb(px(8.)).children(opts)
         });
-        let remind = if t.alerts.is_empty() { muted("tasks-no-remind") } else { div().child(tr!("tasks-remind-set", n = t.alerts.len() as i64)).into_any_element() };
+        let editable = !letter && self.draft.as_ref().is_none_or(|d| d.uid != t.uid);
+        let remind = match t.alerts.first().map(|a| &a.trigger) {
+            None => muted("tasks-no-remind"),
+            Some(tr) => div().child(remind_text(tr)).into_any_element(),
+        };
         let repeat = if t.recurrence.is_some() { div().child(tr!("tasks-repeats")).into_any_element() } else { muted("tasks-no-repeat") };
         let project = match &t.project {
             Some(p) => {
@@ -1354,6 +1890,84 @@ impl TasksView {
             Some(c) => crate::labels::chip(c.name.clone(), &c.color, &l).into_any_element(),
             None => muted("tasks-no-category"),
         };
+        let clickable = |id: &'static str, f: Field, row: Div, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .rounded(px(4.))
+                .when(editable, |d| d.cursor_pointer().hover(|d| d.bg(l.hover())).on_click(cx.listener(move |this, _, _, cx| this.toggle_field(f, cx))))
+                .child(row)
+        };
+        let pill = |id: ElementId, text: String, on: bool| {
+            div()
+                .id(id)
+                .h(px(26.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(13.))
+                .text_size(px(12.))
+                .border_1()
+                .border_color(if on { l.accent_text() } else { l.stroke() })
+                .when(on, |d| d.bg(l.picked()))
+                .cursor_pointer()
+                .hover(|d| d.bg(l.hover()))
+                .child(text)
+        };
+        let options = |items: Vec<AnyElement>| div().flex().flex_wrap().gap(px(6.)).pl(px(26.)).pt(px(4.)).pb(px(8.)).children(items);
+        let remind_opts = (self.open == Some(Field::Remind)).then(|| {
+            let cur = t.alerts.first().and_then(|a| match a.trigger {
+                Trigger::Offset { secs, from: Anchor::Due } => Some(secs),
+                _ => None,
+            });
+            let mut items: Vec<AnyElement> = REMINDERS
+                .iter()
+                .enumerate()
+                .map(|(i, secs)| {
+                    let secs = *secs;
+                    pill(("remind-opt", i).into(), remind_text(&Trigger::Offset { secs, from: Anchor::Due }), cur == Some(secs))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_remind(Some(secs), cx)))
+                        .into_any_element()
+                })
+                .collect();
+            items.push(pill("remind-none".into(), tr!("tasks-no-remind"), cur.is_none()).on_click(cx.listener(|this, _, _, cx| this.set_remind(None, cx))).into_any_element());
+            options(items)
+        });
+        let project_opts = (self.open == Some(Field::Project)).then(|| {
+            let mut items: Vec<AnyElement> = model::projects(&self.tasks)
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let on = t.project.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&p.name));
+                    let name = p.name.clone();
+                    pill(("proj-opt", i).into(), p.name, on).on_click(cx.listener(move |this, _, _, cx| this.set_project(Some(name.clone()), cx))).into_any_element()
+                })
+                .collect();
+            items.push(pill("proj-none".into(), tr!("tasks-no-project"), t.project.is_none()).on_click(cx.listener(|this, _, _, cx| this.set_project(None, cx))).into_any_element());
+            items.push(div().w(px(180.)).child(Input::new(&self.project_input)).into_any_element());
+            options(items)
+        });
+        let category_opts = (self.open == Some(Field::Category)).then(|| {
+            let cur = model::category(t, &self.categories).map(|c| c.keyword.clone());
+            let mut items: Vec<AnyElement> = self
+                .categories
+                .list
+                .iter()
+                .filter(|c| !c.hidden)
+                .enumerate()
+                .map(|(i, c)| {
+                    let kw = c.keyword.clone();
+                    let on = cur.as_deref() == Some(c.keyword.as_str());
+                    let dot = div().size(px(8.)).mr(px(6.)).rounded(px(2.)).bg(l.cat(&c.color).dot);
+                    pill(("cat-opt", i).into(), String::new(), on)
+                        .child(dot)
+                        .child(c.name.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_category(Some(kw.clone()), cx)))
+                        .into_any_element()
+                })
+                .collect();
+            items.push(pill("cat-none".into(), tr!("tasks-no-category"), cur.is_none()).on_click(cx.listener(|this, _, _, cx| this.set_category(None, cx))).into_any_element());
+            options(items)
+        });
         let fields = div()
             .mx(px(20.))
             .mt(px(10.))
@@ -1365,10 +1979,15 @@ impl TasksView {
             .border_color(l.border())
             .child(due_row)
             .children(due_opts)
-            .child(field(g::RINGER, "tasks-field-remind", remind))
+            .child(clickable("card-remind", Field::Remind, field(g::RINGER, "tasks-field-remind", remind), cx))
+            .children(remind_opts)
             .child(field(g::REPEAT, "tasks-field-repeat", repeat))
-            .child(field(g::FOLDER, "tasks-field-project", project))
-            .child(field(g::TAG, "tasks-field-category", category));
+            .child(clickable("card-project", Field::Project, field(g::FOLDER, "tasks-field-project", project), cx))
+            .children(project_opts)
+            .child(clickable("card-category", Field::Category, field(g::TAG, "tasks-field-category", category), cx))
+            .children(category_opts);
+        // Время в календаре (S6-08).
+        let block = editable.then(|| self.block_view(t, &l, cx));
         // Подзадачи.
         let subs = model::subtasks(&self.tasks, &t.uid);
         let (sd, sn) = model::subtask_progress(&self.tasks, &t.uid);
@@ -1425,8 +2044,9 @@ impl TasksView {
                     .children(bar),
             )
             .children(sub_rows)
-            .when(sn == 0, |d| d.child(div().h(px(25.)).flex().items_center().text_color(l.text3()).child(tr!("tasks-no-subtasks"))));
-        // Заметки — текстом (Markdown с живым отображением — S6-06).
+            .when(editable, |d| d.child(div().pt(px(4.)).child(Input::new(&self.sub_input).prefix(icon(g::ADD, 12.).text_color(l.text3())))))
+            .when(sn == 0 && !editable, |d| d.child(div().h(px(25.)).flex().items_center().text_color(l.text3()).child(tr!("tasks-no-subtasks"))));
+        // Заметки — Markdown с живым отображением (S6-06): то же поле, что текст письма.
         let notes = div()
             .mx(px(20.))
             .pt(px(10.))
@@ -1444,10 +2064,12 @@ impl TasksView {
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!("tasks-notes")))
                     .child(div().px(px(6.)).rounded(px(4.)).border_1().border_color(l.stroke()).text_size(px(11.)).text_color(l.text2()).child("Markdown")),
             )
-            .child(if t.notes.trim().is_empty() {
-                div().text_color(l.text3()).child(tr!("tasks-no-notes"))
+            .child(if editable {
+                div().flex_1().min_h(px(60.)).child(Editor::new(&self.notes).appearance(false).font_family(self.font.clone()).text_size(px(13.)).line_height(relative(1.45)).h(relative(1.))).into_any_element()
+            } else if t.notes.trim().is_empty() {
+                div().text_color(l.text3()).child(tr!("tasks-no-notes")).into_any_element()
             } else {
-                div().line_height(px(19.)).text_color(l.text()).children(t.notes.lines().map(|line| div().child(line.to_string())))
+                div().line_height(px(19.)).text_color(l.text()).children(t.notes.lines().map(|line| div().child(line.to_string()))).into_any_element()
             });
         div()
             .size_full()
@@ -1456,6 +2078,7 @@ impl TasksView {
             .child(head)
             .children(mail)
             .child(fields)
+            .children(block)
             .child(subtasks)
             .child(notes)
             .into_any_element()
@@ -1463,7 +2086,9 @@ impl TasksView {
 }
 
 impl Render for TasksView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.font = window.text_style().font_family.clone();
+        self.sync_notes(window, cx);
         let l = crate::roles::look(cx);
         let pane = match self.selected_task().cloned() {
             Some(t) => self.card_pane(&t, cx),
@@ -1512,6 +2137,27 @@ pub(crate) fn due_badge(t: &Task, now: i64, tz: &TimeZone) -> Option<Badge> {
     let kws = vec![marks::DUE.to_owned(), Kind::Due.keyword(when)];
     let now = jiff::Timestamp::from_second(now).ok()?.to_zoned(tz.clone());
     cycle::badges(&kws, &now).into_iter().find(|b| matches!(b, Badge::Due(_) | Badge::Overdue(_)))
+}
+
+/// «В срок», «За 15 мин», «За 1 ч», «За 1 д», «В 12:00».
+fn remind_text(t: &Trigger) -> String {
+    match *t {
+        Trigger::Offset { secs: 0, .. } => tr!("tasks-remind-at-due"),
+        Trigger::Offset { secs, .. } if secs <= -86_400 && secs % 86_400 == 0 => tr!("tasks-remind-days", n = -secs / 86_400),
+        Trigger::Offset { secs, .. } if secs <= -3600 && secs % 3600 == 0 => tr!("tasks-remind-hours", n = -secs / 3600),
+        Trigger::Offset { secs, .. } => tr!("tasks-remind-minutes", n = (-secs / 60).max(0)),
+        Trigger::At(ts) => tr!("tasks-remind-at", when = crate::calendar::hm(ts, &TimeZone::system())),
+    }
+}
+
+/// «15:00–16:00»; не сегодня — с днём: «Пятница, 23 октября, 09:00–09:30».
+fn slot_label(s: Span, tz: &TimeZone) -> String {
+    let time = format!("{}–{}", crate::calendar::hm(s.start, tz), crate::calendar::hm(s.end, tz));
+    let today = day_of(jiff::Timestamp::now().as_second(), tz);
+    match day_of(s.start, tz) {
+        Some(d) if Some(d) != today => format!("{}, {time}", crate::calendar::long_day(d)),
+        _ => time,
+    }
 }
 
 /// «Чт 22.10, до 18:00», «Сегодня», «Завтра, до 10:00».
