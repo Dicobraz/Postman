@@ -2146,6 +2146,17 @@ pub(crate) mod scenes {
         }
     }
 
+    /// «Конфиденциально» адресату с известным сертификатом (S5-12 Ф4, снимок `compose-confidential`).
+    pub(crate) fn confidential_draft() -> Draft {
+        Draft {
+            to: vec![Address::new("Петров Иван", "i.petrov@corp.example")], // i18n-ok: образец письма
+            subject: "Условия сделки — для согласования".into(), // i18n-ok: образец письма
+            markdown: "Иван, добрый день!\n\nНаправляю условия сделки. Письмо зашифровано.\n\nАнна".into(), // i18n-ok: образец письма
+            keywords: vec![marks::CONFIDENTIAL.into()],
+            ..Default::default()
+        }
+    }
+
     /// История адресной книги для замечания «писала с другого адреса»: новый адрес три дня назад.
     pub(crate) fn seed_book(book: &Book) {
         let now = jiff::Timestamp::now().as_second();

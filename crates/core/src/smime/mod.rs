@@ -360,7 +360,7 @@ pub fn split_for_encryption(draft: &postman_compose::Draft) -> Result<Vec<postma
     }
     let of = |addr: &str, gost: Option<bool>| -> Option<&To> {
         let addr = addr.trim().to_lowercase();
-        draft.encrypt_to.iter().filter(|t| t.prepared.emails.iter().any(|e| *e == addr)).find(|t| gost.is_none_or(|g| t.prepared.key.is_gost() == g))
+        draft.encrypt_to.iter().filter(|t| t.prepared.emails.contains(&addr)).find(|t| gost.is_none_or(|g| t.prepared.key.is_gost() == g))
     };
     // Семейство адресата: RSA/EC, если есть; иначе ГОСТ; иначе — нет сертификата.
     let family = |addr: &str| -> Result<bool, String> {
