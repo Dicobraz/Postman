@@ -103,6 +103,10 @@ cmd-task-delete = Delete task
 cmd-task-open = Open task email
 cmd-task-next = Next task
 cmd-task-prev = Previous task
+cmd-task-slot-next = Next free slot
+cmd-task-slot-prev = Previous free slot
+cmd-task-block = Block time in calendar
+
 cmd-task-delegate = Delegate task
 cmd-task-remind = Remind assignee
 cmd-task-revoke = Take task back

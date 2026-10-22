@@ -19,7 +19,7 @@ use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use pets_ui::theme::Metric;
-use postman_calendar::{Event, EventStatus, Invitation, Participant, Partstat, WorkHours, layout_day};
+use postman_calendar::{Busy, BusyKind, Event, EventStatus, Invitation, Participant, Partstat, Span, WorkHours, layout_day};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::labels::Categories;
 use postman_core::sync::{Command, Event as SyncEvent};
@@ -457,6 +457,24 @@ impl CalendarView {
     pub(crate) fn close_details(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         cx.notify();
+    }
+
+    /// Своя занятость с сегодня на неделю вперёд (S6-08, «Время в календаре»): загруженные события, кроме
+    /// свободных и отменённых.
+    pub(crate) fn busy_today(&self) -> Vec<Busy> {
+        let now = self.clock.unwrap_or_else(|| jiff::Timestamp::now().as_second());
+        let Some(today) = zoned(now, &self.tz).map(|z| z.date()) else { return Vec::new() };
+        let (from, to) = (day_start(today, &self.tz), day_start(add_days(today, 8), &self.tz));
+        let day = Span::new(from, to);
+        self.events
+            .iter()
+            .filter(|e| e.span.overlaps(&day) && !e.all_day)
+            .filter(|e| e.free_busy == postman_calendar::FreeBusy::Busy && e.status != postman_calendar::EventStatus::Cancelled)
+            .map(|e| Busy {
+                span: e.span,
+                kind: if e.status == postman_calendar::EventStatus::Tentative { BusyKind::Tentative } else { BusyKind::Busy },
+            })
+            .collect()
     }
 
     pub(crate) fn is_empty(&self) -> bool {

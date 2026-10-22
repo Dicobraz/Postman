@@ -14,7 +14,8 @@ pub use freebusy::{Busy, BusyKind, Cell, WorkHours, find_slots, grid, merge};
 pub use invite::{Invitation, imip_reply, participant_id, partstat_json, reply_subject};
 pub use layout::{Placed, layout_day};
 pub use task::{
-    Alert, Anchor, MailLink, Moment, Progress, Role, TASK_PROPERTIES, Task, TaskParticipant, TaskPartstat, Trigger, X_EMAIL_ID,
+    Alert, Anchor, MailLink, Moment, Progress, Role, TASK_PROPERTIES, Task, TaskParticipant, TaskPartstat, TimeBlock, Trigger, X_BLOCK,
+    X_EMAIL_ID,
     X_MESSAGE_ID, X_ORDER, X_PROJECT, X_SOMEDAY,
 };
 

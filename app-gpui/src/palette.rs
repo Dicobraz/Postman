@@ -565,6 +565,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "view.contacts" => CONTACTS,
         "view.tasks" | "task.new" | "task.complete" | "task.open" | "task.next" | "task.prev" => crate::tasks::g::TASKS,
         "task.due" => crate::tasks::g::FLAG,
+        "task.slot_next" | "task.slot_prev" | "task.block" => crate::calendar::g::CALENDAR,
         "task.edit" => crate::tasks::g::EDIT,
         "task.delete" => crate::tasks::g::DELETE,
         "task.delegate" => crate::tasks::g::DELEGATE,

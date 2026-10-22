@@ -81,6 +81,20 @@ tasks-status-mail = { $n ->
    *[many] { $n } задач из писем
 }
 tasks-failed = Задача не сохранена на сервере: { $error }
+tasks-project-new = Новый проект — Enter
+tasks-sub-add = Добавить подзадачу
+tasks-notes-placeholder = Добавить заметку…
+tasks-important = важно
+tasks-remind-at-due = В срок
+tasks-remind-minutes = За { $n } мин
+tasks-remind-hours = За { $n } ч
+tasks-remind-days = За { $n } д
+tasks-remind-at = В { $when }
+tasks-block = Время в календаре
+tasks-block-remove = Убрать
+tasks-block-none = Сегодня свободного окна нет
+tasks-block-placed = В календаре: { $when }
+
 
 # Поручения (S6-10): форма «Поручить», карточка поручения, письма шагов.
 tasks-delegate = Поручить

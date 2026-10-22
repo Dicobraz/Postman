@@ -85,7 +85,7 @@ pub mod contacts {
 
 /// Задачи (S6-05): новая, выполнить / вернуть, срок, переименовать, удалить, открыть письмо, по списку.
 pub mod task {
-    gpui_kit::actions!(task, [New, Complete, Due, Edit, Delete, Open, Next, Prev, Delegate, Remind, Revoke]);
+    gpui_kit::actions!(task, [New, Complete, Due, Edit, Delete, Open, Next, Prev, SlotNext, SlotPrev, Block, Delegate, Remind, Revoke]);
 }
 
 /// Ответ на приглашение в письме (S5-11): кнопки карточки; клавиши A / T / N — только в схеме «Одиночные клавиши»
@@ -298,6 +298,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("task.open", &["enter"], TASKS),
     cmd("task.next", &["down"], TASKS),
     cmd("task.prev", &["up"], TASKS),
+    // «Время в календаре» (S6-08): ←/→ — соседнее свободное окно, как во встрече; поставить — кнопкой (Enter — письмо).
+    cmd("task.slot_next", &["right"], TASKS),
+    cmd("task.slot_prev", &["left"], TASKS),
+    cmd("task.block", &[], TASKS),
     // Поручения (S6-10): «Поручить», «Напомнить», «Забрать» — кнопки командной строки, без клавиш (главное действие
     // поручения — Space, срок — Insert, как у задачи).
     cmd("task.delegate", &[], TASKS),
