@@ -3,6 +3,7 @@
 
 pub mod assign;
 pub mod attach;
+pub mod autoreply;
 pub mod bulk;
 pub mod bench;
 pub mod categories;
