@@ -597,6 +597,69 @@ pub fn drive(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
     window.on_next_frame(|window, _| window.refresh());
 }
 
+/// Сцены, которые продолжают прошлую: её письмо, вкладку, меню, клавиши (порядок — `SCENES`).
+fn continues(scene: Scene) -> bool {
+    matches!(
+        scene,
+        Scene::Letter
+            | Scene::PreviewImage
+            | Scene::PreviewPdf
+            | Scene::PreviewPdfEnd
+            | Scene::PreviewZip
+            | Scene::AttachMacro
+            | Scene::InviteAnswered
+            | Scene::InviteUpdated
+            | Scene::InviteCancelled
+            | Scene::InviteOutdated
+            | Scene::InviteSide
+            | Scene::SearchLetter
+            | Scene::SearchNext
+            | Scene::PaletteQuery
+            | Scene::MeetingSlot
+            | Scene::MeetingBlue
+            | Scene::Assistant
+            | Scene::ContextMenu
+            | Scene::Phishing
+            | Scene::Overdue
+            | Scene::SendLater
+            | Scene::ContactEdit
+            | Scene::ContactsFrequent
+            | Scene::KeyTipsSingle
+            | Scene::FolderMenu
+            | Scene::ThreadStack
+            | Scene::ThreadList
+    )
+}
+
+/// Чистое начало сцены: «Входящие» главной вкладки почты, без поиска, фильтров, выделения, меню и палитры.
+fn clean_slate(m: &mut Mailer, window: &mut Window, cx: &mut Context<Mailer>) {
+    m.close_menu(cx);
+    m.close_picker(cx);
+    m.close_folder_menu(cx);
+    m.close_palette(window, cx);
+    m.tabs.activate_kind(crate::tabs::TabKind::Main);
+    m.set_section(Section::Mail, cx);
+    if !m.search.read(cx).value().is_empty() {
+        m.search.update(cx, |s, cx| s.set_value("", window, cx));
+        m.run_search("", cx);
+    }
+    m.reset_filters(cx);
+    m.filters.update(cx, |f, cx| {
+        f.set(cx, |f| {
+            f.panel = false;
+            f.quick_open = false;
+        });
+        f.change(cx, |q| q.scope = crate::filters::Where::Folder);
+    });
+    m.list.update(cx, |l, cx| {
+        l.clear_selection(cx);
+    });
+    m.reading.update(cx, |r, cx| r.clear(cx));
+    if let Some(inbox) = crate::live::inbox(&m.folders.read(cx).mailboxes) {
+        m.open_mailbox(inbox, cx);
+    }
+}
+
 fn set_phase(m: &mut Mailer, phase: Phase) {
     if let Some(d) = &mut m.screens {
         d.phase = phase;
@@ -627,6 +690,11 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     // Сервер умеет всё — кроме своей сцены (S7-03).
     if !matches!(scene, Scene::FeaturesMailOnly | Scene::FeaturesMailOnlySettings) && crate::features::get(cx) != postman_core::model::Features::ALL {
         m.set_features(postman_core::model::Features::ALL, cx);
+    }
+    // Сцена начинается с чистого экрана: фильтры, выделение и модуль прошлой сцены ей не мешают (сцена
+    // `delegation-mail` брала «Ждём» и «Отправленные» сцены `quick-wait`). Продолжения прошлой сцены — без этого.
+    if !continues(scene) {
+        clean_slate(m, window, cx);
     }
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
@@ -1709,7 +1777,10 @@ fn settings_on(m: &Mailer, section: SettingsSection, cx: &App) -> bool {
 /// «Входящие» первого общего ящика, где можно писать (иначе первого любого), — сцена `shared`.
 fn shared_inbox(m: &Mailer, cx: &App) -> Option<String> {
     let f = m.folders.read(cx);
-    let account = f.accounts.iter().find(|a| !f.read_only(a)).or(f.accounts.first())?;
+    // Общие ящики, а не другие учётные записи профиля (S7-03б: `@<n>` — тоже строка дерева).
+    let shared: Vec<&postman_cache::AccountRow> =
+        f.accounts.iter().filter(|a| postman_cache::profile_of(Some(&a.id)) != Some(a.id.as_str())).collect();
+    let account = shared.iter().find(|a| !f.read_only(a)).or(shared.first())?;
     let mut boxes = f.of(Some(&account.id));
     let first = f.of(Some(&account.id)).next().map(|b| b.id.clone());
     boxes.find(|b| b.role.as_deref() == Some("inbox")).map(|b| b.id.clone()).or(first)
