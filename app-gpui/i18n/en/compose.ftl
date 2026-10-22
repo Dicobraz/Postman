@@ -43,3 +43,8 @@ compose-sign-need-skzi = Not signed: GOST certificate needs a certified crypto p
 compose-sign-no-cert = Not signed: no signing certificate for { $address } · turn off "Sign"
 compose-sign-eight-bit = Not signed: the message is not 7-bit
 compose-sign-failed = Not signed: { $error }
+# S/MIME encryption (S5-12 phase 4).
+compose-seal-no-cert = Not sent: no encryption certificate for { $address }
+compose-seal-no-own-cert = Not sent: you have no encryption certificate (the message is encrypted to you too)
+compose-seal-need-skzi = Not sent: GOST recipients need a certified crypto provider (CryptoPro CSP or ViPNet CSP)
+compose-seal-failed = Not encrypted: { $error }

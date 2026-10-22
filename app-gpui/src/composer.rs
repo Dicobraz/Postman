@@ -63,6 +63,8 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 /// Что письму нужно от экрана при открытии.
 pub(crate) struct Open {
+    /// Сертификаты шифрования адресатов (S5-12 Ф4).
+    pub(crate) certs: crate::smime_seal::Certs,
     /// Ответ на письмо общего ящика (S5-28): предупреждение у «От» и подсказки меню адресов.
     pub(crate) shared: Option<crate::shared::Reply>,
     /// Свои адреса с сертификатом подписи (S5-12 Ф3).
@@ -117,6 +119,9 @@ pub(crate) struct Composer {
     place: Place,
     /// Выбор «От» (S4-06).
     senders: Vec<Sender>,
+    /// Сертификаты шифрования адресатов (S5-12 Ф4) и «Снять „Конфиденциально“» ждёт подтверждения.
+    certs: crate::smime_seal::Certs,
+    confirm_unmark: bool,
     /// Ответ на письмо общего ящика (S5-28).
     shared: Option<crate::shared::Reply>,
     to: Entity<InputState>,
@@ -145,6 +150,8 @@ pub(crate) struct Composer {
     own: Vec<String>,
     /// Слепок адресатов и метки, по которому посчитаны замечания по адресатам.
     recipients_key: u64,
+    /// Адреса для поиска сертификатов (S5-12 Ф4) — отдаются экрану почты после отрисовки.
+    resolve_pending: Option<(Vec<String>, String)>,
     later: Later,
     /// Подписи учётной записи (Настройки → Подписи и шаблоны).
     prefs: AccountPrefs,
@@ -243,6 +250,8 @@ impl Composer {
             model,
             place: open.place,
             senders: open.senders,
+            certs: open.certs,
+            confirm_unmark: false,
             shared: open.shared,
             to,
             cc,
@@ -263,6 +272,7 @@ impl Composer {
             categories: open.categories,
             own,
             recipients_key: 0,
+            resolve_pending: None,
             later,
             prefs: open.prefs,
             screens: open.screens.then_some(0),
@@ -725,6 +735,17 @@ impl Composer {
             }
             (Check::MissingAttachment { .. }, true) => self.pick_files(cx),
             (Check::External { .. }, true) => self.to.update(cx, |s, cx| s.focus(window, cx)),
+            (Check::NoCertificate { addresses, .. }, true) => {
+                if self.model.remove_addresses(addresses) {
+                    self.sync_inputs = true;
+                }
+            }
+            // «Снять „Конфиденциально“» — строкой подтверждения (решение владельца №6).
+            (Check::NoCertificate { .. }, false) if !self.confirm_unmark => self.confirm_unmark = true,
+            (Check::NoCertificate { .. }, false) => {
+                self.model.confidential = false;
+                self.confirm_unmark = false;
+            }
             (Check::Moved { from, to, .. }, true) => {
                 if self.model.replace_address(from, to) {
                     for f in [Field::To, Field::Cc, Field::Bcc] {
@@ -735,7 +756,7 @@ impl Composer {
                     }
                 }
             }
-            (_, false) => self.model.dismiss(&check),
+            (Check::Split { .. }, true) | (_, false) => self.model.dismiss(&check),
         }
         self.schedule_autosave(cx);
         cx.notify();
@@ -745,12 +766,35 @@ impl Composer {
     fn refresh_recipient_checks(&mut self) {
         let mut h = DefaultHasher::new();
         (&self.model.to, &self.model.cc, &self.model.bcc, self.model.confidential).hash(&mut h);
-        (self.book.borrow().len(), &self.own).hash(&mut h);
+        (self.book.borrow().len(), &self.own, crate::smime_seal::lock(&self.certs).version, &self.model.from().email).hash(&mut h);
         let key = h.finish();
         if key != self.recipients_key {
             self.recipients_key = key;
             let book = self.book.borrow();
             self.model.refresh_recipient_checks(&self.own, &book);
+            drop(book);
+            self.refresh_encryption();
+        }
+    }
+
+    /// «Конфиденциально» (S5-12 Ф4): замечания по сертификатам, получатели шифрования; неизвестные адреса — на поиск.
+    fn refresh_encryption(&mut self) {
+        if !self.model.confidential {
+            self.model.set_encryption(Vec::new(), Vec::new());
+            return;
+        }
+        let recipients = self.model.recipients();
+        let from = self.model.from().email.clone();
+        let (checks, to, unknown) = {
+            let b = crate::smime_seal::lock(&self.certs);
+            let checks = checks::certificates(&recipients, &from, &|a| b.families(a));
+            let to = b.encrypt_to(&recipients, &from);
+            let unknown = b.unknown(recipients.iter().map(|a| a.email.as_str()).chain(std::iter::once(from.as_str())));
+            (checks, to, unknown)
+        };
+        self.model.set_encryption(checks, to);
+        if !unknown.is_empty() {
+            self.resolve_pending = Some((unknown, from));
         }
     }
 
@@ -1014,6 +1058,14 @@ impl Composer {
                     .child(crate::list::initials(&name)),
             )
             .child(div().max_w(px(220.)).truncate().child(name))
+            // «Конфиденциально» (S5-12 Ф4): замок — сертификат есть, знак — нет.
+            .when(self.model.confidential && !bad, |d| {
+                match crate::smime_seal::lock(&self.certs).families(&email) {
+                    Some(f) if !f.is_empty() => d.child(icon(glyph::LOCK, 12.).text_color(l.text2())),
+                    Some(_) => d.child(icon(glyph::WARNING, 12.).text_color(l.pm(Pm::ThreatFg))),
+                    None => d,
+                }
+            })
             .when(external, |d| {
                 d.child(
                     div()
@@ -1653,6 +1705,18 @@ impl Composer {
                 tr!("checks-review"),
                 tr!("checks-ok"),
             ),
+            Check::NoCertificate { names, .. } => (
+                tr!("checks-no-cert", names = names.join(", ")),
+                tr!("checks-no-cert-detail"),
+                tr!("checks-no-cert-remove"),
+                if self.confirm_unmark { tr!("checks-no-cert-unmark-confirm") } else { tr!("checks-no-cert-unmark") },
+            ),
+            Check::Split { gost } => (
+                tr!("checks-split", names = gost.join(", ")),
+                tr!("checks-split-detail"),
+                tr!("checks-ok"),
+                tr!("checks-ok"),
+            ),
             Check::Moved { name, from, to, last } => (
                 tr!("checks-moved", name = name.clone()),
                 tr!("checks-moved-detail", from = from.clone(), to = to.clone(), when = ago(*last)),
@@ -1954,6 +2018,13 @@ impl Render for Composer {
             self.show_bcc |= !self.model.bcc.trim().is_empty();
         }
         self.refresh_recipient_checks();
+        // Поиск сертификатов (S5-12 Ф4) — экрану почты, не посреди отрисовки.
+        if let Some((addrs, from)) = self.resolve_pending.take() {
+            let mailer = self.mailer.clone();
+            cx.defer(move |cx| {
+                mailer.update(cx, |m, cx| m.resolve_certs(addrs, from, cx)).ok();
+            });
+        }
         if let Some(n) = &mut self.screens {
             *n += 1;
             if *n < 8 {
@@ -2090,6 +2161,17 @@ pub(crate) mod scenes {
         }
     }
 
+    /// «Конфиденциально» адресату с известным сертификатом (S5-12 Ф4, снимок `compose-confidential`).
+    pub(crate) fn confidential_draft() -> Draft {
+        Draft {
+            to: vec![Address::new("Петров Иван", "i.petrov@corp.example")], // i18n-ok: образец письма
+            subject: "Условия сделки — для согласования".into(), // i18n-ok: образец письма
+            markdown: "Иван, добрый день!\n\nНаправляю условия сделки. Письмо зашифровано.\n\nАнна".into(), // i18n-ok: образец письма
+            keywords: vec![marks::CONFIDENTIAL.into()],
+            ..Default::default()
+        }
+    }
+
     /// История адресной книги для замечания «писала с другого адреса»: новый адрес три дня назад.
     pub(crate) fn seed_book(book: &Book) {
         let now = jiff::Timestamp::now().as_second();
@@ -2147,6 +2229,16 @@ pub(crate) fn md_style(m: &postman_compose::display::Look, l: &Look) -> Highligh
 
 /// Строка ошибки отправки; подпись S/MIME (код `smime-sign:…` от ядра) — своими словами.
 fn failed_text(e: &str) -> String {
+    if let Some(at) = e.find("smime-seal:") {
+        let rest = &e[at + "smime-seal:".len()..];
+        let (code, detail) = rest.split_once(':').unwrap_or((rest, ""));
+        return match code {
+            "no-cert" => tr!("compose-seal-no-cert", address = detail.to_owned()),
+            "no-own-cert" => tr!("compose-seal-no-own-cert"),
+            "need-skzi" => tr!("compose-seal-need-skzi"),
+            _ => tr!("compose-seal-failed", error = detail.to_owned()),
+        };
+    }
     let Some(at) = e.find("smime-sign:") else { return tr!("compose-failed", error = e.to_owned()) };
     let rest = &e[at + "smime-sign:".len()..];
     let (code, detail) = rest.split_once(':').unwrap_or((rest, ""));

@@ -125,3 +125,16 @@ fn decryption_through_the_sandbox() {
     assert_eq!(c.smime_envelope(b"From: a@x\r\n\r\nhi").unwrap(), Err(OpenError::NotEncrypted));
     assert!(c.render(&Request::Text("ok".into())).is_ok());
 }
+
+/// Подготовка получателей в песочнице (S5-12 Ф4): доверенный — ключ значениями, чужой корень — отказ.
+#[test]
+fn prepare_through_the_sandbox() {
+    use postman_smime::prepare::RecipientKey;
+    let mut c = client();
+    let pki = Pki::rsa("Postman Test Root", "Петров", "p@itt.test");
+    let other = Pki::rsa("Other Root", "x", "x@itt.test");
+    let r = c.smime_prepare(&[pki.user.der.clone(), other.user.der.clone()], &pki.trust(), NOW).unwrap();
+    assert!(matches!(&r[0], Ok(p) if matches!(p.key, RecipientKey::Rsa { .. }) && p.emails == ["p@itt.test"]), "{r:?}");
+    assert!(r[1].is_err());
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+}

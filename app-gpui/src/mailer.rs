@@ -908,6 +908,15 @@ impl Mailer {
                 if std::env::var_os(bench::IDLE_OFFLINE_VAR).is_some() {
                     self.on_connection(postman_core::link::Connection::Offline { retry_in: postman_core::link::MAX_RETRY, queued: 0 }, cx);
                 }
+                let section = match std::env::var(bench::IDLE_SECTION_VAR).as_deref() {
+                    Ok("calendar") => Some(Section::Calendar),
+                    Ok("contacts") => Some(Section::Contacts),
+                    Ok("tasks") => Some(Section::Tasks),
+                    _ => None,
+                };
+                if let Some(section) = section {
+                    self.set_section(section, cx);
+                }
                 return;
             }
         }

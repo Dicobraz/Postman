@@ -65,6 +65,9 @@ pub enum Request {
     /// Письмо, расшифрованное в ядре СКЗИ (ГОСТ): в бинарной части — якоря и внутреннее письмо
     /// (`postman_smime::wire::encode_request`); `from` — «От» внешнего письма. Ответ — как у `SmimeOpen`.
     SmimeInner { now: u64, from: String, part: Option<u32> },
+    /// Подготовить сертификаты получателей к шифрованию (S5-12 Ф4): в бинарной части — якоря и сертификаты
+    /// (`postman_smime::wire::encode_prepare`). Ответ — на каждый сертификат значения ключа или причина отказа.
+    SmimePrepare { now: u64 },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -197,6 +200,8 @@ enum Response {
     Opened { opened: Box<Result<postman_smime::envelope::Opened, postman_smime::envelope::OpenError>>, doc: Option<Document> },
     /// Байты вложения расшифрованного письма — в бинарной части.
     Part,
+    /// Подготовленные получатели (Ф4) — по порядку сертификатов запроса.
+    Prepared(Vec<Result<postman_smime::prepare::Prepared, String>>),
     Err(String),
 }
 
@@ -359,6 +364,15 @@ pub fn serve() -> ! {
                 out_bin = bin;
                 resp
             }
+            Ok(Request::SmimePrepare { now }) => match postman_smime::wire::decode_prepare(&bin) {
+                Some((trust, certs)) => Response::Prepared(
+                    certs.iter().enumerate().map(|(i, c)| {
+                        let others: Vec<Vec<u8>> = certs.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, d)| d.clone()).collect();
+                        postman_smime::prepare::prepare(c, &others, &trust, now)
+                    }).collect(),
+                ),
+                None => Response::Err("запрос подготовки повреждён".into()),
+            },
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
@@ -466,7 +480,8 @@ impl Client {
             | Response::Smime { .. }
             | Response::Envelope(_)
             | Response::Opened { .. }
-            | Response::Part => Err("неожиданный ответ".into()),
+            | Response::Part
+            | Response::Prepared(_) => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
@@ -574,6 +589,21 @@ impl Client {
                 }
                 Err(e) => Ok(Err(e)),
             },
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
+    /// Подготовить сертификаты получателей (Ф4): проверка цепочки к якорям `trust`, назначения и срока — в
+    /// песочнице; ответ — значения ключей по порядку `certs`.
+    pub fn smime_prepare(&mut self, certs: &[Vec<u8>], trust: &postman_smime::Trust, now: u64) -> Result<Vec<Result<postman_smime::prepare::Prepared, String>>, SmimeFailure> {
+        let bin = postman_smime::wire::encode_prepare(trust, certs);
+        if bin.len() > MAX_FRAME {
+            return Err(SmimeFailure::TooLarge);
+        }
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimePrepare { now }, &bin, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Prepared(list), _) if list.len() == certs.len() => Ok(list),
             (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
             _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
         }

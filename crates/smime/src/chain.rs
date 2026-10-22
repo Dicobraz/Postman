@@ -109,6 +109,35 @@ fn webpki_status(e: &webpki::Error) -> Status {
     }
 }
 
+/// Сертификат получателя (Ф4) доведён до доверенного якоря (EKU «Защита почты», если есть), не запрещён; ошибка —
+/// текстом для журнала и строки «нет сертификата».
+pub(crate) fn path_ok(leaf: &[u8], others: &[Vec<u8>], trust: &Trust, now: u64) -> Result<(), String> {
+    let disallowed: Vec<String> = trust.disallowed.iter().map(|d| sha256_hex(d)).collect();
+    let anchors: Vec<TrustAnchor<'_>> = trust
+        .roots
+        .iter()
+        .filter_map(|a| webpki::anchor_from_trusted_cert(&CertificateDer::from(a.der.as_slice())).ok().map(|t| t.to_owned()))
+        .collect();
+    let intermediates: Vec<CertificateDer<'_>> = others.iter().chain(&trust.intermediates).map(|d| CertificateDer::from(d.as_slice())).collect();
+    let ee_der = CertificateDer::from(leaf);
+    let ee = EndEntityCert::try_from(&ee_der).map_err(|e| format!("{e:?}"))?;
+    let time = UnixTime::since_unix_epoch(std::time::Duration::from_secs(now));
+    let path = ee
+        .verify_for_usage(algs::chain_algs(), &anchors, &intermediates, time, KeyUsage::required_if_present(EKU_EMAIL), None, None)
+        .map_err(|e| format!("{:?}", webpki_status(&e)))?;
+    let mut chain = vec![leaf.to_vec()];
+    chain.extend(path.intermediate_certificates().map(|c| c.der().to_vec()));
+    if chain.iter().any(|d| disallowed.contains(&sha256_hex(d))) {
+        return Err("distrusted".into());
+    }
+    Ok(())
+}
+
+/// Адреса сертификата (для получателей Ф4).
+pub(crate) fn emails_of(der: &[u8]) -> Vec<String> {
+    Certificate::from_der(der).map(|c| emails(&c)).unwrap_or_default()
+}
+
 /// Итог по цепочке: статус, сводки, DER цепочки, корпоративный ли корень, адрес.
 pub(crate) fn evaluate(report: &mut Report, checked: &Checked, trust: &Trust, now: u64) {
     let Ok(leaf) = Certificate::from_der(&checked.signer) else {

@@ -45,7 +45,7 @@ checks-attachment-card = An attachment is mentioned — no file attached
 checks-attach = Attach a file
 checks-ignore = Ignore
 checks-external = External recipients: { $n } ({ $domains })
-checks-external-detail = “Confidential” label: the message leaves the company without encryption.
+checks-external-detail = "Confidential": the message leaves the company — encrypted with the recipients' certificates.
 checks-review = Review recipients
 checks-ok = OK
 checks-moved = { $name } last wrote from a different address
@@ -57,3 +57,10 @@ checks-days-ago = { $n ->
     [one] { $n } day ago
    *[other] { $n } days ago
 }
+checks-no-cert = No certificate: { $names }
+checks-no-cert-detail = "Confidential" means encrypted; without a certificate the recipient can't read it. It can't be sent while they're in the message.
+checks-no-cert-remove = Remove them
+checks-no-cert-unmark = Remove "Confidential"
+checks-no-cert-unmark-confirm = The message goes unencrypted · Yes, remove
+checks-split = Two messages will be sent: separately — { $names } (GOST)
+checks-split-detail = These recipients have GOST certificates, the others RSA or EC. Both messages go to Sent, both encrypted to you as well.

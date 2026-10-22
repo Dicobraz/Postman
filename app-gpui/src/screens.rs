@@ -123,6 +123,9 @@ enum Scene {
     SendLater,
     /// Второе письмо — вторая вкладка: все замечания «Перед отправкой» (карта, вложение, внешние, сменённый адрес).
     Checks,
+    /// «Конфиденциально» (S5-12 Ф4): адресат с сертификатом (Петров из подписанного образца демо) — замок у чипа,
+    /// замечаний по сертификатам нет; письмо зашифруется ему и себе.
+    Confidential,
     /// Ответ в области чтения над письмом с цитатой (S3-02, S5-06б).
     Reply,
     /// Вкладка новой встречи: поля и подбор времени в одной форме (S5-11); общие окна — розовым бренда (S5-20).
@@ -304,6 +307,7 @@ const SCENES: &[Scene] = &[
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
+    Scene::Confidential,
     Scene::Reply,
     Scene::Vacation,
     Scene::Rules,
@@ -406,6 +410,7 @@ impl Scene {
             Scene::Compose => "compose",
             Scene::SendLater => "send-later",
             Scene::Checks => "checks",
+            Scene::Confidential => "compose-confidential",
             Scene::Reply => "reply-inline",
             Scene::Meeting => "meeting",
             Scene::MeetingSlot => "meeting-slot",
@@ -887,6 +892,19 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 c.toggle_later_menu(cx);
             });
         }
+        Scene::Confidential => {
+            remember_composer(m, cx);
+            // Сертификат Петрова — как после открытия его подписанного письма (Ф1 запоминает подписанта).
+            let cache = m.cache.clone();
+            let ctx = crate::smime::demo_context();
+            let trust = ctx.anchors.trust();
+            if let Some(raw) = postman_demo::smime::raw("rsa") {
+                let now = jiff::Timestamp::now().as_second();
+                let report = postman_smime::verify(raw, &trust, u64::try_from(now).unwrap_or(0));
+                postman_core::smime::finish(&cache, "screens-seed-rsa", report, &ctx, now);
+            }
+            m.open_compose(crate::composer::scenes::confidential_draft(), cx);
+        }
         Scene::Checks => {
             remember_composer(m, cx);
             m.load_address_book(cx);
@@ -1346,12 +1364,18 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::Compose => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn()),
         Scene::SendLater => compose_tab(m, cx).is_some_and(|c| c.read(cx).drawn() && c.read(cx).later_menu_open()),
+        Scene::Confidential => {
+            let before = m.screens.as_ref().and_then(|d| d.composer);
+            let certs = m.compose.certs.clone();
+            let known = crate::smime_seal::lock(&certs).families("i.petrov@corp.example").is_some_and(|f| !f.is_empty());
+            compose_tab(m, cx).is_some_and(|c| Some(c.read(cx).id) != before && c.read(cx).drawn()) && known
+        }
         Scene::Checks => {
             // Новое письмо — вторая вкладка; замечания по адресатам считаются при отрисовке.
             let before = m.screens.as_ref().and_then(|d| d.composer);
             compose_tab(m, cx).is_some_and(|c| {
                 let c = c.read(cx);
-                Some(c.id) != before && c.drawn() && c.model.checks().count() >= 4
+                Some(c.id) != before && c.drawn() && c.model.checks().count() >= 5
             })
         }
         Scene::Reply => {

@@ -336,7 +336,7 @@ pub fn issue(spec: &Spec, key: &Key, issuer: Option<(&Issued, &Key)>) -> Issued 
     } else if spec.encrypt_only {
         KeyUsages::KeyEncipherment | KeyUsages::DataEncipherment
     } else {
-        KeyUsages::DigitalSignature | KeyUsages::NonRepudiation | KeyUsages::KeyEncipherment
+        KeyUsages::DigitalSignature | KeyUsages::NonRepudiation | KeyUsages::KeyEncipherment | KeyUsages::KeyAgreement
     };
     exts.push(ext(const_oid::db::rfc5280::ID_CE_KEY_USAGE, true, &KeyUsage(ku)));
     match spec.eku {
@@ -1046,4 +1046,47 @@ pub fn signed_part(inner: &[u8], signer: &Issued, key: &Key, chain: &[&Issued], 
     // Без заголовков письма: от `Content-Type` до конца.
     let at = full.windows(13).position(|w| w == b"Content-Type:").unwrap();
     full[at..].to_vec()
+}
+
+/// Случайные числа и ECDH для тестового шифрования (Ф4): детерминированно, ECDH — `p256`/`p384`.
+pub struct TestOps(pub std::cell::Cell<u64>);
+
+impl Default for TestOps {
+    fn default() -> Self {
+        TestOps(std::cell::Cell::new(7))
+    }
+}
+
+impl crate::seal::Ops for TestOps {
+    fn random(&self, out: &mut [u8]) {
+        let mut rng = TestRng::new(self.0.get());
+        rand_core::TryRng::try_fill_bytes(&mut rng, out).unwrap();
+        self.0.set(self.0.get().wrapping_add(1));
+    }
+
+    fn ecdh(&self, bits: u16, peer: &[u8]) -> Result<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>), crate::seal::SealError> {
+        let label = format!("seal-eph-{}", self.0.get());
+        self.0.set(self.0.get().wrapping_add(1));
+        let fail = |e: String| crate::seal::SealError::Failed(e);
+        if bits == 384 {
+            let eph = p384::SecretKey::from_slice(&seed(&label, 48)).map_err(|e| fail(e.to_string()))?;
+            let pk = p384::PublicKey::from_sec1_bytes(peer).map_err(|e| fail(e.to_string()))?;
+            let z = p384::ecdh::diffie_hellman(eph.to_nonzero_scalar(), pk.as_affine());
+            Ok((eph.public_key().to_sec1_point(false).as_bytes().to_vec(), zeroize::Zeroizing::new(z.raw_secret_bytes().to_vec())))
+        } else {
+            let eph = p256::SecretKey::from_slice(&seed(&label, 32)).map_err(|e| fail(e.to_string()))?;
+            let pk = p256::PublicKey::from_sec1_bytes(peer).map_err(|e| fail(e.to_string()))?;
+            let z = p256::ecdh::diffie_hellman(eph.to_nonzero_scalar(), pk.as_affine());
+            Ok((eph.public_key().to_sec1_point(false).as_bytes().to_vec(), zeroize::Zeroizing::new(z.raw_secret_bytes().to_vec())))
+        }
+    }
+}
+
+/// Общий секрет ECDH своим ключом `key` с точкой `peer` (тесты: получатель снимает обёртку).
+pub fn ecdh_with(key: &Key, peer: &[u8]) -> Option<Vec<u8>> {
+    match key {
+        Key::P256(sk) => Some(p256::ecdh::diffie_hellman(*sk.as_nonzero_scalar(), p256::PublicKey::from_sec1_bytes(peer).ok()?.as_affine()).raw_secret_bytes().to_vec()),
+        Key::P384(sk) => Some(p384::ecdh::diffie_hellman(*sk.as_nonzero_scalar(), p384::PublicKey::from_sec1_bytes(peer).ok()?.as_affine()).raw_secret_bytes().to_vec()),
+        _ => None,
+    }
 }

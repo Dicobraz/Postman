@@ -107,6 +107,21 @@ pub fn decode_open(bin: &[u8]) -> Option<(Trust, &[u8], &[u8])> {
     Some((trust, message, cek))
 }
 
+/// Запрос подготовки получателей (Ф4): якоря и сертификаты (DER) списком.
+pub fn encode_prepare(trust: &Trust, certs: &[Vec<u8>]) -> Vec<u8> {
+    let mut list = Vec::new();
+    put_list(&mut list, certs.iter().map(Vec::as_slice));
+    encode_request(trust, &list)
+}
+
+/// Разбор запроса подготовки (в воркере).
+pub fn decode_prepare(bin: &[u8]) -> Option<(Trust, Vec<Vec<u8>>)> {
+    let (trust, list) = decode_request(bin)?;
+    let mut r = Reader(list);
+    let certs = r.list()?.into_iter().map(<[u8]>::to_vec).collect();
+    r.0.is_empty().then_some((trust, certs))
+}
+
 /// Ответ: DER цепочки и содержимое `signed-data` (пусто — нет).
 pub fn encode_response(chain: &[Vec<u8>], content: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::new();

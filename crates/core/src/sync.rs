@@ -1270,7 +1270,22 @@ async fn handle(
             }
         }
         Command::Send { draft, replace, ticket, release } => {
-            let r = send(accounts, cache, send_as, &draft, replace.as_deref(), release).await;
+            // «Конфиденциально» с получателями ГОСТ и RSA/EC — два письма (S5-12 Ф4): сначала ГОСТ, итог — по последнему.
+            let r = match crate::smime::split_for_encryption(&draft) {
+                Err(code) => Err(postman_jmap::Error::Protocol(code)),
+                Ok(parts) => {
+                    let last = parts.len().saturating_sub(1);
+                    let mut r = Ok(None);
+                    for (i, part) in parts.iter().enumerate() {
+                        let replace = if i == last { replace.as_deref() } else { None };
+                        r = send(accounts, cache, send_as, part, replace, release).await;
+                        if r.is_err() {
+                            break;
+                        }
+                    }
+                    r
+                }
+            };
             let later = matches!((&r, release), (Ok(Some(_)), Release::At(_)));
             notify(match r {
                 Ok(scheduled) => Event::Sent { ticket, scheduled },
@@ -1790,6 +1805,25 @@ pub fn sign_code(e: &postman_smime::sign::SignError) -> String {
     }
 }
 
+/// Код ошибки шифрования для интерфейса: `smime-seal:<код>[:подробности]`.
+pub fn seal_code(e: &postman_smime::seal::SealError) -> String {
+    use postman_smime::seal::SealError as E;
+    match e {
+        E::NoRecipients => "smime-seal:no-recipients".into(),
+        E::Gost => "smime-seal:need-skzi".into(),
+        E::Failed(t) => format!("smime-seal:failed:{t}"),
+    }
+}
+
+/// Письмо для сохранения черновиком: «Конфиденциально» — зашифровано себе (решение владельца №5).
+fn draft_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
+    let raw = raw_message(draft)?;
+    if draft.encrypt_to.is_empty() {
+        return Ok(raw);
+    }
+    crate::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_jmap::Error::Protocol(seal_code(&e)))
+}
+
 fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
     let now = jiff::Timestamp::now().as_second();
     postman_compose::build(draft, now, &postman_compose::new_message_id(&draft.from, now))
@@ -1858,6 +1892,10 @@ async fn send(
     if draft.sign {
         let now = jiff::Timestamp::now().as_second();
         raw = crate::smime::sign_outgoing(&raw, &draft.from.email, None, now).map_err(|e| postman_jmap::Error::Protocol(sign_code(&e)))?;
+    }
+    // Шифрование S/MIME (S5-12 Ф4): после подписи (RFC 8551 §3.7); ошибка — код `smime-seal:<код>`.
+    if !draft.encrypt_to.is_empty() {
+        raw = crate::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_jmap::Error::Protocol(seal_code(&e)))?;
     }
     let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &server_words(&draft.keywords)).await?;
     if let Some(old) = replace {
@@ -1945,7 +1983,7 @@ async fn save_draft(
         Some(old) => (None, Some(old)),
         None => (None, None),
     };
-    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same, &server_words(&draft.keywords)).await?;
+    let id = acc.client.save_draft(draft_message(draft)?, &drafts, same, &server_words(&draft.keywords)).await?;
     if let Some(old) = other
         && let Ok((prev, old_id)) = accounts.locate(old)
     {

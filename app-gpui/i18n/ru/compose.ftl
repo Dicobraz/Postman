@@ -43,3 +43,8 @@ compose-sign-need-skzi = Не подписано: сертификат ГОСТ,
 compose-sign-no-cert = Не подписано: нет сертификата подписи для { $address } · снимите «Подписать»
 compose-sign-eight-bit = Не подписано: письмо не в 7 бит
 compose-sign-failed = Не подписано: { $error }
+# Шифрование S/MIME (S5-12 Ф4).
+compose-seal-no-cert = Не отправлено: нет сертификата шифрования для { $address }
+compose-seal-no-own-cert = Не отправлено: нет своего сертификата шифрования (письмо — себе тоже)
+compose-seal-need-skzi = Не отправлено: адресаты с ГОСТ — нужно сертифицированное СКЗИ (КриптоПро CSP или ViPNet CSP)
+compose-seal-failed = Не зашифровано: { $error }
