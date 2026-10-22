@@ -259,10 +259,7 @@ impl Client {
 
     /// Отменить отправку, которую держит сервер (`undoStatus: canceled`); письмо остаётся, где было. Уже ушло —
     /// [`UnsendError::TooLate`].
-    pub async fn cancel_submission(
-        &self,
-        submission: &str,
-    ) -> std::result::Result<(), UnsendError> {
+    pub async fn cancel_submission(&self, submission: &str) -> std::result::Result<(), UnsendError> {
         let acc = self.account_for(SUBMISSION)?.to_string();
         let cancel = inv(
             "EmailSubmission/set",

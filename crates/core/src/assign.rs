@@ -443,13 +443,7 @@ pub fn in_tab(t: &Task, me: &str, tab: Tab, own: bool) -> bool {
 
 /// Поручения вкладки по группам: внутри — «Ждут принятия» по срочности ответа (отклонено, предложен срок, ждёт),
 /// остальные — по сроку.
-pub fn section<'a>(
-    tasks: &'a [Task],
-    me: &str,
-    tab: Tab,
-    own: bool,
-    tz: &jiff::tz::TimeZone,
-) -> Vec<(Bucket, Vec<&'a Task>)> {
+pub fn section<'a>(tasks: &'a [Task], me: &str, tab: Tab, own: bool, tz: &jiff::tz::TimeZone) -> Vec<(Bucket, Vec<&'a Task>)> {
     let rank = |s: Status| match s {
         Status::Declined => 0,
         Status::Proposed => 1,
@@ -458,29 +452,12 @@ pub fn section<'a>(
     buckets(tab)
         .iter()
         .filter_map(|&b| {
-            let mut v: Vec<&Task> = tasks
-                .iter()
-                .filter(|t| {
-                    in_tab(t, me, tab, own)
-                        && assign::status(t).and_then(|s| bucket(s, tab)) == Some(b)
-                })
-                .collect();
+            let mut v: Vec<&Task> =
+                tasks.iter().filter(|t| in_tab(t, me, tab, own) && assign::status(t).and_then(|s| bucket(s, tab)) == Some(b)).collect();
             v.sort_by(|x, y| {
-                let (sx, sy) = (
-                    assign::status(x).map_or(2, rank),
-                    assign::status(y).map_or(2, rank),
-                );
-                let r = if b == Bucket::Waiting {
-                    sx.cmp(&sy)
-                } else {
-                    std::cmp::Ordering::Equal
-                };
-                r.then_with(|| {
-                    x.due_at(tz)
-                        .unwrap_or(i64::MAX)
-                        .cmp(&y.due_at(tz).unwrap_or(i64::MAX))
-                })
-                .then_with(|| x.title.cmp(&y.title))
+                let (sx, sy) = (assign::status(x).map_or(2, rank), assign::status(y).map_or(2, rank));
+                let r = if b == Bucket::Waiting { sx.cmp(&sy) } else { std::cmp::Ordering::Equal };
+                r.then_with(|| x.due_at(tz).unwrap_or(i64::MAX).cmp(&y.due_at(tz).unwrap_or(i64::MAX))).then_with(|| x.title.cmp(&y.title))
             });
             (!v.is_empty()).then_some((b, v))
         })
@@ -529,11 +506,7 @@ pub fn waits(t: &Task, me: &str) -> bool {
 
 /// Слова писем моих невыполненных поручений ([`assign::keyword`]): «Ждём» показывает эти письма из «Отправленных».
 pub fn waiting_keywords(tasks: &[Task], me: &str) -> Vec<String> {
-    let mut v: Vec<String> = tasks
-        .iter()
-        .filter(|t| waits(t, me))
-        .map(|t| assign::keyword(&t.uid))
-        .collect();
+    let mut v: Vec<String> = tasks.iter().filter(|t| waits(t, me)).map(|t| assign::keyword(&t.uid)).collect();
     v.sort();
     v.dedup();
     v
@@ -700,9 +673,7 @@ mod tests {
     }
 
     fn names<'a>(s: &[(Bucket, Vec<&'a Task>)]) -> Vec<(Bucket, Vec<&'a str>)> {
-        s.iter()
-            .map(|(b, v)| (*b, v.iter().map(|t| t.title.as_str()).collect()))
-            .collect()
+        s.iter().map(|(b, v)| (*b, v.iter().map(|t| t.title.as_str()).collect())).collect()
     }
 
     /// Вкладки «Я поручил» / «Мне поручили» и «Только свои» на поручениях демо: группы, порядок, счётчики.
@@ -714,43 +685,20 @@ mod tests {
         let me = postman_demo::ME;
         let mut by_me = names(&section(&list, me, Tab::ByMe, true, &tz));
         // «Ждут принятия»: отклонено, предложен срок, ждёт.
-        assert_eq!(
-            by_me,
-            [
-                (Bucket::Review, vec![d::REVIEW]),
-                (Bucket::InWork, vec!["Ресурсный план группы на ноябрь"]),
-                (
-                    Bucket::Waiting,
-                    vec![
-                        "Заказать пропуска для аудиторов",
-                        "Требования к мониторингу для ТЗ",
-                        "Расчёт коммерческого предложения"
-                    ]
-                ),
-            ]
-        );
+        assert_eq!(by_me, [
+            (Bucket::Review, vec![d::REVIEW]),
+            (Bucket::InWork, vec!["Ресурсный план группы на ноябрь"]),
+            (Bucket::Waiting, vec!["Заказать пропуска для аудиторов", "Требования к мониторингу для ТЗ", "Расчёт коммерческого предложения"]),
+        ]);
         // «Только свои» снят — ещё и где я наблюдатель.
         by_me[1].1.push(d::WATCHED);
         assert_eq!(names(&section(&list, me, Tab::ByMe, false, &tz)), by_me);
-        assert_eq!(
-            names(&section(&list, me, Tab::ToMe, true, &tz)),
-            [
-                (Bucket::New, vec![d::LETTER, d::INCOMING]),
-                (Bucket::InWork, vec!["Комментарии к статусу проектов"]),
-            ]
-        );
+        assert_eq!(names(&section(&list, me, Tab::ToMe, true, &tz)), [
+            (Bucket::New, vec![d::LETTER, d::INCOMING]),
+            (Bucket::InWork, vec!["Комментарии к статусу проектов"]),
+        ]);
         let c = counts(&list, me, false);
-        assert_eq!(
-            c,
-            Counts {
-                by_me: 5,
-                by_me_shown: 6,
-                to_me: 3,
-                new: 2,
-                review: 1,
-                waiting: 4
-            }
-        );
+        assert_eq!(c, Counts { by_me: 5, by_me_shown: 6, to_me: 3, new: 2, review: 1, waiting: 4 });
         // Наблюдаю — не мне поручено и не я поручил; «Ждём» — только мои.
         let watched = list.iter().find(|t| t.title == d::WATCHED).unwrap();
         assert!(assign::is_watched_by(watched, me) && !waits(watched, me));
@@ -787,59 +735,22 @@ mod tests {
             ids
         };
         let mut list = d::all(today, now);
-        assert_eq!(
-            waiting(&list),
-            [
-                "deleg-mail-2",
-                "deleg-mail-3",
-                "deleg-mail-4",
-                "deleg-mail-5"
-            ],
-            "готово (1) ждёт меня, а не исполнителя"
-        );
+        assert_eq!(waiting(&list), ["deleg-mail-2", "deleg-mail-3", "deleg-mail-4", "deleg-mail-5"], "готово (1) ждёт меня, а не исполнителя");
         // Исполнитель сделал (2) — на проверке у меня; я принял результат — закрыто.
-        let i = list
-            .iter()
-            .position(|t| t.uid == "demo-deleg-2@postman")
-            .unwrap();
+        let i = list.iter().position(|t| t.uid == "demo-deleg-2@postman").unwrap();
         let worker = assign::assignee(&list[i]).unwrap().email.clone();
         assign::set_partstat(&mut list[i], &worker, TaskPartstat::Completed);
-        assert_eq!(
-            waiting(&list),
-            ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]
-        );
-        list[i] = act(
-            &list[i],
-            me,
-            Action::AcceptResult,
-            &Input::default(),
-            now,
-            &tz(),
-        )
-        .unwrap()
-        .task;
+        assert_eq!(waiting(&list), ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]);
+        list[i] = act(&list[i], me, Action::AcceptResult, &Input::default(), now, &tz()).unwrap().task;
         assert_eq!(assign::status(&list[i]), Some(Status::Closed));
-        assert_eq!(
-            waiting(&list),
-            ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]
-        );
+        assert_eq!(waiting(&list), ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]);
         // Слово «Ждём ответа» у письма поручения — письмо в счётчике одно.
         let mut c = crate::filters::Counts::default();
-        let crit = crate::filters::Criteria {
-            quick: [crate::filters::Quick::Waiting].into(),
-            ..Default::default()
-        };
+        let crit = crate::filters::Criteria { quick: [crate::filters::Quick::Waiting].into(), ..Default::default() };
         let who = Me::new([me], [""; 0]).with_waiting(waiting_keywords(&list, me));
-        let mut row = cache
-            .rows_by_ids(&["deleg-mail-3".to_string()])
-            .unwrap()
-            .remove(0);
+        let mut row = cache.rows_by_ids(&["deleg-mail-3".to_string()]).unwrap().remove(0);
         row.keywords.push(crate::filters::WAIT.into());
-        c.add(
-            &crit,
-            &Facts::of(&who, &row, &Default::default()),
-            &row.keywords,
-        );
+        c.add(&crit, &Facts::of(&who, &row, &Default::default()), &row.keywords);
         assert_eq!(c.quick[2], 1);
     }
 }

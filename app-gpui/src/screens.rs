@@ -1444,9 +1444,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::DelegationsOut | Scene::DelegationsIn => {
             let t = m.tasks.read(cx);
-            m.section == Section::Tasks
-                && t.ready()
-                && matches!(t.nav, crate::tasks::Nav::Delegations(_))
+            m.section == Section::Tasks && t.ready() && matches!(t.nav, crate::tasks::Nav::Delegations(_))
         }
         Scene::DelegationMail => {
             let list = m.list.read(cx);
@@ -1500,11 +1498,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::QuickWait => {
             list.query.scope == crate::filters::Where::Folder
-                && list
-                    .query
-                    .criteria
-                    .quick
-                    .contains(&postman_core::filters::Quick::Waiting)
+                && list.query.criteria.quick.contains(&postman_core::filters::Quick::Waiting)
                 && list.view.is_some()
                 && !list.computing
                 && (rows_loaded || list.count == 0)

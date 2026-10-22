@@ -174,10 +174,7 @@ pub fn is_delegation(t: &Task) -> bool {
 
 /// Я наблюдаю за поручением (`ROLE=NON-PARTICIPANT`): не поручивший и не исполнитель.
 pub fn is_watched_by(t: &Task, me: &str) -> bool {
-    is_delegation(t)
-        && t.participants
-            .iter()
-            .any(|p| p.role == Role::Observer && p.email.eq_ignore_ascii_case(me))
+    is_delegation(t) && t.participants.iter().any(|p| p.role == Role::Observer && p.email.eq_ignore_ascii_case(me))
 }
 
 /// Слово письма-поручения в «Отправленных» (S6-11): `pm.assign.<16 hex>` — FNV-1a от UID в нижнем регистре
@@ -759,9 +756,6 @@ mod tests {
         assert_eq!(k, keyword(" demo-deleg-1@postman "));
         assert_ne!(k, keyword("demo-deleg-2@postman"));
         assert!(k.starts_with("pm.assign.") && k.len() == "pm.assign.".len() + 16);
-        assert!(
-            k.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.')
-        );
+        assert!(k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.'));
     }
 }

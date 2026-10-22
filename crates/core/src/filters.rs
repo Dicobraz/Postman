@@ -78,10 +78,7 @@ impl Me {
 
     /// Письма поручений, которых ждём (S6-11): «Ждём» — ещё и они.
     pub fn with_waiting<S: AsRef<str>>(mut self, keywords: impl IntoIterator<Item = S>) -> Me {
-        self.waiting = keywords
-            .into_iter()
-            .map(|k| k.as_ref().to_ascii_lowercase())
-            .collect();
+        self.waiting = keywords.into_iter().map(|k| k.as_ref().to_ascii_lowercase()).collect();
         self
     }
 
