@@ -1075,8 +1075,12 @@ impl Mailer {
                 built.absorb(std::mem::take(&mut *b));
                 *b = built;
             }
-            // Книга собрана — «Часто пишу» в «Контактах» (S5-25).
-            let _ = this.update(cx, |m: &mut Mailer, cx| m.contacts_frequent(cx));
+            // Книга собрана — «Часто пишу» в «Контактах» (S5-25), имена «Назначено: …» в списке и шапке (S5-28).
+            let _ = this.update(cx, |m: &mut Mailer, cx| {
+                m.contacts_frequent(cx);
+                m.list.update(cx, |_, cx| cx.notify());
+                m.reading.update(cx, |_, cx| cx.notify());
+            });
         })
         .detach();
     }

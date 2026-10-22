@@ -14,7 +14,7 @@ use postman_core::marks::{self, Taken};
 use crate::chrome::{glyph, icon};
 use crate::compose::Book;
 use crate::mailer::Mailer;
-use crate::roles::{Look, Pm};
+use crate::roles::Look;
 
 /// Кто я и как зовут коллег — `Global`: строке списка, шапке письма и окну ответа. Имена — из адресной книги экрана
 /// почты (переписка, контакты, справочник сотрудников); адрес — `Event::Me` (в демо — владелец демо-ящика).
@@ -124,24 +124,6 @@ pub(crate) fn undo(row: &EmailRow, p: &Patch) -> Patch {
     Patch { id: p.id.clone(), keywords: p.keywords.iter().map(|(k, _)| (k.clone(), had(k))).collect(), mailboxes: Vec::new() }
 }
 
-/// Тонированная кнопка (DESIGN «Цвет»: второстепенные — синяя подложка без рамки).
-pub(crate) fn tinted(id: impl Into<ElementId>, h: f32, l: &Look) -> Stateful<Div> {
-    let hover = l.pm(Pm::TintedHover);
-    div()
-        .id(id)
-        .h(px(h))
-        .px(px(12.))
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(6.))
-        .rounded(l.px(Metric::RadiusControl))
-        .bg(l.pm(Pm::Tinted))
-        .text_color(l.pm(Pm::TintedFg))
-        .cursor_pointer()
-        .hover(move |d| d.bg(hover))
-}
-
 /// Полоса в шапке письма общего ящика (макет): никто не взял — «Взять в работу»; взял коллега — его инициалы, «Взято в
 /// работу: имя · время» и «Забрать себе»; взял я — «Вы взяли в работу · время» и «Вернуть в очередь».
 pub(crate) fn strip(row: &EmailRow, l: &Look, cx: &App) -> Option<Div> {
@@ -203,7 +185,7 @@ pub(crate) fn strip(row: &EmailRow, l: &Look, cx: &App) -> Option<Div> {
             .text_color(l.accent_text())
             .cursor_pointer()
             .hover(|d| d.bg(l.c(pets_ui::theme::Role::FillSubtleHover))),
-        _ => tinted("shared-act", 28., l),
+        _ => crate::buttons::secondary("shared-act", l).h(px(28.)),
     };
     let label = act.label();
     let button = button

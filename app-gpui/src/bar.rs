@@ -127,10 +127,11 @@ impl Render for CommandBar {
         // письма — «Вернуть в очередь».
         let take = self.take.map(|t| {
             let hint = tr!(if t == crate::shared::Act::Release { "shared-release-hint" } else { "shared-take-hint" });
-            let b = crate::shared::tinted("bar-take", 32., &l)
+            let b = crate::buttons::secondary("bar-take", &l)
                 .mr(px(8.))
                 .child(chrome::icon(glyph::CONTACTS, 16.))
-                .child(t.label())
+                // Как в макете: у письма коллеги — тоже «Взять в работу» (в шапке письма — «Забрать себе»).
+                .child(if t == crate::shared::Act::Release { t.label() } else { crate::shared::Act::Take.label() })
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(mail::Take), cx));
             keytips::command(b, "mail.take", Some(hint), &l, cx)
         });

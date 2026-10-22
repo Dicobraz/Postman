@@ -365,6 +365,10 @@ impl Mailer {
 
     pub(crate) fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
         self.drop_search(cx);
+        // Общий ящик (S5-28): имена тех, кто взял письма в работу, — из адресной книги.
+        if postman_cache::account_of(&id).is_some() {
+            self.load_address_book(cx);
+        }
         self.folders.update(cx, |f, cx| {
             f.current = Some(id.clone());
             f.results = None;

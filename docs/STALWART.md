@@ -352,6 +352,11 @@ cargo test -p postman-core --test stand -- --ignored
   только для чтения (`Mailbox/set` `shareWith` на principal user3).
 - Смотрит user3; тест — `cargo test -p postman-core --test stand_shared -- --ignored`, по одному письму на прогон и
   адрес (п. 17).
+- «Взять в работу» (S5-28): слова `pm.taken` и `pm.taken.2026-10-22t1551z.user3@itt.test` (с `@` и временем)
+  Stalwart хранит как есть, у письма ящика группы — для всех с доступом (`taken_words_survive_the_server`, 2026-10-22,
+  зелёный). Двое участников (`taken_is_seen_by_a_colleague`: user3 берёт — коллега видит, коллега забирает — у user3
+  в кэше по push) — [проверить]: в группе один участник, нужен ещё user1 или user2 (`x:Account/set` от имени
+  администратора, задача стенда).
 
 ## Большой ящик (S4-03)
 
