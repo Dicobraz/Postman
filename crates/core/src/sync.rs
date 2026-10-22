@@ -142,7 +142,11 @@ pub enum Command {
     Tasks(tasks::Request),
     /// Шаг поручения (S6-09, `assign.rs`): своя копия задачи уже в кэше (`tasks::save_local`) — сначала она на
     /// сервер (без рассылки), затем письма iTIP шага → `Event::Delegated`. Без связи — в очередь, как правки.
-    Delegate { uid: String, drafts: Vec<Draft>, ticket: u64 },
+    /// `release` — как у `Send`: «Забрать» и «Удалить поручение» (S6-11) держатся сервером окно «Отменить».
+    Delegate { uid: String, drafts: Vec<Draft>, ticket: u64, release: Release },
+    /// «Отменить» шага поручения (S6-11): письма, которые сервер ещё держит, не отправлять и удалить из
+    /// «Отправленных» → `Event::Withheld`.
+    Withhold { scheduled: Vec<Scheduled>, ticket: u64 },
 }
 
 impl Command {
@@ -160,7 +164,9 @@ impl Command {
                 Command::Patch { patches: patches.clone(), archive_name: archive_name.clone() }
             }
             Command::Tasks(r) => Command::Tasks(r.replayable()?),
-            Command::Delegate { uid, drafts, ticket } => Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket: *ticket },
+            Command::Delegate { uid, drafts, ticket, release } => {
+                Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket: *ticket, release: *release }
+            }
             Command::ReportPhishing { ids, to, subject, text, ticket } => Command::ReportPhishing {
                 ids: ids.clone(),
                 to: to.clone(),
@@ -349,7 +355,10 @@ pub enum Event {
     /// события нет — команда ждёт в очереди.
     Reported { ticket: u64, error: Option<String> },
     /// Шаг поручения (`Command::Delegate`) ушёл (`error: None`) или нет. Без связи события нет — ждёт в очереди.
-    Delegated { ticket: u64, uid: String, error: Option<String> },
+    /// `scheduled` — письма, которые сервер держит (окно «Отменить»).
+    Delegated { ticket: u64, uid: String, error: Option<String>, scheduled: Vec<Scheduled> },
+    /// Письма шага не ушли (`Command::Withhold`); `too_late` — хотя бы одно уже отправлено.
+    Withheld { ticket: u64, too_late: bool, error: Option<String> },
     Error(SyncError),
 }
 
@@ -1434,22 +1443,38 @@ async fn handle(
             }
             r?;
         }
-        Command::Delegate { uid, drafts, ticket } => {
+        Command::Delegate { uid, drafts, ticket, release } => {
             let mut r = tasks::handle(&tasks::JmapStore::new(client), cache, tasks::Request::Flush, &|r| notify(Event::Tasks(r))).await;
+            let mut scheduled = Vec::new();
             if r.is_ok() {
                 for d in &drafts {
-                    if let Err(e) = send(accounts, cache, send_as, d, None, Release::Now).await {
-                        r = Err(e);
-                        break;
+                    match send(accounts, cache, send_as, d, None, release).await {
+                        Ok(s) => scheduled.extend(s),
+                        Err(e) => {
+                            r = Err(e);
+                            break;
+                        }
                     }
                 }
             }
             match &r {
-                Ok(()) => notify(Event::Delegated { ticket, uid, error: None }),
+                Ok(()) => notify(Event::Delegated { ticket, uid, error: None, scheduled }),
                 Err(e) if ErrorKind::of(e) == ErrorKind::Network => {}
-                Err(e) => notify(Event::Delegated { ticket, uid, error: Some(e.to_string()) }),
+                Err(e) => notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled }),
             }
             r?;
+        }
+        Command::Withhold { scheduled, ticket } => {
+            let (mut too_late, mut error) = (false, None);
+            for s in &scheduled {
+                match withhold(accounts, s).await {
+                    Ok(()) => {}
+                    Err(UnsendError::TooLate) => too_late = true,
+                    Err(UnsendError::Jmap(e)) => error = Some(e.to_string()),
+                }
+            }
+            notify(Event::Withheld { ticket, too_late, error });
+            notify_scheduled(accounts, send_as, notify).await;
         }
         // «Повторить сейчас» — забота цикла синхронизации.
         Command::Reconnect => {}
@@ -1907,6 +1932,15 @@ async fn send(
         email: acc.key(&sub.email_id),
         send_at: sub.send_at.unwrap_or_else(|| jiff::Timestamp::now().as_second()),
     }))
+}
+
+/// Не отправлять письмо шага поручения, которое держит сервер, и удалить его (в «Черновики» оно не нужно).
+async fn withhold(accounts: &Accounts, s: &Scheduled) -> Result<(), UnsendError> {
+    let (acc, submission) = accounts.locate(&s.submission)?;
+    acc.client.cancel_submission(submission).await?;
+    let (acc, email) = accounts.locate(&s.email)?;
+    acc.client.destroy_email(email).await?;
+    Ok(())
 }
 
 /// Отменить отправку, которую держит сервер: письмо — обратно в «Черновики» аккаунта отправителя.

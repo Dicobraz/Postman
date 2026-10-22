@@ -243,6 +243,26 @@ impl Client {
         drafts: &str,
         sent: &str,
     ) -> std::result::Result<(), UnsendError> {
+        self.cancel_submission(submission).await?;
+        let acc = self.account_for(SUBMISSION)?.to_string();
+        // Отменено — письмо снова черновик. Отдельным запросом: в одном с отменой он прошёл бы и при её отказе.
+        let mut patch = Map::new();
+        patch.insert(format!("mailboxIds/{sent}"), Value::Null);
+        patch.insert(format!("mailboxIds/{drafts}"), Value::Bool(true));
+        patch.insert("keywords/$draft".into(), Value::Bool(true));
+        let update = inv("Email/set", json!({ "accountId": acc, "update": { email: patch } }), "e");
+        let mut r = self.call(USING, &[update]).await?;
+        let v: Value = take(&mut r, "e")?;
+        set_error(&v, "notUpdated", email, "Email/set")?;
+        Ok(())
+    }
+
+    /// Отменить отправку, которую держит сервер (`undoStatus: canceled`); письмо остаётся, где было. Уже ушло —
+    /// [`UnsendError::TooLate`].
+    pub async fn cancel_submission(
+        &self,
+        submission: &str,
+    ) -> std::result::Result<(), UnsendError> {
         let acc = self.account_for(SUBMISSION)?.to_string();
         let cancel = inv(
             "EmailSubmission/set",
@@ -255,15 +275,6 @@ impl Client {
             return Err(UnsendError::TooLate);
         }
         set_error(&v, "notUpdated", submission, "EmailSubmission/set")?;
-        // Отменено — письмо снова черновик. Отдельным запросом: в одном с отменой он прошёл бы и при её отказе.
-        let mut patch = Map::new();
-        patch.insert(format!("mailboxIds/{sent}"), Value::Null);
-        patch.insert(format!("mailboxIds/{drafts}"), Value::Bool(true));
-        patch.insert("keywords/$draft".into(), Value::Bool(true));
-        let update = inv("Email/set", json!({ "accountId": acc, "update": { email: patch } }), "e");
-        let mut r = self.call(USING, &[update]).await?;
-        let v: Value = take(&mut r, "e")?;
-        set_error(&v, "notUpdated", email, "Email/set")?;
         Ok(())
     }
 }

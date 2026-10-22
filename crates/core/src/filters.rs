@@ -30,6 +30,9 @@ pub const DUE: &str = "pm.due";
 pub const WAIT: &str = "pm.wait";
 pub const EXPIRE: &str = "pm.expire";
 
+/// Писем поручений в условии сервера — не больше (условие `Email/query` не растёт без конца).
+const WAITING_MAX: usize = 64;
+
 /// Есть ли у письма слово `base` или его уточнение (`base.…`).
 fn has_word(keywords: &[String], base: &str) -> bool {
     keywords.iter().any(|k| k.strip_prefix(base).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
@@ -44,6 +47,8 @@ pub struct Me {
     /// Что может стоять после `@` в упоминании: полное имя, слова имени, имя ящика до `@`.
     handles: Vec<String>,
     domains: Vec<String>,
+    /// Слова писем моих невыполненных поручений (`assign::waiting_keywords`, S6-11): такие письма — в «Ждём».
+    waiting: BTreeSet<String>,
 }
 
 impl Me {
@@ -69,6 +74,19 @@ impl Me {
         // Длинные первыми: `@смирнова анна` совпадёт целиком, а не по первому слову.
         me.handles.sort_by_key(|h| std::cmp::Reverse(h.len()));
         me
+    }
+
+    /// Письма поручений, которых ждём (S6-11): «Ждём» — ещё и они.
+    pub fn with_waiting<S: AsRef<str>>(mut self, keywords: impl IntoIterator<Item = S>) -> Me {
+        self.waiting = keywords
+            .into_iter()
+            .map(|k| k.as_ref().to_ascii_lowercase())
+            .collect();
+        self
+    }
+
+    pub fn waiting(&self) -> &BTreeSet<String> {
+        &self.waiting
     }
 
     /// Адреса ещё неизвестны (живой ящик до `Event::Me`): упоминаний, «Мне» и внешних нет.
@@ -193,7 +211,8 @@ impl Facts {
             to_me: me.to_me(to),
             threat: has_word(k, PHISHING) || has_word(k, THREAT),
             due: has_word(k, DUE),
-            waiting: has_word(k, WAIT),
+            // «Ждём ответа» или письмо моего невыполненного поручения — одно письмо один раз.
+            waiting: has_word(k, WAIT) || k.iter().any(|w| me.waiting.contains(w)),
             expiring: has_word(k, EXPIRE),
         }
     }
@@ -302,7 +321,10 @@ impl Criteria {
             .flat_map(|q| match q {
                 Quick::Threats => vec![Filter::HasKeyword(PHISHING.into()), Filter::HasKeyword(THREAT.into())],
                 Quick::Due => vec![Filter::HasKeyword(DUE.into())],
-                Quick::Waiting => vec![Filter::HasKeyword(WAIT.into())],
+                Quick::Waiting => std::iter::once(WAIT.to_owned())
+                    .chain(me.waiting.iter().take(WAITING_MAX).cloned())
+                    .map(Filter::HasKeyword)
+                    .collect(),
                 Quick::Expiring => vec![Filter::HasKeyword(EXPIRE.into())],
                 Quick::ToMe => me.addresses.iter().map(|a| Filter::To(a.clone())).collect(),
             })

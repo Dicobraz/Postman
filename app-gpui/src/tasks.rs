@@ -26,6 +26,7 @@ use pets_ui::Level as Toast;
 use pets_ui::theme::Metric;
 use postman_cache::{Cache, EmailRow};
 use postman_calendar::{Alert, Anchor, Busy, Moment, Progress, Span, Task, TimeBlock, Trigger, WorkHours};
+use postman_core::assign::{self as flow, Bucket, Tab};
 use postman_core::labels::Categories;
 use postman_core::lifecycle::{self as cycle, Badge, Patch, Pick};
 use postman_core::mailtask;
@@ -88,6 +89,8 @@ pub(crate) enum Nav {
     Project(String),
     /// Категория по ключевому слову.
     Category(String),
+    /// «Поручения» (S6-11): вкладка «Я поручил» | «Мне поручили».
+    Delegations(Tab),
 }
 
 /// Группа списка (заголовок над задачами).
@@ -111,6 +114,8 @@ pub(crate) enum Group {
     DoneToday,
     DoneYesterday,
     DoneEarlier,
+    /// Группа раздела «Поручения».
+    Deleg(Bucket),
 }
 
 /// Поле карточки с вариантами (S6-06).
@@ -176,6 +181,11 @@ pub(crate) fn groups(shown: &[Task], nav: &Nav, pending: &[String], now: i64, tz
             }
             push(Group::Later, pick(&|t| due_day(t).is_some_and(|d| d >= add_days(today, 7))));
         }
+        Nav::Delegations(tab) => {
+            for &b in flow::buckets(*tab) {
+                push(Group::Deleg(b), pick(&|t| postman_calendar::assign::status(t).and_then(|s| flow::bucket(s, *tab)) == Some(b)));
+            }
+        }
         Nav::List(List::Done) => {
             let done_day = |t: &Task| t.completed_at.and_then(|c| day_of(c, tz));
             push(Group::DoneToday, pick(&|t| done_day(t) == Some(today)));
@@ -210,6 +220,8 @@ pub(crate) fn section(tasks: &[Task], letters: &[EmailRow], nav: &Nav, pending: 
     };
     match nav {
         Nav::List(List::FromMail) => mailtask::from_mail(&view, letters, tz),
+        // «Поручения» — по моему адресу и «Только свои» (`TasksView::reshow`).
+        Nav::Delegations(_) => Vec::new(),
         Nav::List(l) => model::list(&view, *l, now, tz).into_iter().cloned().collect(),
         Nav::Project(p) => {
             let mut v: Vec<Task> = view
@@ -287,8 +299,15 @@ pub(crate) enum TasksAction {
     Toast(Toast, String),
     /// Тост с «Отменить»: что вернуть.
     Undo { text: String, undo: Undo },
-    /// Письма шага поручения (S6-10): своя копия уже записана — `Command::Delegate`.
-    Delegate { uid: String, drafts: Vec<postman_compose::Draft> },
+    /// Письма шага поручения (S6-10): своя копия уже записана — `Command::Delegate`; `hold` — сервер держит их окно
+    /// «Отменить» (S6-11: «Забрать», «Удалить поручение»).
+    Delegate { uid: String, drafts: Vec<postman_compose::Draft>, hold: bool },
+    /// «Отменить» шага: письма, которые сервер держит, не отправлять (`Command::Withhold`).
+    Withhold(Vec<postman_core::send_later::Scheduled>),
+    /// Слова писем моих невыполненных поручений изменились — «Ждём» в почте (S6-11).
+    Waiting(Vec<String>),
+    /// «Открыть в почте»: почта с быстрым фильтром «Ждём».
+    OpenWaiting,
     /// Форме «Поручить» нужна адресная книга окна письма (подсказки исполнителя).
     NeedBook,
 }
@@ -300,6 +319,8 @@ pub(crate) enum Undo {
     Tasks(Vec<Task>),
     /// Слова срока писем.
     Letters(Vec<Patch>),
+    /// Поручение до «Забрать» или «Удалить» (S6-11): копия — как была, письма отмены — не отправлять.
+    Delegation(Box<Task>),
 }
 
 pub(crate) struct TasksView {
@@ -362,6 +383,11 @@ pub(crate) struct TasksView {
     book: Option<crate::compose::Book>,
     /// Формы поручения (S6-10).
     deleg: delegation::State,
+    /// «Поручения» (S6-11): последняя вкладка и «Только свои».
+    tab: Tab,
+    pub(crate) own_only: bool,
+    /// Слова «Ждём», отданные почте последними.
+    waiting_sent: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -479,6 +505,9 @@ impl TasksView {
             me: Some(postman_compose::Address::new(postman_demo::ME_NAME, postman_demo::ME)),
             book: None,
             deleg,
+            tab: Tab::ByMe,
+            own_only: true,
+            waiting_sent: Vec::new(),
             _subscriptions: subscriptions,
         };
         this.load_letters(cx);
@@ -554,7 +583,18 @@ impl TasksView {
     fn reshow(&mut self, cx: &mut Context<Self>) {
         let pending = self.completing.uids();
         let now = self.now();
-        let mut shown = section(&self.tasks, &self.letters, &self.nav, &pending, now, &self.tz);
+        let mut shown = match &self.nav {
+            Nav::Delegations(tab) => flow::section(&self.tasks, &self.me_email(), *tab, self.own_only, &self.tz)
+                .into_iter()
+                .flat_map(|(_, v)| v.into_iter().cloned())
+                .collect(),
+            nav => section(&self.tasks, &self.letters, nav, &pending, now, &self.tz),
+        };
+        let waiting = self.waiting_keywords();
+        if waiting != self.waiting_sent {
+            self.waiting_sent = waiting.clone();
+            cx.emit(TasksAction::Waiting(waiting));
+        }
         let q = self.query.trim().to_lowercase();
         if !q.is_empty() {
             shown.retain(|t| t.title.to_lowercase().contains(&q) || t.notes.to_lowercase().contains(&q));
@@ -600,7 +640,27 @@ impl TasksView {
         self.remind_pass(cx);
     }
 
+    /// Слова писем моих невыполненных поручений: «Ждём» в почте.
+    pub(crate) fn waiting_keywords(&self) -> Vec<String> {
+        flow::waiting_keywords(&self.tasks, &self.me_email())
+    }
+
+    /// «Поручения»: вкладка.
+    pub(crate) fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.set_nav(Nav::Delegations(tab), cx);
+    }
+
+    /// «Только свои» на «Я поручил».
+    pub(crate) fn toggle_own(&mut self, cx: &mut Context<Self>) {
+        self.own_only = !self.own_only;
+        self.reshow(cx);
+    }
+
     pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        if let Nav::Delegations(tab) = nav {
+            self.tab = tab;
+        }
         if self.nav != nav {
             self.nav = nav;
             self.selected = None;
@@ -1047,11 +1107,16 @@ impl TasksView {
         match undo {
             Undo::Tasks(list) => self.save(list, cx),
             Undo::Letters(p) => cx.emit(TasksAction::Patch(p)),
+            Undo::Delegation(t) => self.undo_delegation(*t, cx),
         }
     }
 
     /// Удалить выбранную (Del); у задачи-письма — снять срок письма.
     pub(crate) fn delete(&mut self, cx: &mut Context<Self>) {
+        // Поручение: удалить у себя и отменить у исполнителя (S6-11); чужое — не трогать.
+        if self.delete_delegation(cx) {
+            return;
+        }
         let Some(t) = self.selected_task().cloned() else { return };
         if mailtask::is_letter(&t) {
             let mut gone = t.clone();
@@ -1229,8 +1294,12 @@ impl TasksView {
         }
     }
 
-    /// Строка состояния: «N задач из писем».
+    /// Строка состояния: «N задач из писем»; в «Поручениях» — сколько их в «Ждём».
     pub(crate) fn status_text(&self) -> String {
+        if matches!(self.nav, Nav::Delegations(_)) {
+            let c = flow::counts(&self.tasks, &self.me_email(), self.own_only);
+            return tr!("deleg-status-waiting", n = c.waiting as i64);
+        }
         let n = mailtask::from_mail(&self.tasks, &self.letters, &self.tz).len();
         tr!("tasks-status-mail", n = n as i64)
     }
@@ -1355,6 +1424,17 @@ impl TasksView {
             let badge = if which == List::Today { overdue } else { 0 };
             col = col.child(item(("tasks-nav", i).into(), Some(gl), None, tr!(key), count(which), badge, Nav::List(which), cx));
         }
+        let dc = flow::counts(&self.tasks, &self.me_email(), self.own_only);
+        col = col.child(item(
+            "tasks-nav-deleg".into(),
+            Some(g::DELEGATE),
+            None,
+            tr!("tasks-delegations"),
+            dc.by_me + dc.to_me,
+            dc.new + dc.review,
+            Nav::Delegations(self.tab),
+            cx,
+        ));
         let heading = |key: &str| div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(14.)).pb(px(4.)).child(tr!(key));
         let projects = model::projects(&self.tasks);
         if !projects.is_empty() {
@@ -1404,6 +1484,7 @@ impl TasksView {
             Nav::List(l) => tr!(list_key(*l)),
             Nav::Project(p) => p.clone(),
             Nav::Category(k) => self.categories.list.iter().find(|c| &c.keyword == k).map(|c| c.name.clone()).unwrap_or_else(|| k.clone()),
+            Nav::Delegations(_) => tr!("tasks-delegations"),
         }
     }
 
@@ -1418,6 +1499,14 @@ impl TasksView {
             }
             Nav::List(List::FromMail) => tr!("tasks-summary-mail", n = open),
             Nav::List(List::Done) => tr!("tasks-summary", n = self.shown.len() as i64),
+            Nav::Delegations(tab) => {
+                let c = flow::counts(&self.tasks, &self.me_email(), self.own_only);
+                let n = self.shown.len() as i64;
+                match tab {
+                    Tab::ByMe => tr!("deleg-summary-by-me", n = n, review = c.review as i64),
+                    Tab::ToMe => tr!("deleg-summary-to-me", n = n, new = c.new as i64),
+                }
+            }
             Nav::Project(p) => {
                 let pr = model::projects(&self.tasks).into_iter().find(|x| x.name.eq_ignore_ascii_case(p));
                 let (done, total) = pr.map(|x| (x.done as i64, x.total as i64)).unwrap_or((0, 0));
@@ -1439,7 +1528,9 @@ impl TasksView {
             .pr(px(8.))
             .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(self.title_of()))
             .child(div().pt(px(3.)).text_color(l.text2()).truncate().child(self.summary()));
-        let quick_shown = !matches!(self.nav, Nav::List(List::Done) | Nav::List(List::FromMail));
+        let quick_shown = !matches!(self.nav, Nav::List(List::Done) | Nav::List(List::FromMail) | Nav::Delegations(_));
+        let deleg_bar = matches!(self.nav, Nav::Delegations(_)).then(|| self.deleg_bar(&l, cx));
+        let deleg_hint = matches!(self.nav, Nav::Delegations(Tab::ByMe)).then(|| self.deleg_hint(&l, cx));
         let chips = if quick_shown { self.quick_chips(&l, cx) } else { None };
         let quick = quick_shown.then(|| {
             div().flex_none().px(px(14.)).pb(px(10.)).child(
@@ -1455,6 +1546,7 @@ impl TasksView {
             .min_w_0()
             .mr(px(8.))
             .child(header)
+            .children(deleg_bar)
             .children(quick)
             .child(
                 div()
@@ -1467,6 +1559,7 @@ impl TasksView {
                     .child(body)
                     .child(Scrollbar::vertical(&self.list).mode(ScrollbarMode::Hover)),
             )
+            .children(deleg_hint)
     }
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1487,6 +1580,12 @@ impl TasksView {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(group_label(gr)))
                 .child(div().text_color(l.text2()).child(n.to_string()))
                 .when_some(group_sub(gr), |d, s| d.child(div().text_color(l.text3()).child(s)))
+                .when(gr == Group::Deleg(Bucket::Waiting) && self.remind_all_count() > 0, |d| {
+                    d.child(div().flex_1()).child(
+                        crate::settings_tab::link("deleg-remind-all", tr!("deleg-remind-all"), &l)
+                            .on_click(cx.listener(|this, _, _, cx| this.remind_all(cx))),
+                    )
+                })
                 .into_any_element(),
             Some(Item::Row(i)) => match self.shown.get(i).cloned() {
                 Some(t) => self.row(ix, &t, &l, cx),
@@ -1528,8 +1627,19 @@ impl TasksView {
         if done && let Some(c) = t.completed_at {
             meta.insert(0, div().child(crate::calendar::hm(c, &self.tz)).into_any_element());
         }
+        let in_deleg = matches!(self.nav, Nav::Delegations(_));
+        let watched = in_deleg && postman_calendar::assign::is_watched_by(t, &self.me_email());
+        let fresh = matches!(self.nav, Nav::Delegations(Tab::ToMe)) && postman_calendar::assign::status(t) == Some(postman_calendar::assign::Status::Waiting);
+        if in_deleg {
+            meta = self.deleg_meta(t, l);
+        }
         let two = !meta.is_empty() && !l.compact();
         let mut chips: Vec<AnyElement> = Vec::new();
+        if watched {
+            chips.push(
+                div().px(px(6.)).rounded(px(3.)).bg(l.fill()).text_size(px(11.)).line_height(px(16.)).text_color(l.text2()).child(tr!("deleg-watching")).into_any_element(),
+            );
+        }
         if !checked && let Some(b) = due_badge(t, self.now(), &self.tz) {
             chips.push(crate::lifecycle::chip(&b, l).into_any_element());
         }
@@ -1568,7 +1678,7 @@ impl TasksView {
                 div()
                     .truncate()
                     .when(checked, |d| d.line_through().text_color(l.text3()))
-                    .when(selected && !checked, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .when((selected || fresh) && !checked, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(t.title.clone()),
             );
         let inner = if two {
@@ -2362,6 +2472,8 @@ fn empty_key(nav: &Nav) -> &'static str {
         Nav::List(List::FromMail) => "tasks-empty-mail",
         Nav::List(List::Someday) => "tasks-empty-someday",
         Nav::List(List::Done) => "tasks-empty-done",
+        Nav::Delegations(Tab::ByMe) => "deleg-empty-by-me",
+        Nav::Delegations(Tab::ToMe) => "deleg-empty-to-me",
         _ => "tasks-empty",
     }
 }
@@ -2379,12 +2491,22 @@ fn group_label(g: Group) -> String {
         Group::NoDue => tr!("tasks-group-no-due"),
         Group::DoneYesterday => tr!("tasks-group-yesterday"),
         Group::DoneEarlier => tr!("tasks-group-earlier"),
+        Group::Deleg(b) => tr!(match b {
+            Bucket::Review => "deleg-group-review",
+            Bucket::InWork => "deleg-group-work",
+            Bucket::Waiting => "deleg-group-waiting",
+            Bucket::New => "deleg-group-new",
+            Bucket::Checking => "deleg-group-checking",
+        }),
     }
 }
 
 fn group_sub(g: Group) -> Option<String> {
     match g {
         Group::TodayTimed => Some(tr!("tasks-group-timed")),
+        Group::Deleg(Bucket::Review) => Some(tr!("deleg-group-review-sub")),
+        Group::Deleg(Bucket::New) => Some(tr!("deleg-group-new-sub")),
+        Group::Deleg(Bucket::Checking) => Some(tr!("deleg-group-checking-sub")),
         _ => None,
     }
 }
@@ -2487,13 +2609,27 @@ impl crate::Mailer {
                 }
             }
             TasksAction::Toast(level, text) => self.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx)),
-            TasksAction::Delegate { uid, drafts } => {
+            TasksAction::Delegate { uid, drafts, hold } => {
+                use postman_core::{send_later::UNDO_HOLD_SECS, sync::Release};
                 let ticket = jiff::Timestamp::now().as_millisecond() as u64;
-                let cmd = postman_core::sync::Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket };
+                let release = if *hold { Release::After(UNDO_HOLD_SECS) } else { Release::Now };
+                let cmd = postman_core::sync::Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket, release };
                 if self.backend.is_live() && !self.backend.send(cmd) {
                     self.sync_stopped(cx);
                 }
             }
+            TasksAction::Withhold(scheduled) => {
+                let ticket = jiff::Timestamp::now().as_millisecond() as u64;
+                let cmd = postman_core::sync::Command::Withhold { scheduled: scheduled.clone(), ticket };
+                if self.backend.is_live() && !self.backend.send(cmd) {
+                    self.sync_stopped(cx);
+                }
+            }
+            TasksAction::Waiting(words) => {
+                let words = words.clone();
+                self.list.update(cx, |l, cx| l.set_waiting(words, cx));
+            }
+            TasksAction::OpenWaiting => self.open_waiting(cx),
             TasksAction::NeedBook => {
                 let book = self.compose.book.clone();
                 self.tasks.update(cx, |t, _| t.set_book(book));
@@ -2522,6 +2658,21 @@ impl crate::Mailer {
                 self.toasts.update(cx, |t, cx| t.push_action(Toast::Success, text.clone(), act, cx));
             }
         }
+    }
+}
+
+impl crate::Mailer {
+    /// «Открыть в почте» в «Поручениях»: почта, все папки, быстрый фильтр «Ждём» (письма поручений — в
+    /// «Отправленных»).
+    pub(crate) fn open_waiting(&mut self, cx: &mut Context<Self>) {
+        use postman_core::filters::Quick;
+        self.set_section(crate::mailer::Section::Mail, cx);
+        self.filters.update(cx, |f, cx| {
+            f.change(cx, |q| {
+                q.scope = crate::filters::Where::All;
+                q.criteria.quick.insert(Quick::Waiting);
+            })
+        });
     }
 }
 

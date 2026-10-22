@@ -164,6 +164,9 @@ impl Mailer {
         let tasks = cx.new(|cx| crate::tasks::TasksView::new(cache.clone(), window, cx));
         let tasks_bar = cx.new(|cx| crate::tasks::TasksBar::new(tasks.clone(), cx));
         reading.update(cx, |r, _| r.tasks = Some(tasks.downgrade()));
+        // «Ждём» в почте — ещё и письма моих невыполненных поручений (S6-11); дальше — `TasksAction::Waiting`.
+        let waiting = tasks.read(cx).waiting_keywords();
+        list.update(cx, |l, cx| l.set_waiting(waiting, cx));
         let subscriptions = vec![
             cx.subscribe(&tasks, |this, _, action: &crate::tasks::TasksAction, cx| this.on_tasks(action, cx)),
             cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
@@ -371,9 +374,22 @@ impl Mailer {
         match ev {
             postman_core::sync::Event::Connection(c) => self.on_connection(*c, cx),
             postman_core::sync::Event::Reported { error, .. } => self.on_reported(error.as_deref(), cx),
-            postman_core::sync::Event::Delegated { error: Some(e), .. } => {
-                let text = tr!("assign-failed", error = e.clone());
-                self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
+            postman_core::sync::Event::Delegated { error, uid, scheduled, .. } => {
+                if let Some(e) = error {
+                    let text = tr!("assign-failed", error = e.clone());
+                    self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
+                }
+                self.tasks.update(cx, |t, cx| t.on_delegated(uid, scheduled, cx));
+            }
+            postman_core::sync::Event::Withheld { too_late, error, .. } => {
+                let text = match (too_late, error) {
+                    (true, _) => Some((Toast::Info, tr!("assign-withhold-late"))),
+                    (false, Some(e)) => Some((Toast::Error, tr!("assign-failed", error = e.clone()))),
+                    (false, None) => None,
+                };
+                if let Some((level, text)) = text {
+                    self.toasts.update(cx, |t, cx| t.push(level, text, cx));
+                }
             }
             _ => {}
         }
@@ -576,7 +592,8 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::task::Due, window, cx| this.tasks.update(cx, |t, cx| t.toggle_due(window, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Delegate, window, cx| this.tasks.update(cx, |t, cx| t.delegate(window, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Remind, _, cx| this.tasks.update(cx, |t, cx| t.remind(cx))))
-            .on_action(cx.listener(|this, _: &commands::task::Revoke, window, cx| this.tasks.update(cx, |t, cx| t.revoke(window, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::RemindAll, _, cx| this.tasks.update(cx, |t, cx| t.remind_all(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Revoke, _, cx| this.tasks.update(cx, |t, cx| t.revoke(cx))))
             .on_action(cx.listener(|this, _: &commands::task::Edit, window, cx| this.tasks.update(cx, |t, cx| t.rename(window, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Delete, _, cx| this.tasks.update(cx, |t, cx| t.delete(cx))))
             .on_action(cx.listener(|this, _: &commands::task::Open, _, cx| this.tasks.update(cx, |t, cx| t.open_letter(cx))))

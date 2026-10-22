@@ -114,6 +114,7 @@ cmd-task-block = Поставить время в календаре
 
 cmd-task-delegate = Поручить задачу
 cmd-task-remind = Напомнить исполнителю
+cmd-task-remind-all = Напомнить всем, кто не принял поручение
 cmd-task-revoke = Забрать поручение
 cmd-invite-accept = Принять приглашение
 cmd-invite-tentative = Ответить «Под вопросом»

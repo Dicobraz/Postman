@@ -145,6 +145,8 @@ pub(crate) struct MailList {
     /// Кто я — упоминания, «Мне», внешние: демо — владелец демо-ящика; живой ящик — `Event::Me`, `Event::Senders`.
     pub(crate) me: Me,
     identity: Vec<(String, String)>,
+    /// Слова писем моих невыполненных поручений (`TasksAction::Waiting`).
+    waiting: Vec<String>,
     /// Письма, которые нашёл сервер по фильтрам «Все папки» (живой ящик): в списке без проверки по кэшу.
     pub(crate) server_hits: Arc<HashSet<String>>,
     /// Папки по порядку дерева — группы «Все папки».
@@ -465,6 +467,7 @@ impl MailList {
             computing: false,
             me: Me::default(),
             identity,
+            waiting: Vec::new(),
             server_hits: Arc::new(HashSet::new()),
             order: Vec::new(),
             sort_open: false,
@@ -492,7 +495,17 @@ impl MailList {
     // --- фильтры (S5-03) ---
 
     fn who_am_i(&self) -> Me {
-        Me::new(self.identity.iter().map(|(a, _)| a), self.identity.iter().map(|(_, n)| n))
+        Me::new(self.identity.iter().map(|(a, _)| a), self.identity.iter().map(|(_, n)| n)).with_waiting(&self.waiting)
+    }
+
+    /// Слова писем моих невыполненных поручений (S6-11): «Ждём» — ещё и эти письма.
+    pub(crate) fn set_waiting(&mut self, words: Vec<String>, cx: &mut Context<Self>) {
+        if self.waiting == words {
+            return;
+        }
+        self.waiting = words;
+        self.me = self.who_am_i();
+        self.recompute(cx);
     }
 
     /// Мой адрес и мои адреса отправителя (живой ящик): кто я для упоминаний, «Мне» и внешних.

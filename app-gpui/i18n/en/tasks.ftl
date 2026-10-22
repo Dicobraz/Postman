@@ -172,8 +172,6 @@ assign-return = Return with a comment
 assign-do-return = Return
 assign-change-due = Change due date
 assign-revoke = Take the task back
-assign-revoke-ask = Take the task back from { $who }? They will get a cancellation.
-assign-revoke-yes = Take back
 assign-agree = Agree: { $due }
 assign-keep = Keep the due date
 assign-reassign = Delegate to someone else
@@ -284,3 +282,54 @@ assign-mail-body-revoked = { $who } takes the task “{ $title }” back — no 
 assign-mail-body-reassigned = { $who } delegates the task “{ $title }” to you.
 # Screen `delegate`: the form comment (demo).
 assign-screen-comment = Collect questions for the customer: delivery dates, requirements, licences and SLA.
+
+# Delegations section (S6-11).
+tasks-delegations = Delegations
+deleg-count = { $n ->
+    [one] { $n } delegation
+   *[other] { $n } delegations
+}
+deleg-summary-by-me = { $review ->
+    [0] { deleg-count }
+   *[other] { deleg-count } · { $review } to review
+}
+deleg-summary-to-me = { $new ->
+    [0] { deleg-count }
+   *[other] { deleg-count } · { $new } awaiting your answer
+}
+deleg-tab-by-me = Delegated by me
+deleg-tab-to-me = Assigned to me
+deleg-own-only = Mine only
+deleg-group-review = To review
+deleg-group-review-sub = waiting for your decision
+deleg-group-work = In progress
+deleg-group-waiting = Not accepted yet
+deleg-group-new = New
+deleg-group-new-sub = waiting for your answer
+deleg-group-checking = Under review
+deleg-group-checking-sub = by the author
+deleg-remind-all = Remind everyone
+deleg-watching = watching
+deleg-last = { $when } — { $what }
+deleg-last-watched = by { $who } · { $last }
+deleg-proposes = Proposes: { $due }
+deleg-wait-hint = { $n ->
+    [one] An open delegation ({ $n }) shows up in mail — in the “Waiting” quick filter
+   *[other] Open delegations ({ $n }) show up in mail — in the “Waiting” quick filter
+}
+deleg-open-wait = Open in mail
+deleg-status-waiting = In “Waiting”: { deleg-count }
+deleg-empty-by-me = No delegations. Open a task and press “Delegate”.
+deleg-empty-to-me = Nothing is assigned to you.
+assign-toast-taken = The task is yours again · in “{ $list }”
+assign-toast-deleted = Delegation deleted · { $who } will see it
+assign-delete-not-mine = Not your delegation: its author deletes it. You can decline it.
+assign-withhold-late = The message has already gone — the assignee got the cancellation
+assign-toast-reminded-all = { $n ->
+    [one] Reminded { $n } assignee
+   *[other] Reminded { $n } assignees
+}{ $soon ->
+    [0] {""}
+   *[other] {" "}· { $soon } already today
+}
+assign-remind-all-soon = Everyone was reminded today — next reminder in a day

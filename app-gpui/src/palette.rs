@@ -569,7 +569,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "task.edit" => crate::tasks::g::EDIT,
         "task.delete" => crate::tasks::g::DELETE,
         "task.delegate" => crate::tasks::g::DELEGATE,
-        "task.remind" => crate::tasks::g::RINGER,
+        "task.remind" | "task.remind_all" => crate::tasks::g::RINGER,
         "task.revoke" => crate::tasks::g::REVOKE,
         "tab.close" | "compose.close" | "meeting.close" | "invite.decline" => CLOSE,
         "search.focus" | "palette.open" => SEARCH,

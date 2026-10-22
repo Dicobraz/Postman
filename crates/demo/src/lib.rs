@@ -72,6 +72,10 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
         if cache.rows_by_ids(&[CHAIN[0].id.to_string()])?.is_empty() {
             chain(&cache, jiff::Timestamp::now().as_second())?;
         }
+        // …и писем-поручений (S6-11).
+        if cache.rows_by_ids(&[delegations::letter_id(1)])?.is_empty() {
+            delegations::letters(&cache, jiff::Timestamp::now().as_second())?;
+        }
         return Ok(());
     }
     let mb = |id: &str, name: &str, order| MailboxRow {
@@ -156,7 +160,8 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     cache.upsert_emails(&batch)?;
     cache.set_recipients(&to)?;
     shared(&cache, now)?;
-    chain(&cache, now)
+    chain(&cache, now)?;
+    delegations::letters(&cache, now)
 }
 
 /// Ключевые слова демо-письма `i` (S5-02): категории по умолчанию (`postman_core::labels::DEFAULTS`) и метка
@@ -815,6 +820,8 @@ pub mod delegations {
     pub const INCOMING: &str = "Проверить перечень работ к договору";
     /// Поручить (снимок `delegate`): своя задача без поручения.
     pub const TO_ASSIGN: &str = "Вопросы к созвону по тендеру";
+    /// Поручил коллега, я наблюдаю (снимок `delegations-out` со снятым «Только свои»).
+    pub const WATCHED: &str = "Регламент реагирования на инциденты";
     /// Письмо-поручение (снимок `delegation-mail`).
     pub const LETTER: &str = "Подготовить вопросы к созвону с заказчиком";
 
@@ -894,6 +901,11 @@ pub mod delegations {
                 (20, PETROV, K::Assigned, ""),
                 (18, me, K::Accepted, ""),
             ]),
+            watched(task(8, WATCHED, PETROV, VOLKOV, P::InProcess, (6, 18), today, now, &[
+                (30, PETROV, K::Assigned, ""),
+                (28, VOLKOV, K::Accepted, ""),
+                (3, VOLKOV, K::Started, ""),
+            ])),
             letter_task(today),
         ];
         // Предложенный срок — через неделю, с комментарием.
@@ -908,6 +920,56 @@ pub mod delegations {
             });
         }
         out
+    }
+
+    /// Я — наблюдатель (`ROLE=NON-PARTICIPANT`): видно в «Я поручил», если «Только свои» снят.
+    fn watched(mut t: Task) -> Task {
+        t.participants.push(person("observer1", me(), Role::Observer, TaskPartstat::NeedsAction));
+        t
+    }
+
+    /// Мои поручения (я поручивший) — номера задач демо.
+    const MINE: [usize; 5] = [1, 2, 3, 4, 5];
+
+    /// Ключ письма-поручения `n` в кэше демо.
+    pub fn letter_id(n: usize) -> String {
+        format!("deleg-mail-{n}")
+    }
+
+    /// Письма моих поручений в «Отправленных» (как их оставляет отправка, S6-11): со словом поручения
+    /// (`assign::keyword`) — быстрый фильтр «Ждём» находит письма невыполненных.
+    pub fn letters(cache: &postman_cache::Cache, now: i64) -> postman_cache::Result<()> {
+        let today = jiff::Timestamp::from_second(now).map(|t| t.to_zoned(jiff::tz::TimeZone::system()).date()).unwrap_or_default();
+        let list = all(today, now);
+        let mine: Vec<(usize, &Task)> =
+            MINE.iter().filter_map(|&n| list.iter().find(|t| t.uid == format!("demo-deleg-{n}@postman")).map(|t| (n, t))).collect();
+        let rows: Vec<postman_cache::EmailRow> = mine
+            .iter()
+            .map(|&(n, t)| postman_cache::EmailRow {
+                id: letter_id(n),
+                thread_id: letter_id(n),
+                mailbox_ids: vec!["sent".into()],
+                received_at: assign::steps(t).first().map_or(now, |s| s.at),
+                subject: format!("Поручение: {}", t.title),
+                from_name: super::ME_NAME.into(),
+                from_addr: super::ME.into(),
+                preview: t.notes.clone(),
+                seen: true,
+                flagged: false,
+                has_attachment: false,
+                size: 6144,
+                keywords: vec![assign::keyword(&t.uid)],
+            })
+            .collect();
+        cache.upsert_emails(&rows)?;
+        let to: Vec<(String, postman_cache::Recipients)> = mine
+            .iter()
+            .map(|&(n, t)| {
+                let to = assign::assignee(t).map(|p| vec![p.email.clone()]).unwrap_or_default();
+                (letter_id(n), postman_cache::Recipients { to, cc: Vec::new() })
+            })
+            .collect();
+        cache.set_recipients(&to)
     }
 
     /// Задача письма-поручения: сервер уже положил её в мой календарь (как VTODO из iMIP, S6-01) — срок завтра.

@@ -381,6 +381,164 @@ pub fn draft(out: &Outgoing, from: &Address, subject: String, markdown: String) 
     }
 }
 
+// --- раздел «Поручения» (S6-11) ---
+
+/// Вкладка раздела.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Tab {
+    /// «Я поручил»: я поручивший (и наблюдатель, если «Только свои» снят).
+    #[default]
+    ByMe,
+    /// «Мне поручили»: я исполнитель.
+    ToMe,
+}
+
+/// Группа вкладки (макеты «Поручил я», «Поручено мне»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bucket {
+    /// «На проверку» — готово, ждут моего решения.
+    Review,
+    /// «В работе» — принято или в работе.
+    InWork,
+    /// «Ждут принятия» — отклонено, предложен срок, ждёт ответа.
+    Waiting,
+    /// «Новые» — мне поручили, ждут моего ответа (и мои «отклонил», «предложил срок»).
+    New,
+    /// «На проверке» у автора — я отправил результат.
+    Checking,
+}
+
+/// Группа поручения во вкладке по статусу.
+pub fn bucket(st: Status, tab: Tab) -> Option<Bucket> {
+    if st.is_final() {
+        return None;
+    }
+    Some(match (tab, st) {
+        (Tab::ByMe, Status::Done) => Bucket::Review,
+        (Tab::ToMe, Status::Done) => Bucket::Checking,
+        (_, Status::Accepted | Status::InProgress) => Bucket::InWork,
+        (Tab::ByMe, _) => Bucket::Waiting,
+        (Tab::ToMe, _) => Bucket::New,
+    })
+}
+
+/// Порядок групп во вкладке.
+pub fn buckets(tab: Tab) -> &'static [Bucket] {
+    match tab {
+        Tab::ByMe => &[Bucket::Review, Bucket::InWork, Bucket::Waiting],
+        Tab::ToMe => &[Bucket::New, Bucket::InWork, Bucket::Checking],
+    }
+}
+
+/// Поручение во вкладке: «Я поручил» — мои (и где я наблюдатель, если `own` снят), «Мне поручили» — мне;
+/// закрытые и забранные — нет.
+pub fn in_tab(t: &Task, me: &str, tab: Tab, own: bool) -> bool {
+    let open = assign::status(t).is_some_and(|s| !s.is_final());
+    open && t.parent.is_none()
+        && match tab {
+            Tab::ByMe => t.is_delegated_by(me) || (!own && assign::is_watched_by(t, me)),
+            Tab::ToMe => t.is_assigned_to(me),
+        }
+}
+
+/// Поручения вкладки по группам: внутри — «Ждут принятия» по срочности ответа (отклонено, предложен срок, ждёт),
+/// остальные — по сроку.
+pub fn section<'a>(
+    tasks: &'a [Task],
+    me: &str,
+    tab: Tab,
+    own: bool,
+    tz: &jiff::tz::TimeZone,
+) -> Vec<(Bucket, Vec<&'a Task>)> {
+    let rank = |s: Status| match s {
+        Status::Declined => 0,
+        Status::Proposed => 1,
+        _ => 2,
+    };
+    buckets(tab)
+        .iter()
+        .filter_map(|&b| {
+            let mut v: Vec<&Task> = tasks
+                .iter()
+                .filter(|t| {
+                    in_tab(t, me, tab, own)
+                        && assign::status(t).and_then(|s| bucket(s, tab)) == Some(b)
+                })
+                .collect();
+            v.sort_by(|x, y| {
+                let (sx, sy) = (
+                    assign::status(x).map_or(2, rank),
+                    assign::status(y).map_or(2, rank),
+                );
+                let r = if b == Bucket::Waiting {
+                    sx.cmp(&sy)
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                r.then_with(|| {
+                    x.due_at(tz)
+                        .unwrap_or(i64::MAX)
+                        .cmp(&y.due_at(tz).unwrap_or(i64::MAX))
+                })
+                .then_with(|| x.title.cmp(&y.title))
+            });
+            (!v.is_empty()).then_some((b, v))
+        })
+        .collect()
+}
+
+/// Счётчики раздела: пункт слева (поручений всего и бейдж «ждут ответа + на проверку»), вкладки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counts {
+    /// «Я поручил» (только свои).
+    pub by_me: usize,
+    /// «Я поручил» с учётом «Только свои».
+    pub by_me_shown: usize,
+    pub to_me: usize,
+    /// Мне поручили, ждут моего ответа.
+    pub new: usize,
+    /// Готово, ждут моей проверки.
+    pub review: usize,
+    /// Мои невыполненные — в «Ждём».
+    pub waiting: usize,
+}
+
+pub fn counts(tasks: &[Task], me: &str, own: bool) -> Counts {
+    let st = |t: &Task| assign::status(t);
+    let mut c = Counts::default();
+    for t in tasks {
+        if in_tab(t, me, Tab::ByMe, true) {
+            c.by_me += 1;
+            c.review += usize::from(st(t) == Some(Status::Done));
+            c.waiting += usize::from(waits(t, me));
+        }
+        c.by_me_shown += usize::from(in_tab(t, me, Tab::ByMe, own));
+        if in_tab(t, me, Tab::ToMe, true) {
+            c.to_me += 1;
+            c.new += usize::from(st(t) == Some(Status::Waiting));
+        }
+    }
+    c
+}
+
+/// Моё невыполненное поручение — ждём исполнителя (быстрый фильтр «Ждём», макет «Поручил я»): я поручивший,
+/// поручение не закрыто и не на проверке у меня.
+pub fn waits(t: &Task, me: &str) -> bool {
+    t.is_delegated_by(me) && assign::status(t).is_some_and(|s| !s.is_final() && s != Status::Done)
+}
+
+/// Слова писем моих невыполненных поручений ([`assign::keyword`]): «Ждём» показывает эти письма из «Отправленных».
+pub fn waiting_keywords(tasks: &[Task], me: &str) -> Vec<String> {
+    let mut v: Vec<String> = tasks
+        .iter()
+        .filter(|t| waits(t, me))
+        .map(|t| assign::keyword(&t.uid))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +697,149 @@ mod tests {
         let draft = draft(&x.outgoing[0], &Address::new("", BOSS), "Забрано: Пропуска".into(), "Текст".into());
         assert_eq!(draft.calendar.as_ref().map(|c| c.method.as_str()), Some("CANCEL"));
         assert_eq!(draft.to.len(), 2);
+    }
+
+    fn names<'a>(s: &[(Bucket, Vec<&'a Task>)]) -> Vec<(Bucket, Vec<&'a str>)> {
+        s.iter()
+            .map(|(b, v)| (*b, v.iter().map(|t| t.title.as_str()).collect()))
+            .collect()
+    }
+
+    /// Вкладки «Я поручил» / «Мне поручили» и «Только свои» на поручениях демо: группы, порядок, счётчики.
+    #[test]
+    fn tabs_and_own_only() {
+        use postman_demo::delegations as d;
+        let tz = tz();
+        let list = d::all(jiff::civil::date(2026, 10, 21), 1_792_000_000);
+        let me = postman_demo::ME;
+        let mut by_me = names(&section(&list, me, Tab::ByMe, true, &tz));
+        // «Ждут принятия»: отклонено, предложен срок, ждёт.
+        assert_eq!(
+            by_me,
+            [
+                (Bucket::Review, vec![d::REVIEW]),
+                (Bucket::InWork, vec!["Ресурсный план группы на ноябрь"]),
+                (
+                    Bucket::Waiting,
+                    vec![
+                        "Заказать пропуска для аудиторов",
+                        "Требования к мониторингу для ТЗ",
+                        "Расчёт коммерческого предложения"
+                    ]
+                ),
+            ]
+        );
+        // «Только свои» снят — ещё и где я наблюдатель.
+        by_me[1].1.push(d::WATCHED);
+        assert_eq!(names(&section(&list, me, Tab::ByMe, false, &tz)), by_me);
+        assert_eq!(
+            names(&section(&list, me, Tab::ToMe, true, &tz)),
+            [
+                (Bucket::New, vec![d::LETTER, d::INCOMING]),
+                (Bucket::InWork, vec!["Комментарии к статусу проектов"]),
+            ]
+        );
+        let c = counts(&list, me, false);
+        assert_eq!(
+            c,
+            Counts {
+                by_me: 5,
+                by_me_shown: 6,
+                to_me: 3,
+                new: 2,
+                review: 1,
+                waiting: 4
+            }
+        );
+        // Наблюдаю — не мне поручено и не я поручил; «Ждём» — только мои.
+        let watched = list.iter().find(|t| t.title == d::WATCHED).unwrap();
+        assert!(assign::is_watched_by(watched, me) && !waits(watched, me));
+        assert!(!in_tab(watched, me, Tab::ToMe, false));
+    }
+
+    /// «Ждём» на демо-ящике: письма моих невыполненных поручений (из «Отправленных», по слову UID) — в фильтре;
+    /// готово (ждёт моей проверки) и после приёмки результата — нет. Письмо и с «Ждём ответа», и поручения —
+    /// одно.
+    #[test]
+    fn waiting_filter_on_demo_box() {
+        use crate::filters::{Facts, Me};
+        use postman_cache::{Cache, Scan};
+        use postman_demo::delegations as d;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.redb");
+        postman_demo::ensure(&path, 60).unwrap();
+        let cache = Cache::open(&path).unwrap();
+        let now = jiff::Timestamp::now().as_second();
+        let today = jiff::Timestamp::now().to_zoned(TimeZone::system()).date();
+        let me = postman_demo::ME;
+        let waiting = |list: &[Task]| {
+            let who = Me::new([me], [""; 0]).with_waiting(waiting_keywords(list, me));
+            let mut ids = Vec::new();
+            cache
+                .scan(&Scan::Account(None), |row, to| {
+                    if row.id.starts_with("deleg-mail") && Facts::of(&who, &row, &to).waiting {
+                        ids.push(row.id);
+                    }
+                    true
+                })
+                .unwrap();
+            ids.sort();
+            ids
+        };
+        let mut list = d::all(today, now);
+        assert_eq!(
+            waiting(&list),
+            [
+                "deleg-mail-2",
+                "deleg-mail-3",
+                "deleg-mail-4",
+                "deleg-mail-5"
+            ],
+            "готово (1) ждёт меня, а не исполнителя"
+        );
+        // Исполнитель сделал (2) — на проверке у меня; я принял результат — закрыто.
+        let i = list
+            .iter()
+            .position(|t| t.uid == "demo-deleg-2@postman")
+            .unwrap();
+        let worker = assign::assignee(&list[i]).unwrap().email.clone();
+        assign::set_partstat(&mut list[i], &worker, TaskPartstat::Completed);
+        assert_eq!(
+            waiting(&list),
+            ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]
+        );
+        list[i] = act(
+            &list[i],
+            me,
+            Action::AcceptResult,
+            &Input::default(),
+            now,
+            &tz(),
+        )
+        .unwrap()
+        .task;
+        assert_eq!(assign::status(&list[i]), Some(Status::Closed));
+        assert_eq!(
+            waiting(&list),
+            ["deleg-mail-3", "deleg-mail-4", "deleg-mail-5"]
+        );
+        // Слово «Ждём ответа» у письма поручения — письмо в счётчике одно.
+        let mut c = crate::filters::Counts::default();
+        let crit = crate::filters::Criteria {
+            quick: [crate::filters::Quick::Waiting].into(),
+            ..Default::default()
+        };
+        let who = Me::new([me], [""; 0]).with_waiting(waiting_keywords(&list, me));
+        let mut row = cache
+            .rows_by_ids(&["deleg-mail-3".to_string()])
+            .unwrap()
+            .remove(0);
+        row.keywords.push(crate::filters::WAIT.into());
+        c.add(
+            &crit,
+            &Facts::of(&who, &row, &Default::default()),
+            &row.keywords,
+        );
+        assert_eq!(c.quick[2], 1);
     }
 }

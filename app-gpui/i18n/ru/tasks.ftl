@@ -175,8 +175,6 @@ assign-return = Вернуть с комментарием
 assign-do-return = Вернуть
 assign-change-due = Изменить срок
 assign-revoke = Забрать задачу
-assign-revoke-ask = Забрать задачу у исполнителя ({ $who })? Он получит отмену поручения.
-assign-revoke-yes = Забрать
 assign-agree = Согласиться: { $due }
 assign-keep = Оставить срок
 assign-reassign = Поручить другому
@@ -287,3 +285,55 @@ assign-mail-body-revoked = { $who } забирает задачу «{ $title }»
 assign-mail-body-reassigned = { $who } поручает вам задачу «{ $title }».
 # Снимок `delegate`: комментарий формы (демо).
 assign-screen-comment = Собрать вопросы заказчику: сроки поставки, требования, лицензии и SLA.
+
+# Раздел «Поручения» (S6-11, макеты «Поручил я», «Поручено мне»).
+tasks-delegations = Поручения
+deleg-count = { $n ->
+    [one] { $n } поручение
+    [few] { $n } поручения
+   *[many] { $n } поручений
+}
+deleg-summary-by-me = { $review ->
+    [0] { deleg-count }
+   *[other] { deleg-count } · { $review } на проверку
+}
+deleg-summary-to-me = { $new ->
+    [0] { deleg-count }
+   *[other] { deleg-count } · { $new } ждут ответа
+}
+deleg-tab-by-me = Я поручил
+deleg-tab-to-me = Мне поручили
+deleg-own-only = Только свои
+deleg-group-review = На проверку
+deleg-group-review-sub = ждут вашего решения
+deleg-group-work = В работе
+deleg-group-waiting = Ждут принятия
+deleg-group-new = Новые
+deleg-group-new-sub = ждут вашего ответа
+deleg-group-checking = На проверке
+deleg-group-checking-sub = у автора
+deleg-remind-all = Напомнить всем
+deleg-watching = наблюдаю
+deleg-last = { $when } — { $what }
+deleg-last-watched = поручил(а) { $who } · { $last }
+deleg-proposes = Предлагает: { $due }
+deleg-wait-hint = { $n ->
+    [one] Невыполненное поручение ({ $n }) само попадает в почту — в быстрый фильтр «Ждём»
+   *[other] Невыполненные поручения ({ $n }) сами попадают в почту — в быстрый фильтр «Ждём»
+}
+deleg-open-wait = Открыть в почте
+deleg-status-waiting = В «Ждём»: { deleg-count }
+deleg-empty-by-me = Поручений нет. Откройте задачу и нажмите «Поручить».
+deleg-empty-to-me = Вам ничего не поручили.
+assign-toast-taken = Задача снова ваша · в «{ $list }»
+assign-toast-deleted = Поручение удалено · { $who } увидит
+assign-delete-not-mine = Поручение не ваше: его удаляет автор. Можно отклонить.
+assign-withhold-late = Письмо уже ушло — исполнитель получил отмену
+assign-toast-reminded-all = { $n ->
+    [one] Напомнили: { $n } исполнителю
+   *[other] Напомнили: { $n } исполнителям
+}{ $soon ->
+    [0] {""}
+   *[other] {" "}· { $soon } — уже сегодня
+}
+assign-remind-all-soon = Всем уже напомнили сегодня — следующее напоминание через сутки

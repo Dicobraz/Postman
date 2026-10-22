@@ -114,6 +114,7 @@ cmd-task-block = Block time in calendar
 
 cmd-task-delegate = Delegate task
 cmd-task-remind = Remind assignee
+cmd-task-remind-all = Remind everyone who has not accepted
 cmd-task-revoke = Take task back
 cmd-invite-accept = Accept invitation
 cmd-invite-tentative = Answer tentative
