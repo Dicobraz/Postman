@@ -418,7 +418,7 @@ fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPan
 }
 
 /// Значок ответа в круге (DESIGN «Цвет», кнопки статуса): ✓ принять, ? под вопросом, ✕ отклонить.
-fn status_mark(s: Partstat, ink: Hsla) -> Div {
+pub(crate) fn status_mark(s: Partstat, ink: Hsla) -> Div {
     let mark = div().size(px(16.)).flex_none().flex().items_center().justify_center().rounded_full().border_1().border_color(ink).text_color(ink);
     match s {
         Partstat::Accepted => mark.child(icon(g::CHECK, 9.)),

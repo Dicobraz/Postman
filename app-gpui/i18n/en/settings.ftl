@@ -505,7 +505,7 @@ settings-cal-preview-view = { $view } · step { $step }
 settings-cal-preview-days = Working days: { $n }, hours { $from }–{ $to }.
 settings-cal-preview-meeting = New meeting — { $duration }, reminder: { $reminder }.
 settings-cal-preview-zone = Time zone: { $zone }.
-settings-cal-preview-stored = “Saved” — the choice is remembered; it takes effect in the calendar with the new views and colleagues' calendars.
+settings-cal-preview-stored = “Saved” — the choice is remembered; it takes effect in the calendar with reminders and colleagues' calendars.
 
 # Settings: General, Security, Appearance (S5-30).
 settings-nav-security = Security
