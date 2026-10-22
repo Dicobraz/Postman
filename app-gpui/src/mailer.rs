@@ -26,6 +26,7 @@ pub(crate) enum Section {
     Mail,
     Calendar,
     Contacts,
+    Tasks,
 }
 
 // --- экран ---
@@ -90,6 +91,9 @@ pub(crate) struct Mailer {
     pub(crate) settings: crate::settings::ServerSettings,
     /// Контакты и справочник — своя кэшируемая view (S4-02).
     pub(crate) contacts: Entity<crate::contacts::ContactsView>,
+    /// Задачи (S6-05) — своя кэшируемая view и командная строка раздела.
+    pub(crate) tasks: Entity<crate::tasks::TasksView>,
+    pub(crate) tasks_bar: Entity<crate::tasks::TasksBar>,
     /// «Отправить позже» и окно «Отменить» отправки (S5-06, `send_later.rs`).
     pub(crate) send_later: crate::send_later::SendLater,
     /// Сроки, напоминания, «Ждём ответа», «Исчезнет» (S5-04, `lifecycle.rs`).
@@ -156,7 +160,10 @@ impl Mailer {
         let contacts = cx.new(|cx| crate::contacts::ContactsView::new(window, cx));
         let cal_bar = cx.new(|cx| calendar::CalendarBar::new(cal.clone(), cx));
         let contacts_bar = cx.new(|cx| crate::contacts::ContactsBar::new(contacts.clone(), cx));
+        let tasks = cx.new(|cx| crate::tasks::TasksView::new(cache.clone(), window, cx));
+        let tasks_bar = cx.new(|cx| crate::tasks::TasksBar::new(tasks.clone(), cx));
         let subscriptions = vec![
+            cx.subscribe(&tasks, |this, _, action: &crate::tasks::TasksAction, cx| this.on_tasks(action, cx)),
             cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
             cx.subscribe(&cal, |this, _, action: &calendar::CalendarAction, cx| this.on_calendar(action, cx)),
             on_search,
@@ -290,6 +297,8 @@ impl Mailer {
             meetings: Default::default(),
             settings: Default::default(),
             contacts,
+            tasks,
+            tasks_bar,
             send_later: Default::default(),
             lifecycle: Default::default(),
             tabs: Default::default(),
@@ -326,6 +335,9 @@ impl Mailer {
         self.on_send_sync(ev, sent, cx);
         self.cal.update(cx, |c, cx| c.on_sync(ev, cx));
         self.contacts.update(cx, |c, cx| c.on_sync(ev, cx));
+        if let postman_core::sync::Event::Tasks(reply) = ev {
+            self.tasks.update(cx, |t, cx| t.on_reply(reply, cx));
+        }
         let created = self.meetings.on_sync(ev, cx);
         self.meetings_created(created, cx);
         self.on_settings_sync(ev, cx);
@@ -387,6 +399,16 @@ impl Mailer {
             // «Часто пишу» (S5-25) — из адресной книги переписки (собирается в фоне один раз).
             self.load_address_book(cx);
             self.contacts_frequent(cx);
+        }
+        if section == Section::Tasks {
+            // Категории — та же таблица, что у почты; письма со сроком — заново из кэша.
+            let table = self.list.read(cx).labels.for_account(None).cloned().unwrap_or_else(crate::labels::default_table);
+            self.tasks.update(cx, |t, cx| {
+                t.set_categories(table, cx);
+                if self.section != section {
+                    t.refresh(cx);
+                }
+            });
         }
         self.section = section;
         cx.notify();
@@ -450,6 +472,7 @@ impl Render for Mailer {
             Section::Mail => "Mailer MailView",
             Section::Calendar => "Mailer CalendarView",
             Section::Contacts => "Mailer ContactsView",
+            Section::Tasks => "Mailer TasksView",
         };
         let root = crate::attachments::handlers(crate::actions::handlers(div(), cx), cx)
             .key_context(context)
@@ -504,6 +527,20 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
             .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
             .on_action(cx.listener(|this, _: &view::Contacts, _, cx| this.set_section(Section::Contacts, cx)))
+            .on_action(cx.listener(|this, _: &view::Tasks, _, cx| this.set_section(Section::Tasks, cx)))
+            .on_action(cx.listener(|this, _: &commands::task::New, window, cx| {
+                if this.section != Section::Tasks {
+                    this.set_section(Section::Tasks, cx);
+                }
+                this.tasks.update(cx, |t, cx| t.new_task(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &commands::task::Complete, _, cx| this.tasks.update(cx, |t, cx| t.toggle_done(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Due, _, cx| this.tasks.update(cx, |t, cx| t.toggle_due(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Edit, window, cx| this.tasks.update(cx, |t, cx| t.rename(window, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Delete, _, cx| this.tasks.update(cx, |t, cx| t.delete(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Open, _, cx| this.tasks.update(cx, |t, cx| t.open_letter(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Next, _, cx| this.tasks.update(cx, |t, cx| t.step(1, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Prev, _, cx| this.tasks.update(cx, |t, cx| t.step(-1, cx))))
             .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {
                 this.open_meeting(None, cx);
             }))
@@ -530,6 +567,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 if this.section == Section::Contacts {
                     return this.contacts.update(cx, |c, cx| c.focus_search(window, cx));
+                }
+                if this.section == Section::Tasks {
+                    return this.tasks.update(cx, |t, cx| t.focus_search(window, cx));
                 }
                 this.search.update(cx, |s, cx| s.focus(window, cx));
             }))
@@ -613,6 +653,9 @@ impl Render for Mailer {
                 }
                 // В контактах — строка «Удалить контакт?», форма, поиск контактов.
                 if this.section == Section::Contacts && this.contacts.update(cx, |c, cx| c.escape(window, cx)) {
+                    return;
+                }
+                if this.section == Section::Tasks && this.tasks.update(cx, |t, cx| t.escape(window, cx)) {
                     return;
                 }
                 this.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -756,6 +799,7 @@ impl Mailer {
         match self.section {
             Section::Calendar => body.child(div().flex_1().min_w_0().h_full().child(self.cal.clone().cached(full()))),
             Section::Contacts => body.child(div().flex_1().min_w_0().h_full().child(self.contacts.clone().cached(full()))),
+            Section::Tasks => body.child(div().flex_1().min_w_0().h_full().child(self.tasks.clone().cached(full()))),
             Section::Mail => body,
         }
     }
@@ -766,6 +810,7 @@ impl Mailer {
         match self.section {
             Section::Calendar if free => self.cal_bar.clone().cached(style).into_any_element(),
             Section::Contacts if free => self.contacts_bar.clone().cached(style).into_any_element(),
+            Section::Tasks if free => self.tasks_bar.clone().cached(style).into_any_element(),
             _ => self.bar.clone().cached(style).into_any_element(),
         }
     }
