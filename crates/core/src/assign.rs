@@ -370,20 +370,14 @@ fn applied(own: &Task, mut t: Task, s: Step) -> Received {
 /// Письмо шага: тема и текст (Markdown → текст и HTML для людей без Postman, решение 3) — от интерфейса (Fluent),
 /// часть `text/calendar` — iTIP шага.
 pub fn draft(out: &Outgoing, from: &Address, subject: String, markdown: String) -> Draft {
+    // Шаг поручения не подписывается и не шифруется (как ответ на приглашение): остальное — по умолчанию.
     Draft {
         from: from.clone(),
         to: out.to.clone(),
-        cc: Vec::new(),
-        bcc: Vec::new(),
         subject,
         markdown,
-        in_reply_to: None,
-        references: Vec::new(),
-        attachments: Vec::new(),
         calendar: Some(CalendarPart { method: out.method.clone(), ics: out.ics.clone() }),
-        keywords: Vec::new(),
-        // Шаг поручения не подписывается (как ответ на приглашение).
-        sign: false,
+        ..Default::default()
     }
 }
 
