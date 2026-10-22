@@ -1,8 +1,15 @@
 name: CI
 
 on:
+  # PR проверяется один раз (pull_request); push — только main, чтобы ветка PR не гоняла CI дважды.
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  # Новый пуш в PR отменяет устаревший прогон.
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
