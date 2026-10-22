@@ -258,11 +258,13 @@ pub struct Security {
     pub tls13: bool,
     /// Хранить пароль в Диспетчере учётных данных Windows (иначе — спрашивать при каждом запуске).
     pub store_password: bool,
+    /// Подписывать все письма S/MIME (решение владельца №7; S5-12 Ф3): «Подписать» в новом письме включено.
+    pub sign_all: bool,
 }
 
 impl Default for Security {
     fn default() -> Self {
-        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true }
+        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true, sign_all: true }
     }
 }
 

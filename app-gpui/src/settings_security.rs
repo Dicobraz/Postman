@@ -170,6 +170,15 @@ impl SettingsView {
                 })),
                 l,
             ))
+            .child(row(
+                tr!("settings-sign-all"),
+                Some(tr!("settings-sign-all-hint")),
+                toggle("settings-sign-all", p.security.sign_all, l).on_click(cx.listener(|_, _, _, cx| {
+                    crate::prefs::update(cx, |p| p.security.sign_all = !p.security.sign_all);
+                    cx.notify();
+                })),
+                l,
+            ))
             .child(group(tr!("settings-sandbox-group"), l))
             .child(row(
                 tr!("settings-sandbox"),
