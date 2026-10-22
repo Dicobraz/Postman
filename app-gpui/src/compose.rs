@@ -753,6 +753,9 @@ pub(crate) fn size_text(n: u64) -> String {
 /// Адресная книга для подсказок: строится в фоне при первом письме, пополняется контактами с сервера.
 pub(crate) type Book = Rc<RefCell<AddressBook>>;
 
+/// Сколько адресатов в «Часто пишу» (макет «Контакты»: два десятка).
+const FREQUENT_MAX: usize = 24;
+
 /// Открытое письмо: во вкладке или ответом в области чтения.
 pub(crate) struct Opened {
     pub(crate) id: u64,
@@ -1047,14 +1050,32 @@ impl Mailer {
             book
         });
         let book = self.compose.book.clone();
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |this, cx| {
             let mut built = task.await;
-            let mut b = book.borrow_mut();
-            // Контакты с сервера, пришедшие раньше книги, — не теряем.
-            built.absorb(std::mem::take(&mut *b));
-            *b = built;
+            {
+                let mut b = book.borrow_mut();
+                // Контакты с сервера, пришедшие раньше книги, — не теряем.
+                built.absorb(std::mem::take(&mut *b));
+                *b = built;
+            }
+            // Книга собрана — «Часто пишу» в «Контактах» (S5-25).
+            let _ = this.update(cx, |m: &mut Mailer, cx| m.contacts_frequent(cx));
         })
         .detach();
+    }
+
+    /// «Часто пишу» (S5-25): адресаты переписки за 30 дней по частоте и давности — в «Контакты».
+    pub(crate) fn contacts_frequent(&mut self, cx: &mut Context<Self>) {
+        let now = jiff::Timestamp::now().as_second();
+        let list: Vec<(String, String)> = self
+            .compose
+            .book
+            .borrow()
+            .frequent(now, postman_core::contacts::FREQUENT_DAYS, FREQUENT_MAX)
+            .into_iter()
+            .map(|e| (e.name.clone(), e.email.clone()))
+            .collect();
+        self.contacts.update(cx, |c, cx| c.set_frequent(list, cx));
     }
 }
 
