@@ -23,16 +23,18 @@ pub(crate) enum Kind {
     Flag,
     Discard,
     Redirect,
+    Category,
 }
 
 const FIELDS: [(Field, &str); 3] =
     [(Field::From, "rules-field-from"), (Field::To, "rules-field-to"), (Field::Subject, "rules-field-subject")];
-const KINDS: [(Kind, &str); 5] = [
+const KINDS: [(Kind, &str); 6] = [
     (Kind::Move, "rules-kind-move"),
     (Kind::MarkRead, "rules-kind-read"),
     (Kind::Flag, "rules-kind-flag"),
     (Kind::Discard, "rules-kind-discard"),
     (Kind::Redirect, "rules-kind-redirect"),
+    (Kind::Category, "rules-kind-category"),
 ];
 
 /// Правило в редакторе: `index` — какое правило правим (`None` — новое).
@@ -46,6 +48,8 @@ pub(crate) struct Draft {
     /// Папка: (id, имя).
     pub(crate) folder: Option<(String, String)>,
     pub(crate) address: String,
+    /// Категория: ключевое слово (S5-26).
+    pub(crate) category: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +57,7 @@ pub(crate) enum DraftError {
     Value,
     Folder,
     Address,
+    Category,
 }
 
 impl DraftError {
@@ -61,6 +66,7 @@ impl DraftError {
             DraftError::Value => tr!("rules-bad-value"),
             DraftError::Folder => tr!("rules-bad-folder"),
             DraftError::Address => tr!("rules-bad-address"),
+            DraftError::Category => tr!("rules-bad-category"),
         }
     }
 }
@@ -75,6 +81,7 @@ impl Draft {
             kind: Kind::Move,
             folder: None,
             address: String::new(),
+            category: None,
         }
     }
 
@@ -92,6 +99,10 @@ impl Draft {
             Action::Redirect(to) => {
                 d.address = to.clone();
                 Kind::Redirect
+            }
+            Action::Category(keyword) => {
+                d.category = Some(keyword.clone());
+                Kind::Category
             }
         };
         d
@@ -120,6 +131,7 @@ impl Draft {
                 }
                 Action::Redirect(to.to_owned())
             }
+            Kind::Category => Action::Category(self.category.clone().ok_or(DraftError::Category)?),
         };
         Ok(Rule { enabled: self.enabled, field: self.field, value: value.to_owned(), action })
     }
@@ -135,8 +147,12 @@ pub(crate) fn apply(rules: &[Rule], index: Option<usize>, rule: Rule) -> Vec<Rul
     out
 }
 
-/// Правило словами: «Тема содержит «X» → переместить в «Y»». Папка — по id из текущих (её могли переименовать).
-pub(crate) fn describe(r: &Rule, mailboxes: &[(String, String)]) -> String {
+/// Категория для правила: (ключевое слово, имя, цвет).
+pub(crate) type CategoryChoice = (String, String, &'static str);
+
+/// Правило словами: «Тема содержит «X» → переместить в «Y»». Папка — по id из текущих (её могли переименовать),
+/// категория — по ключевому слову из таблицы (удалённая — словом).
+pub(crate) fn describe(r: &Rule, mailboxes: &[(String, String)], categories: &[CategoryChoice]) -> String {
     let when = match r.field {
         Field::From => tr!("rules-when-from", value = r.value.clone()),
         Field::To => tr!("rules-when-to", value = r.value.clone()),
@@ -151,6 +167,10 @@ pub(crate) fn describe(r: &Rule, mailboxes: &[(String, String)]) -> String {
         Action::Flag => tr!("rules-do-flag"),
         Action::Discard => tr!("rules-do-discard"),
         Action::Redirect(to) => tr!("rules-do-redirect", address = to.clone()),
+        Action::Category(keyword) => {
+            let name = categories.iter().find(|(k, _, _)| k == keyword).map_or(keyword, |(_, n, _)| n);
+            tr!("rules-do-category", category = name.clone())
+        }
     };
     tr!("rules-line", when = when, then = then)
 }
@@ -171,6 +191,8 @@ pub(crate) struct RulesPanel {
     pub(crate) state: Option<RulesState>,
     /// Папки ящика: (id, имя).
     mailboxes: Vec<(String, String)>,
+    /// Категории своего ящика (таблица S5-02).
+    categories: Vec<CategoryChoice>,
     pub(crate) editor: Option<Draft>,
     value: Entity<InputState>,
     address: Entity<InputState>,
@@ -191,6 +213,7 @@ impl RulesPanel {
     pub(crate) fn new(
         state: Option<RulesState>,
         mailboxes: Vec<(String, String)>,
+        categories: Vec<CategoryChoice>,
         live: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -210,6 +233,7 @@ impl RulesPanel {
             live,
             state,
             mailboxes,
+            categories,
             editor: None,
             value,
             address,
@@ -393,7 +417,7 @@ impl RulesPanel {
                     .flex_1()
                     .min_w_0()
                     .when(!r.enabled, |d| d.text_color(l.text2()))
-                    .child(describe(r, &self.mailboxes)),
+                    .child(describe(r, &self.mailboxes, &self.categories)),
             )
             .when(confirm, |d| {
                 d.child(div().text_color(l.error()).child(tr!("rules-delete-confirm")))
@@ -444,6 +468,19 @@ impl RulesPanel {
                 },
             ))
         });
+        let chosen = d.category.clone();
+        let categories = self.categories.iter().enumerate().map(|(n, (keyword, name, color))| {
+            let pick = keyword.clone();
+            chip(("rules-category", n), name.clone(), chosen.as_deref() == Some(keyword.as_str()))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().size(px(10.)).rounded(px(3.)).bg(l.cat(color).dot))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let pick = pick.clone();
+                    this.set_editor(cx, |d| d.category = Some(pick))
+                }))
+        });
         let busy = self.busy;
         div()
             .flex()
@@ -472,6 +509,11 @@ impl RulesPanel {
             .when(d.kind == Kind::Move, |el| {
                 el.child(
                     div().flex().flex_wrap().items_center().gap_2().child(label(tr!("rules-folder"))).children(folders),
+                )
+            })
+            .when(d.kind == Kind::Category, |el| {
+                el.child(
+                    div().flex().flex_wrap().items_center().gap_2().child(label(tr!("rules-category"))).children(categories),
                 )
             })
             .when(d.kind == Kind::Redirect, |el| {
@@ -628,6 +670,7 @@ mod tests {
             kind,
             folder: Some(("f1".into(), "Отчёты".into())),
             address: " boss@corp.example ".into(),
+            category: Some("pm.cat.tenders".into()),
         }
     }
 
@@ -646,9 +689,14 @@ mod tests {
                 "{bad}"
             );
         }
+        // Категория (S5-26): слово из таблицы; не выбрана — отказ.
+        assert_eq!(draft(Kind::Category).rule().unwrap().action, Action::Category("pm.cat.tenders".into()));
+        assert_eq!(Draft { category: None, ..draft(Kind::Category) }.rule(), Err(DraftError::Category));
         // Туда и обратно.
-        let r = draft(Kind::Redirect).rule().unwrap();
-        assert_eq!(Draft::of(3, &r).rule(), Ok(r));
+        for kind in [Kind::Redirect, Kind::Category] {
+            let r = draft(kind).rule().unwrap();
+            assert_eq!(Draft::of(3, &r).rule(), Ok(r));
+        }
     }
 
     #[test]
