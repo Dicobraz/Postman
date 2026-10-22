@@ -1,35 +1,116 @@
-# Mailbox settings on the server: automatic replies, mailbox usage (S4-05), rules (S4-07).
+# Mailbox settings on the server: automatic replies (S4-05, S5-29), mailbox usage, rules (S4-07).
 vacation-demo = Demo: automatic replies live on the server — an account is required.
 vacation-loading = Reading settings from the server…
 vacation-unsupported = The server does not support automatic replies.
-vacation-enabled = Send automatic replies
-vacation-period = Only during this time range
-vacation-from = from
+vacation-enabled = Reply automatically
+vacation-master-on = On · until you turn it off
+vacation-master-period = On · { $period }
+vacation-master-off = Off — mail arrives as usual, without a reply
+vacation-period-group = Period
+vacation-period = Only during this period
+vacation-period-on = The server turns the reply on at the start of the period and off at the end — no action needed.
+vacation-period-off = Replies from the moment you save until you turn it off.
+vacation-from = From
 vacation-to = to
+vacation-work-days = { $n ->
+    [one] { $n } working day
+   *[other] { $n } working days
+}
 vacation-date-placeholder = DD.MM.YYYY HH:MM
+vacation-day = { $wd }, { $day } { $month }
+vacation-since = from { $from }
+vacation-until = until { $to }
 vacation-subject = Subject
 vacation-subject-placeholder = Out of office
 vacation-body = Reply text
 vacation-body-placeholder = I am on leave until …; for urgent matters contact …
+vacation-tab-internal = Inside the company
+vacation-tab-external = External
+vacation-internal-hint = For colleagues — who covers for you and how to reach them
+vacation-contacts-only = Reply only to my contacts
+vacation-contacts-only-on = Other external senders get no reply: less spam and fewer leaks about your absence.
+vacation-contacts-only-off = Any external sender gets the reply, spammers included.
+vacation-markdown = Markdown
+vacation-extra-group = More
+vacation-once = Don't reply to the same sender again within { $n ->
+    [one] { $n } day
+   *[other] { $n } days
+}
+vacation-recommended = recommended
+vacation-once-on = A long thread with one person gets one automatic reply, not one per message.
+vacation-once-off = Every message gets its own reply (at most once a day — that is how Sieve works) — threads get cluttered.
+vacation-ooo = Put an “Out of office” event in the calendar
+vacation-ooo-on = For the period — an all-day “Out of office” event: colleagues see it when scheduling meetings.
+vacation-ooo-off = The calendar stays as is: when scheduling, you look free.
+vacation-ooo-title = Out of office
+vacation-cancel = Cancel
 vacation-save = Save
 vacation-saving = Saving…
+vacation-dirty = Unsaved changes
+vacation-saved-at = Saved on the server · { $time }
 vacation-saved = Automatic replies saved and turned on.
 vacation-saved-off = Automatic replies are off.
 vacation-failed = Automatic replies not saved: { $error }
 vacation-bad-from = The “from” date is not recognized: DD.MM.YYYY or DD.MM.YYYY HH:MM.
 vacation-bad-to = The “to” date is not recognized: DD.MM.YYYY or DD.MM.YYYY HH:MM.
 vacation-bad-order = The “to” date is before the “from” date.
-vacation-bar-on = Automatic replies are on: incoming mail gets an out-of-office reply.
-vacation-bar-period = Automatic replies are on from { $from } to { $to }.
-vacation-bar-from = Automatic replies are on from { $from }.
-vacation-bar-to = Automatic replies are on until { $to }.
-vacation-bar-edit = Settings
-vacation-bar-off = Turn off
-settings-quota = Mailbox: { $percent }% of { $unit ->
-    [mb] { $n } MB
-   *[gb] { $n } GB
+vacation-preview = Preview
+vacation-preview-off = Off
+vacation-preview-internal = To a colleague
+vacation-preview-external = External
+vacation-preview-to-colleague = To: a colleague @{ $domain }
+vacation-preview-to-external = To: an external sender
+vacation-preview-empty = No text — this group gets no reply.
+vacation-rule-internal = Recipients: colleagues with @{ $domain } addresses
+vacation-rule-contacts = Recipients: external senders from your contacts
+vacation-rule-everyone = Recipients: all external senders
+vacation-rule-once = The same sender — at most once in { $n ->
+    [one] { $n } day
+   *[other] { $n } days
 }
-settings-quota-warn = Mailbox is { $percent }% full: delete unneeded mail, or new mail will stop arriving.
+vacation-rule-each = A separate reply to every message
+vacation-rule-period = Active { $period }
+vacation-rule-always = Active until you turn it off
+vacation-tip = Tip
+vacation-tip-1 = Mailing lists, noreply addresses and other automatic replies get no reply — no loops and no extra mail.
+vacation-tip-2 = While automatic replies are on, the mail window shows an “Automatic replies on” bar under the command bar with a “Turn off” button.
+vacation-reach-colleagues-contacts = colleagues and external contacts
+vacation-reach-everyone = colleagues and all external senders
+vacation-reach-colleagues = colleagues only
+vacation-reach-contacts = external contacts
+vacation-reach-external = all external senders
+vacation-reach-nobody = nobody: no texts
+vacation-bar-on = Automatic replies on
+vacation-bar-until = { " " }until { $to }
+vacation-bar-edit = Edit
+vacation-bar-off = Turn off
+vacation-turned-off = Automatic replies are off
+vacation-undo = Undo
+vacation-sample-internal-subject = Out of office until Friday
+vacation-sample-internal-body = Hi all,
+
+    I am on leave **until Friday** and read mail with a delay.
+
+    For urgent matters:
+    - projects — [Ivan Petrov](mailto:i.petrov@corp.example)
+    - support — [support@corp.example](mailto:support@corp.example)
+vacation-sample-external-subject = Automatic reply: out of office until Friday
+vacation-sample-external-body = Hello,
+
+    Thank you for your message. I am out of the office until Friday and will reply when I am back.
+
+    Best regards
+settings-decimal-sep = .
+settings-quota = Mailbox: { $used } of { $limit } { $unit ->
+    [mb] MB
+   *[gb] GB
+}
+settings-quota-warn = Mailbox is { $percent }% full — { $used } of { $limit } { $unit ->
+    [mb] MB
+   *[gb] GB
+}. When it runs out, new mail will not be accepted.
+settings-quota-clean = Clean up attachments…
+status-quota-tip = { $account }: { $quota } ({ $percent }%)
 vacation-foreign-warning = The server has an active filter “{ $name }” not created in Postman: turning automatic replies on will turn it off.
 # Mail rules (S4-07).
 rules-demo = Demo: rules live on the server — an account is required.
@@ -119,7 +200,7 @@ settings-nav-rules-keywords = rules filters sieve sorting folders
 settings-hint-rules = The server runs the rules when mail is delivered, even when Postman is closed. Changes are saved at once.
 settings-nav-vacation = Automatic replies
 settings-nav-vacation-keywords = automatic replies out of office vacation leave
-settings-hint-vacation = The server sends the out-of-office reply, even when Postman is closed.
+settings-hint-vacation = The out-of-office reply is stored on the server and goes out even when Postman is closed.
 # General.
 settings-look = Appearance
 settings-theme = Theme

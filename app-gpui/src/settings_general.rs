@@ -12,7 +12,8 @@ use pets_i18n::tr;
 use postman_core::prefs::{Channel, LANGUAGES, LogLevel, Notify, QUIET_FROM, QUIET_TO, StartView};
 
 use crate::roles::Look;
-use crate::settings_tab::{SettingsView, button, group, row, seg, seg_group, toggle};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, group, row, seg, seg_group, toggle};
 
 /// Пометка «сохраняется»: выбор запомнен, действия пока нет.
 pub(crate) fn stored(l: &Look) -> Div {

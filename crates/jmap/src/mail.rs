@@ -348,6 +348,8 @@ pub enum Filter {
     Before(String),
     /// Получено не раньше (`after`, UTCDate; S5-10).
     After(String),
+    /// Размер не меньше, байт (`minSize`; «Очистить вложения…», S5-29).
+    MinSize(u64),
 }
 
 impl Filter {
@@ -370,6 +372,7 @@ impl Filter {
             Filter::Not(list) => op("NOT", list),
             Filter::Before(at) => json!({ "before": at }),
             Filter::After(at) => json!({ "after": at }),
+            Filter::MinSize(n) => json!({ "minSize": n }),
         }
     }
 }
