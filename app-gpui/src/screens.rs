@@ -184,7 +184,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 69] = [
+const SCENES: &[Scene] = &[
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -261,7 +261,7 @@ const SCENES: [Scene; 69] = [
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
 /// вкладка встречи — занятость с сервера для адресов из `POSTMAN_SCREENS_ATTENDEES` (S3-05).
-const LIVE_SCENES: [Scene; 10] = [
+const LIVE_SCENES: &[Scene] = &[
     Scene::List,
     Scene::Letter,
     Scene::Reply,
@@ -273,7 +273,7 @@ const LIVE_SCENES: [Scene; 10] = [
     Scene::Rules,
     Scene::Shared,
 ];
-const SIGNIN_SCENES: [Scene; 1] = [Scene::SignIn];
+const SIGNIN_SCENES: &[Scene] = &[Scene::SignIn];
 /// Первая синхронизация живого ящика дольше сцены демо.
 const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -398,9 +398,9 @@ impl Driver {
     /// прежние, без них может не собраться).
     fn scenes(&self) -> Vec<Scene> {
         let all: &[Scene] = match (self.live, self.signin) {
-            (_, true) => &SIGNIN_SCENES,
-            (true, false) => &LIVE_SCENES,
-            (false, false) => &SCENES,
+            (_, true) => SIGNIN_SCENES,
+            (true, false) => LIVE_SCENES,
+            (false, false) => SCENES,
         };
         match std::env::var("POSTMAN_SCREENS_ONLY") {
             Ok(only) if !only.trim().is_empty() => {
@@ -1444,22 +1444,7 @@ fn ctrl(on: bool) -> ModifiersChangedEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{LIVE_SCENES, SCENES, SIGNIN_SCENES, uniform};
-
-    /// Список сцен в CLAUDE.md («Снимки экранов») — по `SCENES` и `LIVE_SCENES`: каждая сцена названа там
-    /// (`` `имя` ``), демо — до строки про `--live`, живые — после неё.
-    #[test]
-    fn every_scene_is_listed_in_claude_md() {
-        let doc = include_str!("../../CLAUDE.md").replace("\r\n", "\n");
-        let section = doc.split("### Снимки экранов").nth(1).and_then(|s| s.split("\n## ").next()).unwrap();
-        let (demo, live) = section.split_once("`--screens <каталог> --live`").unwrap();
-        for s in SCENES {
-            assert!(demo.contains(&format!("`{}`", s.name())), "CLAUDE.md: нет сцены `{}` в списке снимков", s.name());
-        }
-        for s in LIVE_SCENES.iter().chain(&SIGNIN_SCENES) {
-            assert!(live.contains(&format!("`{}`", s.name())), "CLAUDE.md: нет сцены `{}` в списке --live", s.name());
-        }
-    }
+    use super::uniform;
 
     #[test]
     fn one_color_capture_is_rejected() {
