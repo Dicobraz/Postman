@@ -385,11 +385,15 @@ pub fn bind(cx: &mut App, prefs: &postman_core::prefs::Prefs) {
     crate::keytips::rebuild(cx, prefs);
     let mut bindings = Vec::new();
     let set = crate::keymap::KeySet::of(prefs);
+    let features = crate::features::get(cx);
     for b in crate::keymap::bound(COMMANDS, &SINGLE, &set) {
         let Some(c) = pets_commands::find(COMMANDS, b.id) else { continue };
         let context = b.context.as_deref().and_then(|s| KeyBindingContextPredicate::parse(s).ok()).map(Rc::new);
         let keys = b.keys.as_str();
-        let action = match keyed_action(c, keys) {
+        // «Нет у сервера — нет на экране» (S7-03): клавиша команды, которой у сервера нет, — тост, а не тишина.
+        let unavailable = (!crate::features::available(c.id, features))
+            .then(|| Box::new(crate::features::Unavailable) as Box<dyn Action>);
+        let action = match unavailable.or_else(|| keyed_action(c, keys)) {
             Some(a) => a,
             None => match cx.build_action(&c.action_name(), None) {
                 Ok(a) => a,

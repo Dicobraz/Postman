@@ -302,6 +302,8 @@ pub enum Event {
     BlobFailed { blob_id: String, error: String },
     /// Учётная запись отправителя и подпись (из Identity).
     Me { address: Address, signature: String },
+    /// Что умеет сервер (ADR 0003, S7-03): интерфейс прячет то, чего нет. Приходит сразу после входа.
+    Features(crate::model::Features),
     /// Адреса, от которых можно отправить письмо (S4-06): свои Identity и Identity общих ящиков.
     Senders(Vec<Sender>),
     /// Личные контакты (имя, адрес) — для автодополнения.
@@ -652,6 +654,7 @@ async fn run(
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
     let client = Client::connect(&account.url, (&account.auth).into()).await.map_err(|e| SyncError::new(Stage::Connect, &e))?;
     notify(Event::Status(Status::SignedIn { user: client.session().username.clone() }));
+    notify(Event::Features(crate::backend::jmap::features(&client)));
     let own_id = client.mail_account().map_err(|e| SyncError::new(Stage::Connect, &e))?.to_string();
 
     // Общие и делегированные ящики (S4-06) — аккаунты сессии, кроме своего.

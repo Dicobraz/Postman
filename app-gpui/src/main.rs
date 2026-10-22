@@ -14,6 +14,7 @@ mod buttons;
 mod cal_model;
 mod calendar;
 mod commands;
+mod features;
 mod ir_view;
 #[cfg(test)]
 mod keys_doc;

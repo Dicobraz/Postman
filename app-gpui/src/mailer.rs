@@ -30,6 +30,18 @@ pub(crate) enum Section {
     Tasks,
 }
 
+impl Section {
+    /// Команда рейла этого модуля.
+    pub(crate) fn command(self) -> &'static str {
+        match self {
+            Section::Mail => "view.mail",
+            Section::Calendar => "view.calendar",
+            Section::Contacts => "view.contacts",
+            Section::Tasks => "view.tasks",
+        }
+    }
+}
+
 // --- экран ---
 
 /// Экран почты: связывает части, держит хоткеи, поиск, календарь и строку состояния.
@@ -351,6 +363,9 @@ impl Mailer {
         if let postman_core::sync::Event::Me { address, .. } = ev {
             crate::shared::set_me(Some(address.email.clone()), cx);
         }
+        if let postman_core::sync::Event::Features(f) = ev {
+            self.set_features(*f, cx);
+        }
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
         self.list.update(cx, |l, cx| l.on_sync(ev, cx));
         let sent = self.compose.on_sync(ev, cx);
@@ -425,6 +440,20 @@ impl Mailer {
             crate::bar::Scope::All => None,
             crate::bar::Scope::Folder => self.list.read(cx).mailbox.clone(),
         }
+    }
+
+    /// Что умеет сервер (S7-03, `features.rs`): открыт модуль, которого у сервера нет, — назад в «Почту».
+    pub(crate) fn set_features(&mut self, features: postman_core::model::Features, cx: &mut Context<Self>) {
+        crate::features::set(features, cx);
+        if !crate::features::available(self.section.command(), features) {
+            self.set_section(Section::Mail, cx);
+        }
+        cx.notify();
+    }
+
+    /// «Нет у сервера этой учётной записи» — клавиша команды, которой у сервера нет (`features::Unavailable`).
+    fn unavailable(&mut self, cx: &mut Context<Self>) {
+        self.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("feature-unavailable"), cx));
     }
 
     pub(crate) fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -578,6 +607,7 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &mail::New, _, cx| {
                 this.open_compose(Default::default(), cx);
             }))
+            .on_action(cx.listener(|this, _: &crate::features::Unavailable, _, cx| this.unavailable(cx)))
             .on_action(cx.listener(|this, _: &view::Mail, _, cx| this.set_section(Section::Mail, cx)))
             .on_action(cx.listener(|this, _: &view::Calendar, _, cx| this.set_section(Section::Calendar, cx)))
             .on_action(cx.listener(|this, _: &view::Contacts, _, cx| this.set_section(Section::Contacts, cx)))

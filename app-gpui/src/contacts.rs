@@ -1645,6 +1645,10 @@ impl Render for ContactsBar {
             .on_click(|_, window, cx| window.dispatch_action(Box::new(cmd::New), cx));
         // Клавиши — подсказкой и KeyTips (S5-18), не в тексте кнопки и поля.
         let new = crate::keytips::command(new, "contacts.new", Some(tr!("contacts-new")), &l, cx);
+        // «Нет у сервера — нет на экране» (S7-03): без личных контактов — без кнопок правки, без календаря — без «Встречи».
+        let features = crate::features::get(cx);
+        let personal = crate::features::available("contacts.new", features);
+        let meet = crate::features::available("contacts.meeting", features);
         let search = Input::new(&search_state).prefix(icon(g::SEARCH, 14.).text_color(l.text3()));
         div()
             .size_full()
@@ -1653,19 +1657,23 @@ impl Render for ContactsBar {
             .gap(px(2.))
             .px(px(12.))
             .text_color(l.text())
-            .child(new)
+            .when(personal, |d| d.child(new))
             .child(action("contacts-write", g::MAIL, "contacts-write", has_mail, || Box::new(cmd::Write)))
-            .child(action("contacts-meet", g::CALENDAR, "contacts-meet", has_mail, || Box::new(cmd::Meeting)))
+            .when(meet, |d| d.child(action("contacts-meet", g::CALENDAR, "contacts-meet", has_mail, || Box::new(cmd::Meeting))))
             .child(action("contacts-copy", g::COPY, "contacts-copy", has_mail, || Box::new(cmd::CopyAddress)))
-            .child(div().w(px(1.)).h(px(20.)).mx(px(8.)).bg(l.stroke()))
-            .child(action(
-                "contacts-edit",
-                g::EDIT,
-                if kind.is_some_and(|k| k != Kind::Contact) { "contacts-add-mine" } else { "contacts-edit" },
-                kind.is_some(),
-                || Box::new(cmd::Edit),
-            ))
-            .child(action("contacts-delete", g::DELETE, "contacts-delete", kind == Some(Kind::Contact), || Box::new(cmd::Delete)))
+            .when(personal, |d| {
+                d.child(div().w(px(1.)).h(px(20.)).mx(px(8.)).bg(l.stroke()))
+                    .child(action(
+                        "contacts-edit",
+                        g::EDIT,
+                        if kind.is_some_and(|k| k != Kind::Contact) { "contacts-add-mine" } else { "contacts-edit" },
+                        kind.is_some(),
+                        || Box::new(cmd::Edit),
+                    ))
+                    .child(action("contacts-delete", g::DELETE, "contacts-delete", kind == Some(Kind::Contact), || {
+                        Box::new(cmd::Delete)
+                    }))
+            })
             .child(div().flex_1())
             .child(crate::keytips::badge(
                 div().ml(px(12.)).w(px(300.)).flex_none().child(search),

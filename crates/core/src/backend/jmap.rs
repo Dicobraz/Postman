@@ -1,6 +1,27 @@
 //! Путь JMAP (Stalwart): типы `postman_jmap` ↔ нейтральная модель, один к одному.
 
-use crate::model::{Auth, ContactCard, Filter, Principal, Release, VacationResponse};
+use crate::model::{Auth, ContactCard, Feature, Features, Filter, Principal, Release, VacationResponse};
+
+/// Что умеет сервер JMAP — по capabilities сессии. Задачи живут в календаре (S6-01), поэтому идут за ним.
+pub fn features(client: &postman_jmap::Client) -> Features {
+    features_of(&|c| client.has(c))
+}
+
+fn features_of(has: &dyn Fn(&str) -> bool) -> Features {
+    use postman_jmap::{CALENDARS, CONTACTS, PRINCIPALS, PRINCIPALS_AVAILABILITY, QUOTA, SIEVE, VACATION_RESPONSE};
+    [
+        (Feature::Calendar, CALENDARS),
+        (Feature::Tasks, CALENDARS),
+        (Feature::Contacts, CONTACTS),
+        (Feature::Directory, PRINCIPALS),
+        (Feature::FreeBusy, PRINCIPALS_AVAILABILITY),
+        (Feature::Rules, SIEVE),
+        (Feature::Autoreply, VACATION_RESPONSE),
+        (Feature::Quota, QUOTA),
+    ]
+    .into_iter()
+    .fold(Features::NONE, |f, (feature, capability)| f.with(feature, has(capability)))
+}
 
 impl From<&Auth> for postman_jmap::Auth {
     fn from(a: &Auth) -> Self {
@@ -136,6 +157,16 @@ mod tests {
         ]);
         assert_eq!(postman_jmap::Filter::from(&f), j);
         assert_eq!(postman_jmap::Filter::from(&f).to_json(), j.to_json());
+    }
+
+    #[test]
+    fn features_follow_capabilities() {
+        assert_eq!(features_of(&|_| true), Features::ALL);
+        assert_eq!(features_of(&|_| false), Features::NONE);
+        let mail_only = features_of(&|c| c == postman_jmap::CORE || c == postman_jmap::MAIL);
+        assert!(Feature::ALL.iter().all(|&f| !mail_only.has(f)));
+        let no_sieve = features_of(&|c| c != postman_jmap::SIEVE);
+        assert!(!no_sieve.has(Feature::Rules) && no_sieve.has(Feature::Autoreply) && no_sieve.has(Feature::Tasks));
     }
 
     #[test]
