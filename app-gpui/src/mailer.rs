@@ -396,6 +396,9 @@ impl Mailer {
         }
         if section == Section::Contacts && self.section != section {
             self.contacts.update(cx, |c, cx| c.refresh(cx));
+            // «Часто пишу» (S5-25) — из адресной книги переписки (собирается в фоне один раз).
+            self.load_address_book(cx);
+            self.contacts_frequent(cx);
         }
         if section == Section::Tasks {
             // Категории — та же таблица, что у почты; письма со сроком — заново из кэша.

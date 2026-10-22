@@ -114,6 +114,8 @@ enum Scene {
     Contacts,
     /// Форма правки первого контакта (демо).
     ContactEdit,
+    /// «Часто пишу» (S5-25): адресаты переписки по частоте, первая строка выбрана.
+    ContactsFrequent,
     /// Модуль «Задачи» (S6-05): «Сегодня», карточка задачи с подзадачами и заметкой (демо).
     Tasks,
     /// «Сегодня» с выбранной просроченной задачей: «Просрочено» сверху, метка срока в карточке.
@@ -186,7 +188,7 @@ enum Scene {
     KeyTipsSingle,
 }
 
-const SCENES: [Scene; 70] = [
+const SCENES: [Scene; 71] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -219,6 +221,7 @@ const SCENES: [Scene; 70] = [
     Scene::Assistant,
     Scene::Contacts,
     Scene::ContactEdit,
+    Scene::ContactsFrequent,
     Scene::Tasks,
     Scene::TasksToday,
     Scene::TasksProject,
@@ -320,6 +323,7 @@ impl Scene {
             Scene::MeetingBlue => "meeting-blue",
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
+            Scene::ContactsFrequent => "contacts-frequent",
             Scene::Tasks => "tasks",
             Scene::TasksToday => "tasks-today",
             Scene::TasksProject => "tasks-project",
@@ -743,6 +747,13 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             });
         }
         Scene::ContactEdit => m.contacts.update(cx, |c, cx| c.edit_selected(window, cx)),
+        Scene::ContactsFrequent => {
+            // Из правки — назад к карточке; «Часто пишу» — из адресной книги переписки (собирается в фоне).
+            m.contacts.update(cx, |c, cx| c.escape(window, cx));
+            m.load_address_book(cx);
+            m.contacts_frequent(cx);
+            m.contacts.update(cx, |c, cx| c.show_frequent(cx));
+        }
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             use postman_core::tasks::List;
             m.set_section(Section::Tasks, cx);
@@ -1085,6 +1096,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Contacts && c.ready()
         }
         Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
+        Scene::ContactsFrequent => m.contacts.read(cx).frequent_shown() && m.contacts.read(cx).ready(),
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
@@ -1196,6 +1208,12 @@ const THREAD_CHILD: &str = "chain1";
 
 /// Шаг ожидания сцены (перед проверкой готовности): то, что можно сделать только после фоновой работы.
 fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
+    if let Scene::ContactsFrequent = scene {
+        // Книга собирается в фоне: пока «Часто пишу» пуст — открыть снова, когда придёт.
+        if !m.contacts.read(cx).frequent_shown() {
+            m.contacts.update(cx, |c, cx| c.show_frequent(cx));
+        }
+    }
     if let Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted = scene {
         // Подпись проверена — раскрыть карточку, как щелчок по значку.
         m.reading.update(cx, |r, cx| {
