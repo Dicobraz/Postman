@@ -1519,10 +1519,13 @@ fn row(ix: usize, e: &Entry, selected: bool, external: bool, l: &Look, cx: &mut 
         .gap(px(10.))
         .pl(px(14.))
         .pr(px(12.))
+        .relative()
         .border_b_1()
         .border_color(l.border())
         .cursor_pointer()
-        .when(selected, |d| d.bg(l.picked()))
+        .when(selected, |d| {
+            d.bg(l.selected()).child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(l.accent()))
+        })
         .when(!selected, |d| d.hover(|d| d.bg(l.hover())))
         .child(avatar(&name, 36., l))
         .child(

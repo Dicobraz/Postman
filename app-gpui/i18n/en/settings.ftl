@@ -210,6 +210,7 @@ settings-cat-key-taken = The key belongs to “{ $name }”
 settings-cat-new = New category
 settings-cat-edit = Category
 settings-cat-inplace = — edited in place
+settings-cat-colors-none = No free color left: all { $total } are taken. Delete a category or change its color.
 settings-cat-colors-free = Free colors: { $n } of { $total }. Crossed-out ones are too close to taken colors or reserved.
 settings-cat-color-near = Too close to the color of “{ $name }” — they would be confused in the list.
 settings-cat-color-threat = Taken: red is for security threats only.

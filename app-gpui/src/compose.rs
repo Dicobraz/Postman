@@ -908,7 +908,7 @@ impl Mailer {
             .read(cx)
             .labels
             .for_account(account)
-            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), postman_core::palette::resolve(&c.color))).collect())
+            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.shown_color())).collect())
             .unwrap_or_default();
         let place = if how.letter.is_some() { Place::Inline } else { Place::Tab };
         let open = Open {
