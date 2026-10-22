@@ -1,29 +1,17 @@
-//! Палитра категорий и меток (S5-02, `docs/DESIGN.md` «Цвет», решение владельца №5 в `docs/specs/S5.md`):
-//! «общие цвета» Fluent 2 (shared colors) — общеупотребимая палитра Microsoft 365, а не своя.
+//! Палитра категорий и меток (S5-02, S5-31): свои токены `docs/DESIGN.md` «Токены цвета» — решение владельца
+//! 2026-10-21 (вечер, `docs/specs/S0-decisions.md`), заменило «общие цвета» Fluent 2.
 //!
-//! У каждого цвета Fluent — ряд оттенков (`shade50…tint60`); роли берутся токенами Fluent UI v9
-//! `colorPalette<Цвет>…` для светлой и тёмной темы:
+//! Пять цветов таблицы — синий, зелёный, розовый бренда, графит, серый; у каждого точка (и полоса в строке письма),
+//! подложка и текст метки для светлой и тёмной темы. Бирюзы нет. Цветов пять — шестой категории цвета нет (решение
+//! владельца 2026-10-22, новые цвета — через дизайн).
 //!
-//! | Роль | Токен Fluent | Светлая | Тёмная |
-//! |---|---|---|---|
-//! | точка и полоса в строке письма | `Background3` (заливка) | `primary` | `primary` |
-//! | подложка метки | `Background2` | `tint40` | `shade30` |
-//! | текст метки | `Foreground2` | `shade30` | `tint40` |
-//! | обводка (выбор цвета в настройках) | `BorderActive` | `primary` | `tint30` |
+//! Красный — только безопасность, янтарный — только сроки ([`Reserved`]): подложка и текст — из таблицы, точки —
+//! прежние (вне таблицы). В одной таблице категорий цвета не близки (ΔE2000 ≥ [`MIN_DELTA_E`], [`clash`], [`check`]);
+//! принятое исключение — [`EXEMPT`] (розовый бренда и красный безопасности).
 //!
-//! Полоса — заливка, как у бейджа Fluent с заливкой (`Background3`): в тёмной теме это тот же `primary`, приглушены
-//! крупные заливки — подложки меток (`shade30`), как в DESIGN.md.
-//!
-//! Красный — только безопасность, янтарный (`marigold`) — только сроки ([`Reserved`]). Категории берут только цвета,
-//! далёкие от них (ΔE2000 ≥ [`MIN_DELTA_E`], [`usable`]): красные (`darkRed`, `cranberry`, `pumpkin`, `magenta`)
-//! и янтарные (`peach`, `gold`, `brass`, `brown`) из выбора выпадают. В одной таблице категорий цвета тоже не близки
-//! ([`clash`], [`check`]).
-//!
-//! Значения — `@fluentui/tokens` 9.x (`src/global/colors.ts`, ряды `sharedColors`; роли —
-//! `src/alias/lightColorPalette.ts`, `darkColorPalette.ts`).
-//!
-//! Fluent UI: Copyright (c) Microsoft Corporation. Лицензия MIT
-//! (<https://github.com/microsoft/fluentui/blob/master/LICENSE>); значения цветов взяты оттуда с этим уведомлением.
+//! Цвета категорий, сохранённые прежними версиями (имена Fluent: `darkGreen`, `lightTeal`…), рисуются ближайшим цветом
+//! таблицы ([`LEGACY`], [`resolve`]); категории по умолчанию — своим цветом по имени (`labels::Category::shown_color`).
+//! При правке категории сохраняется новое имя.
 
 use std::sync::OnceLock;
 
@@ -54,83 +42,87 @@ pub struct Oklch {
 /// Цвета роли в теме.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Swatch {
-    /// Точка у фильтра и полоса слева в строке письма (`Background3`).
+    /// Точка у фильтра и полоса слева в строке письма.
     pub dot: Rgb,
-    /// Текст метки (`Foreground2`).
+    /// Текст метки.
     pub text: Rgb,
-    /// Подложка метки (`Background2`).
+    /// Подложка метки.
     pub bg: Rgb,
-    /// Обводка выбранного (`BorderActive`).
-    pub border: Rgb,
 }
 
-/// Общий цвет Fluent 2: имя и оттенки ряда, из которых собраны роли.
+/// Цвет категории: имя (так он хранится в таблице категорий на сервере) и цвета светлой и тёмной темы.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color {
-    /// Имя Fluent (`blue`, `darkGreen`) — так цвет хранится в таблице категорий на сервере.
     pub key: &'static str,
-    pub shade30: Rgb,
-    pub primary: Rgb,
-    pub tint30: Rgb,
-    pub tint40: Rgb,
+    pub light: Swatch,
+    pub dark: Swatch,
 }
 
-const fn fluent(key: &'static str, shade30: Rgb, primary: Rgb, tint30: Rgb, tint40: Rgb) -> Color {
-    Color { key, shade30, primary, tint30, tint40 }
+/// Точка, подложка, текст — в порядке таблицы DESIGN.
+const fn sw(dot: Rgb, bg: Rgb, text: Rgb) -> Swatch {
+    Swatch { dot, text, bg }
 }
 
 impl Color {
     pub fn swatch(&self, theme: Theme) -> Swatch {
         match theme {
-            Theme::Light => Swatch { dot: self.primary, text: self.shade30, bg: self.tint40, border: self.primary },
-            Theme::Dark => Swatch { dot: self.primary, text: self.tint40, bg: self.shade30, border: self.tint30 },
+            Theme::Light => self.light,
+            Theme::Dark => self.dark,
         }
     }
 }
 
-/// Общие цвета Fluent 2 в порядке Fluent (статусные `red`, `marigold`, `berry` и цвета персон).
+pub const BLUE: &str = "blue";
+pub const GREEN: &str = "green";
+/// Розовый бренда.
+pub const PINK: &str = "pink";
+pub const GRAPHITE: &str = "graphite";
+pub const GREY: &str = "grey";
+/// Нейтральный: метки Thunderbird вне таблицы, служебные метки, неизвестный цвет.
+pub const NEUTRAL: &str = GREY;
+
+/// Цвета категорий — строка «Категории» таблицы DESIGN, по её порядку.
 pub const PALETTE: &[Color] = &[
-    fluent("red", 0x751D1F, 0xD13438, 0xE37D80, 0xF1BBBC),
-    fluent("darkRed", 0x420610, 0x750B1C, 0xAC4F5E, 0xD69CA5),
-    fluent("cranberry", 0x6E0811, 0xC50F1F, 0xDC626D, 0xEEACB2),
-    fluent("pumpkin", 0x712D09, 0xCA5010, 0xDF8E64, 0xEFC4AD),
-    fluent("peach", 0x8F4E00, 0xFF8C00, 0xFFBA66, 0xFFDDB3),
-    fluent("marigold", 0x835B00, 0xEAA300, 0xF2C661, 0xF9E2AE),
-    fluent("gold", 0x6C5700, 0xC19C00, 0xDAC157, 0xECDFA5),
-    fluent("brass", 0x553E06, 0x986F0B, 0xC1A256, 0xE0CEA2),
-    fluent("brown", 0x50301A, 0x8E562E, 0xBB8F6F, 0xDDC3B0),
-    fluent("forest", 0x294903, 0x498205, 0x85B44C, 0xBDD99B),
-    fluent("seafoam", 0x00723B, 0x00CC6A, 0x5AE0A0, 0xA8F0CD),
-    fluent("darkGreen", 0x063B06, 0x0B6A0B, 0x4DA64D, 0x9AD29A),
-    fluent("lightTeal", 0x00666D, 0x00B7C3, 0x58D3DB, 0xA6E9ED),
-    fluent("teal", 0x02494C, 0x038387, 0x4CB4B7, 0x9BD9DB),
-    fluent("steel", 0x00333F, 0x005B70, 0x4496A9, 0x94C8D4),
-    fluent("blue", 0x004377, 0x0078D4, 0x5CAAE5, 0xA9D3F2),
-    fluent("royalBlue", 0x002C4E, 0x004E8C, 0x4A89BA, 0x9ABFDC),
-    fluent("cornflower", 0x2C3C85, 0x4F6BED, 0x93A4F4, 0xC8D1FA),
-    fluent("navy", 0x001665, 0x0027B4, 0x546FD2, 0xA3B2E8),
-    fluent("lavender", 0x3F3682, 0x7160E8, 0xA79CF1, 0xD2CCF8),
-    fluent("purple", 0x341A51, 0x5C2E91, 0x9470BD, 0xC6B1DE),
-    fluent("grape", 0x4C0D55, 0x881798, 0xB55FC1, 0xD9A7E0),
-    fluent("berry", 0x6D2064, 0xC239B3, 0xDA7ED0, 0xEDBBE7),
-    fluent("lilac", 0x63276D, 0xB146C2, 0xCF87DA, 0xE6BFED),
-    fluent("pink", 0x80215D, 0xE43BA6, 0xEF85C8, 0xF7C0E3),
-    fluent("magenta", 0x6B0043, 0xBF0077, 0xD957A8, 0xECA5D1),
-    fluent("plum", 0x43002B, 0x77004D, 0xAD4589, 0xD696C0),
-    fluent("beige", 0x444241, 0x7A7574, 0xAFABAA, 0xD7D4D4),
-    fluent("mink", 0x343231, 0x5D5A58, 0x9E9B99, 0xCECCCB),
-    fluent("platinum", 0x3B4447, 0x69797E, 0xA0ADB2, 0xCDD6D8),
-    fluent("anchor", 0x202427, 0x394146, 0x808A90, 0xBCC3C7),
+    Color { key: BLUE, light: sw(0x4687D8, 0xDFF0FF, 0x234E82), dark: sw(0x689BDB, 0x23364F, 0xBFDDFF) },
+    Color { key: GREEN, light: sw(0x5F983A, 0xE5F4DD, 0x34591B), dark: sw(0x709349, 0x2A3B20, 0xBAD9AB) },
+    Color { key: PINK, light: sw(0xE4107F, 0xFCE4EF, 0x8C0B4E), dark: sw(0xD2569A, 0x3A1A2A, 0xF0A8CA) },
+    Color { key: GRAPHITE, light: sw(0x5A5A5A, 0xEBEBEB, 0x3D3D3D), dark: sw(0xCDCDCD, 0x3A3A3A, 0xE0E0E0) },
+    Color { key: GREY, light: sw(0xB7B7B7, 0xF5F5F5, 0x616161), dark: sw(0x5C5C5C, 0x323232, 0xA6A6A6) },
 ];
 
-/// Цвета категорий по умолчанию (DESIGN.md «Цвет»): синий, зелёный, фиолетовый, бирюзовый, серый — подобраны так,
-/// чтобы любые два и занятые цвета различались на ΔE ≥ 25.
-pub const BLUE: &str = "blue";
-pub const GREEN: &str = "darkGreen";
-pub const VIOLET: &str = "grape";
-pub const TEAL: &str = "lightTeal";
-/// Нейтральный серый: метки Thunderbird вне таблицы, служебные метки, неизвестный цвет.
-pub const NEUTRAL: &str = "mink";
+/// Прежние цвета (общие цвета Fluent 2, S5-02) → ближайший цвет таблицы: наименьшая ΔE2000 точки `primary` Fluent
+/// (одна на обе темы) к точке светлой темы. `blue` и `pink` — те же имена в новой палитре.
+pub const LEGACY: &[(&str, &str)] = &[
+    ("red", PINK),
+    ("darkRed", GRAPHITE),
+    ("cranberry", PINK),
+    ("pumpkin", GRAPHITE),
+    ("peach", GREY),
+    ("marigold", GREY),
+    ("gold", GREEN),
+    ("brass", GRAPHITE),
+    ("brown", GRAPHITE),
+    ("forest", GREEN),
+    ("seafoam", GREEN),
+    ("darkGreen", GREEN),
+    ("lightTeal", GREY),
+    ("teal", GRAPHITE),
+    ("steel", GRAPHITE),
+    ("royalBlue", GRAPHITE),
+    ("cornflower", BLUE),
+    ("navy", BLUE),
+    ("lavender", BLUE),
+    ("purple", GRAPHITE),
+    ("grape", PINK),
+    ("berry", PINK),
+    ("lilac", PINK),
+    ("magenta", PINK),
+    ("plum", PINK),
+    ("beige", GRAPHITE),
+    ("mink", GRAPHITE),
+    ("platinum", GRAPHITE),
+    ("anchor", GRAPHITE),
+];
 
 /// Занятые цвета: в категориях их и близких к ним не бывает.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,18 +135,30 @@ pub enum Reserved {
 
 impl Reserved {
     pub const ALL: [Reserved; 2] = [Reserved::Threat, Reserved::Deadline];
-
-    /// Цвет Fluent, которым занят.
-    pub fn key(self) -> &'static str {
-        match self {
-            Reserved::Threat => "red",
-            Reserved::Deadline => "marigold",
-        }
-    }
 }
 
-/// Цвет по имени Fluent (регистр как у Fluent: `darkGreen`).
+/// Угроза: подложка и текст — таблица DESIGN; точка и полоса — вне таблицы (прежний красный Fluent).
+const THREAT: (Swatch, Swatch) = (sw(0xD13438, 0xFFE6E3, 0x7A3430), sw(0xD13438, 0x4C2B28, 0xF9BDB7));
+/// Срок: текст «срок впереди», подложка «просрочено» — таблица DESIGN; точка — вне таблицы (прежний янтарный Fluent).
+const DEADLINE: (Swatch, Swatch) = (sw(0xEAA300, 0xF8DEA8, 0x664700), sw(0xEAA300, 0x6C5005, 0xE3CB99));
+
+/// Пары «цвет — занятый цвет» ближе [`MIN_DELTA_E`], принятые владельцем, и их нижняя граница ΔE (в обеих темах):
+/// розовый бренда и красный безопасности (≈ 19 и 23,5; DESIGN «Цвет», строка «Исключение», PR #60).
+pub const EXEMPT: &[(&str, Reserved, f64)] = &[(PINK, Reserved::Threat, 18.0)];
+
+
+/// Имя цвета таблицы для сохранённого имени: своё, прежнее ([`LEGACY`]) или `None`.
+fn canonical(key: &str) -> Option<&'static str> {
+    PALETTE
+        .iter()
+        .find(|c| c.key == key)
+        .map(|c| c.key)
+        .or_else(|| LEGACY.iter().find(|(old, _)| *old == key).map(|(_, new)| *new))
+}
+
+/// Цвет по сохранённому имени (своему или прежнему).
 pub fn color(key: &str) -> Option<&'static Color> {
+    let key = canonical(key)?;
     PALETTE.iter().find(|c| c.key == key)
 }
 
@@ -163,9 +167,10 @@ fn neutral() -> &'static Color {
     color(NEUTRAL).unwrap_or(&PALETTE[PALETTE.len() - 1])
 }
 
-/// Имя цвета для отрисовки: неизвестное (таблица из новой версии, правка руками) — нейтральный.
+/// Имя цвета для отрисовки: прежний — ближайший из таблицы, неизвестный (таблица из новой версии, правка руками) —
+/// нейтральный.
 pub fn resolve(key: &str) -> &'static str {
-    color(key).map_or(NEUTRAL, |c| c.key)
+    canonical(key).unwrap_or(NEUTRAL)
 }
 
 /// Цвета роли в теме; неизвестный цвет — нейтральный.
@@ -175,7 +180,14 @@ pub fn swatch(key: &str, theme: Theme) -> Swatch {
 
 /// Цвета занятого цвета (угроза, срок) в теме.
 pub fn reserved(r: Reserved, theme: Theme) -> Swatch {
-    swatch(r.key(), theme)
+    let (light, dark) = match r {
+        Reserved::Threat => THREAT,
+        Reserved::Deadline => DEADLINE,
+    };
+    match theme {
+        Theme::Light => light,
+        Theme::Dark => dark,
+    }
 }
 
 /// С чем цвет слишком близок.
@@ -189,28 +201,37 @@ pub enum Clash {
     Unknown,
 }
 
-/// Наименьшая ΔE точек двух цветов по темам.
-fn distance(a: &Color, b: &Color) -> f64 {
-    Theme::ALL.iter().map(|&t| delta_e(a.swatch(t).dot, b.swatch(t).dot)).fold(f64::INFINITY, f64::min)
+/// Наименьшая ΔE точек двух цветов категорий по темам, если она меньше [`MIN_DELTA_E`].
+fn too_close(a: &Color, b: &Color) -> Option<f64> {
+    Theme::ALL
+        .iter()
+        .map(|&t| delta_e(a.swatch(t).dot, b.swatch(t).dot))
+        .filter(|&d| d < MIN_DELTA_E)
+        .min_by(f64::total_cmp)
 }
 
-/// Ближайший занятый цвет, если он ближе [`MIN_DELTA_E`].
+/// Нижняя граница ΔE цвета `key` к занятому `r`.
+fn reserved_min(key: &str, r: Reserved) -> f64 {
+    EXEMPT.iter().find(|e| e.0 == key && e.1 == r).map_or(MIN_DELTA_E, |e| e.2)
+}
+
+/// Ближайший занятый цвет, если он ближе допустимого в какой-либо теме.
 fn near_reserved(c: &Color) -> Option<(Reserved, f64)> {
     Reserved::ALL
         .iter()
-        .filter_map(|&r| color(r.key()).map(|rc| (r, distance(c, rc))))
-        .filter(|&(_, d)| d < MIN_DELTA_E)
+        .flat_map(|&r| Theme::ALL.map(|t| (r, delta_e(c.swatch(t).dot, reserved(r, t).dot))))
+        .filter(|&(r, d)| d < reserved_min(c.key, r))
         .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
-/// Цвета, которые можно дать категории: далёкие от красного и янтарного в обеих темах (порядок Fluent).
+/// Цвета, которые можно дать категории: далёкие от красного и янтарного в обеих темах (порядок таблицы).
 pub fn usable() -> &'static [&'static str] {
     static U: OnceLock<Vec<&'static str>> = OnceLock::new();
     U.get_or_init(|| PALETTE.iter().filter(|c| near_reserved(c).is_none()).map(|c| c.key).collect())
 }
 
 /// Можно ли дать категории цвет `key`, когда у других категорий таблицы цвета `others`: первое, к чему он ближе
-/// [`MIN_DELTA_E`] в какой-либо теме, и разница; `None` — можно. Тот же цвет в `others` — разница 0.
+/// допустимого в какой-либо теме, и разница; `None` — можно. Тот же цвет в `others` — разница 0.
 pub fn clash<S: AsRef<str>>(key: &str, others: &[S]) -> Option<(Clash, f64)> {
     let Some(c) = color(key) else { return Some((Clash::Unknown, 0.0)) };
     if let Some((r, d)) = near_reserved(c) {
@@ -219,13 +240,12 @@ pub fn clash<S: AsRef<str>>(key: &str, others: &[S]) -> Option<(Clash, f64)> {
     others
         .iter()
         .filter_map(|o| color(o.as_ref()))
-        .map(|o| (o, distance(c, o)))
-        .filter(|&(_, d)| d < MIN_DELTA_E)
+        .filter_map(|o| too_close(c, o).map(|d| (o, d)))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(o, d)| (Clash::Color(o.key), d))
 }
 
-/// Весь список: любые два цвета и занятые цвета различимы. Ошибка — первый цвет, который ближе [`MIN_DELTA_E`]
+/// Весь список: любые два цвета и занятые цвета различимы. Ошибка — первый цвет, который ближе допустимого
 /// к одному из предыдущих (или к занятому).
 pub fn check<S: AsRef<str>>(keys: &[S]) -> Result<(), (String, Clash, f64)> {
     for (i, k) in keys.iter().enumerate() {
@@ -395,91 +415,135 @@ mod tests {
         assert!((w.l - 1.0).abs() < 1e-3 && w.c < 1e-3);
     }
 
-    /// Все 31 общий цвет Fluent 2, имена без повторов; роли — токены Fluent (светлая и тёмная тема).
+    /// Пять цветов таблицы DESIGN, имена без повторов; прежние имена Fluent — к ближайшему цвету таблицы.
     #[test]
-    fn palette_is_fluent_shared_colors() {
-        assert_eq!(PALETTE.len(), 31);
-        for (i, c) in PALETTE.iter().enumerate() {
-            assert!(PALETTE[..i].iter().all(|o| o.key != c.key), "{} дважды", c.key);
-        }
+    fn palette_is_the_design_table() {
+        let keys: Vec<&str> = PALETTE.iter().map(|c| c.key).collect();
+        assert_eq!(keys, [BLUE, GREEN, PINK, GRAPHITE, GREY]);
         let blue = swatch(BLUE, Theme::Light);
-        assert_eq!(blue, Swatch { dot: 0x0078D4, text: 0x004377, bg: 0xA9D3F2, border: 0x0078D4 });
+        assert_eq!(blue, Swatch { dot: 0x4687D8, text: 0x234E82, bg: 0xDFF0FF });
         let dark = swatch(BLUE, Theme::Dark);
-        assert_eq!(dark, Swatch { dot: 0x0078D4, text: 0xA9D3F2, bg: 0x004377, border: 0x5CAAE5 });
-        // Неизвестный цвет — нейтральный.
+        assert_eq!(dark, Swatch { dot: 0x689BDB, text: 0xBFDDFF, bg: 0x23364F });
+        // Неизвестный цвет — нейтральный; прежний — ближайший из таблицы; бирюзы нет.
         assert_eq!(swatch("chartreuse", Theme::Dark), swatch(NEUTRAL, Theme::Dark));
         assert_eq!(resolve("chartreuse"), NEUTRAL);
-        assert_eq!(resolve("teal"), "teal");
-        assert_eq!(reserved(Reserved::Threat, Theme::Light).dot, 0xD13438);
-        assert_eq!(reserved(Reserved::Deadline, Theme::Light).dot, 0xEAA300);
+        assert_eq!(resolve("teal"), GRAPHITE);
+        assert_eq!(resolve("lightTeal"), GREY);
+        assert_eq!(resolve("darkGreen"), GREEN);
+        assert_eq!(resolve("grape"), PINK);
+        assert_eq!(resolve("blue"), BLUE);
+        assert!(PALETTE.iter().all(|c| !c.key.contains("teal")));
+        assert_eq!(reserved(Reserved::Threat, Theme::Light).bg, 0xFFE6E3);
+        assert_eq!(reserved(Reserved::Deadline, Theme::Dark).text, 0xE3CB99);
+    }
+
+    /// Прежние имена: каждое — ближайший по ΔE2000 цвет таблицы к точке Fluent `primary` (светлая тема); имена
+    /// не совпадают с новыми.
+    #[test]
+    fn legacy_colors_map_to_the_nearest() {
+        // `primary` общих цветов Fluent 2 (`@fluentui/tokens` 9.x) — только для проверки соответствия.
+        const FLUENT: &[(&str, Rgb)] = &[
+            ("red", 0xD13438),
+            ("darkRed", 0x750B1C),
+            ("cranberry", 0xC50F1F),
+            ("pumpkin", 0xCA5010),
+            ("peach", 0xFF8C00),
+            ("marigold", 0xEAA300),
+            ("gold", 0xC19C00),
+            ("brass", 0x986F0B),
+            ("brown", 0x8E562E),
+            ("forest", 0x498205),
+            ("seafoam", 0x00CC6A),
+            ("darkGreen", 0x0B6A0B),
+            ("lightTeal", 0x00B7C3),
+            ("teal", 0x038387),
+            ("steel", 0x005B70),
+            ("royalBlue", 0x004E8C),
+            ("cornflower", 0x4F6BED),
+            ("navy", 0x0027B4),
+            ("lavender", 0x7160E8),
+            ("purple", 0x5C2E91),
+            ("grape", 0x881798),
+            ("berry", 0xC239B3),
+            ("lilac", 0xB146C2),
+            ("magenta", 0xBF0077),
+            ("plum", 0x77004D),
+            ("beige", 0x7A7574),
+            ("mink", 0x5D5A58),
+            ("platinum", 0x69797E),
+            ("anchor", 0x394146),
+        ];
+        assert_eq!(LEGACY.len(), FLUENT.len());
+        for (&(old, new), &(name, primary)) in LEGACY.iter().zip(FLUENT) {
+            assert_eq!(old, name);
+            assert!(PALETTE.iter().all(|c| c.key != old), "{old}: имя занято новой палитрой");
+            let nearest = PALETTE
+                .iter()
+                .min_by(|a, b| delta_e(primary, a.light.dot).total_cmp(&delta_e(primary, b.light.dot)))
+                .map(|c| c.key);
+            assert_eq!(Some(new), nearest, "{old}");
+        }
     }
 
     #[test]
     fn defaults_are_in_the_palette() {
-        for key in [BLUE, GREEN, VIOLET, TEAL, NEUTRAL] {
+        for key in [BLUE, GREEN, PINK, GRAPHITE, NEUTRAL] {
             assert!(color(key).is_some() && usable().contains(&key), "{key}");
         }
     }
 
-    /// Выбор цвета категории: занятые красный и янтарный и близкие к ним выпадают, остальные дальше ΔE 25 от
-    /// обоих в обеих темах.
+    /// Выбор цвета категории: все пять цветов таблицы далеко от красного и янтарного в обеих темах; исключение —
+    /// розовый бренда и красный безопасности ([`EXEMPT`], не ближе 18).
     #[test]
     fn usable_colors_are_far_from_reserved() {
         let usable = usable();
-        assert_eq!(usable.len(), 21, "{usable:?}");
-        for gone in ["red", "darkRed", "cranberry", "pumpkin", "magenta", "marigold", "peach", "gold", "brass", "brown"]
-        {
-            assert!(!usable.contains(&gone), "{gone}");
-        }
+        assert_eq!(usable, [BLUE, GREEN, PINK, GRAPHITE, GREY]);
         for key in usable {
             for r in Reserved::ALL {
                 for theme in Theme::ALL {
                     let d = delta_e(swatch(key, theme).dot, reserved(r, theme).dot);
-                    assert!(d >= MIN_DELTA_E, "{key} — {r:?} {theme:?}: ΔE {d:.1}");
+                    let min = if (*key, r) == (PINK, Reserved::Threat) { 18.0 } else { MIN_DELTA_E };
+                    assert!(d >= min, "{key} — {r:?} {theme:?}: ΔE {d:.1}");
                 }
             }
         }
-        assert!(matches!(clash("red", &[] as &[&str]), Some((Clash::Reserved(Reserved::Threat), _))));
-        assert!(matches!(clash("gold", &[] as &[&str]), Some((Clash::Reserved(Reserved::Deadline), _))));
-        assert!(matches!(clash("pumpkin", &[] as &[&str]), Some((Clash::Reserved(Reserved::Threat), _))));
+        // Розовый к красному ближе 25 — исключение действует, без него было бы отказано.
+        let pink = delta_e(swatch(PINK, Theme::Light).dot, reserved(Reserved::Threat, Theme::Light).dot);
+        assert!(pink < MIN_DELTA_E, "исключение больше не нужно: ΔE {pink:.1}");
         assert_eq!(clash("chartreuse", &[] as &[&str]), Some((Clash::Unknown, 0.0)));
     }
 
-    /// Категории по умолчанию (DESIGN.md: синий, зелёный, фиолетовый, бирюзовый, серый) различимы между собой и
-    /// с красным и янтарным в обеих темах.
+    /// Категории по умолчанию (DESIGN: синий, зелёный, розовый бренда, графит, серый) различимы между собой и с
+    /// красным и янтарным в обеих темах (ΔE2000 ≥ 25, S5-01); исключение — только [`EXEMPT`].
     #[test]
     fn default_categories_are_far_apart() {
-        let defaults = [BLUE, GREEN, VIOLET, TEAL, NEUTRAL];
+        let defaults = [BLUE, GREEN, PINK, GRAPHITE, NEUTRAL];
         assert_eq!(check(&defaults), Ok(()));
         for theme in Theme::ALL {
-            let mut dots: Vec<Rgb> = defaults.iter().map(|&s| swatch(s, theme).dot).collect();
-            dots.extend(Reserved::ALL.map(|r| reserved(r, theme).dot));
-            for (i, a) in dots.iter().enumerate() {
-                for b in &dots[i + 1..] {
-                    let d = delta_e(*a, *b);
-                    assert!(d >= MIN_DELTA_E, "{theme:?}: {a:06X} {b:06X} ΔE {d:.1}");
+            let mut dots: Vec<(&str, Rgb)> = defaults.iter().map(|&s| (s, swatch(s, theme).dot)).collect();
+            dots.push(("threat", reserved(Reserved::Threat, theme).dot));
+            dots.push(("deadline", reserved(Reserved::Deadline, theme).dot));
+            for (i, &(a, x)) in dots.iter().enumerate() {
+                for &(b, y) in &dots[i + 1..] {
+                    let d = delta_e(x, y);
+                    let min = if (a, b) == (PINK, "threat") { 18.0 } else { MIN_DELTA_E };
+                    assert!(d >= min, "{theme:?}: {a} {b} ΔE {d:.1}");
                 }
             }
         }
     }
 
-    /// Запрет близких цветов: к пяти категориям по умолчанию близкий цвет не добавить, повтор — тоже.
+    /// Запрет близких цветов: повтор цвета — отказ; в таблице пять цветов, к пяти категориям по умолчанию шестую
+    /// не добавить (вопрос владельцу, S5-31).
     #[test]
     fn close_colors_are_rejected() {
-        let used = [BLUE, GREEN, VIOLET, TEAL, NEUTRAL];
-        // Голубой рядом с синим, лес рядом с зелёным, сирень рядом с виноградом, платина — с серым и синим.
-        assert!(matches!(clash("royalBlue", &used), Some((Clash::Color(BLUE), _))));
-        assert!(matches!(clash("forest", &used), Some((Clash::Color(GREEN), _))));
-        assert!(matches!(clash("lilac", &used), Some((Clash::Color(VIOLET), _))));
-        assert!(clash("platinum", &used).is_some());
+        let used = [BLUE, GREEN, PINK, GRAPHITE, NEUTRAL];
         assert!(matches!(clash(BLUE, &[BLUE]), Some((Clash::Color(BLUE), d)) if d == 0.0));
-        // Без синего — можно.
-        assert_eq!(clash("royalBlue", &[GREEN]), None);
+        // Прежнее имя — тот же цвет, что новое.
+        assert!(matches!(clash("cornflower", &[BLUE]), Some((Clash::Color(BLUE), _))));
         assert!(check(&[BLUE, BLUE]).is_err());
-        assert!(check(&[BLUE, "steel"]).is_err());
-        // Хотя бы одну шестую категорию к пяти по умолчанию добавить можно.
-        let sixth: Vec<&str> = usable().iter().copied().filter(|k| clash(k, &used).is_none()).collect();
-        assert!(!sixth.is_empty(), "шестой цвет не добавить");
+        assert_eq!(clash(GREEN, &[BLUE]), None);
+        assert!(usable().iter().all(|k| clash(k, &used).is_some()), "шестой цвет нашёлся — обновить тест");
     }
 
     /// Текст метки читается на её подложке (контраст WCAG ≥ 4,5) в обеих темах — у всех цветов палитры.

@@ -44,6 +44,7 @@ pub(crate) fn spawn(exe: &Path, _relaxed: bool) -> io::Result<Process> {
         // Фактический уровень сообщает сам воркер через отказ работать без seccomp;
         // namespaces — бонус, поэтому здесь считаем полную изоляцию.
         level: Level::Full,
+        fallback: None,
     })
 }
 
