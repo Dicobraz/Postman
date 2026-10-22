@@ -163,8 +163,12 @@ enum Scene {
     Quota,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
     Rules,
-    /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06).
+    /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06): никто не взял его в работу — полоса
+    /// «Взять в работу», в командной строке — та же кнопка (S5-28).
     Shared,
+    /// Тот же ящик (S5-28): письмо, взятое коллегой, — «Взято в работу: …» и «Забрать себе», в списке — метки
+    /// «Назначено: …»; ответ в области чтения — от ящика, строка «Письмо взято в работу…».
+    Taken,
     /// Свои «Входящие» с полосами категорий и метками (S5-02): первому письму без меток клавишами 1 и 3 (как
     /// `mail.categorize`) поставлены «Клиенты» и «Тендеры», оно открыто.
     Labels,
@@ -300,6 +304,7 @@ const SCENES: &[Scene] = &[
     Scene::SettingsCalendarFree,
     Scene::SettingsSign,
     Scene::Shared,
+    Scene::Taken,
     Scene::Labels,
     Scene::Filters,
     Scene::Quick,
@@ -407,6 +412,7 @@ impl Scene {
             Scene::Quota => "quota",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
+            Scene::Taken => "taken",
             Scene::Labels => "labels",
             Scene::Filters => "filters",
             Scene::Quick => "quick",
@@ -945,6 +951,21 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 }
             });
         }
+        Scene::Taken => {
+            m.set_section(Section::Mail, cx);
+            m.tabs.activate_kind(crate::tabs::TabKind::Main);
+            let Some(id) = shared_inbox(m, cx) else { return Err("no shared mailbox in the folder tree".into()) };
+            m.open_mailbox(id, cx);
+            // Демо: второе письмо ящика отдела взял коллега (`postman_demo`, «Взять в работу»).
+            let i = (0..m.list.read(cx).count).find(|&i| {
+                m.list.read(cx).row(i).and_then(crate::shared::taken).is_some_and(|t| !t.by(postman_demo::ME))
+            });
+            let Some(i) = i else { return Err("no message taken by a colleague in the shared mailbox".into()) };
+            remember_composer(m, cx);
+            m.list.update(cx, |l, cx| l.select(i, cx));
+            let mailer = cx.entity();
+            cx.defer(move |cx| mailer.update(cx, |m, cx| m.respond(postman_compose::Mode::Reply, cx)));
+        }
         Scene::Labels => {
             m.set_section(Section::Mail, cx);
             let inbox = crate::live::inbox(&m.folders.read(cx).mailboxes);
@@ -1402,6 +1423,12 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let open = reading.is_some_and(|r| r.row.id == THREAD_CHILD && r.doc.is_some());
             let picked = list.selected.and_then(|i| list.row(i)).is_some_and(|r| r.id == THREAD_CHILD);
             list.outline.is_some() && !list.computing && rows_loaded && picked && open
+        }
+        Scene::Taken => {
+            let before = m.screens.as_ref().and_then(|d| d.composer);
+            let reply = m.compose.inline_view().is_some_and(|c| Some(c.read(cx).id) != before && c.read(cx).drawn());
+            let taken = reading.is_some_and(|r| crate::shared::taken(&r.row).is_some());
+            m.section == Section::Mail && rows_loaded && taken && reply
         }
         Scene::Shared => {
             // Живой общий ящик может быть пуст: тогда снимок — без письма.

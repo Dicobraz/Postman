@@ -1,9 +1,11 @@
 //! Общие и делегированные ящики (S4-06) против живого Stalwart: user3 видит ящик группы `shared-sales@itt.test`,
 //! синхронизация кладёт его «Входящие» в кэш с префиксом аккаунта, письмо, доставленное на адрес группы, читается,
-//! флаг ставится на сервере; отправка от имени ящика; папка, открытая только для чтения (`shared-ro@itt.test`).
+//! флаг ставится на сервере; отправка от имени ящика; папка, открытая только для чтения (`shared-ro@itt.test`);
+//! «Взять в работу» (S5-28): два участника группы видят слова `pm.taken…` друг друга.
 //! Подготовка стенда — `docs/STALWART.md`, «Общие ящики». Без стенда тесты пропускаются (`#[ignore]`).
 //!
-//! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER3`, `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую),
+//! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER3`, `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую);
+//! для `taken_is_seen_by_a_colleague` — ещё `POSTMAN_STAND_USER1/2` и пароли (коллега — тот, кто в группе),
 //! `cargo test -p postman-core --test stand_shared -- --ignored`. Писем — по одному на прогон и адрес (ограничение
 //! входящих на получателя, `docs/STALWART.md`).
 
@@ -255,4 +257,139 @@ async fn read_only_share_has_rights_but_no_identity() {
         Err(postman_jmap::Error::Method { kind, .. }) => assert_eq!(kind, "forbidden"),
         other => panic!("Identity чужого ящика: {other:?}"),
     }
+}
+
+/// Коллега user3 в группе: user1 или user2, у кого в сессии есть ящик группы (`docs/STALWART.md`, «Общие ящики»).
+async fn colleague() -> (Client, String, SharedAccount) {
+    let mut tried = Vec::new();
+    for n in ["1", "2"] {
+        let (Ok(user), Ok(password)) = (std::env::var(format!("POSTMAN_STAND_USER{n}")), std::env::var(format!("POSTMAN_STAND_PASSWORD{n}")))
+        else {
+            continue;
+        };
+        let c = Client::connect(&env("POSTMAN_STAND_URL"), Auth::Basic { user: user.clone(), password })
+            .await
+            .unwrap_or_else(|e| panic!("вход {user}: {e}"));
+        if let Some(a) = c.session().shared_accounts().into_iter().find(|a| a.name == GROUP) {
+            return (c, user, a);
+        }
+        tried.push(user);
+    }
+    panic!("ни у кого из {tried:?} нет ящика {GROUP}: добавить участника группы (docs/STALWART.md, «Общие ящики»)")
+}
+
+/// Слова письма `id` на сервере (аккаунт клиента `c`), когда `ok` по ним выполнилось.
+async fn wait_keywords(c: &Client, id: &str, what: &str, ok: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let start = Instant::now();
+    loop {
+        let (emails, _) = c.email_get(&[id.to_owned()]).await.unwrap();
+        let words: Vec<String> =
+            emails.first().map(|e| e.keywords.iter().filter(|(_, on)| **on).map(|(k, _)| k.to_ascii_lowercase()).collect()).unwrap_or_default();
+        if ok(&words) {
+            return words;
+        }
+        assert!(start.elapsed() < DELIVERY, "не дождались на сервере: {what} (слова {words:?})");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Письмо ящика группы во «Входящих» user3: (клиент, аккаунт группы, ключ кэша, id сервера, тема).
+async fn taken_letter(c: &Client, rx: &Events, cache: &Cache, group: &SharedAccount) -> (String, String, String) {
+    let theirs = c.in_account(&group.id);
+    let inbox = role(&theirs, "inbox").await;
+    let key = scoped(Some(&group.id), &inbox);
+    let subject = format!("Postman taken {}", stamp());
+    send_from_own(c, GROUP, &subject).await;
+    let row = wait_in_cache(rx, cache, &key, &subject);
+    (key, row, subject)
+}
+
+/// Правка «взять» или «вернуть» тем же путём, что и приложение: `Command::Patch`.
+fn send_patch(commands: &sync::UnboundedSender<Command>, row: &str, keywords: Vec<(String, bool)>) {
+    let patch = postman_core::lifecycle::Patch { id: row.to_owned(), keywords, mailboxes: Vec::new() };
+    assert!(commands.send(Command::Patch { patches: vec![patch], archive_name: "Архив".into() }).is_ok());
+}
+
+fn take_words(keywords: &[String], me: &str) -> Vec<(String, bool)> {
+    let (add, remove) = postman_core::marks::taking(keywords, me, jiff::Timestamp::now()).unwrap();
+    remove.into_iter().map(|k| (k, false)).chain(add.into_iter().map(|k| (k, true))).collect()
+}
+
+async fn cleanup(c: &Client, theirs: &Client, id: &str, subject: &str) {
+    theirs.destroy_email(id).await.unwrap();
+    if let Some(copy) = find(c, &role(c, "sent").await, subject).await {
+        c.destroy_email(&copy).await.unwrap();
+    }
+}
+
+/// «Взять в работу» (S5-28), один пользователь: слова `pm.taken…` (адрес с `@`, время) сервер хранит как есть —
+/// они разбираются обратно в «взял user3»; «Вернуть в очередь» снимает их.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn taken_words_survive_the_server() {
+    use postman_core::marks;
+
+    let c = viewer().await;
+    let me = env("POSTMAN_STAND_USER3");
+    let group = shared(&c, GROUP);
+    let theirs = c.in_account(&group.id);
+    let (commands, rx, cache) = sync_user3();
+    wait_for(&rx, "первая синхронизация", |e| matches!(e, Event::Status(Status::Synced)).then_some(()));
+    let (_, row, subject) = taken_letter(&c, &rx, &cache, &group).await;
+    let id = postman_cache::unscoped(&row).1.to_owned();
+
+    send_patch(&commands, &row, take_words(&[], &me));
+    let words = wait_keywords(&theirs, &id, "«взял user3» на сервере", |k| marks::taken(k).is_some_and(|t| t.by(&me))).await;
+    assert!(words.iter().any(|k| k == marks::TAKEN), "общее слово: {words:?}");
+    println!("server keeps: {words:?}");
+    send_patch(&commands, &row, marks::releasing(&words).into_iter().map(|k| (k, false)).collect());
+    wait_keywords(&theirs, &id, "слова «взял» сняты", |k| !k.iter().any(|w| marks::is_taken_word(w))).await;
+    cleanup(&c, &theirs, &id, &subject).await;
+}
+
+/// «Взять в работу» (S5-28), два участника группы: user3 берёт письмо ящика группы тем же путём, что и приложение
+/// (`Command::Patch` из `marks::taking`), коллега видит «взял user3»; коллега «забирает себе» — у user3 в кэше «взял
+/// коллега»; user3 «возвращает в очередь» — слов нет.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn taken_is_seen_by_a_colleague() {
+    use postman_core::marks;
+
+    let c = viewer().await;
+    let me = env("POSTMAN_STAND_USER3");
+    let group = shared(&c, GROUP);
+    let theirs = c.in_account(&group.id);
+    let (mate, mate_email, mate_group) = colleague().await;
+    let mate_theirs = mate.in_account(&mate_group.id);
+
+    let (commands, rx, cache) = sync_user3();
+    wait_for(&rx, "первая синхронизация", |e| matches!(e, Event::Status(Status::Synced)).then_some(()));
+    let (key, row, subject) = taken_letter(&c, &rx, &cache, &group).await;
+    let id = postman_cache::unscoped(&row).1.to_owned();
+
+    // user3 берёт в работу — коллега видит «взял user3».
+    send_patch(&commands, &row, take_words(&[], &me));
+    let seen = wait_keywords(&mate_theirs, &id, "коллега видит «взял user3»", |k| marks::taken(k).is_some_and(|t| t.by(&me))).await;
+    println!("{mate_email} sees taken by {me}: {seen:?}");
+
+    // Коллега забирает себе — у user3 в кэше «взял коллега» (push аккаунта группы).
+    let (add, remove) = marks::taking(&seen, &mate_email, jiff::Timestamp::now()).unwrap();
+    mate_theirs.set_keywords(std::slice::from_ref(&id), &add, &remove).await.unwrap();
+    let start = Instant::now();
+    let words = loop {
+        let r = cache.page(&key, 0, 50).unwrap().into_iter().find(|r| r.id == row);
+        if let Some(r) = r.filter(|r| marks::taken(&r.keywords).is_some_and(|t| t.by(&mate_email))) {
+            break r.keywords;
+        }
+        assert!(start.elapsed() < DELIVERY, "у user3 не видно, что письмо забрал {mate_email}");
+        if let Ok(Event::Error(e)) = rx.recv_timeout(Duration::from_millis(300)) {
+            panic!("синхронизация: {e}");
+        }
+    };
+    assert_eq!(words.iter().filter(|k| marks::is_taken_word(k)).count(), 2, "только общее и слово коллеги: {words:?}");
+
+    // user3 возвращает в очередь: слов «взял» нет и у коллеги.
+    send_patch(&commands, &row, marks::releasing(&words).into_iter().map(|k| (k, false)).collect());
+    wait_keywords(&mate_theirs, &id, "слова «взял» сняты", |k| !k.iter().any(|w| marks::is_taken_word(w))).await;
+    cleanup(&c, &theirs, &id, &subject).await;
 }

@@ -27,6 +27,7 @@ cmd-mail-move = Переместить в папку…
 cmd-mail-archive = Архив
 cmd-mail-report-phishing = Сообщить о фишинге
 cmd-mail-signature = Подробности подписи
+cmd-mail-take = Взять в работу
 cmd-thread-toggle = Беседа: лента вместо письма
 cmd-thread-quotes = Беседа: показать цитаты
 cmd-thread-next = Следующее письмо беседы

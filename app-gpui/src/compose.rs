@@ -947,7 +947,16 @@ impl Mailer {
             .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.shown_color())).collect())
             .unwrap_or_default();
         let place = if how.letter.is_some() { Place::Inline } else { Place::Tab };
+        // Ответ на письмо общего ящика (S5-28): адрес ящика и кто держит письмо — предупреждение у «От».
+        let shared = how.letter.as_deref().and_then(|letter| {
+            let account = postman_cache::account_of(letter)?;
+            let address = senders.iter().find(|s| s.account.as_deref() == Some(account))?.address.email.clone();
+            let reading = self.reading.read(cx);
+            let row = reading.reading.as_ref().map(|r| &r.row).filter(|r| r.id == letter)?;
+            Some(crate::shared::Reply::of(row, &address, cx))
+        });
         let open = Open {
+            shared,
             signable: self.compose.signable.clone(),
             senders,
             max_delay,
@@ -1103,8 +1112,12 @@ impl Mailer {
                 built.absorb(std::mem::take(&mut *b));
                 *b = built;
             }
-            // Книга собрана — «Часто пишу» в «Контактах» (S5-25).
-            let _ = this.update(cx, |m: &mut Mailer, cx| m.contacts_frequent(cx));
+            // Книга собрана — «Часто пишу» в «Контактах» (S5-25), имена «Назначено: …» в списке и шапке (S5-28).
+            let _ = this.update(cx, |m: &mut Mailer, cx| {
+                m.contacts_frequent(cx);
+                m.list.update(cx, |_, cx| cx.notify());
+                m.reading.update(cx, |_, cx| cx.notify());
+            });
         })
         .detach();
     }
@@ -1125,7 +1138,7 @@ impl Mailer {
 }
 
 /// Демо: свой адрес и общий ящик отдела (`postman_demo::SHARED`) — выбор «От» виден и без сервера.
-fn demo_senders() -> Vec<Sender> {
+pub(crate) fn demo_senders() -> Vec<Sender> {
     let own = Sender { account: None, address: Address::new("", postman_demo::ME), signature: String::new() };
     let shared = postman_demo::SHARED.iter().filter(|(_, _, read_only)| !read_only).map(|(id, email, _)| Sender {
         account: Some((*id).to_owned()),

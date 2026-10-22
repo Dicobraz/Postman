@@ -255,6 +255,9 @@ impl Mailer {
         ];
         let mut subscriptions = subscriptions;
         subscriptions.extend(Self::watch_bulk(&list, cx));
+        // Кнопка «Взять в работу» командной строки (S5-28) — по открытой папке и письму.
+        subscriptions.push(cx.observe(&list, |this, _, cx| this.sync_take_button(cx)));
+        subscriptions.push(cx.observe(&reading, |this, _, cx| this.sync_take_button(cx)));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         // Планировщик жизненного цикла — после создания экрана (снимки и замер ставят себя сразу после `new`).
@@ -262,6 +265,9 @@ impl Mailer {
             let _ = this.update(cx, |m: &mut Mailer, cx| m.lifecycle_pass(false, cx));
         })
         .detach();
+        // Кто я и имена коллег — строке списка и шапке письма общего ящика (S5-28, `shared.rs`).
+        let compose = crate::compose::Composers::default();
+        cx.set_global(crate::shared::People { book: compose.book.clone(), me: Some(postman_demo::ME.to_owned()) });
         Self {
             cache,
             focus,
@@ -280,7 +286,7 @@ impl Mailer {
             offline_ticking: false,
             backend: Backend::Demo,
             live: Default::default(),
-            compose: Default::default(),
+            compose,
             window: window.window_handle(),
             actions: Default::default(),
             sandbox: None,
@@ -330,6 +336,9 @@ impl Mailer {
     /// Событие синхронизации: каждая часть берёт своё (`on_sync`); общее (папки, список, статус, ошибки,
     /// поиск) — `live.rs`.
     pub(crate) fn on_sync(&mut self, ev: &postman_core::sync::Event, cx: &mut Context<Self>) {
+        if let postman_core::sync::Event::Me { address, .. } = ev {
+            crate::shared::set_me(Some(address.email.clone()), cx);
+        }
         self.reading.update(cx, |r, cx| r.on_sync(ev, cx));
         self.list.update(cx, |l, cx| l.on_sync(ev, cx));
         let sent = self.compose.on_sync(ev, cx);
@@ -357,6 +366,10 @@ impl Mailer {
 
     pub(crate) fn open_mailbox(&mut self, id: String, cx: &mut Context<Self>) {
         self.drop_search(cx);
+        // Общий ящик (S5-28): имена тех, кто взял письма в работу, — из адресной книги.
+        if postman_cache::account_of(&id).is_some() {
+            self.load_address_book(cx);
+        }
         self.folders.update(cx, |f, cx| {
             f.current = Some(id.clone());
             f.results = None;
@@ -512,6 +525,7 @@ impl Render for Mailer {
                 let ids = this.targets(cx);
                 this.ask(ids, crate::bulk::Ask::Phishing, cx);
             }))
+            .on_action(cx.listener(|this, _: &mail::Take, _, cx| this.take(cx)))
             .on_action(cx.listener(|this, _: &mail::Due, _, cx| this.open_picker(postman_core::marks::Kind::Due, cx)))
             .on_action(cx.listener(|this, _: &mail::Remind, _, cx| this.open_picker(postman_core::marks::Kind::Remind, cx)))
             .on_action(cx.listener(|this, _: &mail::Wait, _, cx| this.open_picker(postman_core::marks::Kind::Wait, cx)))
