@@ -371,6 +371,58 @@ async fn free_busy_after_sharing() {
     a.client.destroy_event(&id, false).await.unwrap();
 }
 
+/// S5-22: календарь user2, открытый user1 (`shareWith`, `mayReadItems`), виден у user1 отдельным аккаунтом сессии
+/// (после нового входа); его календари и события читаются (`Calendar/get`, `CalendarEvent/query` в этом аккаунте).
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn shared_calendar_is_visible() {
+    let (a, b) = (user(1).await, user(2).await);
+    let viewer = b.client.principal_by_email(&a.email).await.unwrap().expect("principal user1");
+    let cal = first_calendar(&b.client).await;
+    let uid = format!("postman-shared-{}@itt.test", stamp());
+    let start = start_in(10);
+    let ev = NewEvent {
+        uid: &uid,
+        calendar_id: &cal,
+        title: "Postman: календарь коллеги",
+        description: "",
+        location: "",
+        start,
+        time_zone: "Europe/Moscow",
+        duration_secs: 3600,
+        organizer: ("User 2", &b.email),
+        attendees: &[],
+    };
+    let id = b.client.create_event(ev.to_jmap(), false).await.unwrap();
+    b.client.share_calendar(&cal, &viewer.id, true).await.unwrap();
+    let day = |d: jiff::civil::DateTime| d.to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let (from, to) = (day(start.date().at(0, 0, 0, 0)), day(start.date().at(23, 0, 0, 0)));
+
+    // Аккаунты сессии — на момент входа: входим заново.
+    let found = eventually("календарь коллеги в сессии user1", || {
+        let (from, to, uid) = (from.clone(), to.clone(), uid.clone());
+        async move {
+            let a = user(1).await;
+            let shared = a.client.session().shared_calendar_accounts();
+            eprintln!("shared calendar accounts: {shared:?}");
+            for (acc, name) in shared {
+                let cals = a.client.calendars_of(&acc).await.ok()?;
+                let events = a.client.events_of(&acc, None, &from, &to).await.ok()?;
+                if events.iter().any(|e| e["uid"].as_str() == Some(uid.as_str())) {
+                    return Some((name, cals.len()));
+                }
+            }
+            None
+        }
+    })
+    .await;
+    eprintln!("calendar of user2 at user1: account {:?}, calendars {}", found.0, found.1);
+
+    b.client.unshare_calendar(&cal, &viewer.id).await.unwrap();
+    b.client.destroy_event(&id, false).await.unwrap();
+    drop(a);
+}
+
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn contacts_are_read() {
