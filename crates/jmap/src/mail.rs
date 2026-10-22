@@ -64,7 +64,7 @@ impl EmailAddress {
 
 pub const SUMMARY_PROPERTIES: &[&str] = &[
     "id", "threadId", "mailboxIds", "keywords", "receivedAt", "subject", "from", "to", "cc", "preview",
-    "hasAttachment", "size",
+    "hasAttachment", "size", "header:Content-Type",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +89,9 @@ pub struct EmailSummary {
     pub has_attachment: bool,
     #[serde(default)]
     pub size: u64,
+    /// `Content-Type` корня как пришёл (S5-12 Ф2: шифрованное S/MIME видно без загрузки письма).
+    #[serde(default, rename = "header:Content-Type")]
+    pub content_type: Option<String>,
 }
 
 impl EmailSummary {

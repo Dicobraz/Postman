@@ -77,6 +77,15 @@ enum Scene {
     SmimeGost,
     SmimeBad,
     SmimeUntrusted,
+    /// Шифрованное и подписанное письмо демо (S5-12 Ф2): расшифровано демо-ключом, «Зашифровано» и «Подписано»,
+    /// карточка раскрыта (шифр и подпись), вложение — из расшифрованного письма.
+    Encrypted,
+    /// Шифровано не для меня: строка «не для вас» с издателем и номером сертификата.
+    EncryptedOther,
+    /// Тег GCM испорчен: красная строка «повреждено».
+    EncryptedBad,
+    /// Ключ на смарт-карте: строка «Нужен PIN · Ввести» (состояние подставлено — демо без карты).
+    EncryptedPin,
     /// Поиск «Везде» (S5-10): результаты группами по папкам, подсветка, чипы «Уточнить».
     Search,
     /// Письмо из результатов поиска: подсветка в теме и тексте, строка «Совпадения».
@@ -134,6 +143,8 @@ enum Scene {
     TaskNotes,
     /// «Время в календаре» (S6-08): блок поставлен в ближайшее свободное окно.
     TaskTimeblock,
+    /// Повтор (S6-07): варианты повтора в карточке.
+    TaskRepeat,
     /// «Настройки → Автоответ» (S4-05, S5-29; демо — образец со своими текстами коллегам и внешним).
     Vacation,
     /// Ящик заполнен на 94 % (S5-29): индикатор в строке состояния и тост «Очистить вложения…».
@@ -226,6 +237,10 @@ const SCENES: &[Scene] = &[
     Scene::SmimeGost,
     Scene::SmimeBad,
     Scene::SmimeUntrusted,
+    Scene::Encrypted,
+    Scene::EncryptedOther,
+    Scene::EncryptedBad,
+    Scene::EncryptedPin,
     Scene::Search,
     Scene::SearchLetter,
     Scene::SearchNext,
@@ -249,6 +264,7 @@ const SCENES: &[Scene] = &[
     Scene::TaskCardMail,
     Scene::TaskNotes,
     Scene::TaskTimeblock,
+    Scene::TaskRepeat,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -332,6 +348,10 @@ impl Scene {
             Scene::SmimeGost => "smime-gost",
             Scene::SmimeBad => "smime-bad",
             Scene::SmimeUntrusted => "smime-untrusted",
+            Scene::Encrypted => "encrypted",
+            Scene::EncryptedOther => "encrypted-other",
+            Scene::EncryptedBad => "encrypted-bad",
+            Scene::EncryptedPin => "encrypted-pin",
             Scene::Search => "search",
             Scene::SearchLetter => "search-letter",
             Scene::SearchNext => "search-next",
@@ -360,6 +380,7 @@ impl Scene {
             Scene::TaskCardMail => "task-card-mail",
             Scene::TaskNotes => "task-notes",
             Scene::TaskTimeblock => "task-timeblock",
+            Scene::TaskRepeat => "task-repeat",
             Scene::Vacation => "vacation",
             Scene::Quota => "quota",
             Scene::Rules => "rules",
@@ -532,7 +553,17 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
         Scene::Letter => m.list.update(cx, |l, cx| l.select(0, cx)),
-        Scene::Attachments | Scene::Invite | Scene::LetterImage | Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted => {
+        Scene::Attachments
+        | Scene::Invite
+        | Scene::LetterImage
+        | Scene::Smime
+        | Scene::SmimeGost
+        | Scene::SmimeBad
+        | Scene::SmimeUntrusted
+        | Scene::Encrypted
+        | Scene::EncryptedOther
+        | Scene::EncryptedBad
+        | Scene::EncryptedPin => {
             let Some(i) = demo_row(m.list.read(cx), scene) else {
                 return Err("no such message in the first rows of the demo inbox".into());
             };
@@ -818,7 +849,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.contacts_frequent(cx);
             m.contacts.update(cx, |c, cx| c.show_frequent(cx));
         }
-        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock | Scene::TaskRepeat => {
             use postman_core::tasks::List;
             m.set_section(Section::Tasks, cx);
             let first = m.list.read(cx).row(0).cloned();
@@ -834,6 +865,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                         }
                     }
                     Scene::TaskNotes => t.focus_notes(window, cx),
+                    Scene::TaskRepeat => t.demo_repeat(cx),
                     _ => t.demo_block(cx),
                 }
             });
@@ -1075,6 +1107,23 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::InviteSide => {
             crate::prefs::get(cx).reading.invite_side && reading.and_then(|r| r.invite.as_ref()).is_some_and(|c| c.clock.is_some())
         }
+        Scene::Encrypted | Scene::EncryptedOther | Scene::EncryptedBad | Scene::EncryptedPin => {
+            use crate::smime_enc::{Lock, Problem};
+            let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
+            reading.is_some_and(|r| {
+                let s = r.smime.as_ref();
+                let lock = s.and_then(|s| s.lock.as_ref());
+                let ok = match scene {
+                    Scene::Encrypted => {
+                        matches!(lock, Some(Lock::Open(_))) && s.is_some_and(|s| s.open && matches!(s.seal, crate::smime::Seal::Done(_)))
+                    }
+                    Scene::EncryptedOther => matches!(lock, Some(Lock::Failed(Problem::NotForYou(_)))),
+                    Scene::EncryptedBad => matches!(lock, Some(Lock::Failed(Problem::Damaged))),
+                    _ => matches!(lock, Some(Lock::Failed(Problem::NeedPin))),
+                };
+                Some(r.row.id.as_str()) == target && ok
+            })
+        }
         Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted => {
             // Подпись проверена воркером, карточка раскрыта, тело разобрано.
             let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.as_str());
@@ -1191,7 +1240,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
-        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock | Scene::TaskRepeat => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
         Scene::Vacation => {
@@ -1312,7 +1361,17 @@ fn wait_step(m: &mut Mailer, scene: Scene, cx: &mut Context<Mailer>) {
             m.contacts.update(cx, |c, cx| c.show_frequent(cx));
         }
     }
-    if let Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted = scene {
+    if let Scene::EncryptedPin = scene {
+        // Демо без смарт-карты: «не для вас» подменяется строкой PIN — так её видит владелец карты.
+        m.reading.update(cx, |r, cx| {
+            use crate::smime_enc::{Lock, Problem};
+            if let Some(s) = r.reading.as_mut().and_then(|r| r.smime.as_mut()).filter(|s| matches!(s.lock, Some(Lock::Failed(Problem::NotForYou(_))))) {
+                s.lock = Some(Lock::Failed(Problem::NeedPin));
+                cx.notify();
+            }
+        });
+    }
+    if let Scene::Smime | Scene::SmimeGost | Scene::SmimeBad | Scene::SmimeUntrusted | Scene::Encrypted = scene {
         // Подпись проверена — раскрыть карточку, как щелчок по значку.
         m.reading.update(cx, |r, cx| {
             let closed = r.reading.as_ref().and_then(|r| r.smime.as_ref()).is_some_and(|s| !s.open && matches!(s.seal, crate::smime::Seal::Done(_)));
@@ -1426,6 +1485,9 @@ fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
             Scene::SmimeGost => signed("gost"),
             Scene::SmimeBad => signed("bad"),
             Scene::SmimeUntrusted => signed("untrusted"),
+            Scene::Encrypted => signed("enc"),
+            Scene::EncryptedOther | Scene::EncryptedPin => signed("enc-other"),
+            Scene::EncryptedBad => signed("enc-bad"),
             Scene::Invite => a.iter().any(crate::attachments::is_invite),
             Scene::LetterImage => has("chart"),
             _ => has("pdf") && a.iter().any(|a| a.cid.is_some()),

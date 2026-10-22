@@ -29,8 +29,10 @@ pub const X_MESSAGE_ID: &str = "x-postman-message-id";
 pub const X_EMAIL_ID: &str = "x-postman-email-id";
 /// «Время в календаре» (S6-08): `<начало UTC>/<конец UTC>/<id события>`.
 pub const X_BLOCK: &str = "x-postman-block";
+/// Повтор «через N дней после выполнения» (S6-07): в RRULE такого нет.
+pub const X_REPEAT_AFTER: &str = "x-postman-repeat-after";
 const COMPLETED: &str = "completed";
-const OURS: &[&str] = &[X_PROJECT, X_SOMEDAY, X_ORDER, X_MESSAGE_ID, X_EMAIL_ID, X_BLOCK, COMPLETED];
+const OURS: &[&str] = &[X_PROJECT, X_SOMEDAY, X_ORDER, X_MESSAGE_ID, X_EMAIL_ID, X_BLOCK, X_REPEAT_AFTER, COMPLETED];
 
 /// Ход задачи (JSCalendar `progress`, iCalendar STATUS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -234,8 +236,10 @@ pub struct Task {
     pub completed_at: Option<i64>,
     /// Категории (`keywords`, CATEGORIES) — та же таблица, что у почты.
     pub keywords: Vec<String>,
-    /// Повтор (`recurrenceRule` JSCalendar 2.0) как есть; разбор — S6-07.
+    /// Повтор (`recurrenceRule` JSCalendar 2.0) как есть; разбор — `postman_core::recur` (S6-07).
     pub recurrence: Option<Value>,
+    /// Повтор через столько дней после выполнения (`X-POSTMAN-REPEAT-AFTER`).
+    pub repeat_after: Option<u32>,
     pub alerts: Vec<Alert>,
     /// Родительская задача (подзадача): UID родителя (`relatedTo` с `parent`, RELATED-TO;RELTYPE=PARENT).
     pub parent: Option<String>,
@@ -271,6 +275,7 @@ impl Task {
             completed_at: None,
             keywords: Vec::new(),
             recurrence: None,
+            repeat_after: None,
             alerts: Vec::new(),
             parent: None,
             order: None,
@@ -361,6 +366,7 @@ impl Task {
             completed_at: ical.get(COMPLETED).and_then(|c| ical_utc(c)),
             keywords,
             recurrence: v.get("recurrenceRule").filter(|r| r.is_object()).cloned(),
+            repeat_after: ical.get(X_REPEAT_AFTER).and_then(|n| n.trim().parse().ok()).filter(|n| *n > 0),
             alerts: v["alerts"].as_object().into_iter().flat_map(|m| m.values()).filter_map(alert).collect(),
             parent,
             order: ical.get(X_ORDER).and_then(|o| o.trim().parse().ok()),
@@ -451,6 +457,9 @@ impl Task {
         }
         if let Some(b) = &self.block {
             push(X_BLOCK, json!(b.to_x()));
+        }
+        if let Some(n) = self.repeat_after {
+            push(X_REPEAT_AFTER, json!(n.to_string()));
         }
         if let Some(t) = self.completed_at {
             push(COMPLETED, json!(utc_ical(t)));
@@ -608,6 +617,9 @@ impl Task {
         }
         if let Some(b) = &self.block {
             l.push(format!("X-POSTMAN-BLOCK:{}", text(&b.to_x())));
+        }
+        if let Some(n) = self.repeat_after {
+            l.push(format!("X-POSTMAN-REPEAT-AFTER:{n}"));
         }
         for p in &self.participants {
             let cn = cn(&p.name);

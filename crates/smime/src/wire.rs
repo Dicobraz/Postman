@@ -1,4 +1,4 @@
-//! Бинарная часть запроса и ответа воркера `SmimeVerify`: якоря, промежуточные, запрещённые и письмо; в ответе —
+//! Бинарная часть запроса и ответа воркера `SmimeVerify` и `SmimeOpen` (Ф2: впереди — ключ содержимого): якоря, промежуточные, запрещённые и письмо; в ответе —
 //! DER цепочки и подписанное содержимое. Без JSON: DER в JSON-массивах чисел — вчетверо больше.
 //!
 //! Формат: `PMS1`, затем списки `u32 LE число` + элементы `u32 LE длина + байты`. Разбор строгий: лишние или
@@ -89,6 +89,24 @@ pub fn decode_request(bin: &[u8]) -> Option<(Trust, &[u8])> {
     r.0.is_empty().then_some((Trust { roots, intermediates, disallowed }, message))
 }
 
+const OPEN: &[u8; 4] = b"PMO1";
+
+/// Запрос расшифровки (Ф2): ключ содержимого, затем доверие (для подписи внутри) и письмо — как у проверки.
+pub fn encode_open(trust: &Trust, message: &[u8], cek: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
+    let mut out = zeroize::Zeroizing::new(OPEN.to_vec());
+    put(&mut out, cek);
+    out.extend_from_slice(&encode_request(trust, message));
+    out
+}
+
+/// Разбор запроса расшифровки (в воркере): доверие, письмо, ключ содержимого.
+pub fn decode_open(bin: &[u8]) -> Option<(Trust, &[u8], &[u8])> {
+    let mut r = Reader(bin.strip_prefix(OPEN)?);
+    let cek = r.bytes()?;
+    let (trust, message) = decode_request(r.0)?;
+    Some((trust, message, cek))
+}
+
 /// Ответ: DER цепочки и содержимое `signed-data` (пусто — нет).
 pub fn encode_response(chain: &[Vec<u8>], content: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -127,7 +145,7 @@ mod tests {
         };
         let bin = encode_request(&trust, b"letter");
         let (t, m) = decode_request(&bin).unwrap();
-        assert_eq!((t, m), (trust, &b"letter"[..]));
+        assert_eq!((t, m), (trust.clone(), &b"letter"[..]));
         for cut in 0..bin.len() {
             assert!(decode_request(&bin[..cut]).is_none(), "обрезан на {cut}");
         }
@@ -142,5 +160,12 @@ mod tests {
         assert_eq!(decode_response(&resp), Some((vec![vec![9; 3], vec![8]], Some(b"inner".to_vec()))));
         assert_eq!(decode_response(&encode_response(&[], None)), Some((vec![], None)));
         assert!(decode_response(&resp[..resp.len() - 1]).is_none());
+
+        let open = encode_open(&trust, b"letter", &[7; 32]);
+        let (t, m, k) = decode_open(&open).unwrap();
+        assert_eq!((t, m, k), (trust.clone(), &b"letter"[..], &[7u8; 32][..]));
+        for cut in 0..open.len() {
+            assert!(decode_open(&open[..cut]).is_none(), "обрезан на {cut}");
+        }
     }
 }

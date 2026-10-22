@@ -361,6 +361,34 @@ async fn rule_files_by_subject_with_vacation() {
     assert!(!b.client.vacation().await.unwrap().is_enabled);
 }
 
+/// S5-26: правило «тема содержит X → категория» ставит новому письму ключевое слово категории (`addflag`,
+/// `imap4flags`); письмо остаётся во «Входящих». Уборка: правила, письма.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn sieve_rule_sets_category() {
+    let (a, b) = (user(1).await, user(2).await);
+    let stamp = stamp();
+    let marker = format!("category-{stamp}");
+    let keyword = postman_core::labels::category_keyword("tenders");
+    let result = async {
+        let rule = Rule { enabled: true, field: Field::Subject, value: marker.clone(), action: Action::Category(keyword.clone()) };
+        let state =
+            saved_rules(&settings(&b.client, Request::SaveRules { rules: vec![rule.clone()], replace: true }).await)?;
+        if !(state.active && state.rules == vec![rule]) {
+            return Err(format!("правила на сервере не те: {state:?}"));
+        }
+        send(&a, &b.email, &format!("Postman {marker}"), "Проверка категории.").await;
+        let got = eventually(|| async { find(&b, &marker).await.into_iter().find(|e| e.keywords.get(&keyword) == Some(&true)) }).await;
+        got.map(|_| ()).ok_or_else(|| format!("письмо не получило слово {keyword} за {DELIVERY:?}"))
+    }
+    .await;
+    let cleared = saved_rules(&settings(&b.client, Request::SaveRules { rules: vec![], replace: true }).await);
+    destroy_all(&a, &stamp).await;
+    destroy_all(&b, &stamp).await;
+    result.unwrap();
+    assert!(cleared.unwrap().rules.is_empty(), "правила не убраны");
+}
+
 /// S4-07: скрипт с ошибкой сервер не принимает (`SieveScript/validate`), на сервере ничего не меняется.
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]

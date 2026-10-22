@@ -34,6 +34,9 @@ pub enum Action {
     Discard,
     /// Переслать копию на адрес (`redirect :copy`), письмо остаётся.
     Redirect(String),
+    /// Поставить категорию (S5-26): ключевое слово категории (`pm.cat.<id>` или взятая в таблицу метка Thunderbird)
+    /// — `addflag "<слово>"` (`imap4flags`), сервер ставит его письму в `keywords`.
+    Category(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +92,7 @@ fn action(a: &Action) -> String {
         Action::Flag => "addflag \"\\\\Flagged\";".into(),
         Action::Discard => "discard;".into(),
         Action::Redirect(to) => format!("redirect :copy {};", quote(to)),
+        Action::Category(keyword) => format!("addflag {};", quote(keyword)),
     }
 }
 
@@ -104,7 +108,7 @@ fn extensions(s: &Script) -> Vec<&'static str> {
         match r.action {
             // Stalwart требует и `mailbox` для `:mailboxid` (`docs/STALWART.md`).
             Action::Move { .. } => ext.extend(["fileinto", "mailbox", "mailboxid"]),
-            Action::MarkRead | Action::Flag => ext.push("imap4flags"),
+            Action::MarkRead | Action::Flag | Action::Category(_) => ext.push("imap4flags"),
             Action::Discard => {}
             Action::Redirect(_) => ext.push("copy"),
         }
@@ -181,13 +185,22 @@ fn parse_rule(enabled: bool, line: &str) -> Option<Rule> {
     } else if let Some(r) = body.strip_prefix("redirect :copy ") {
         let (to, r) = unquote(r)?;
         (r == ";").then_some(Action::Redirect(to))?
-    } else {
-        match body {
-            "addflag \"\\\\Seen\";" => Action::MarkRead,
-            "addflag \"\\\\Flagged\";" => Action::Flag,
-            "discard;" => Action::Discard,
+    } else if let Some(r) = body.strip_prefix("addflag ") {
+        let (flag, r) = unquote(r)?;
+        if r != ";" {
+            return None;
+        }
+        match flag.as_str() {
+            "\\Seen" => Action::MarkRead,
+            "\\Flagged" => Action::Flag,
+            // Системные флаги (`\Answered`…) — не наши; категория — ключевое слово без `\`.
+            k if !k.is_empty() && !k.starts_with('\\') => Action::Category(flag),
             _ => return None,
         }
+    } else if body == "discard;" {
+        Action::Discard
+    } else {
+        return None;
     };
     Some(Rule { enabled, field, value, action })
 }
@@ -228,6 +241,8 @@ mod tests {
                     value: "срочно".into(),
                     action: Action::Redirect("me@home.example".into()),
                 },
+                Rule { enabled: true, field: Field::Subject, value: "тендер".into(), action: Action::Category("pm.cat.tenders".into()) },
+                Rule { enabled: false, field: Field::From, value: "tb".into(), action: Action::Category("$label2".into()) },
             ],
             vacation: true,
         }
@@ -245,6 +260,8 @@ mod tests {
             r#"if header :contains ["to", "cc"] "team@corp" { addflag "\\Seen"; }"#,
             r#"if header :contains "from" "boss" { addflag "\\Flagged"; }"#,
             r#"if header :contains "subject" "срочно" { redirect :copy "me@home.example"; }"#,
+            r#"if header :contains "subject" "тендер" { addflag "pm.cat.tenders"; }"#,
+            r#"# off: if header :contains "from" "tb" { addflag "$label2"; }"#,
         ]
         .map(|l| format!("{l}\n"))
         .concat();
@@ -275,6 +292,9 @@ mod tests {
         assert_eq!(parse(&text.replace(":contains \"from\" \"boss\"", ":is \"from\" \"boss\"")), None);
         assert_eq!(parse(&text.replace("{ discard; }", "{ discard; stop; }")), None);
         assert_eq!(parse(&text.replace("\"a1\" \"Отчёты\"", "\"a1\"")), None);
+        // Системный флаг вместо категории и лишнее после `addflag` — не наше.
+        assert_eq!(parse(&text.replace("\"pm.cat.tenders\"", "\"\\\\Answered\"")), None);
+        assert_eq!(parse(&text.replace("addflag \"pm.cat.tenders\";", "addflag \"pm.cat.tenders\" \"x\";")), None);
         assert_eq!(parse(""), None);
     }
 

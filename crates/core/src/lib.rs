@@ -22,6 +22,7 @@ pub mod marks;
 pub mod palette;
 pub mod prefs;
 pub mod query;
+pub mod recur;
 pub mod render;
 pub mod rules;
 pub mod schedule;
