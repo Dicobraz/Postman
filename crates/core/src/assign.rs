@@ -382,6 +382,8 @@ pub fn draft(out: &Outgoing, from: &Address, subject: String, markdown: String) 
         attachments: Vec::new(),
         calendar: Some(CalendarPart { method: out.method.clone(), ics: out.ics.clone() }),
         keywords: Vec::new(),
+        // Шаг поручения не подписывается (как ответ на приглашение).
+        sign: false,
     }
 }
 
