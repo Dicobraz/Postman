@@ -147,9 +147,9 @@ pub(crate) fn base(density: Option<Density>, accent: Accent) -> ThemeSpec {
             t.insert(Role::AccentFillHover.name().to_owned(), a((0xE6 << 24) | fill));
             t.insert(Role::AccentFillPressed.name().to_owned(), a((0xCC << 24) | fill));
             t.insert(Role::AccentSubtle.name().to_owned(), c(tint));
-            t.insert(pm_name(Pm::Tinted).to_owned(), c(tint));
-            t.insert(pm_name(Pm::TintedFg).to_owned(), c(tint_fg));
-            t.insert(pm_name(Pm::TintedHover).to_owned(), c(mix(tint, tint_fg, 0.08)));
+            t.insert(pm_name(Pm::Secondary).to_owned(), c(tint));
+            t.insert(pm_name(Pm::SecondaryFg).to_owned(), c(tint_fg));
+            t.insert(pm_name(Pm::SecondaryHover).to_owned(), c(mix(tint, tint_fg, 0.08)));
         }
         t.into_iter().collect()
     };
@@ -696,9 +696,9 @@ mod tests {
             Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, accent)), &os, FontSizes::default(), &ROLES))
         };
         let l = look(false, Accent::Teal);
-        assert_eq!([hex(l.accent()), hex(l.accent_text()), hex(l.picked()), hex(l.pm(Pm::TintedFg))], ["#00756F", "#00756F", "#E1F3F1", "#00524D"]);
+        assert_eq!([hex(l.accent()), hex(l.accent_text()), hex(l.picked()), hex(l.pm(Pm::SecondaryFg))], ["#00756F", "#00756F", "#E1F3F1", "#00524D"]);
         let d = look(true, Accent::Violet);
-        assert_eq!([hex(d.accent()), hex(d.accent_text()), hex(d.pm(Pm::Tinted))], ["#6A4CAE", "#B39DEB", "#332A4A"]);
+        assert_eq!([hex(d.accent()), hex(d.accent_text()), hex(d.pm(Pm::Secondary))], ["#6A4CAE", "#B39DEB", "#332A4A"]);
         assert_eq!(hex(look(false, Accent::System).accent()), "#0067C0");
     }
 
