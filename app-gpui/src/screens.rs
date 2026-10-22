@@ -105,6 +105,9 @@ enum Scene {
     Assistant,
     /// Календарь с подробностями самого людного события (S3-05).
     Event,
+    /// Календари коллег (S5-22): события коллег цветом их календаря и с именем владельца, слева «Календари коллег»;
+    /// открыто событие из календаря коллеги.
+    CalendarColleagues,
     /// Виды календаря (S5-21): «День» — среда демо-недели, «Неделя» — с выходными, «Месяц» — клетки с полосами
     /// многодневных и строками событий, «+N ещё».
     CalendarDay,
@@ -257,6 +260,7 @@ const SCENES: &[Scene] = &[
     Scene::PaletteQuery,
     Scene::Calendar,
     Scene::Event,
+    Scene::CalendarColleagues,
     Scene::CalendarDay,
     Scene::CalendarWeek,
     Scene::CalendarMonth,
@@ -373,6 +377,7 @@ impl Scene {
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
+            Scene::CalendarColleagues => "calendar-colleagues",
             Scene::CalendarDay => "calendar-day",
             Scene::CalendarWeek => "calendar-week",
             Scene::CalendarMonth => "calendar-month",
@@ -704,6 +709,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         }
         Scene::Event => {
             m.cal.update(cx, |c, cx| c.select_busiest(cx));
+            m.set_section(Section::Calendar, cx);
+        }
+        Scene::CalendarColleagues => {
+            m.cal.update(cx, |c, cx| c.select_colleague(cx));
             m.set_section(Section::Calendar, cx);
         }
         Scene::Lifecycle => lifecycle_scene(m, cx)?,
@@ -1217,6 +1226,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                         && (!matches!(scene, Scene::MeetingSlot) || v.slot_cursor.is_some())
                 })
         }
+        Scene::CalendarColleagues => m.section == Section::Calendar && m.cal.read(cx).selected(),
         Scene::CalendarDay | Scene::CalendarWeek | Scene::CalendarMonth => {
             use postman_core::prefs::CalendarView as V;
             let want = match scene {

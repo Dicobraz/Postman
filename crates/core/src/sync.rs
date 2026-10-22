@@ -311,7 +311,8 @@ pub enum Event {
     InviteAnswered { uid: String, status: Partstat, delivery: Delivery },
     InviteFailed { uid: String, error: String },
     /// События календаря в `[from, to)` — без отменённых, по времени начала.
-    EventsLoaded { from: i64, to: i64, events: Vec<postman_calendar::Event> },
+    /// События недели: мои и календарей коллег (`Event::owner`, S5-22); коллеги — все, кто открыл мне календарь.
+    EventsLoaded { from: i64, to: i64, events: Vec<postman_calendar::Event>, colleagues: Vec<postman_calendar::Owner> },
     /// Найдено в календаре по тексту `text` (S5-21); `error` — запрос не удался.
     EventsFound { text: String, events: Vec<postman_calendar::Event>, error: Option<String> },
     /// Занятость для помощника: моя и по адресам; `None` — нет данных (календарь не открыт мне, сотрудник
@@ -1325,8 +1326,8 @@ async fn handle(
             });
         }
         Command::Events { from, to } => {
-            notify(match schedule::week(client, from, to).await {
-                Ok(events) => Event::EventsLoaded { from, to, events },
+            notify(match schedule::week_with_colleagues(client, from, to).await {
+                Ok((events, colleagues)) => Event::EventsLoaded { from, to, events, colleagues },
                 Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
