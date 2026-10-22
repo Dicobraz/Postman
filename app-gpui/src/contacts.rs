@@ -1,5 +1,5 @@
-//! Контакты (S4-02; вид — S5-11 по макету «Контакты и справочник», Ctrl+3): слева — источники («Справочник
-//! компании», «Мои контакты»), список с буквами и указателем, справа — карточка: «Написать», «Встреча» (вкладка
+//! Контакты (S4-02; вид — S5-11 по макету «Контакты и справочник», Ctrl+3): слева — источники («Часто пишу» — S5-25,
+//! «Справочник компании», «Мои контакты»), список с буквами и указателем, справа — карточка: «Написать», «Встреча» (вкладка
 //! встречи с этим участником), «Копировать адрес», поля в две колонки, занятость сегодня (сотрудники и переговорные).
 //! Командная строка раздела — [`ContactsBar`] с поиском. Личный контакт меняется на месте (форма вместо карточки,
 //! `ContactCard/set`), удаление — после строки «Удалить контакт? Да / Нет». Справочник — только просмотр; из него —
@@ -39,11 +39,13 @@ const HEAD_H: f32 = 26.;
 const DAY_FROM: i64 = 8;
 const DAY_TO: i64 = 20;
 
-/// Откуда список: личная адресная книга или справочник организации.
+/// Откуда список: личная адресная книга, справочник организации или «Часто пишу» (S5-25: адресаты переписки за
+/// 30 дней по частоте и давности, `AddressBook::frequent`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Source {
     Mine,
     Directory,
+    Frequent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,6 +54,9 @@ pub(crate) enum Kind {
     Person,
     Room,
     Resource,
+    /// Адресат переписки — ни в справочнике, ни в моих контактах («Часто пишу», S5-25): только чтение, можно добавить
+    /// в мои контакты.
+    Correspondent,
 }
 
 impl Kind {
@@ -70,6 +75,7 @@ impl Kind {
             Kind::Person => "contacts-kind-person",
             Kind::Room => "contacts-kind-room",
             Kind::Resource => "contacts-kind-resource",
+            Kind::Correspondent => "contacts-kind-correspondent",
         })
     }
 }
@@ -110,13 +116,21 @@ impl Entry {
     }
 
     /// Слово запроса: начало слова имени, организации, должности или адреса; номер — часть телефона.
-    fn matches(&self, word: &str) -> bool {
+    fn matches_word(&self, word: &str) -> bool {
         let phone_like = word.chars().all(|c| c.is_ascii_digit() || "+-()".contains(c));
         let digits: String = word.chars().filter(char::is_ascii_digit).collect();
         if phone_like && !digits.is_empty() && self.digits.iter().any(|d| d.contains(&digits)) {
             return true;
         }
         self.keys.iter().any(|k| k.starts_with(word))
+    }
+
+    /// Весь запрос: каждое слово — начало слова или часть телефона; иначе — как в подсказках адреса (другая раскладка,
+    /// транслит; `postman_core::contacts::matches`).
+    fn matches(&self, words: &[String], query: &str) -> bool {
+        words.iter().all(|w| self.matches_word(w))
+            || self.card.emails.iter().any(|m| postman_core::contacts::matches(&self.card.name, m, query))
+            || (self.card.emails.is_empty() && postman_core::contacts::matches(&self.card.name, "", query))
     }
 
     fn name(&self) -> String {
@@ -145,7 +159,31 @@ fn normalize(s: &str) -> String {
 /// Индексы строк, подходящих под запрос: каждое слово запроса где-то совпало. Пустой запрос — все.
 pub(crate) fn filter(entries: &[Entry], query: &str) -> Vec<usize> {
     let words: Vec<String> = normalize(query).split_whitespace().map(str::to_string).collect();
-    (0..entries.len()).filter(|&i| words.iter().all(|w| entries[i].matches(w))).collect()
+    if words.is_empty() {
+        return (0..entries.len()).collect();
+    }
+    (0..entries.len()).filter(|&i| entries[i].matches(&words, query)).collect()
+}
+
+/// «Часто пишу» (S5-25): адресаты переписки по порядку `AddressBook::frequent` — запись справочника или моих контактов
+/// с этим адресом (та же карточка), иначе — адресат переписки. Адрес — одна строка.
+pub(crate) fn frequent(list: &[(String, String)], directory: &[Entry], mine: &[Entry]) -> Vec<Entry> {
+    let has = |e: &Entry, email: &str| e.card.emails.iter().any(|m| m.eq_ignore_ascii_case(email));
+    let mut out: Vec<Entry> = Vec::new();
+    for (name, email) in list {
+        if out.iter().any(|e| has(e, email)) {
+            continue;
+        }
+        let known = directory.iter().find(|e| has(e, email)).or_else(|| mine.iter().find(|e| has(e, email)));
+        out.push(match known {
+            Some(e) => e.clone(),
+            None => Entry::new(
+                ContactCard { id: format!("freq:{email}"), name: name.clone(), emails: vec![email.clone()], ..Default::default() },
+                Kind::Correspondent,
+            ),
+        });
+    }
+    out
 }
 
 /// По имени (без регистра), затем по адресу.
@@ -157,6 +195,8 @@ fn sort(entries: &mut [Entry]) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Item {
     Letter(char, usize),
+    /// Группа поиска по всем источникам (S5-25): источник и сколько найдено.
+    Group(Source, usize),
     Row(usize),
 }
 
@@ -314,6 +354,11 @@ pub(crate) struct ContactsView {
     source: Source,
     mine: Vec<Entry>,
     directory: Vec<Entry>,
+    /// «Часто пишу»: (имя, адрес) из адресной книги по порядку и строки списка из них (S5-25).
+    frequent_src: Vec<(String, String)>,
+    frequent: Vec<Entry>,
+    /// Поиск — по всем трём источникам сразу: найденные группами (справочник, мои, переписка).
+    pool: Vec<Entry>,
     /// Ждём контакты с сервера.
     loading: bool,
     /// Контакты пришли с сервера (снимки `--screens --live` ждут их).
@@ -361,6 +406,9 @@ impl ContactsView {
             source: Source::Directory,
             mine: demo_mine(),
             directory: demo_directory(),
+            frequent_src: Vec::new(),
+            frequent: Vec::new(),
+            pool: Vec::new(),
             loading: false,
             loaded: false,
             search,
@@ -418,10 +466,40 @@ impl ContactsView {
     }
 
     fn entries(&self) -> &[Entry] {
+        if self.searching() {
+            return &self.pool;
+        }
         match self.source {
             Source::Mine => &self.mine,
             Source::Directory => &self.directory,
+            Source::Frequent => &self.frequent,
         }
+    }
+
+    fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    /// «Часто пишу» из адресной книги (экран — при открытии раздела и когда книга собрана).
+    pub(crate) fn set_frequent(&mut self, list: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if self.frequent_src != list {
+            self.frequent_src = list;
+            self.refilter(cx);
+        }
+    }
+
+    /// Открыть «Часто пишу» с первой строкой (снимок `contacts-frequent`).
+    pub(crate) fn show_frequent(&mut self, cx: &mut Context<Self>) {
+        self.set_source(Source::Frequent, cx);
+        let first = self.frequent.first().map(|e| e.card.id.clone());
+        if let Some(id) = first {
+            self.select(id, cx);
+        }
+    }
+
+    /// Открыт «Часто пишу» и в нём выбрана строка.
+    pub(crate) fn frequent_shown(&self) -> bool {
+        self.source == Source::Frequent && !self.frequent.is_empty() && self.selected.is_some()
     }
 
     fn selected_entry(&self) -> Option<&Entry> {
@@ -439,8 +517,33 @@ impl ContactsView {
     }
 
     fn reshow(&mut self) {
-        self.shown = filter(self.entries(), &self.query);
-        self.items = items(self.entries(), &self.shown, self.query.trim().is_empty());
+        self.frequent = frequent(&self.frequent_src, &self.directory, &self.mine);
+        if self.searching() {
+            // По всем трём источникам: справочник, мои, адресаты переписки (кого нет ни там, ни там).
+            let groups: [(Source, Vec<Entry>); 3] = [
+                (Source::Directory, self.directory.clone()),
+                (Source::Mine, self.mine.clone()),
+                (Source::Frequent, self.frequent.iter().filter(|e| e.kind == Kind::Correspondent).cloned().collect()),
+            ];
+            self.pool.clear();
+            self.items.clear();
+            for (source, entries) in groups {
+                let found: Vec<Entry> = filter(&entries, &self.query).into_iter().map(|i| entries[i].clone()).collect();
+                if found.is_empty() {
+                    continue;
+                }
+                self.items.push(Item::Group(source, found.len()));
+                let start = self.pool.len();
+                self.pool.extend(found);
+                self.items.extend((start..self.pool.len()).map(Item::Row));
+            }
+            self.shown = (0..self.pool.len()).collect();
+        } else {
+            self.pool.clear();
+            self.shown = (0..self.entries().len()).collect();
+            // «Часто пишу» — по частоте, без букв.
+            self.items = items(self.entries(), &self.shown, self.source != Source::Frequent);
+        }
         self.list.reset(self.items.len());
     }
 
@@ -471,7 +574,7 @@ impl ContactsView {
     /// Занятость выбранного сегодня: сотрудники и переговорные (у личных контактов — нет).
     fn ask_today(&mut self, cx: &mut Context<Self>) {
         let Some(e) = self.selected_entry() else { return };
-        let Some(email) = e.card.emails.first().cloned().filter(|_| e.kind != Kind::Contact) else {
+        let Some(email) = e.card.emails.first().cloned().filter(|_| matches!(e.kind, Kind::Person | Kind::Room | Kind::Resource)) else {
             self.today = Today::default();
             return;
         };
@@ -826,7 +929,9 @@ impl ContactsView {
             .pr(px(8.))
             .pl(px(4.))
             .text_size(px(13.))
-            .child(div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(8.)).pb(px(4.)).truncate().child(account))
+            .child(div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(8.)).pb(px(4.)).child(tr!("contacts-favorites")))
+            .child(item("src-freq", "contacts-frequent", self.frequent.len(), Source::Frequent, cx))
+            .child(div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(12.)).pb(px(4.)).truncate().child(account))
             .child(item("src-dir", "contacts-directory", self.directory.len(), Source::Directory, cx))
             .child(item("src-mine", "contacts-mine", self.mine.len(), Source::Mine, cx))
             .when(self.loading, |d| d.child(div().px(px(8.)).pt(px(6.)).text_size(px(12.)).text_color(l.text2()).child(tr!("contacts-loading"))))
@@ -852,13 +957,18 @@ impl ContactsView {
 
     fn list_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let l = crate::roles::look(cx);
+        let searching = self.searching();
         let title = tr!(match self.source {
+            _ if searching => "contacts-search-title",
             Source::Mine => "contacts-mine",
             Source::Directory => "contacts-directory",
+            Source::Frequent => "contacts-frequent",
         });
-        let searching = !self.query.trim().is_empty();
-        let summary =
-            if searching { tr!("contacts-found", n = self.shown.len()) } else { tr!("contacts-count", n = self.entries().len()) };
+        let summary = match self.source {
+            _ if searching => tr!("contacts-found", n = self.shown.len()),
+            Source::Frequent => tr!("contacts-frequent-summary", days = postman_core::contacts::FREQUENT_DAYS),
+            _ => tr!("contacts-count", n = self.entries().len()),
+        };
         let note = if self.loading && self.entries().is_empty() {
             Some(tr!("contacts-loading"))
         } else if self.shown.is_empty() {
@@ -879,7 +989,11 @@ impl ContactsView {
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
             .child(div().text_size(px(12.)).text_color(l.text2()).child(summary))
             .child(div().flex_1())
-            .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!(if searching { "contacts-sort-match" } else { "contacts-sort-name" })));
+            .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!(match self.source {
+                _ if searching => "contacts-sort-match",
+                Source::Frequent => "contacts-sort-frequency",
+                _ => "contacts-sort-name",
+            })));
         let list = list(
             self.list.clone(),
             cx.processor(|this, ix: usize, _window, cx| this.item(ix, cx)),
@@ -891,7 +1005,7 @@ impl ContactsView {
             .enumerate()
             .filter_map(|(i, it)| match it {
                 Item::Letter(c, _) => Some((*c, i)),
-                Item::Row(_) => None,
+                Item::Group(..) | Item::Row(_) => None,
             })
             .collect();
         let index = (!searching && letters.len() > 1).then(|| {
@@ -963,6 +1077,24 @@ impl ContactsView {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(c.to_string()))
                 .child(div().text_color(l.text2()).child(n.to_string()))
                 .into_any_element(),
+            Some(Item::Group(source, n)) => div()
+                .w_full()
+                .h(px(HEAD_H))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(14.))
+                .bg(l.pm(Pm::CalOff))
+                .border_b_1()
+                .border_color(l.border())
+                .text_size(px(12.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(tr!(match source {
+                    Source::Directory => "contacts-directory",
+                    Source::Mine => "contacts-mine",
+                    Source::Frequent => "contacts-group-correspondents",
+                })))
+                .child(div().text_color(l.text2()).child(n.to_string()))
+                .into_any_element(),
             Some(Item::Row(i)) => match self.entries().get(i) {
                 Some(e) => row(ix, e, self.selected.as_deref() == Some(e.card.id.as_str()), self.external(e), &l, cx),
                 None => div().into_any_element(),
@@ -1028,10 +1160,11 @@ impl ContactsView {
                     ))
                 })
         });
-        let (badge, link) = if mine {
-            (tr!("contacts-badge-mine"), tr!("contacts-edit-f2"))
-        } else {
-            (tr!("contacts-badge-directory"), tr!("contacts-add-mine"))
+        // Клавиша «Изменить» (F2) — подсказкой и KeyTips, не в тексте (S5-18).
+        let (badge, link) = match e.kind {
+            _ if mine => (tr!("contacts-badge-mine"), tr!("contacts-edit")),
+            Kind::Correspondent => (tr!("contacts-group-correspondents"), tr!("contacts-add-mine")),
+            _ => (tr!("contacts-badge-directory"), tr!("contacts-add-mine")),
         };
         let second = if !c.title.is_empty() { c.title.clone() } else { e.kind.label() };
         let head = div()
@@ -1622,7 +1755,7 @@ pub(crate) fn add_demo(book: &mut AddressBook) {
 #[cfg(test)]
 mod tests {
     // Не `super::*`: из `gpui_kit::*` пришёл бы атрибут `test` gpui вместо встроенного.
-    use super::{ContactCard, Entry, FormError, FormText, Item, Kind, demo_directory, demo_mine, filter, items};
+    use super::{ContactCard, Entry, FormError, FormText, Item, Kind, demo_directory, demo_mine, filter, frequent, items};
 
     fn names(entries: &[Entry], q: &str) -> Vec<String> {
         filter(entries, q).into_iter().map(|i| entries[i].card.name.clone()).collect()
@@ -1648,6 +1781,34 @@ mod tests {
         assert_eq!(room, Some(Kind::Room));
     }
 
+    /// «Часто пишу» (S5-25): порядок книги; сотрудник и личный контакт — их карточки (по адресу, без дублей), прочие —
+    /// адресаты переписки; поиск находит и в другой раскладке.
+    #[test]
+    fn frequent_reuses_cards_without_duplicates() {
+        let dir = demo_directory();
+        let mine = demo_mine();
+        let colleague = dir.iter().find(|e| e.kind == Kind::Person && !e.card.emails.is_empty()).unwrap();
+        let friend = mine.iter().find(|e| !e.card.emails.is_empty()).unwrap();
+        let ce = colleague.card.emails[0].to_uppercase();
+        let fe = friend.card.emails[0].clone();
+        let list = vec![
+            ("Партнёр".to_string(), "partner@outside.example".to_string()),
+            (String::new(), ce.clone()),
+            (String::new(), fe.clone()),
+            (String::new(), ce.to_lowercase()),
+        ];
+        let f = frequent(&list, &dir, &mine);
+        assert_eq!(f.len(), 3, "один адрес — одна строка");
+        assert_eq!(f[0].kind, Kind::Correspondent);
+        assert_eq!(f[0].card.name, "Партнёр");
+        assert_eq!(f[1].card.id, colleague.card.id, "карточка справочника");
+        assert_eq!(f[2].card.id, friend.card.id, "карточка моих контактов");
+        // Поиск — и в другой раскладке: «gfhn» — «парт».
+        assert!(filter(&f, "gfhn").contains(&0));
+        assert!(filter(&f, "партн").contains(&0));
+        assert!(!filter(&f, "gfhn").contains(&1), "сотрудник не подходит");
+    }
+
     /// Список с буквами: заголовок буквы с числом, «Ё» — с «Е»; при поиске букв нет.
     #[test]
     fn letters_group_the_list() {
@@ -1658,7 +1819,7 @@ mod tests {
             .iter()
             .filter_map(|i| match i {
                 Item::Letter(c, n) => Some((*c, *n)),
-                Item::Row(_) => None,
+                Item::Group(..) | Item::Row(_) => None,
             })
             .collect();
         assert_eq!(list.len(), shown.len() + letters.len());
