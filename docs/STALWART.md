@@ -345,6 +345,10 @@ cargo test -p postman-core --test stand -- --ignored
     `FileNode/changes` отдаёт его второму клиенту (как таблица категорий, п. 29–31). Но это файл, видимый и удаляемый
     пользователем (п. 29), без отбора на сервере, без iTIP и без показа в других клиентах — только если календарь
     недоступен.
+43. **Правило «→ категория» — `addflag` (`imap4flags`, S5-26).** Скрипт `if header :contains "subject" "…"
+    { addflag "pm.cat.tenders"; }` с `require ["imap4flags"]` сервер принимает (`SieveScript/validate`), и новое
+    письмо приходит во «Входящие» с ключевым словом `pm.cat.tenders` в `keywords` (тест `sieve_rule_sets_category`,
+    `stand_settings.rs`). Своё ключевое слово (не системный флаг) ставится как есть, регистр сохраняется.
 
 ## Общие ящики на стенде (S4-06)
 
