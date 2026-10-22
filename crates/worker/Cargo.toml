@@ -13,6 +13,8 @@ postman-smime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 calcard = "0.3"
+# Письмо IMAP целиком → тело и вложения (S7-04б): тот же разборщик, что у S/MIME, — только здесь, в песочнице.
+mail-parser = { version = "0.11", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Встроенный просмотр вложений (S5-07): PDF — чистый Rust без unsafe (Apache-2.0 OR MIT), стандартные шрифты
 # Foxit (BSD) встроены, таблицы CJK — нет; ZIP — только оглавление и `vbaProject.bin` (MIT); OLE — составные
