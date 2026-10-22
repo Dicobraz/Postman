@@ -4,9 +4,9 @@
 //!
 //! Действуют сразу: рабочие дни и часы (затенение недели, общие окна встречи), пояс (календарь, встреча,
 //! приглашение, контакты), длительность новой встречи, «Учитывать необязательных» (новая вкладка встречи), цвет
-//! свободного времени (встреча), удаление письма-приглашения после ответа. Остальное помечено «сохраняется»: вид и
-//! первый день недели, шаг, второй пояс — S5-21; напоминание, «на 5 мин позже», «под вопросом» — позже; цвета и имена
-//! коллег — S5-22.
+//! свободного времени (встреча), удаление письма-приглашения после ответа, цвета календарей, «Цвета по владельцу» и
+//! «Имя владельца» (S5-22). Остальное помечено «сохраняется»: вид и первый день недели, шаг, второй пояс — S5-21;
+//! напоминание, «на 5 мин позже», «под вопросом» — позже.
 
 use std::rc::Rc;
 
@@ -194,6 +194,43 @@ impl SettingsView {
         }))
     }
 
+    /// Цвета календарей (S5-22): мой и каждого коллеги, кого календарь уже видел; щелчок по образцу — цвет.
+    fn calendar_colors(&self, c: &Calendar, l: &Look, cx: &mut Context<Self>) -> Vec<Div> {
+        c.calendar_colors
+            .keys()
+            .enumerate()
+            .map(|(n, key)| {
+                let name = if key.is_empty() { tr!("cal-my-calendar") } else { key.clone() };
+                let current = c.calendar_colors.get(key).cloned().unwrap_or_default();
+                let swatches = postman_core::palette::CALENDAR.iter().enumerate().map(|(m, color)| {
+                    let (k, col) = (key.clone(), (*color).to_owned());
+                    div()
+                        .id(("settings-cal-color", n * 8 + m))
+                        .size(px(20.))
+                        .rounded(px(4.))
+                        .bg(l.cat(color).dot)
+                        .border_2()
+                        .border_color(if current == *color { l.text() } else { l.none() })
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            let (k, col) = (k.clone(), col.clone());
+                            crate::prefs::update(cx, move |p| {
+                                p.calendar.calendar_colors.insert(k, col);
+                            });
+                            cx.notify();
+                        }))
+                });
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .py_1()
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(div().flex().gap_1p5().children(swatches))
+            })
+            .collect()
+    }
+
     /// Сегмент «одно из» настройки календаря.
     fn cal_seg(&self, id: (&'static str, usize), label: String, on: bool, set: impl Fn(&mut Calendar) + 'static, l: &Look, cx: &mut Context<Self>) -> Stateful<Div> {
         seg(id, label, on, true, l).on_click(cx.listener(move |_, _, _, cx| {
@@ -356,18 +393,19 @@ impl SettingsView {
             .child(group(tr!("settings-cal-colleagues-group"), l))
             .child(line(
                 tr!("settings-cal-owner-colors"),
-                Some(stored(l)),
+                None,
                 Some(tr!("settings-cal-owner-colors-hint")),
                 self.cal_toggle("settings-cal-owner-colors", c.owner_colors, |c| c.owner_colors = !c.owner_colors, l, cx),
                 l,
             ))
             .child(line(
                 tr!("settings-cal-owner-names"),
-                Some(stored(l)),
+                None,
                 Some(tr!("settings-cal-owner-names-hint")),
                 self.cal_toggle("settings-cal-owner-names", c.owner_names, |c| c.owner_names = !c.owner_names, l, cx),
                 l,
             ))
+            .children(self.calendar_colors(c, l, cx))
             .child(group(tr!("settings-cal-invites-group"), l))
             .child(line(
                 tr!("settings-cal-tentative"),

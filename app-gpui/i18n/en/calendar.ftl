@@ -217,3 +217,7 @@ invite-side-title = Invitation
 invite-side-strip = Meeting invitation · { $when }
 invite-side-strip-hint = Details and reply are in the panel on the right
 invite-now = Now { $time }
+cal-group-colleagues = Colleagues’ calendars
+cal-colleague-calendar = Calendar: { $name }
+cal-chip-colleague = Colleague’s calendar
+cal-color-change = Calendar color

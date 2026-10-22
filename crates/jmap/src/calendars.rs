@@ -84,7 +84,12 @@ impl Client {
     }
 
     pub async fn calendars(&self) -> Result<Vec<Calendar>> {
-        let acc = self.calendar_account()?;
+        let acc = self.calendar_account()?.to_owned();
+        self.calendars_of(&acc).await
+    }
+
+    /// Календари аккаунта `acc`: свой или открытый мне коллегой ([`crate::Session::shared_calendar_accounts`], S5-22).
+    pub async fn calendars_of(&self, acc: &str) -> Result<Vec<Calendar>> {
         let mut r = self.call(USING, &[inv("Calendar/get", json!({ "accountId": acc, "ids": null }), "c")]).await?;
         let g: GetResponse<Calendar> = take(&mut r, "c")?;
         Ok(g.list)
@@ -92,7 +97,12 @@ impl Client {
 
     /// События в интервале (UTC, `YYYY-MM-DDTHH:MM:SSZ`), повторения разворачивает сервер.
     pub async fn events(&self, calendar_ids: Option<&[String]>, utc_after: &str, utc_before: &str) -> Result<Vec<Value>> {
-        let acc = self.calendar_account()?;
+        let acc = self.calendar_account()?.to_owned();
+        self.events_of(&acc, calendar_ids, utc_after, utc_before).await
+    }
+
+    /// События аккаунта `acc` в окне времени (свой или открытый мне календарь коллеги, S5-22).
+    pub async fn events_of(&self, acc: &str, calendar_ids: Option<&[String]>, utc_after: &str, utc_before: &str) -> Result<Vec<Value>> {
         let mut filter = json!({ "after": utc_after, "before": utc_before });
         if let Some(ids) = calendar_ids {
             filter["inCalendars"] = json!(ids);
@@ -182,6 +192,17 @@ impl Client {
     }
 
     /// Ответ на приглашение: accepted | tentative | declined.
+    /// Закрыть календарь для `principal_id` (`shareWith/<id>: null`).
+    pub async fn unshare_calendar(&self, calendar_id: &str, principal_id: &str) -> Result<()> {
+        let acc = self.calendar_account()?;
+        let mut patch = Map::new();
+        patch.insert(format!("shareWith/{principal_id}"), Value::Null);
+        let args = json!({ "accountId": acc, "update": { calendar_id: patch } });
+        let mut r = self.call(USING, &[inv("Calendar/set", args, "s")]).await?;
+        let v: Value = take(&mut r, "s")?;
+        set_error(&v, "notUpdated", calendar_id, "Calendar/set")
+    }
+
     pub async fn reply(&self, event_id: &str, participant_id: &str, status: &str) -> Result<()> {
         let mut patch = Map::new();
         patch.insert(format!("participants/{participant_id}/participationStatus"), json!(status));

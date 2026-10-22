@@ -345,6 +345,11 @@ cargo test -p postman-core --test stand -- --ignored
     пользователем (п. 29), без отбора на сервере, без iTIP и без показа в других клиентах — только если календарь
     недоступен.
 
+44. **Календарь коллеги (S5-22).** Календарь user2, открытый user1 (`Calendar/set` `shareWith/<principal>`:
+    `mayReadItems: true`), появляется в сессии user1 отдельным аккаунтом с capability календарей; имя аккаунта —
+    адрес владельца (`user2@itt.test`). `Calendar/get` и `CalendarEvent/query` с этим `accountId` отдают его календарь
+    и события (тест `shared_calendar_is_visible`). Закрыть — `shareWith/<principal>: null`.
+
 ## Общие ящики на стенде (S4-06)
 
 - `shared-sales@itt.test` — группа (`x:Account/set` от имени администратора), user3 — участник; пароля нет.

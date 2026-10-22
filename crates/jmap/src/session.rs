@@ -62,6 +62,20 @@ impl Session {
         out
     }
 
+    /// Аккаунты с календарями, кроме своего (`primaryAccounts` календаря): календари, открытые мне коллегами (S5-22).
+    /// По имени аккаунта (Stalwart — адрес владельца).
+    pub fn shared_calendar_accounts(&self) -> Vec<(String, String)> {
+        let primary = self.primary_accounts.get(crate::CALENDARS);
+        let mut out: Vec<(String, String)> = self
+            .accounts
+            .iter()
+            .filter(|(id, a)| Some(*id) != primary && a.account_capabilities.contains_key(crate::CALENDARS))
+            .map(|(id, a)| (id.clone(), a.name.clone()))
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        out
+    }
+
     /// URL сессии — на тот же адрес, по которому получена сессия: относительные дополняем, у абсолютных
     /// заменяем начало (схема, хост, порт). Сервер за прокси или туннелем объявляет свой внутренний адрес
     /// (Stalwart: `http://10.70.2.40:8080/jmap/`), а пароль и токен не должны уходить на другой хост.

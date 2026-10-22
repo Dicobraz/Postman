@@ -217,3 +217,7 @@ invite-side-title = Приглашение
 invite-side-strip = Приглашение на встречу · { $when }
 invite-side-strip-hint = Подробности и ответ — в панели справа
 invite-now = Сейчас { $time }
+cal-group-colleagues = Календари коллег
+cal-colleague-calendar = Календарь: { $name }
+cal-chip-colleague = Календарь коллеги
+cal-color-change = Цвет календаря

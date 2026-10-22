@@ -94,6 +94,9 @@ enum Scene {
     Assistant,
     /// Календарь с подробностями самого людного события (S3-05).
     Event,
+    /// Календари коллег (S5-22): события коллег цветом их календаря и с именем владельца, слева «Календари коллег»;
+    /// открыто событие из календаря коллеги.
+    CalendarColleagues,
     /// Строка входа (нет учётной записи).
     SignIn,
     /// Новое письмо во вкладке (S5-06б): адресаты чипами (один внешний), текст, вложение, панель справа.
@@ -221,6 +224,7 @@ const SCENES: &[Scene] = &[
     Scene::PaletteQuery,
     Scene::Calendar,
     Scene::Event,
+    Scene::CalendarColleagues,
     Scene::Meeting,
     Scene::MeetingSlot,
     Scene::MeetingBlue,
@@ -322,6 +326,7 @@ impl Scene {
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
+            Scene::CalendarColleagues => "calendar-colleagues",
             Scene::SignIn => "firstrun",
             Scene::Compose => "compose",
             Scene::SendLater => "send-later",
@@ -606,6 +611,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         }
         Scene::Event => {
             m.cal.update(cx, |c, cx| c.select_busiest(cx));
+            m.set_section(Section::Calendar, cx);
+        }
+        Scene::CalendarColleagues => {
+            m.cal.update(cx, |c, cx| c.select_colleague(cx));
             m.set_section(Section::Calendar, cx);
         }
         Scene::Lifecycle => lifecycle_scene(m, cx)?,
@@ -1064,6 +1073,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                         && (!matches!(scene, Scene::MeetingSlot) || v.slot_cursor.is_some())
                 })
         }
+        Scene::CalendarColleagues => m.section == Section::Calendar && m.cal.read(cx).selected(),
         Scene::Event => {
             // Живая неделя может быть пустой: тогда снимок — без подробностей.
             let c = m.cal.read(cx);

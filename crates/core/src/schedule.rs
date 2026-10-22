@@ -7,7 +7,7 @@
 
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use postman_calendar::{Busy, BusyKind, Event, EventStatus, FreeBusy, NewEvent};
+use postman_calendar::{Busy, BusyKind, Event, EventStatus, FreeBusy, NewEvent, Owner};
 use postman_jmap::{BusyPeriod, Calendar, Client, Error, Identity, Result};
 use serde_json::Value;
 
@@ -123,6 +123,38 @@ pub fn default_calendar(calendars: &[Calendar]) -> Option<&Calendar> {
 pub async fn week(client: &Client, from: i64, to: i64) -> Result<Vec<Event>> {
     let values = client.events(None, &utc(from), &utc(to)).await?;
     Ok(parse_events(&values, &TimeZone::system()))
+}
+
+/// Неделя с календарями коллег (S5-22): мои события и события календарей, открытых мне (`mayReadItems`) — отдельные
+/// аккаунты сессии с календарями (`docs/STALWART.md` п. 44); у их событий — владелец (адрес аккаунта и имя из
+/// справочника). Календарь коллеги, который не ответил, пропускается: его неделя — без него. Коллеги — все открывшие,
+/// и без событий в неделе (список слева в календаре).
+pub async fn week_with_colleagues(client: &Client, from: i64, to: i64) -> Result<(Vec<Event>, Vec<Owner>)> {
+    let mut events = week(client, from, to).await?;
+    let mut colleagues = Vec::new();
+    let tz = TimeZone::system();
+    for (account, email) in client.session().shared_calendar_accounts() {
+        let name = match client.principal_by_email(&email).await {
+            Ok(Some(p)) => p.display_name().to_owned(),
+            _ => email.clone(),
+        };
+        let owner = Owner { email, name };
+        if let Ok(values) = client.events_of(&account, None, &utc(from), &utc(to)).await {
+            // Встреча, где и я участник, уже есть в моём календаре — копию коллеги не показываем.
+            let theirs: Vec<Event> = parse_events(&values, &tz)
+                .into_iter()
+                .filter(|e| !events.iter().any(|m| m.owner.is_none() && m.uid == e.uid && m.span.start == e.span.start))
+                .map(|mut e| {
+                    e.owner = Some(owner.clone());
+                    e
+                })
+                .collect();
+            events.extend(theirs);
+        }
+        colleagues.push(owner);
+    }
+    events.sort_by(|a, b| (a.span.start, a.span.end, &a.title).cmp(&(b.span.start, b.span.end, &b.title)));
+    Ok((events, colleagues))
 }
 
 /// Занятость в `[from, to)`: моя (из моих событий) и каждого адреса (`None` — нет данных: сотрудник не найден,

@@ -998,7 +998,11 @@ impl ReadingPane {
     /// Итог синхронизации для карточки: мой день (`EventsLoaded`), сбой календаря.
     pub(crate) fn invite_sync(&mut self, ev: &SyncEvent, cx: &mut Context<Self>) {
         match ev {
-            SyncEvent::EventsLoaded { from, to, events } => self.invite_events(*from, *to, events, cx),
+            // Мой день — только мои события (календари коллег — в календаре, S5-22).
+            SyncEvent::EventsLoaded { from, to, events, .. } => {
+                let mine: Vec<postman_calendar::Event> = events.iter().filter(|e| e.owner.is_none()).cloned().collect();
+                self.invite_events(*from, *to, &mine, cx)
+            }
             SyncEvent::CalendarFailed(_) => {
                 self.invite_events_failed();
                 cx.notify();
