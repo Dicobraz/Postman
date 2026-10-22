@@ -292,7 +292,7 @@ impl MailList {
     pub(crate) fn category_items(&self) -> Vec<(String, String, String, Option<u8>)> {
         self.labels
             .for_account(None)
-            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.color.clone(), c.key)).collect())
+            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.shown_color().to_owned(), c.key)).collect())
             .unwrap_or_default()
     }
 

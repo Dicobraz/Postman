@@ -211,6 +211,7 @@ settings-cat-key-taken = Клавиша у «{ $name }»
 settings-cat-new = Новая категория
 settings-cat-edit = Категория
 settings-cat-inplace = — редактируется на месте
+settings-cat-colors-none = Свободного цвета нет: все { $total } заняты. Удалите категорию или смените ей цвет.
 settings-cat-colors-free = Свободно цветов: { $n } из { $total }. Перечёркнутые слишком похожи на занятые или зарезервированы.
 settings-cat-color-near = Слишком похож на цвет «{ $name }» — в списке будут путаться.
 settings-cat-color-threat = Занят: красный — только угрозы безопасности.

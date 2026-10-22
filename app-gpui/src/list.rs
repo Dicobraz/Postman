@@ -537,7 +537,7 @@ impl MailList {
         let cats: Vec<(String, String, String)> = self
             .labels
             .for_account(None)
-            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.color.clone())).collect())
+            .map(|t| t.visible().map(|c| (c.keyword.clone(), c.name.clone(), c.shown_color().to_owned())).collect())
             .unwrap_or_default();
         self.filters.update(cx, |m, cx| {
             if m.categories != cats {
@@ -1539,6 +1539,8 @@ pub(crate) fn list_row(
         div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(crate::search::marked(&r.preview, marks, l))
     });
     let lit = state.open || state.picked;
+    // Выделенная строка — нейтральная подложка «выбранное» и полоса акцента слева (решение владельца 2026-10-22).
+    let stripe = if lit { Some(l.accent()) } else { stripe };
     let open_head = state.thread.open_head();
     div()
         .id(i)
@@ -1552,7 +1554,7 @@ pub(crate) fn list_row(
         // Развёрнутая беседа — без черты снизу, к письмам под ней — линия (макет «В списке, как Outlook»).
         .when(!open_head, |d| d.border_b_1())
         .border_color(l.border())
-        .when(lit, |d| d.bg(l.picked()))
+        .when(lit, |d| d.bg(l.selected()))
         .when(!lit, |d| d.hover(|d| d.bg(l.hover())))
         // Строка под контекстным меню — с рамкой акцента (макет «Выделение»).
         .when(state.menu, |d| d.border_1().border_color(l.accent_text()))
