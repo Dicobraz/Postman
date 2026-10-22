@@ -13,6 +13,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-ir", 0),
     ("postman-smime", 1),
     ("postman-jmap", 1),
+    ("postman-imap", 1),
     ("postman-cache", 1),
     ("postman-compose", 1),
     ("postman-calendar", 1),
