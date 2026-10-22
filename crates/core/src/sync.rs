@@ -1198,7 +1198,7 @@ async fn handle(
             for (scope, keys) in by_account(&ids) {
                 let Some(acc) = accounts.by_scope(scope) else { continue };
                 let server: Vec<String> = keys.iter().map(|k| unscoped(k).1.to_owned()).collect();
-                let failed: Vec<String> = match acc.client.set_keywords(&server, &add, &remove).await {
+                let failed: Vec<String> = match acc.client.set_keywords(&server, &server_words(&add), &server_words(&remove)).await {
                     Ok(f) => f
                         .into_iter()
                         .map(|(id, e)| {
@@ -1499,7 +1499,7 @@ fn server_patch(p: &lifecycle::Patch, archive: Option<&str>) -> (String, postman
             out = out.mailbox(id, *on);
         }
     }
-    for (k, on) in &p.keywords {
+    for (k, on) in p.keywords.iter().filter(|(k, _)| !k.eq_ignore_ascii_case(postman_cache::ENCRYPTED)) {
         out = out.keyword(k, *on);
     }
     (unscoped(&p.id).1.to_owned(), out)
@@ -1815,7 +1815,7 @@ async fn send(
         r => r,
     };
     let raw = raw_message(draft)?;
-    let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &draft.keywords).await?;
+    let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &server_words(&draft.keywords)).await?;
     if let Some(old) = replace {
         let (acc, id) = accounts.locate(old)?;
         acc.client.destroy_email(id).await?;
@@ -1901,7 +1901,7 @@ async fn save_draft(
         Some(old) => (None, Some(old)),
         None => (None, None),
     };
-    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same, &draft.keywords).await?;
+    let id = acc.client.save_draft(raw_message(draft)?, &drafts, same, &server_words(&draft.keywords)).await?;
     if let Some(old) = other
         && let Ok((prev, old_id)) = accounts.locate(old)
     {
@@ -2029,6 +2029,20 @@ fn email_row(e: &EmailSummary, scope: Option<&str>) -> EmailRow {
     }
 }
 
+/// Корень письма — шифрованное S/MIME (`application/pkcs7-mime; smime-type=enveloped-data` или
+/// `authEnveloped-data`; без `smime-type` — по имени `.p7m` не судим).
+fn is_encrypted(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else { return false };
+    let ct = ct.to_ascii_lowercase();
+    (ct.contains("application/pkcs7-mime") || ct.contains("application/x-pkcs7-mime"))
+        && (ct.contains("enveloped-data") || ct.contains("authenveloped-data"))
+}
+
+/// Ключевые слова для сервера: без локальных меток строки.
+fn server_words(words: &[String]) -> Vec<String> {
+    words.iter().filter(|k| !k.eq_ignore_ascii_case(postman_cache::ENCRYPTED)).cloned().collect()
+}
+
 /// Ключевые слова письма для кэша: кроме `$seen` и `$flagged` (свои поля), нижний регистр, по алфавиту.
 fn row_keywords(e: &EmailSummary) -> Vec<String> {
     let mut out: Vec<String> = e
@@ -2036,8 +2050,11 @@ fn row_keywords(e: &EmailSummary) -> Vec<String> {
         .iter()
         .filter(|(_, on)| **on)
         .map(|(k, _)| k.to_ascii_lowercase())
-        .filter(|k| k != postman_cache::SEEN && k != postman_cache::FLAGGED)
+        .filter(|k| k != postman_cache::SEEN && k != postman_cache::FLAGGED && k != postman_cache::ENCRYPTED)
         .collect();
+    if is_encrypted(e.content_type.as_deref()) {
+        out.push(postman_cache::ENCRYPTED.to_owned());
+    }
     out.sort();
     out.dedup();
     out
@@ -2134,6 +2151,17 @@ mod tests {
         let row = email_row(&e, None);
         assert!(row.seen && row.flagged);
         assert_eq!(row.keywords, ["$label1", "pm.cat.team"]);
+        // S5-12 Ф2: шифрованное S/MIME — локальная метка по `Content-Type`, на сервер не уходит.
+        let enc: EmailSummary = serde_json::from_value(serde_json::json!({
+            "id": "m2", "threadId": "t", "mailboxIds": { "a": true }, "receivedAt": "2026-10-20T18:00:58Z",
+            "header:Content-Type": " application/pkcs7-mime; smime-type=enveloped-data;
+ name=\"smime.p7m\""
+        }))
+        .unwrap();
+        assert_eq!(email_row(&enc, None).keywords, [postman_cache::ENCRYPTED]);
+        assert!(!is_encrypted(Some("application/pkcs7-mime; smime-type=signed-data")) && !is_encrypted(None));
+        assert!(is_encrypted(Some("application/pkcs7-mime; smime-type=authEnveloped-data")));
+        assert_eq!(server_words(&[postman_cache::ENCRYPTED.into(), "pm.conf".into()]), ["pm.conf"]);
         let keys = ["a".to_string(), "i/b".into(), "c".into(), "i/d".into()];
         let groups = by_account(&keys);
         assert_eq!(groups[&None], ["a", "c"]);

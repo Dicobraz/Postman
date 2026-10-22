@@ -1,0 +1,22 @@
+From: Служба ИБ <security@corp.example>
+To: Смирнова Анна <me@corp.example>
+Subject: =?utf-8?B?0J/QsNGA0L7Qu9C4INC6INGC0LXRgdGC0L7QstC+0LzRgyDRgdGC0LXQvdC00YM=?=
+Date: Wed, 21 Oct 2026 09:30:00 +0300
+Message-ID: <a3a9e7ed77973c5d@postman.test>
+MIME-Version: 1.0
+Content-Type: application/pkcs7-mime; smime-type=enveloped-data; name="smime.p7m"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7m"
+
+MIICewYJKoZIhvcNAQcDoIICbDCCAmgCAQAxggGBMIIBfQIBADBlMF8xKDAmBgNVBAoMH9Ca0L7R
+gNC/0L7RgNCw0YbQuNGPICjQtNC10LzQvikxMzAxBgNVBAMMKtCa0L7RgNC/0L7RgNCw0YLQuNCy
+0L3Ri9C5INCj0KYgKNC00LXQvNC+KQICdwEwDQYJKoZIhvcNAQEBBQAEggEA1sKTDmEQvV8DNrf4
+jJHj5D2ohOF+oVuou9i8fQd+NPyWRGDkrz+bOkf3CAlzD0V2U1s1MI/yyVHwc7swSkWsCVANEvqf
+5bPzj5hqTh4m0HsTijiCmcXrehwZrqJInVl42ylEmxxH584ZwPVrswLVHUMkcG1V6D+hmQzZNVqS
+/eLd73gj7aCue5odeVJTMfbkdGEfDeeqH3u5Ol4gkftvz37FtKe7rd3xgNkErrkYYz5iNWIbB+FM
+a2hck10rFHRxKGYmE2rfiycaDvlUyLTUdoE6P38ZFTt2UcP+c57y8/yVyCAZO2rlFWYfWefJrh8l
+i5GiDjKsNDruJgw5CylNpTCB3QYJKoZIhvcNAQcBMB0GCWCGSAFlAwQBKgQQF1suOTlwXSBT5Zwa
+14OReICBsCcJOFfWoapdyaJJNWELF+pGrcaS2jKBSzMgRrVt7iwAxVzTxX9b0sIuxALq/uZLGv4b
+H08k6NbooaepfYYTEuDRjuOwwNGK6SmZTCZ2AWuprKoKExq1Pq37k9YUVOUKTtix9Q8rSYS9+s+2
+OgYMk54b+x/oPYnTnGG3GX+DRzHaelVXwWvUWJjAdoNy7/ptpYrUMtlaC8AgeNnZfeAjZOMsqIgR
+I/iHjEG6qerv/dzY
