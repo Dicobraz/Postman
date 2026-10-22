@@ -143,8 +143,8 @@ pub(crate) fn base(density: Option<Density>, accent: Accent) -> ThemeSpec {
             // подложка с 8 % текста на ней.
             t.insert(Role::AccentText.name().to_owned(), c(text));
             t.insert(Role::AccentFill.name().to_owned(), c(fill));
-            t.insert(Role::AccentFillHover.name().to_owned(), a(0xE600_0000 | fill));
-            t.insert(Role::AccentFillPressed.name().to_owned(), a(0xCC00_0000 | fill));
+            t.insert(Role::AccentFillHover.name().to_owned(), a((0xE6 << 24) | fill));
+            t.insert(Role::AccentFillPressed.name().to_owned(), a((0xCC << 24) | fill));
             t.insert(Role::AccentSubtle.name().to_owned(), c(tint));
             t.insert(pm_name(Pm::Tinted).to_owned(), c(tint));
             t.insert(pm_name(Pm::TintedFg).to_owned(), c(tint_fg));

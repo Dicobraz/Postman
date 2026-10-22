@@ -332,7 +332,11 @@ impl Prefs {
     pub fn normalized(mut self) -> Prefs {
         self.version = VERSION;
         // Прежние «удобная» 28 и «просторная» 32 — к ближайшей из двух (обычная 24).
-        self.general.density = self.general.density.map(|d| if d <= 22 { 20 } else { 24 });
+        self.general.density = match self.general.density {
+            Some(20) => Some(20),
+            Some(24 | 28 | 32) => Some(24),
+            _ => None,
+        };
         if self.general.language.as_deref().is_some_and(|l| !LANGUAGES.contains(&l)) {
             self.general.language = None;
         }
