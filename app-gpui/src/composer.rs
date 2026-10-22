@@ -2093,7 +2093,7 @@ pub(crate) mod scenes {
 
 /// Оформление отрезка Markdown в поле письма: знаки разметки приглушены, ссылка и маркер списка — акцентом, цитата —
 /// вторичным текстом, код — подложкой (роли темы).
-fn md_style(m: &postman_compose::display::Look, l: &Look) -> HighlightStyle {
+pub(crate) fn md_style(m: &postman_compose::display::Look, l: &Look) -> HighlightStyle {
     let mut s = HighlightStyle::default();
     if m.strong || m.heading > 0 {
         s.font_weight = Some(FontWeight::BOLD);

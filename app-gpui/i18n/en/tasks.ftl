@@ -78,3 +78,16 @@ tasks-status-mail = { $n ->
    *[other] { $n } tasks from emails
 }
 tasks-failed = The task was not saved on the server: { $error }
+tasks-project-new = New project — Enter
+tasks-sub-add = Add a subtask
+tasks-notes-placeholder = Add a note…
+tasks-important = important
+tasks-remind-at-due = At due time
+tasks-remind-minutes = { $n } min before
+tasks-remind-hours = { $n } h before
+tasks-remind-days = { $n } d before
+tasks-remind-at = At { $when }
+tasks-block = Time in calendar
+tasks-block-remove = Remove
+tasks-block-none = No free slot left today
+tasks-block-placed = In calendar: { $when }
