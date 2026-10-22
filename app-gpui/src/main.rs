@@ -70,6 +70,7 @@ mod notices;
 mod palette;
 mod search;
 mod smime;
+mod smime_enc;
 mod tasks;
 
 pub(crate) use mailer::{Mailer, Section};

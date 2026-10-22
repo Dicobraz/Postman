@@ -459,6 +459,10 @@ impl ReadingPane {
     }
 
     /// Картинки `cid:` текущего письма, за которыми ещё не ходили.
+    pub(crate) fn ensure_images_pub(&mut self, cx: &mut Context<Self>) {
+        self.ensure_images(cx);
+    }
+
     fn ensure_images(&mut self, cx: &mut Context<Self>) {
         let Some(r) = &mut self.reading else { return };
         let (Some(doc), Some(body)) = (&r.doc, &r.body) else { return };
@@ -488,6 +492,10 @@ impl ReadingPane {
 
     /// Байты вложения: демо — сразу; живой ящик — из хранилища (в фоне), иначе с сервера.
     pub(crate) fn fetch(&mut self, a: &AttachmentRow, cx: &mut Context<Self>) {
+        // Вложение расшифрованного письма (S5-12 Ф2) — из воркера по ключу сеанса.
+        if self.fetch_part(a, cx) {
+            return;
+        }
         if !self.live {
             match postman_demo::blob(&a.blob_id) {
                 Some(data) => self.blob_ready(&a.blob_id, Arc::new(data), cx),
@@ -515,6 +523,14 @@ impl ReadingPane {
     }
 
     /// Байты пришли: приглашение — на разбор, картинки — на декодирование, ждущие действия — выполнить.
+    pub(crate) fn blob_ready_pub(&mut self, blob_id: &str, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
+        self.blob_ready(blob_id, data, cx);
+    }
+
+    pub(crate) fn blob_failed_pub(&mut self, blob_id: &str, error: String, cx: &mut Context<Self>) {
+        self.blob_failed(blob_id, error, cx);
+    }
+
     fn blob_ready(&mut self, blob_id: &str, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         self.in_flight.remove(blob_id);
         if self.smime_waits(blob_id) {
@@ -668,6 +684,11 @@ impl ReadingPane {
     fn do_file(&mut self, a: AttachmentRow, act: FileAct, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         let name = files::safe_name(&a.name);
         match act {
+            // Расшифрованное вложение (S5-12 Ф2): «Открыть» положило бы его на диск во временную папку — только
+            // «Сохранить» по выбору пользователя (решение владельца №4).
+            FileAct::Open if a.blob_id.starts_with(crate::smime_enc::PART) => {
+                cx.emit(ReadingEvent::Toast(Toast::Info, tr!("smime-enc-part-open")));
+            }
             FileAct::Open if self.risk_of(&a) != postman_core::attach::Risk::Safe => {
                 // Макросы (по имени или найденные воркером) и исполняемые — только «Сохранить» (S5-07).
                 let text = tr!("reading-file-failed", name = name, error = tr!("att-status-macros"));
@@ -811,8 +832,10 @@ impl Render for ReadingPane {
             .text_color(neutral.text)
             .child(crate::list::initials(&name));
         // Подпись S/MIME (S5-12): значок справа от отправителя и даты, карточка — под шапкой.
+        let lock = self.lock_badge(&l, cx);
         let seal = self.smime_badge(&l, cx);
         let seal_card = self.smime_card(&l);
+        let lock_line = self.lock_line(&l, cx);
         // Шапка (макет главного окна): тема, затем аватар, отправитель с адресом, «Кому: … · дата».
         let header = div()
             .flex()
@@ -851,6 +874,7 @@ impl Render for ReadingPane {
                                 .child(tr!("frame-reading-to", to = to, date = format_date(r.row.received_at))),
                         ),
                 )
+                .children(lock)
                 .children(seal),
             )
             // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
@@ -954,6 +978,7 @@ impl Render for ReadingPane {
             .children(strip)
             .children(card)
             .children(matches)
+            .children(lock_line)
             .child(body);
         with_side(main, side)
     }

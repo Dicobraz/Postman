@@ -22,7 +22,8 @@ memory-stats = "1"
 open = "5"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # Типы итога проверки S/MIME (S5-12); сам разбор и проверка — только в воркере.
-postman-smime.workspace = true
+postman-smime = { workspace = true, features = ["soft"] }
+zeroize = "1"
 tracing = "0.1"
 
 # S/MIME (S5-12): якоря из хранилищ Windows, подтверждение цепочки и отзыв (`smime/windows.rs`), поиск СКЗИ ГОСТ.

@@ -94,6 +94,21 @@ tasks-block = Время в календаре
 tasks-block-remove = Убрать
 tasks-block-none = Сегодня свободного окна нет
 tasks-block-placed = В календаре: { $when }
+tasks-done-next = Выполнено · следующая — { $when }
+tasks-repeat-daily = Каждый день
+tasks-repeat-days = Каждые { $n } дн.
+tasks-repeat-weekdays = По будням
+tasks-repeat-weekly = Каждую неделю
+tasks-repeat-weeks = Каждые { $n } нед.
+tasks-repeat-monthly = Каждый месяц
+tasks-repeat-months = Каждые { $n } мес.
+tasks-repeat-monthly-day = Каждый месяц, { $day }-го
+tasks-repeat-yearly = Каждый год
+tasks-repeat-after = Через { $n } д после выполнения
+tasks-repeat-other = Повторяется (особое правило)
+tasks-snooze = Отложить на 10 мин
+tasks-remind-title = Напоминание о задаче
+tasks-remind-toast = Напоминание: «{ $title }»
 
 
 # Поручения (S6-10): форма «Поручить», карточка поручения, письма шагов.

@@ -9,15 +9,20 @@
 //! ГОСТ Р 34.10-2012 (256 и 512 бит, [`gost`] — **не сертифицировано**); хэши SHA-256/384/512, «Стрибог» 256/512,
 //! SHA-1 — «слабая» (решение №10); цепочка — `rustls-webpki` к переданным якорям, EKU «Защита почты», адрес
 //! сертификата ↔ «От»; `SMIMECapabilities`.
+//!
+//! Ф2 — расшифровка ([`envelope`]): получатели и шифр — ядру, содержимое по ключу ядра — здесь же, в воркере.
 
 mod algs;
 mod ber;
 mod chain;
 mod ec;
+pub mod envelope;
 pub mod gost;
 mod mime;
 pub mod oid;
 mod signed;
+#[cfg(feature = "soft")]
+pub mod soft;
 pub mod wire;
 
 #[cfg(feature = "testkit")]
@@ -55,7 +60,7 @@ pub enum Kind {
     Detached,
     /// `application/pkcs7-mime; smime-type=signed-data` (`smime.p7m`).
     Opaque,
-    /// `application/pkcs7-mime; smime-type=enveloped-data` — зашифровано (расшифровка — Ф2).
+    /// `application/pkcs7-mime; smime-type=enveloped-data` — зашифровано (расшифровка — [`envelope`]).
     Encrypted,
     /// Не S/MIME.
     None,
@@ -216,7 +221,7 @@ fn verify_inner(message: &[u8], trust: &Trust, now: u64) -> Report {
             r.from = from;
             return r;
         }
-        mime::Found::Encrypted { from } => {
+        mime::Found::Encrypted { from, .. } => {
             let mut r = Report::new(Kind::Encrypted, Status::NotSigned);
             r.from = from;
             return r;

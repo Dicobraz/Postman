@@ -30,6 +30,7 @@ use postman_core::labels::Categories;
 use postman_core::lifecycle::{self as cycle, Badge, Patch, Pick};
 use postman_core::mailtask;
 use postman_core::marks::{self, Kind, When};
+use postman_core::recur::{self, Freq, Rule, Snooze};
 use postman_core::tasks::{self as model, ChipKind, Hours, Lang, List, Parsed, Reply, Request};
 
 use crate::chrome::icon;
@@ -116,6 +117,7 @@ pub(crate) enum Group {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Field {
     Remind,
+    Repeat,
     Project,
     Category,
 }
@@ -280,6 +282,8 @@ pub(crate) enum TasksAction {
     Patch(Vec<Patch>),
     /// Открыть письмо по ключу кэша.
     OpenLetter(String),
+    /// Сработало напоминание (S6-07): тост с «Отложить», при свёрнутом окне — уведомление Windows.
+    Remind { uid: String, title: String },
     Toast(Toast, String),
     /// Тост с «Отменить»: что вернуть.
     Undo { text: String, undo: Undo },
@@ -344,6 +348,10 @@ pub(crate) struct TasksView {
     /// «Время в календаре» (S6-08): занятость сегодня из своего календаря и выбранное окно.
     busy: Vec<Busy>,
     pub(crate) slot: usize,
+    /// Напоминания (S6-07): проверено до этого момента, отложенные, таймер к ближайшему.
+    remind_since: i64,
+    snoozed: Vec<(String, i64)>,
+    remind_timer: Option<gpui_kit::Task<()>>,
     tz: TimeZone,
     /// Задачи пришли (снимки ждут их).
     pub(crate) loaded: bool,
@@ -461,6 +469,10 @@ impl TasksView {
             ignored: Vec::new(),
             busy: Vec::new(),
             slot: 0,
+            // Напоминания, сработавшие до запуска, не показываются (кроме последней минуты).
+            remind_since: jiff::Timestamp::now().as_second() - 60,
+            snoozed: Vec::new(),
+            remind_timer: None,
             tz: crate::prefs::get(cx).calendar.zone(),
             loaded: true,
             timer: None,
@@ -556,7 +568,36 @@ impl TasksView {
             self.title = None;
         }
         self.list.reset(self.items.len());
+        self.remind_pass(cx);
         cx.notify();
+    }
+
+    /// Напоминания: сработавшие с прошлой проверки — экрану (тост, уведомление); один таймер к ближайшему (без кадров
+    /// между сроками, как у сроков писем).
+    fn remind_pass(&mut self, cx: &mut Context<Self>) {
+        let now = self.now();
+        let plan = recur::plan(&self.tasks, &self.snoozed, self.remind_since, now, &self.tz);
+        self.remind_since = now;
+        self.snoozed.retain(|(_, at)| *at > now);
+        for f in plan.fire {
+            cx.emit(TasksAction::Remind { uid: f.uid, title: f.title });
+        }
+        self.remind_timer = plan.next.map(|at| {
+            let wait = Duration::from_secs((at - now).clamp(1, 86_400) as u64);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |v, cx| v.remind_pass(cx));
+            })
+        });
+    }
+
+    /// «Отложить» напоминание.
+    pub(crate) fn snooze(&mut self, uid: String, s: Snooze, cx: &mut Context<Self>) {
+        let cal = &crate::prefs::get(cx).calendar;
+        let morning = jiff::civil::Time::new((cal.work_start / 60).min(23) as i8, (cal.work_start % 60) as i8, 0, 0).unwrap_or(jiff::civil::Time::midnight());
+        let at = recur::snooze_until(s, self.now(), morning, &self.tz);
+        self.snoozed.push((uid, at));
+        self.remind_pass(cx);
     }
 
     pub(crate) fn set_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
@@ -627,6 +668,10 @@ impl TasksView {
         self.edit_selected(cx, |t| {
             t.alerts = secs.map(|s| vec![Alert { trigger: Trigger::Offset { secs: s, from: Anchor::Due }, email: false }]).unwrap_or_default();
         });
+    }
+
+    fn set_repeat(&mut self, rule: Option<Rule>, cx: &mut Context<Self>) {
+        self.edit_selected(cx, |t| recur::set_rule(t, rule));
     }
 
     fn set_project(&mut self, p: Option<String>, cx: &mut Context<Self>) {
@@ -842,6 +887,11 @@ impl TasksView {
         self.select(uid, cx);
     }
 
+    /// Снимок `task-repeat`: варианты повтора открыты.
+    pub(crate) fn demo_repeat(&mut self, cx: &mut Context<Self>) {
+        self.toggle_field(Field::Repeat, cx);
+    }
+
     /// Снимок `task-timeblock`: блок в выбранное окно.
     pub(crate) fn demo_block(&mut self, cx: &mut Context<Self>) {
         self.place_block(cx);
@@ -960,8 +1010,18 @@ impl TasksView {
         let Some(t) = self.task_by_uid(uid) else { return };
         let mut done = t.clone();
         done.set_done(true, self.now());
+        // Повторяющаяся (S6-07): следующая копия со сдвигом срока, у выполненной повтора больше нет.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let next = (!mailtask::is_letter(&t)).then(|| recur::next_task(&t, &model::new_uid(nanos), self.now(), &self.tz)).flatten();
+        if next.is_some() {
+            recur::set_rule(&mut done, None);
+        }
         let patches = self.letter_patches(&done);
-        let text = if t.mail.is_some() { tr!("tasks-done-mail") } else { tr!("tasks-done", title = t.title.clone()) };
+        let text = match &next {
+            Some(n) => tr!("tasks-done-next", when = due_text(n, &self.tz)),
+            None if t.mail.is_some() => tr!("tasks-done-mail"),
+            None => tr!("tasks-done", title = t.title.clone()),
+        };
         let undo = if mailtask::is_letter(&t) {
             // Задача-письмо: вернуть — срок у письма снова.
             let back = self.letter(mailtask::letter_key(&t).unwrap_or_default()).and_then(|row| {
@@ -975,7 +1035,9 @@ impl TasksView {
             cx.emit(TasksAction::Patch(patches));
         }
         if !mailtask::is_letter(&t) {
-            self.save(vec![done], cx);
+            let mut list = vec![done];
+            list.extend(next);
+            self.save(list, cx);
         }
         cx.emit(TasksAction::Undo { text, undo });
     }
@@ -1457,8 +1519,8 @@ impl TasksView {
         if sn > 0 && !done {
             meta.push(div().flex().items_center().gap(px(4.)).child(icon(g::SUBTASKS, 12.)).child(format!("{sd}/{sn}")).into_any_element());
         }
-        if t.recurrence.is_some() {
-            meta.push(div().flex().items_center().gap(px(4.)).child(icon(g::REPEAT, 12.)).child(tr!("tasks-repeats")).into_any_element());
+        if let Some(r) = recur::rule_of(t) {
+            meta.push(div().flex().items_center().gap(px(4.)).child(icon(g::REPEAT, 12.)).child(repeat_text(&r)).into_any_element());
         }
         if !t.notes.trim().is_empty() && !l.compact() {
             meta.push(icon(g::NOTES, 12.).into_any_element());
@@ -1561,8 +1623,10 @@ impl TasksView {
             .child(div().font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(tr!("tasks-block")))
             .child(div().text_size(px(12.)).text_color(l.text2()).whitespace_nowrap().child(est))
             .child(div().flex_1());
-        let head = match (&t.block, chosen) {
-            (Some(b), _) => head
+        // Окно и кнопки — своей строкой: подпись с датой длинная.
+        let controls = div().flex().items_center().gap(px(8.));
+        let controls = match (&t.block, chosen) {
+            (Some(b), _) => controls
                 .child(div().text_size(px(12.)).text_color(l.accent_text()).child(slot_label(Span::new(b.start, b.end), &self.tz)))
                 .child(
                     div()
@@ -1573,7 +1637,7 @@ impl TasksView {
                         .child(tr!("tasks-block-remove"))
                         .on_click(cx.listener(|this, _, _, cx| this.remove_block(cx))),
                 ),
-            (None, Some(s)) => head
+            (None, Some(s)) => controls
                 .child(crate::calendar::icon_button("slot-prev", crate::calendar::g::PREV, l).on_click(cx.listener(|this, _, _, cx| this.step_slot(-1, cx))))
                 .child(
                     div()
@@ -1592,7 +1656,7 @@ impl TasksView {
                         .on_click(cx.listener(|this, _, _, cx| this.place_block(cx))),
                 )
                 .child(crate::calendar::icon_button("slot-next", crate::calendar::g::NEXT, l).on_click(cx.listener(|this, _, _, cx| this.step_slot(1, cx)))),
-            (None, None) => head.child(div().text_size(px(12.)).text_color(l.text3()).child(tr!("tasks-block-none"))),
+            (None, None) => controls.child(div().text_size(px(12.)).text_color(l.text3()).child(tr!("tasks-block-none"))),
         };
         let mut bar = div().relative().h(px(22.)).rounded(px(4.)).bg(l.fill()).overflow_hidden();
         for b in &self.busy {
@@ -1637,6 +1701,7 @@ impl TasksView {
             .border_b_1()
             .border_color(l.border())
             .child(head)
+            .child(controls)
             .child(bar)
             .child(ticks)
             .into_any_element()
@@ -1917,7 +1982,10 @@ impl TasksView {
             None => muted("tasks-no-remind"),
             Some(tr) => div().child(remind_text(tr)).into_any_element(),
         };
-        let repeat = if t.recurrence.is_some() { div().child(tr!("tasks-repeats")).into_any_element() } else { muted("tasks-no-repeat") };
+        let repeat = match recur::rule_of(t) {
+            Some(r) => div().child(repeat_text(&r)).into_any_element(),
+            None => muted("tasks-no-repeat"),
+        };
         let project = match &t.project {
             Some(p) => {
                 let pr = model::projects(&self.tasks).into_iter().find(|x| x.name.eq_ignore_ascii_case(p));
@@ -1967,7 +2035,11 @@ impl TasksView {
                 Trigger::Offset { secs, from: Anchor::Due } => Some(secs),
                 _ => None,
             });
-            let mut items: Vec<AnyElement> = REMINDERS
+            // По умолчанию — из «Настройки → Календарь» (S5-20), первым.
+            let default = -(i64::from(crate::prefs::get(cx).calendar.reminder) * 60);
+            let mut offsets = vec![default];
+            offsets.extend(REMINDERS.iter().copied().filter(|s| *s != default));
+            let mut items: Vec<AnyElement> = offsets
                 .iter()
                 .enumerate()
                 .map(|(i, secs)| {
@@ -1978,6 +2050,34 @@ impl TasksView {
                 })
                 .collect();
             items.push(pill("remind-none".into(), tr!("tasks-no-remind"), cur.is_none()).on_click(cx.listener(|this, _, _, cx| this.set_remind(None, cx))).into_any_element());
+            options(items)
+        });
+        let repeat_opts = (self.open == Some(Field::Repeat)).then(|| {
+            let cur = recur::rule_of(t);
+            let weekday = t.due.as_ref().and_then(|d| d.date_in(&self.tz)).map(|d| d.weekday());
+            let choices: Vec<Option<Rule>> = vec![
+                Some(Rule::Every { freq: Freq::Daily, interval: 1 }),
+                Some(Rule::Every { freq: Freq::Weekdays, interval: 1 }),
+                Some(Rule::Every { freq: Freq::Weekly(weekday.into_iter().collect()), interval: 1 }),
+                Some(Rule::Every { freq: Freq::Monthly(0), interval: 1 }),
+                Some(Rule::Every { freq: Freq::Yearly, interval: 1 }),
+                Some(Rule::AfterDone(1)),
+                Some(Rule::AfterDone(7)),
+                None,
+            ];
+            let items: Vec<AnyElement> = choices
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let text = r.as_ref().map(repeat_text).unwrap_or_else(|| tr!("tasks-no-repeat"));
+                    let on = match (&r, &cur) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    pill(("repeat-opt", i).into(), text, on).on_click(cx.listener(move |this, _, _, cx| this.set_repeat(r.clone(), cx))).into_any_element()
+                })
+                .collect();
             options(items)
         });
         let project_opts = (self.open == Some(Field::Project)).then(|| {
@@ -2029,7 +2129,8 @@ impl TasksView {
             .children(due_opts)
             .child(clickable("card-remind", Field::Remind, field(g::RINGER, "tasks-field-remind", remind), cx))
             .children(remind_opts)
-            .child(field(g::REPEAT, "tasks-field-repeat", repeat))
+            .child(clickable("card-repeat", Field::Repeat, field(g::REPEAT, "tasks-field-repeat", repeat), cx))
+            .children(repeat_opts)
             .child(clickable("card-project", Field::Project, field(g::FOLDER, "tasks-field-project", project), cx))
             .children(project_opts)
             .child(clickable("card-category", Field::Category, field(g::TAG, "tasks-field-category", category), cx))
@@ -2195,6 +2296,30 @@ fn remind_text(t: &Trigger) -> String {
         Trigger::Offset { secs, .. } if secs <= -3600 && secs % 3600 == 0 => tr!("tasks-remind-hours", n = -secs / 3600),
         Trigger::Offset { secs, .. } => tr!("tasks-remind-minutes", n = (-secs / 60).max(0)),
         Trigger::At(ts) => tr!("tasks-remind-at", when = crate::calendar::hm(ts, &TimeZone::system())),
+    }
+}
+
+/// «Каждый день», «По будням», «Каждую неделю: пн, чт», «Каждый месяц, 20-го», «Через 7 д после выполнения».
+fn repeat_text(r: &Rule) -> String {
+    match r {
+        Rule::AfterDone(n) => tr!("tasks-repeat-after", n = i64::from(*n)),
+        Rule::Other(_) => tr!("tasks-repeat-other"),
+        Rule::Every { freq, interval } => {
+            let n = i64::from(*interval);
+            match freq {
+                Freq::Daily if n == 1 => tr!("tasks-repeat-daily"),
+                Freq::Daily => tr!("tasks-repeat-days", n = n),
+                Freq::Weekdays => tr!("tasks-repeat-weekdays"),
+                Freq::Weekly(days) => {
+                    let names: Vec<String> = days.iter().map(|w| tr!("cal-weekday", d = w.to_monday_zero_offset())).collect();
+                    let base = if n == 1 { tr!("tasks-repeat-weekly") } else { tr!("tasks-repeat-weeks", n = n) };
+                    if names.is_empty() { base } else { format!("{base}: {}", names.join(", ")) }
+                }
+                Freq::Monthly(0) => if n == 1 { tr!("tasks-repeat-monthly") } else { tr!("tasks-repeat-months", n = n) },
+                Freq::Monthly(d) => tr!("tasks-repeat-monthly-day", day = i64::from(*d)),
+                Freq::Yearly => tr!("tasks-repeat-yearly"),
+            }
+        }
     }
 }
 
@@ -2372,6 +2497,20 @@ impl crate::Mailer {
             TasksAction::NeedBook => {
                 let book = self.compose.book.clone();
                 self.tasks.update(cx, |t, _| t.set_book(book));
+            }
+            TasksAction::Remind { uid, title } => {
+                let view = self.tasks.downgrade();
+                let id = uid.clone();
+                let act = pets_ui::ToastAction::new(tr!("tasks-snooze"), move |_, cx| {
+                    let _ = view.update(cx, |v, cx| v.snooze(id.clone(), Snooze::Minutes10, cx));
+                });
+                let text = tr!("tasks-remind-toast", title = title.clone());
+                self.toasts.update(cx, |t, cx| t.push_action(Toast::Info, text.clone(), act, cx));
+                // Окно свёрнуто или не в фокусе — ещё и уведомление Windows (решение 7).
+                let active = self.window.update(cx, |_, window, _| window.is_window_active()).unwrap_or(true);
+                if !active && let Err(e) = crate::sys::shell::notify(&tr!("tasks-remind-title"), title) {
+                    tracing::warn!("task reminder notification: {e}");
+                }
             }
             TasksAction::Undo { text, undo } => {
                 let view = self.tasks.downgrade();
