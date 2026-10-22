@@ -318,6 +318,8 @@ pub(crate) struct Process {
     /// Код завершения, если процесс уже завершился (для текста ошибки).
     pub exit_code: Box<dyn FnMut() -> Option<u32> + Send>,
     pub level: Level,
+    /// Почему изоляция не полная (Windows: отказ AppContainer) — для журнала и текста падения тестов.
+    pub fallback: Option<String>,
 }
 
 struct Running {
@@ -343,11 +345,13 @@ pub struct Client {
     level: Level,
     /// Строгая песочница не дала воркеру работать — запускаем с ослабленной (Windows: без AppContainer).
     relaxed: bool,
+    /// Почему уровень не `Full` ([`Client::fallback`]).
+    fallback: Option<String>,
 }
 
 impl Client {
     pub fn new(exe: PathBuf, timeout: Duration) -> Self {
-        Self { exe, timeout, running: None, level: Level::None, relaxed: false }
+        Self { exe, timeout, running: None, level: Level::None, relaxed: false, fallback: None }
     }
 
     /// Рядом с основным исполняемым файлом.
@@ -362,6 +366,12 @@ impl Client {
     /// Насколько изолирован текущий процесс (после первого запроса).
     pub fn level(&self) -> Level {
         self.level
+    }
+
+    /// Почему изоляция не полная: отказ AppContainer при запуске или воркер, не ответивший в полной изоляции.
+    /// `None` — уровень полный (или причина неизвестна).
+    pub fn fallback(&self) -> Option<&str> {
+        self.fallback.as_deref()
     }
 
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
@@ -451,6 +461,7 @@ impl Client {
         {
             self.running = None;
             self.relaxed = true;
+            self.fallback = Some(format!("в полной изоляции воркер не ответил: {strict}"));
             result = self.exchange(&json, bin, timeout).map_err(|e| format!("{e}; в полной изоляции: {strict}"));
         }
         if result.is_err() {
@@ -483,6 +494,11 @@ impl Client {
     fn start(&mut self) -> Result<Running, String> {
         let p = sandbox::spawn(&self.exe, self.relaxed).map_err(|e| format!("запуск {}: {e}", self.exe.display()))?;
         self.level = p.level;
+        match (p.level, p.fallback) {
+            (Level::Full, _) => self.fallback = None,
+            (_, Some(reason)) => self.fallback = Some(reason),
+            _ => {}
+        }
         let (tx, rx) = mpsc::channel();
         let mut stdout = p.stdout;
         std::thread::Builder::new()

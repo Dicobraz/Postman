@@ -32,7 +32,7 @@ fn verdicts_through_the_sandbox() {
     assert_eq!(r.chain[0], pki.user.der);
     assert!(doc.is_none(), "отдельная подпись — тело показывает сервер");
     if std::env::var_os("POSTMAN_REQUIRE_FULL_SANDBOX").is_some() {
-        assert_eq!(c.level(), postman_worker::Level::Full, "проверка — в полной песочнице (AppContainer)");
+        assert_eq!(c.level(), postman_worker::Level::Full, "проверка — в полной песочнице (AppContainer): {:?}", c.fallback());
     }
 
     // CA не из якорей.
