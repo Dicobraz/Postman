@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:" xmlns:A="urn:ietf:params:xml:ns:caldav"><D:response><D:href>/dav/cal/user1%40itt.test/default/postman-dav-rec-20261023022343.ics</D:href><D:status>HTTP/1.1 404 Not Found</D:status></D:response><D:sync-token>urn:stalwart:davsync:429</D:sync-token></D:multistatus>

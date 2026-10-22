@@ -1,0 +1,27 @@
+[package]
+name = "postman-dav"
+description = "CalDAV and CardDAV client for Postman (S7-05): discovery, collections, sync-collection, multiget, scheduling"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# HTTP — тот же reqwest, что у JMAP (rustls, сертификат и отзыв проверяет Windows): второго стека нет.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+# Ответы WebDAV (207 Multi-Status): без DTD и своих сущностей, с пределами (`xml`).
+quick-xml = "0.41"
+url.workspace = true
+percent-encoding = "2"
+jiff = "0.2"
+# Занятость — типы «Помощника планирования» (`Busy`, `Span`), длительность ISO 8601.
+postman-calendar.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+# Стенд: письма сервера о встрече убираются по IMAP.
+postman-imap.workspace = true
+
+[lints]
+workspace = true

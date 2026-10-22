@@ -26,6 +26,14 @@ cargo test -p postman-core --test stand -- --ignored
 Пароли — только в окружении процесса. Тесты (`crates/core/tests/stand.rs`) идут тем же кодом, что и приложение,
 и за собой убирают (письма, события, карточки); в CI не запускаются (`#[ignore]`).
 
+Клиент CalDAV и CardDAV (S7-05а, `crates/dav/tests/stand.rs`) — тем же HTTPS 443 (`POSTMAN_STAND_DAV`, иначе
+`POSTMAN_STAND_URL`), user1 и user2; письма сервера о встрече убираются по IMAP, если задан `POSTMAN_STAND_IMAP`
+(`<адрес стенда>:993`):
+
+```
+cargo test -p postman-dav --test stand -- --ignored --test-threads=1
+```
+
 | Тест | Что проверяет |
 |---|---|
 | `session_follows_connection_origin_and_has_capabilities` | адреса сессии — на адрес подключения; capabilities |
@@ -69,8 +77,14 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_tasks::mail_due_is_task` | S6-03: письмо со сроком у user1 (`Email/set create`) → задача «Из почты» → заметка → задача со ссылкой в хранилище → выполнить → оба слова срока сняты одним `Email/set` (видит второй клиент) → у второго клиента задача выполнена → письмо удалено — сверка снимает ссылку |
 | `stand_tasks::task_block_in_calendar` | S6-08: блок «Время в календаре» — событие «занят» (`PT30M`) со ссылкой на задачу (`relatedTo` с `parent`), у задачи на сервере — `X-POSTMAN-BLOCK` → «Убрать» — событие удалено |
 | `stand_tasks::alerts_server_mails_only_start_relative_email` | S6-01: напоминания через минуту: письмо «Notification: …» — только `action: email` относительно начала (событие, задача с `start`); по сроку задачи и `display` — ничего (п. 41) |
+| `postman-dav stand::dav_discovery` | S7-05а: `.well-known/caldav` → принципал, домашние наборы, входящие и исходящие планирования, адрес участника; календарь (VEVENT и VTODO, ctag, sync-token) и адресная книга (п. 45) |
+| `postman-dav stand::caldav_event_round_trip` | S7-05а: PUT с `If-None-Match: *` (повтор — 412) → `sync-collection` после токена → `calendar-multiget` (лишний путь — 404) → `calendar-query` по окну и вне его → правка с `If-Match` (старый ETag — 412) → список ETag и `diff` → неизвестный токен (полный список) → DELETE (старый ETag — 412) → удаление в `sync-collection`, второй DELETE — 404 (п. 45) |
+| `postman-dav stand::caldav_free_busy` | S7-05а: событие user2 → календарь открыт user1 (ACL `read` и `read-free-busy`) → POST VFREEBUSY в outbox user1 → занятость user2 ровно на событии; неизвестный адрес — `3.7` без занятости → права и событие убраны (п. 46) |
+| `postman-dav stand::caldav_meeting_cycle` | S7-05а: user1 кладёт встречу с ATTENDEE user2 → копия в календаре user2 со Schedule-Tag → ответ правкой копии с `If-Schedule-Tag-Match` → у организатора PARTSTAT=ACCEPTED (старый ETag — 412) → DELETE организатором → у user2 `STATUS:CANCELLED`; входящие планирования: у user2 REQUEST и CANCEL, у user1 REPLY → убраны вместе с письмами сервера (п. 47) |
+| `postman-dav stand::carddav_round_trip` | S7-05а: vCard 4.0 PUT → `sync-collection` → `addressbook-multiget` → правка с `If-Match` (старый ETag — 412) → новый ETag в `sync-collection` → DELETE → удаление в `sync-collection` (п. 45) |
+| `postman-dav stand::dav_wrong_password` | S7-05а: неверный пароль — `Error::Auth` (401) на поиске, а не «нет CalDAV» |
 
-Последний прогон — 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
+Последний прогон — 2026-10-23, напрямую по HTTPS: `postman-dav stand` 6 из 6 (S7-05а); 2026-10-22: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
 ## Настройка сервера
@@ -367,6 +381,36 @@ cargo test -p postman-core --test stand -- --ignored
     X- первого REQUEST доходят, п. 40) — «закрыто» Postman узнаёт по `progress` + PARTSTAT COMPLETED
     (`assign::status`). COMMENT — по-прежнему только в письме (GAPS 42): Postman берёт его в ленту шагов при открытии
     письма.
+
+45. **CalDAV и CardDAV** (S7-05а, `crates/dav/tests/stand.rs`, 2026-10-23). `.well-known/caldav` и `/carddav` —
+    307 на `/dav/cal` и `/dav/card` (метод PROPFIND сохраняется), корень `/` — 302. Принципал `/dav/pal/<адрес>/`;
+    наборы `/dav/cal/<адрес>/` и `/dav/card/<адрес>/`; планирование — `/dav/itip/<адрес>/inbox/` и `/outbox/`;
+    `calendar-user-address-set` — `mailto:<адрес>`; `schedule-default-calendar-URL` — 404 (приглашения ложатся в
+    `default`). У пользователя один календарь `default` (VEVENT, VTODO, VJOURNAL, VFREEBUSY, VAVAILABILITY…) и одна
+    книга `default`; у обоих `getctag` и `sync-token`; `calendar-color` и описание — 404. `calendar-data` и
+    `address-data` — в CDATA. PUT — 201 с ETag; `If-None-Match: *` на существующий — 412, старый `If-Match` у PUT и
+    DELETE — 412. `sync-collection`: без токена — полный список **вместе с самой коллекцией** (у неё свой ETag);
+    после токена — только изменения, удалённое — 404 у ресурса; без изменений — один новый токен. **Неизвестный
+    токен — 207 с полным списком**, а не 403 `DAV:valid-sync-token` (RFC 6578 §3.2): удалённое за это время клиент
+    не увидит. Клиент: полный список узнаёт по самой коллекции в ответе (`Changes::full`) и сверяет по ETag
+    (`Client::etags`, `diff`). `calendar-multiget` по лишнему пути — 404 у ресурса; `calendar-query` с `time-range`
+    — на сервере.
+46. **Занятость по CalDAV** (RFC 6638 §5, тест `caldav_free_busy`). POST VFREEBUSY (`METHOD:REQUEST`, ORGANIZER —
+    свой адрес) в свой outbox → `schedule-response` по участнику: `2.0;Success` и VFREEBUSY с `FREEBUSY;FBTYPE=BUSY`
+    (периоды через запятую, строка свёрнута по 75 октетов); чужой адрес — `3.7;Invalid calendar user or
+    insufficient permissions` без данных. **Без прав на календарь коллеги — тоже `2.0` и пустой VFREEBUSY**: не
+    отличить от «свободен» (RFC 6638 ждёт `3.8;No authority`). Права — WebDAV ACL на календарь коллеги (метод `ACL`
+    принимается, к правам сервер дописывает `read-current-user-privilege-set`): занятость — только при `read` **и**
+    `read-free-busy` сразу; по одному — пусто (п. 6 подтверждён по CalDAV). Клиент: `Client::share`/`unshare`.
+47. **Неявное планирование по CalDAV** (RFC 6638 §3, тест `caldav_meeting_cycle`). PUT события с ORGANIZER (свой
+    адрес) и ATTENDEE — сервер за доли секунды кладёт копию в `default` участника и пишет письма «Invitation: …»
+    (по два письма на каждого за цикл). Schedule-Tag — в ответе PUT организатора и у копии (`calendar-query`,
+    GET). Ответ участника — PUT своей копии с `If-Schedule-Tag-Match` и PARTSTAT=ACCEPTED: принят, Schedule-Tag
+    копии не меняется (RFC 6638 §3.2.10), у организатора PARTSTAT=ACCEPTED (его ETag меняется — старый 412). DELETE
+    организатором — CANCEL: копия участника остаётся со `STATUS:CANCELLED`, удаляет её сам участник. Входящие
+    планирования: у участника — REQUEST и CANCEL, у организатора — REPLY; PROPFIND их перечисляет, GET отдаёт, но
+    **`calendar-multiget` и `calendar-query` по входящим — 404** на каждый ресурс. Клиент: `Client::inbox` читает
+    недостающее GET по одному.
 
 ## S/MIME (S5-12 Ф2)
 

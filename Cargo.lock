@@ -6015,6 +6015,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-dav"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "percent-encoding",
+ "postman-calendar",
+ "postman-imap",
+ "quick-xml",
+ "reqwest",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "postman-demo"
 version = "0.1.0"
 dependencies = [
