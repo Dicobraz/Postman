@@ -96,20 +96,36 @@ pub fn set_tls13_only(on: bool) {
     TLS13_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Есть ли на узле JMAP (S7-04в, вид сервера по адресу): `GET {base}/.well-known/jmap` без входа отвечает сессией
+/// или требует входа (401, 403). Нет ответа, 404, другой узел — нет.
+pub async fn has_jmap(base: &str) -> bool {
+    let probe = async {
+        let http = http_builder().timeout(std::time::Duration::from_secs(8)).build().ok()?;
+        let url = url::Url::parse(base).ok()?.join("/.well-known/jmap").ok()?;
+        let status = http.get(url).send().await.ok()?.status();
+        Some(status.is_success() || status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN)
+    };
+    probe.await.unwrap_or(false)
+}
+
+fn http_builder() -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder().user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")));
+    builder = builder.tls_version_min(if TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        reqwest::tls::Version::TLS_1_3
+    } else {
+        reqwest::tls::Version::TLS_1_2
+    });
+    if insecure_tls() {
+        tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder
+}
+
 impl Client {
     /// Автообнаружение: `GET {base}/.well-known/jmap`.
     pub async fn connect(base: &str, auth: Auth) -> Result<Self> {
-        let mut builder = reqwest::Client::builder().user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")));
-        builder = builder.tls_version_min(if TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
-            reqwest::tls::Version::TLS_1_3
-        } else {
-            reqwest::tls::Version::TLS_1_2
-        });
-        if insecure_tls() {
-            tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        let http = builder.build()?;
+        let http = http_builder().build()?;
         let base = url::Url::parse(base)?;
         let well_known = base.join("/.well-known/jmap")?;
         let resp = authorize(http.get(well_known), &auth).send().await?.error_for_status()?;

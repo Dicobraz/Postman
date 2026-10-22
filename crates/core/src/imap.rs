@@ -11,8 +11,9 @@
 //! - **Push** — IDLE на «Входящих» отдельным соединением; остальные папки — опросом ([`POLL`]).
 //! - **Тело** — письмо целиком (`BODY.PEEK[]`), разбор MIME — в воркере-песочнице (`postman_worker::mime`);
 //!   письмо целиком лежит в кэше блобом под своим ключом, вложения — `<ключ>#<номер>`.
-//! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». «Отменить» и «Отправить позже» — нет (сервер
-//!   не держит письмо; удержание клиентом — S7-04в): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
+//! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». «Отменить» — письмо держит сама синхронизация
+//!   (`Release::After`, S7-04в): до срока его можно вернуть в черновики; закрыли Postman — уходит сразу. «Отправить
+//!   позже» — нет (сервер не держит письмо): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
 //! - Контакты, календарь, задачи, правила, автоответ — нет: `Features` основной учётной записи IMAP пустые.
 
 use std::collections::{HashMap, HashSet};
@@ -140,11 +141,21 @@ fn parse_key(key: &str) -> Option<(&str, u32, u32)> {
 }
 
 /// Строка письма из заголовка IMAP.
+/// Ключ цепочки письма: начало `References`, иначе `In-Reply-To`, иначе своё `Message-ID` (S7-04в). Без них —
+/// само письмо.
+fn thread_key(scope: Option<&str>, h: &Header, key: &str) -> String {
+    let root = h.references.first().cloned().or_else(|| h.in_reply_to.clone()).or_else(|| h.message_id.clone());
+    match root.map(|r| r.trim().to_ascii_lowercase()).filter(|r| !r.is_empty()) {
+        Some(r) => scoped(scope, &format!("t{}", &folder_id(&r)[1..])),
+        None => key.to_owned(),
+    }
+}
+
 fn row(scope: Option<&str>, f: &Folder, validity: u32, h: &Header) -> EmailRow {
     let key = email_key(scope, &f.id, validity, h.uid);
     let mut r = EmailRow {
-        id: key.clone(),
-        thread_id: key,
+        thread_id: thread_key(scope, h, &key),
+        id: key,
         mailbox_ids: vec![f.key.clone()],
         received_at: h.received_at,
         subject: h.subject.clone(),
@@ -229,6 +240,18 @@ struct Imap {
     cache: Cache,
     _index: Index,
     worker: Option<postman_worker::Client>,
+    /// Письма в окне «Отменить» (S7-04в): уходят по сроку, отмена возвращает их в черновики.
+    held: Vec<Held>,
+    next_hold: u64,
+}
+
+/// Письмо, которое держит синхронизация до срока окна «Отменить».
+struct Held {
+    /// Ключ отправки (`<аккаунт>/hold.<n>`): по нему интерфейс отменяет её (`Command::Unsend`).
+    id: String,
+    draft: Draft,
+    replace: Option<String>,
+    at: tokio::time::Instant,
 }
 
 async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index: Index, mut rx: UnboundedReceiver<Command>, notify: &impl Fn(Event)) {
@@ -238,7 +261,18 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
         Err(e) => return notify(Event::Error(error(Stage::Connect, &e))),
     };
     let scope = in_profile(profile.as_deref(), None);
-    let mut me = Imap { account, profile, scope, session: Some(session), folders: Vec::new(), cache, _index: index, worker: None };
+    let mut me = Imap {
+        account,
+        profile,
+        scope,
+        session: Some(session),
+        folders: Vec::new(),
+        cache,
+        _index: index,
+        worker: None,
+        held: Vec::new(),
+        next_hold: 0,
+    };
     notify(Event::Status(Status::SignedIn { user: me.account.email.clone() }));
     let address = Address::new("", &me.account.email);
     if me.profile.is_none() {
@@ -272,7 +306,11 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
         tokio::select! {
             biased;
             cmd = rx.recv() => {
-                let Some(cmd) = cmd else { return };
+                let Some(cmd) = cmd else {
+                    // Интерфейс закрылся: письма в окне «Отменить» — отправить сейчас, а не потерять.
+                    me.release_held(true, notify).await;
+                    return;
+                };
                 if let Err(e) = me.handle(cmd, notify).await {
                     tracing::warn!("imap command: {e}");
                     if matches!(e, postman_imap::Error::Io(_) | postman_imap::Error::Timeout | postman_imap::Error::Tls(_)) {
@@ -292,12 +330,21 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
                     notify(Event::MailboxesChanged);
                 }
             }
+            () = held_until(me.held.iter().map(|h| h.at).min()) => me.release_held(false, notify).await,
             _ = poll.tick() => {
                 if let Err(e) = me.refresh_all(notify).await {
                     notify(Event::Error(e));
                 }
             }
         }
+    }
+}
+
+/// Срок ближайшего удержанного письма; нет — никогда.
+async fn held_until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -688,7 +735,27 @@ impl Imap {
     }
 
     /// Поиск на сервере: в папке или во всех; найденное, которого нет в кэше, — в кэш.
-    async fn search(&mut self, query: &str, mailbox: Option<&str>) -> postman_imap::Result<Vec<String>> {
+    async fn search(&mut self, text: &str, mailbox: Option<&str>) -> postman_imap::Result<Vec<String>> {
+        self.query(&format!("CHARSET UTF-8 TEXT {}", postman_imap::quote(text)), mailbox).await
+    }
+
+    /// Сколько писем по условию `SEARCH` в папке или во всех.
+    async fn count(&mut self, query: &str, mailbox: Option<&str>) -> postman_imap::Result<usize> {
+        let folders: Vec<Folder> = match mailbox {
+            Some(k) => self.folder_by_key(k).cloned().into_iter().collect(),
+            None => self.folders.iter().filter(|f| f.selectable).cloned().collect(),
+        };
+        let mut n = 0;
+        for f in folders {
+            let session = self.session().await?;
+            session.select(&f.raw).await?;
+            n += session.search(query).await?.len();
+        }
+        Ok(n)
+    }
+
+    /// Письма по условию `SEARCH` в папке или во всех; найденное, которого нет в кэше, — в кэш.
+    async fn query(&mut self, query: &str, mailbox: Option<&str>) -> postman_imap::Result<Vec<String>> {
         let folders: Vec<Folder> = match mailbox {
             Some(k) => self.folder_by_key(k).cloned().into_iter().collect(),
             None => self.folders.iter().filter(|f| f.selectable).cloned().collect(),
@@ -698,7 +765,7 @@ impl Imap {
         for f in folders {
             let session = self.session().await?;
             let sel = session.select(&f.raw).await?;
-            let uids = session.search_text(query).await?;
+            let uids = session.search(query).await?;
             let uids = &uids[uids.len().saturating_sub(SEARCH_LIMIT)..];
             let keys: Vec<String> = uids.iter().map(|&u| email_key(scope.as_deref(), &f.id, sel.state.uid_validity, u)).collect();
             let known: HashSet<String> = self.cache.rows_by_ids(&keys).map_err(db)?.into_iter().map(|r| r.id).collect();
@@ -732,18 +799,40 @@ impl Imap {
         Ok(rows.len())
     }
 
+    /// Отправить удержанные письма, срок которых вышел (`all` — все).
+    async fn release_held(&mut self, all: bool, notify: &impl Fn(Event)) {
+        let now = tokio::time::Instant::now();
+        let (due, keep): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held).into_iter().partition(|h| all || h.at <= now);
+        self.held = keep;
+        if due.is_empty() {
+            return;
+        }
+        for h in due {
+            if let Err(e) = self.send(h.draft, h.replace).await {
+                tracing::warn!("imap held send: {e}");
+                notify(Event::Error(error(Stage::Command, &e)));
+            }
+        }
+        let folders: Vec<String> = [Role::Sent, Role::Drafts].iter().filter_map(|r| self.folder_by_role(*r).map(|f| f.key.clone())).collect();
+        self.after(&folders, notify).await;
+    }
+
     async fn handle(&mut self, cmd: Command, notify: &impl Fn(Event)) -> postman_imap::Result<()> {
         match cmd {
             Command::Body(key) => {
                 self.body(&key).await?;
                 notify(Event::BodyReady(key));
             }
-            Command::Thread(key) => {
-                // Цепочек IMAP Postman пока не собирает: беседа — само письмо.
-                if self.cache.body(&key).map_err(db)?.is_none() {
-                    self.body(&key).await?;
+            Command::Thread(thread) => {
+                // Беседа — письма кэша с тем же ключом цепочки (`thread_key`) из всех папок; тела — с сервера.
+                let mut rows = self.cache.thread(&thread).map_err(db)?;
+                rows.sort_by_key(|r| r.received_at);
+                for r in &rows {
+                    if self.cache.body(&r.id).map_err(db)?.is_none() {
+                        self.body(&r.id).await?;
+                    }
                 }
-                notify(Event::ThreadReady { thread: key.clone(), ids: vec![key] });
+                notify(Event::ThreadReady { thread, ids: rows.into_iter().map(|r| r.id).collect() });
             }
             Command::Blob { blob_id, .. } => match self.blob(&blob_id).await {
                 Ok(data) => notify(Event::BlobReady { blob_id, data: Arc::new(data) }),
@@ -795,12 +884,44 @@ impl Imap {
                 notify(Event::SearchResults { ticket, ids, total });
                 notify(Event::EmailsChanged);
             }
-            // Условия фильтров «Все папки» — по кэшу: у IMAP их на сервере не выполнить так же (S7-04в).
-            Command::Query { ticket, .. } => notify(Event::SearchResults { ticket, ids: Vec::new(), total: 0 }),
-            Command::Counts { ticket, .. } => notify(Event::Counts { ticket, counts: None }),
+            // Фильтры «Все папки» — `SEARCH` сервера (S7-04в); чего IMAP не выразит — пусто.
+            Command::Query { filter, mailbox, ticket } => {
+                let ids = match imap_query(&filter) {
+                    Some((q, inside)) => self.query(&q, inside.as_deref().or(mailbox.as_deref())).await?,
+                    None => Vec::new(),
+                };
+                let total = ids.len() as u64;
+                notify(Event::SearchResults { ticket, ids, total });
+                notify(Event::EmailsChanged);
+            }
+            Command::Counts { filters, mailbox, ticket } => {
+                let mut counts = Vec::with_capacity(filters.len());
+                for f in &filters {
+                    counts.push(match imap_query(f) {
+                        Some((q, inside)) => self.count(&q, inside.as_deref().or(mailbox.as_deref())).await? as u64,
+                        None => 0,
+                    });
+                }
+                notify(Event::Counts { ticket, counts: Some(counts) });
+            }
             Command::Send { draft, replace, ticket, release } => {
-                if let crate::model::Release::At(_) = release {
-                    notify(Event::ComposeFailed { ticket, error: "send later is not available for IMAP".into() });
+                let hold = match release {
+                    crate::model::Release::At(_) => {
+                        notify(Event::ComposeFailed { ticket, error: "send later is not available for IMAP".into() });
+                        return Ok(());
+                    }
+                    crate::model::Release::After(s) => s,
+                    crate::model::Release::Now => 0,
+                };
+                if hold > 0 {
+                    // Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
+                    self.next_hold += 1;
+                    let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
+                    let send_at = jiff::Timestamp::now().as_second() + i64::from(hold);
+                    let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(hold));
+                    self.held.push(Held { id: id.clone(), draft: *draft, replace, at });
+                    let scheduled = crate::send_later::Scheduled { submission: id.clone(), email: id, send_at };
+                    notify(Event::Sent { ticket, scheduled: Some(scheduled) });
                     return Ok(());
                 }
                 match self.send(*draft, replace).await {
@@ -821,6 +942,14 @@ impl Imap {
                 Err(e) => notify(Event::ComposeFailed { ticket, error: e.to_string() }),
             },
             Command::Scheduled => notify(Event::Scheduled { list: Vec::new(), max_delay: 0 }),
+            Command::Unsend { scheduled, ticket } => match self.held.iter().position(|h| h.id == scheduled.submission) {
+                // Письмо ещё здесь: не отправлять; черновик откроет интерфейс (он держит его с окна «Отменить»).
+                Some(i) => {
+                    self.held.remove(i);
+                    notify(Event::Unsent { ticket, email: String::new() });
+                }
+                None => notify(Event::UnsendFailed { ticket, too_late: true, error: String::new() }),
+            },
             Command::Reconnect => {
                 if self.session.is_none() {
                     self.session().await?;
@@ -831,6 +960,62 @@ impl Imap {
         }
         Ok(())
     }
+}
+
+/// Условие фильтра Postman → `SEARCH` IMAP (RFC 3501 §6.4.4) и папка, если условие её задаёт (`InMailbox` в «И»).
+/// `None` — IMAP так не умеет.
+pub fn imap_query(f: &crate::model::Filter) -> Option<(String, Option<String>)> {
+    use crate::model::Filter as F;
+    fn date(utc: &str) -> Option<String> {
+        const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let d: jiff::civil::Date = utc.get(..10)?.parse().ok()?;
+        Some(format!("{}-{}-{}", d.day(), MONTHS[usize::try_from(d.month()).ok()?.checked_sub(1)?], d.year()))
+    }
+    fn keyword(k: &str, on: bool) -> Option<String> {
+        let sys = |yes: &str, no: &str| Some(if on { yes } else { no }.to_owned());
+        match k.to_ascii_lowercase().as_str() {
+            "$seen" => sys("SEEN", "UNSEEN"),
+            "$flagged" => sys("FLAGGED", "UNFLAGGED"),
+            "$answered" => sys("ANSWERED", "UNANSWERED"),
+            "$draft" => sys("DRAFT", "UNDRAFT"),
+            _ => {
+                let flag = postman_imap::flags::flag(k)?;
+                Some(format!("{} {flag}", if on { "KEYWORD" } else { "UNKEYWORD" }))
+            }
+        }
+    }
+    fn key(f: &F) -> Option<String> {
+        let q = |s: &str| postman_imap::quote(s);
+        Some(match f {
+            F::InMailbox(_) => "ALL".into(),
+            F::HasKeyword(k) => keyword(k, true)?,
+            F::NotKeyword(k) => keyword(k, false)?,
+            F::Text(t) => format!("TEXT {}", q(t)),
+            F::From(t) => format!("FROM {}", q(t)),
+            F::To(t) => format!("TO {}", q(t)),
+            F::Body(t) => format!("BODY {}", q(t)),
+            F::Subject(t) => format!("SUBJECT {}", q(t)),
+            // Вложение — по типу письма: `multipart/mixed` (приближение, как у Thunderbird).
+            F::HasAttachment(true) => "HEADER Content-Type \"multipart/mixed\"".into(),
+            F::HasAttachment(false) => "NOT HEADER Content-Type \"multipart/mixed\"".into(),
+            F::And(v) => format!("({})", v.iter().map(key).collect::<Option<Vec<_>>>()?.join(" ")),
+            F::Or(v) => {
+                let mut parts = v.iter().map(key).collect::<Option<Vec<_>>>()?;
+                let last = parts.pop()?;
+                parts.into_iter().rev().fold(last, |acc, p| format!("OR {p} {acc}"))
+            }
+            F::Not(v) => format!("NOT ({})", v.iter().map(key).collect::<Option<Vec<_>>>()?.join(" ")),
+            F::Before(d) => format!("BEFORE {}", date(d)?),
+            F::After(d) => format!("SINCE {}", date(d)?),
+            F::MinSize(n) => format!("LARGER {}", n.saturating_sub(1)),
+        })
+    }
+    let inside = match f {
+        F::InMailbox(m) => Some(m.clone()),
+        F::And(v) => v.iter().find_map(|c| if let F::InMailbox(m) = c { Some(m.clone()) } else { None }),
+        _ => None,
+    };
+    Some((format!("CHARSET UTF-8 {}", key(f)?), inside))
 }
 
 fn command_name(c: &Command) -> &'static str {
@@ -862,6 +1047,36 @@ mod tests {
         assert!(ImapAccount::from_url("imaps://", "u", "p").is_none());
         // Пароль — не в `Debug`.
         assert!(!format!("{a:?}").contains("secret"));
+    }
+
+    #[test]
+    fn filters_become_imap_search() {
+        use crate::model::Filter as F;
+        let q = |f: F| super::imap_query(&f);
+        assert_eq!(q(F::NotKeyword("$seen".into())).unwrap().0, "CHARSET UTF-8 UNSEEN");
+        assert_eq!(q(F::HasKeyword("pm.due".into())).unwrap().0, "CHARSET UTF-8 KEYWORD pm.due");
+        let (s, m) = q(F::And(vec![F::InMailbox("fabc".into()), F::From("Анна".into()), F::After("2026-10-01T00:00:00Z".into())])).unwrap();
+        assert_eq!(s, "CHARSET UTF-8 (ALL FROM \"Анна\" SINCE 1-Oct-2026)");
+        assert_eq!(m.as_deref(), Some("fabc"));
+        assert_eq!(q(F::Or(vec![F::Subject("a".into()), F::Subject("b".into()), F::Subject("c".into())])).unwrap().0, "CHARSET UTF-8 OR SUBJECT \"a\" OR SUBJECT \"b\" SUBJECT \"c\"");
+        assert_eq!(q(F::Not(vec![F::Before("2026-01-31T00:00:00Z".into())])).unwrap().0, "CHARSET UTF-8 NOT (BEFORE 31-Jan-2026)");
+        assert_eq!(q(F::MinSize(1024)).unwrap().0, "CHARSET UTF-8 LARGER 1023");
+        assert!(q(F::HasKeyword("two words".into())).is_none());
+    }
+
+    #[test]
+    fn threads_follow_references() {
+        let h = |refs: &[&str], reply: Option<&str>, mid: Option<&str>| postman_imap::Header {
+            references: refs.iter().map(|s| (*s).to_owned()).collect(),
+            in_reply_to: reply.map(str::to_owned),
+            message_id: mid.map(str::to_owned),
+            ..Default::default()
+        };
+        let root = super::thread_key(None, &h(&[], None, Some("<a@x>")), "k1");
+        assert_eq!(super::thread_key(None, &h(&["<A@x>", "<b@x>"], Some("<b@x>"), Some("<c@x>")), "k2"), root);
+        assert_eq!(super::thread_key(None, &h(&[], Some("<a@x>"), Some("<b@x>")), "k3"), root);
+        assert_eq!(super::thread_key(None, &h(&[], None, None), "k4"), "k4");
+        assert!(super::thread_key(Some("@2"), &h(&[], None, Some("<a@x>")), "k").starts_with("@2/t"));
     }
 
     #[test]
