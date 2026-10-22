@@ -85,7 +85,7 @@ pub mod contacts {
 
 /// Задачи (S6-05): новая, выполнить / вернуть, срок, переименовать, удалить, открыть письмо, по списку.
 pub mod task {
-    gpui_kit::actions!(task, [New, Complete, Due, Edit, Delete, Open, Next, Prev, SlotNext, SlotPrev, Block, Delegate, Remind, Revoke]);
+    gpui_kit::actions!(task, [New, Complete, Due, Edit, Delete, Open, Next, Prev, SlotNext, SlotPrev, Block, Delegate, Remind, RemindAll, Revoke]);
 }
 
 /// Ответ на приглашение в письме (S5-11): кнопки карточки; клавиши A / T / N — только в схеме «Одиночные клавиши»
@@ -313,6 +313,7 @@ pub const COMMANDS: &[Command] = &[
     // поручения — Space, срок — Insert, как у задачи).
     cmd("task.delegate", &[], TASKS),
     cmd("task.remind", &[], TASKS),
+    cmd("task.remind_all", &[], TASKS),
     cmd("task.revoke", &[], TASKS),
     // Ответ на приглашение — кнопками карточки (схема «Outlook»: буквы без модификатора не допускаются); A / T / N —
     // в схеме «Одиночные клавиши» (S5-17, решение владельца 2026-10-21, вопрос 3).

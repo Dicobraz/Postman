@@ -172,6 +172,38 @@ pub fn is_delegation(t: &Task) -> bool {
     t.organizer().is_some() && t.assignees().next().is_some()
 }
 
+/// Я наблюдаю за поручением (`ROLE=NON-PARTICIPANT`): не поручивший и не исполнитель.
+pub fn is_watched_by(t: &Task, me: &str) -> bool {
+    is_delegation(t) && t.participants.iter().any(|p| p.role == Role::Observer && p.email.eq_ignore_ascii_case(me))
+}
+
+/// Слово письма-поручения в «Отправленных» (S6-11): `pm.assign.<16 hex>` — FNV-1a от UID в нижнем регистре
+/// (UID в ключевое слово JMAP целиком не годится: знаки и длина). По нему «Ждём» находит письма моих
+/// невыполненных поручений.
+pub const KEYWORD: &str = "pm.assign";
+
+pub fn keyword(uid: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in uid.trim().to_ascii_lowercase().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{KEYWORD}.{h:016x}")
+}
+
+/// «Забрать»: своя копия снова обычная задача — без участников, своих отметок поручения и хода; лента шагов
+/// остаётся (история).
+pub fn taken_back(t: &Task) -> Task {
+    let mut t = t.clone();
+    t.participants.clear();
+    t.progress = Progress::NeedsAction;
+    t.percent = None;
+    t.completed_at = None;
+    set_proposed(&mut t, None);
+    set_prop(&mut t, X_RESULT, None);
+    t
+}
+
 /// Исполнитель поручения (исполнитель — один, макет «Поручить»).
 pub fn assignee(t: &Task) -> Option<&crate::TaskParticipant> {
     t.assignees().next()
@@ -715,5 +747,15 @@ mod tests {
         assert_eq!(r.method, "REQUEST");
         let ol = parse(&std::fs::read_to_string(path("todo-outlook.ics")).unwrap());
         assert!(!is_delegation(&ol.task));
+    }
+
+    /// Слово письма поручения: одно на UID (регистр не важен), годится в ключевое слово JMAP.
+    #[test]
+    fn keyword_is_stable_and_valid() {
+        let k = keyword("Demo-Deleg-1@Postman");
+        assert_eq!(k, keyword(" demo-deleg-1@postman "));
+        assert_ne!(k, keyword("demo-deleg-2@postman"));
+        assert!(k.starts_with("pm.assign.") && k.len() == "pm.assign.".len() + 16);
+        assert!(k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.'));
     }
 }
