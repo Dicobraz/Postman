@@ -1129,3 +1129,38 @@ async fn mail_due_is_task() {
     assert_eq!(fixed[0].mail, None, "письмо удалено — задача без ссылки");
     sweep(&a, prefix, subject).await;
 }
+
+/// S6-08: «Время в календаре» — блок под задачу: событие «занят» в своём календаре со ссылкой на задачу
+/// (`relatedTo` с `parent`), у задачи — `X-POSTMAN-BLOCK`; «Убрать» — событие удалено.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn task_block_in_calendar() {
+    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    let a = user(1).await;
+    let prefix = "postman-s601-block-";
+    let subject = "Postman s601 block";
+    sweep(&a, prefix, subject).await;
+    let cache = postman_cache::Cache::open_in_memory().unwrap();
+    let store = JmapStore::new(&a.jmap);
+    let quiet = |_: Reply| {};
+    let uid = format!("{prefix}{}@itt.test", stamp());
+    let t = postman_calendar::Task::new(&uid, "", &format!("{subject} {}", stamp()));
+    tasks::handle(&store, &cache, Request::Save(Box::new(t)), &quiet).await.unwrap();
+    let start = (jiff::Timestamp::now() + jiff::Span::new().hours(48)).as_second() / 3600 * 3600;
+    tasks::handle(&store, &cache, Request::Block { uid: uid.clone(), start, end: start + 1800 }, &quiet).await.unwrap();
+    let task = tasks::from_row(&cache.task(&uid).unwrap().unwrap()).unwrap();
+    let block = task.block.clone().expect("у задачи блок");
+    assert_eq!((block.start, block.end), (start, start + 1800));
+    let ev = get(&a.jmap, &block.event_id, Some(&["@type", "title", "duration", "freeBusyStatus", "relatedTo", "keywords", "utcStart"])).await;
+    println!("событие блока: {ev}");
+    assert_eq!(ev["@type"], "Event");
+    assert_eq!(ev["duration"], "PT30M");
+    assert_eq!(ev["relatedTo"][&uid]["relation"]["parent"], true, "ссылка на задачу");
+    assert_eq!(ev["utcStart"].as_str().and_then(postman_jmap::utc_to_unix), Some(start));
+    // Задача на сервере — с X-POSTMAN-BLOCK (второй клиент увидит блок).
+    let server = by_uid(&a.jmap, &uid, &["iCalendar"]).await.unwrap();
+    assert!(server["iCalendar"]["properties"].as_array().unwrap().iter().any(|p| p[0] == "x-postman-block"), "{server}");
+    tasks::handle(&store, &cache, Request::Unblock { uid: uid.clone() }, &quiet).await.unwrap();
+    assert!(get(&a.jmap, &block.event_id, Some(&["id"])).await.is_null(), "событие блока удалено");
+    sweep(&a, prefix, subject).await;
+}

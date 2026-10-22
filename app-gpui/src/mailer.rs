@@ -404,7 +404,10 @@ impl Mailer {
         if section == Section::Tasks {
             // Категории — та же таблица, что у почты; письма со сроком — заново из кэша.
             let table = self.list.read(cx).labels.for_account(None).cloned().unwrap_or_else(crate::labels::default_table);
+            // «Время в календаре»: своя занятость сегодня — из недели календаря.
+            let busy = self.cal.read(cx).busy_today();
             self.tasks.update(cx, |t, cx| {
+                t.set_busy(busy, cx);
                 t.set_categories(table, cx);
                 if self.section != section {
                     t.refresh(cx);
@@ -542,6 +545,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::task::Open, _, cx| this.tasks.update(cx, |t, cx| t.open_letter(cx))))
             .on_action(cx.listener(|this, _: &commands::task::Next, _, cx| this.tasks.update(cx, |t, cx| t.step(1, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Prev, _, cx| this.tasks.update(cx, |t, cx| t.step(-1, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::SlotNext, _, cx| this.tasks.update(cx, |t, cx| t.step_slot(1, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::SlotPrev, _, cx| this.tasks.update(cx, |t, cx| t.step_slot(-1, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Block, _, cx| this.tasks.update(cx, |t, cx| t.place_block(cx))))
             .on_action(cx.listener(|this, _: &commands::calendar::NewMeeting, _, cx| {
                 this.open_meeting(None, cx);
             }))
