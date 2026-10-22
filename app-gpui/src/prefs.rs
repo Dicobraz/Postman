@@ -48,6 +48,14 @@ pub(crate) fn get(cx: &App) -> Prefs {
     cx.try_global::<Store>().map(|s| s.prefs.clone()).unwrap_or_default()
 }
 
+/// Часть настроек без копии всего (строки списка читают её на каждой строке).
+pub(crate) fn with<R>(cx: &App, f: impl FnOnce(&Prefs) -> R) -> R {
+    match cx.try_global::<Store>() {
+        Some(s) => f(&s.prefs),
+        None => f(&Prefs::default()),
+    }
+}
+
 /// Перерисовать view `T`, когда настройки изменились (раскладка экрана почты зависит от «Панели чтения»).
 pub(crate) fn observe<T: 'static>(cx: &mut gpui_kit::Context<T>) -> gpui_kit::Subscription {
     cx.observe_global::<Store>(|_, cx| cx.notify())
@@ -105,6 +113,13 @@ pub(crate) fn set_density(row: u16, cx: &mut App) {
     update(cx, |p| p.general.density = density.map(|d| d.row()));
 }
 
+/// Акцент («Внешний вид», S5-30): тема — заново, на лету.
+pub(crate) fn set_accent(accent: postman_core::prefs::Accent, cx: &mut App) {
+    update(cx, |p| p.look.accent = accent);
+    let density = density_at_start(None, &get(cx));
+    crate::roles::set_accent(accent, density, cx);
+}
+
 /// Язык интерфейса на лету (`None` — язык Windows): тексты, которые экраны строят при отрисовке, — сразу; подписи,
 /// запомненные полями ввода, — после перезапуска.
 pub(crate) fn set_language(lang: Option<&str>, cx: &mut App) {
@@ -143,11 +158,11 @@ mod tests {
     fn start_values_prefer_arguments() {
         let mut p = Prefs::default();
         p.general.theme = Some("fluent-dark".into());
-        p.general.density = Some(28);
+        p.general.density = Some(20);
         p.general.language = Some("en".into());
         assert_eq!(theme_at_start(None, &p), "fluent-dark");
         assert_eq!(theme_at_start(Some("light"), &p), pets_ui::theme::FLUENT_LIGHT);
-        assert_eq!(density_at_start(None, &p), Some(Density::Comfortable));
+        assert_eq!(density_at_start(None, &p), Some(Density::Compact));
         assert_eq!(density_at_start(Some("compact"), &p), Some(Density::Compact));
         assert_eq!(language_at_start(None, &p), "en");
         assert_eq!(language_at_start(Some("ru"), &p), "ru");

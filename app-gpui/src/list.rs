@@ -1456,8 +1456,10 @@ pub(crate) fn list_row(
 ) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let roomy = !l.compact();
+    // Аватары и превью — «Настройки → Внешний вид» (S5-30); в компактной плотности их нет всегда.
+    let (avatars, previews) = crate::prefs::with(cx, |p| (p.look.avatars, p.look.preview));
     let stripe = labels.stripe.map(|c| l.cat(c).dot);
-    let avatar = roomy.then(|| {
+    let avatar = (roomy && avatars).then(|| {
         let c = l.cat(labels.stripe.unwrap_or(postman_core::palette::NEUTRAL));
         div()
             .size(px(32.))
@@ -1533,7 +1535,7 @@ pub(crate) fn list_row(
         .when(!r.seen, |d| d.text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD))
         .when(r.seen, |d| d.text_color(l.text()))
         .child(crate::search::marked(&r.subject, marks, l));
-    let preview = roomy.then(|| {
+    let preview = (roomy && previews).then(|| {
         div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(crate::search::marked(&r.preview, marks, l))
     });
     let lit = state.open || state.picked;

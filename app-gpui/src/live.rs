@@ -751,6 +751,8 @@ impl Mailer {
 
     /// «Проверить и подключить»: открыть кэш этой учётной записи (в фоне), затем экран на нём и синхронизацию.
     fn sign_in(&mut self, account: Account, store: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // «Не хранить» пароль (Безопасность или политика, S5-30) — сильнее галочки входа.
+        let store = store && crate::security::effective(&crate::prefs::get(cx)).store_password;
         self.live.pending_store = store;
         let path = account::cache_path(&crate::data_dir(), &account);
         // Снова вход в ту же учётную запись (сервер отклонил пароль): кэш и экран уже её.

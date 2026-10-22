@@ -1029,6 +1029,14 @@ impl Mailer {
     }
 
     /// Книга адресов из хранилища — в фоне, один раз; письма видят её, как только она готова.
+    /// Ссылка `mailto:` (Postman — клиент по умолчанию, S5-30): новое письмо с адресатами, темой и текстом.
+    pub(crate) fn open_mailto(&mut self, uri: &str, cx: &mut Context<Self>) {
+        let Some(m) = postman_compose::parse_mailto(uri) else { return };
+        let draft = postman_compose::Draft { to: m.to, cc: m.cc, bcc: m.bcc, subject: m.subject, markdown: m.body, ..Default::default() };
+        self.set_section(crate::Section::Mail, cx);
+        self.open_compose(draft, cx);
+    }
+
     pub(crate) fn load_address_book(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.compose.book_started, true) {
             return;
