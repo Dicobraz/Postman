@@ -63,6 +63,11 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+# Уведомления Windows (S6-07: напоминания задач при свёрнутом окне) — WinRT, та же версия, что у gpui.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = ["Data_Xml_Dom", "UI_Notifications"]
+
 # Значок, версия и манифест exe (build.rs, rc.exe из Windows SDK).
 [build-dependencies]
 embed-resource = "3"

@@ -114,6 +114,29 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     }
 }
 
+/// Уведомление Windows (S6-07: напоминание задачи, когда окно свёрнуто): тост центра уведомлений от имени Postman.
+/// AUMID без ярлыка в «Пуске» — регистрируется в `HKCU\Software\Classes\AppUserModelId` (имя в уведомлении).
+pub fn notify(title: &str, body: &str) -> Result<(), String> {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
+    const AUMID: &str = "Pets.Postman";
+    set_string(&format!(r"Software\Classes\AppUserModelId\{AUMID}"), Some("DisplayName"), APP)?;
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let xml = format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        esc(title),
+        esc(body)
+    );
+    let run = || -> windows::core::Result<()> {
+        let doc = XmlDocument::new()?;
+        doc.LoadXml(&HSTRING::from(xml.as_str()))?;
+        let toast = ToastNotification::CreateToastNotification(&doc)?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID))?.Show(&toast)
+    };
+    run().map_err(|e| format!("toast: {e}"))
+}
+
 /// Политика организации (`Software\Policies\Pets\Postman`, сначала HKLM, затем HKCU): строковое значение.
 pub fn policy(name: &str) -> Option<String> {
     const PATH: &str = r"Software\Policies\Pets\Postman";
