@@ -1449,6 +1449,8 @@ pub(crate) fn list_row(
 ) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let roomy = !l.compact();
+    // Шифрованное (S5-12 Ф2): сервер текста не видит — замок и «Зашифрованное письмо» вместо превью.
+    let encrypted = crate::smime_enc::is_encrypted(r);
     // Аватары и превью — «Настройки → Внешний вид» (S5-30); в компактной плотности их нет всегда.
     let (avatars, previews) = crate::prefs::with(cx, |p| (p.look.avatars, p.look.preview));
     let stripe = labels.stripe.map(|c| l.cat(c).dot);
@@ -1520,7 +1522,8 @@ pub(crate) fn list_row(
         .child(chips)
         // Число писем беседы (S5-05б).
         .children(state.thread.count(l))
-        .when(r.has_attachment, |d| d.child(crate::chrome::icon(crate::chrome::glyph::ATTACH, 13.).text_color(l.text3())))
+        .when(encrypted, |d| d.child(crate::chrome::icon(crate::smime_enc::LOCK, 13.).text_color(l.text3())))
+        .when(r.has_attachment && !encrypted, |d| d.child(crate::chrome::icon(crate::chrome::glyph::ATTACH, 13.).text_color(l.text3())))
         .when(r.flagged, |d| d.child(crate::chrome::icon(crate::chrome::glyph::FLAG, 13.).text_color(l.pm(Pm::Flag))))
         .child(div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(format_date(r.received_at)));
     let subject = div()
@@ -1534,7 +1537,8 @@ pub(crate) fn list_row(
     let assigned = labels.assigned.clone().map(|t| crate::labels::chip(t, postman_core::palette::NEUTRAL, l).max_w(px(160.)));
     let subject = div().flex().items_center().gap(px(8.)).min_w_0().child(subject).children(assigned);
     let preview = (roomy && previews).then(|| {
-        div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(crate::search::marked(&r.preview, marks, l))
+        let p = div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2());
+        if encrypted { p.child(tr!("smime-list-preview")) } else { p.child(crate::search::marked(&r.preview, marks, l)) }
     });
     let lit = state.open || state.picked;
     // Выделенная строка — нейтральная подложка «выбранное» и полоса акцента слева (решение владельца 2026-10-22).

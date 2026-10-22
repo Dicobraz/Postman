@@ -71,6 +71,7 @@ mod palette;
 mod search;
 mod smime;
 mod shared;
+mod smime_enc;
 mod tasks;
 
 pub(crate) use mailer::{Mailer, Section};

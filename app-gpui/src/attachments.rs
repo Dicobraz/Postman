@@ -112,7 +112,8 @@ pub(crate) fn items(r: &Reading) -> Vec<Item> {
     let shown: HashSet<String> = r.doc.as_ref().map(|d| crate::ir_view::cids(d).into_iter().collect()).unwrap_or_default();
     let card = r.invite.as_ref().is_some_and(|c| c.invitation().is_some());
     // Подпись S/MIME (S5-12): `smime.p7s` — значком в шапке, не вложением; `smime.p7m` с подписью внутри — телом.
-    let opaque = r.smime.as_ref().is_some_and(|s| matches!(&s.seal, crate::smime::Seal::Done(v) if v.report.kind == postman_smime::Kind::Opaque));
+    // Шифрованное (Ф2): `smime.p7m` — не вложение, а само письмо (до расшифровки — строка, после — его вложения).
+    let opaque = r.smime.as_ref().is_some_and(|s| s.lock.is_some() || matches!(&s.seal, crate::smime::Seal::Done(v) if v.report.kind == postman_smime::Kind::Opaque));
     let all: Vec<AttachmentRow> = body.attachments.iter().filter(|a| !crate::smime::hidden(a, opaque)).cloned().collect();
     listed(&all, &shown, card, &r.scans)
 }
