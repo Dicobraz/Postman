@@ -691,7 +691,7 @@ mod tests {
         };
         let look = |dark: bool, accent: Accent| {
             let os = OsLook { dark, ..OsLook::default() };
-            Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, accent)), os, FontSizes::default(), &ROLES))
+            Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, accent)), &os, FontSizes::default(), &ROLES))
         };
         let l = look(false, Accent::Teal);
         assert_eq!([hex(l.accent()), hex(l.accent_text()), hex(l.picked()), hex(l.pm(Pm::TintedFg))], ["#00756F", "#00756F", "#E1F3F1", "#00524D"]);
