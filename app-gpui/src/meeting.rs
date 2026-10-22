@@ -31,8 +31,8 @@ use postman_core::sync::{Command, Event};
 use postman_demo::calendar as demo;
 
 use crate::calendar::{
-    FIRST_HOUR, HOURS, STEP, accent_button, add_days, avatar, day_start, duration_text, g, hm, long_day, monday_of,
-    outline_button, zone_label,
+    FIRST_HOUR, HOURS, STEP, add_days, avatar, day_start, duration_text, g, hm, long_day, monday_of,
+    zone_label,
 };
 use crate::chrome::icon;
 use crate::commands::meeting;
@@ -1445,15 +1445,15 @@ impl MeetingView {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(outline_button("day-prev", &l).w(px(32.)).px_0().justify_center().child(icon(g::PREV, 12.)).on_click(
+            .child(crate::buttons::secondary("day-prev", &l).w(px(32.)).px_0().justify_center().child(icon(g::PREV, 12.)).on_click(
                 cx.listener(move |this, _, _, cx| this.pick_day(add_days(day, -1), cx)),
             ))
             .child(div().w(px(170.)).text_center().font_weight(FontWeight::SEMIBOLD).child(long_day(day)))
-            .child(outline_button("day-next", &l).w(px(32.)).px_0().justify_center().child(icon(g::NEXT, 12.)).on_click(
+            .child(crate::buttons::secondary("day-next", &l).w(px(32.)).px_0().justify_center().child(icon(g::NEXT, 12.)).on_click(
                 cx.listener(move |this, _, _, cx| this.pick_day(add_days(day, 1), cx)),
             ))
             .child(
-                outline_button("day-today", &l)
+                crate::buttons::secondary("day-today", &l)
                     .child(tr!("cal-today"))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_day(today, cx))),
             );
@@ -1476,7 +1476,7 @@ impl MeetingView {
                         .bg(if on { l.on_accent() } else { l.text2() }),
                 )
         };
-        let only = outline_button("only-free", &l)
+        let only = crate::buttons::secondary("only-free", &l)
             .child(toggle(self.only_free))
             .child(tr!("meeting-only-free"))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -2017,7 +2017,7 @@ impl Render for MeetingView {
             .border_b_1()
             .border_color(l.border())
             .child(
-                accent_button("send", &l)
+                crate::buttons::primary("send", &l)
                     .px(px(16.))
                     .child(icon(g::SEND, 14.))
                     .child(tr!("meeting-send"))
@@ -2043,7 +2043,7 @@ impl Render for MeetingView {
             .children(status)
             // «Удалить черновик» (макет встречи, Ctrl+D): вкладка закрывается без отправки.
             .child(
-                outline_button("discard", &l)
+                crate::buttons::secondary("discard", &l)
                     .w(px(32.))
                     .px_0()
                     .justify_center()

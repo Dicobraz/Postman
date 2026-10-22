@@ -176,9 +176,11 @@ enum Scene {
     KeyTips,
     /// То же в схеме «Одиночные клавиши»: открыто приглашение без ответа — A / T / N на его кнопках.
     KeyTipsSingle,
+    /// Кнопки (S5-19): главная, тонированная и тонированная под указателем на каждой поверхности (`buttons::gallery`).
+    Buttons,
 }
 
-const SCENES: [Scene; 66] = [
+const SCENES: [Scene; 67] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
@@ -248,6 +250,7 @@ const SCENES: [Scene; 66] = [
     Scene::FolderMenu,
     Scene::ThreadStack,
     Scene::ThreadList,
+    Scene::Buttons,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -337,6 +340,7 @@ impl Scene {
             Scene::Toasts => "toasts",
             Scene::KeyTips => "keytips",
             Scene::KeyTipsSingle => "keytips-single",
+            Scene::Buttons => "buttons",
         }
     }
 }
@@ -367,14 +371,21 @@ pub struct Driver {
     undo: Vec<postman_core::lifecycle::Patch>,
     /// Письмо с просроченным сроком (сцена `overdue`).
     overdue: Option<String>,
+    /// Сцена `buttons`: поверх окна — образцы кнопок.
+    gallery: bool,
 }
 
 impl Driver {
+    /// Показать образцы кнопок (сцена `buttons`).
+    pub(crate) fn gallery(&self) -> bool {
+        self.gallery
+    }
+
     /// Каталог создаётся сразу: ошибка — до открытия окна.
     pub fn new(dir: PathBuf, live: bool, suffix: &'static str) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let dir = std::path::absolute(&dir)?;
-        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix, undo: Vec::new(), overdue: None })
+        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix, undo: Vec::new(), overdue: None, gallery: false })
     }
 
     /// Окно открывается со строкой входа: снимается она.
@@ -451,6 +462,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     let mail_tab = m.tabs.iter().find(|t| t.kind == crate::tabs::TabKind::Mail).map(|t| t.id);
     if let Some(id) = mail_tab.filter(|_| !matches!(scene, Scene::TabMail)) {
         m.close_tab(id, window, cx);
+    }
+    // Образцы кнопок — только в своей сцене (S5-19).
+    if let Some(d) = &mut m.screens {
+        d.gallery = matches!(scene, Scene::Buttons);
     }
     // Боковая панель приглашения — только в своей сцене (S5-24).
     let side = matches!(scene, Scene::InviteSide);
@@ -634,6 +649,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Как удержание Ctrl: событие окна, таймер экрана почты (0,4 с).
             send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(true)));
         }
+        Scene::Buttons => m.set_section(Section::Mail, cx),
         Scene::KeyTipsSingle => {
             crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Single);
             let Some(i) = demo_row(m.list.read(cx), Scene::Invite) else { return Err("no invitation in the demo inbox".into()) };
@@ -1128,6 +1144,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Offline => m.offline.is_down() && list.offline.is_some(),
         Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
         Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
+        Scene::Buttons => m.screens.as_ref().is_some_and(|d| d.gallery),
         Scene::KeyTipsSingle => {
             let single = crate::prefs::get(cx).key_scheme == postman_core::prefs::KeyScheme::Single;
             crate::keytips::shown(cx) && single && reading.is_some_and(|r| r.doc.is_some() && r.invite.is_some())

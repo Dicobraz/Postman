@@ -661,6 +661,8 @@ impl Render for Mailer {
             // Контекстное меню письма (S5-08) и папки (S5-05б) — над всем, кроме тостов.
             .children(menu)
             .children(folder_menu)
+            // Образцы кнопок — только снимок `buttons` (S5-19).
+            .children(self.screens.as_ref().filter(|d| d.gallery()).map(|_| crate::buttons::gallery(&l)))
             // Тосты — поверх всего, последним ребёнком.
             .child(self.toasts.clone());
         if let Some(b) = &mut self.bench {

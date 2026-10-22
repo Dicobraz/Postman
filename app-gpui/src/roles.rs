@@ -74,10 +74,11 @@ pub(crate) enum Pm {
     DayOverlapOn,
     DayAccepted,
     DayAcceptedOn,
-    /// Тонированная второстепенная кнопка и метка «Ждёт ответа» (DESIGN «Цвет», синяя подложка) и её наведение.
-    Tinted,
-    TintedFg,
-    TintedHover,
+    /// Второстепенная (тонированная) кнопка — подложка, текст, наведение (S5-19, `crate::buttons`); подложка и текст —
+    /// и у метки «Ждёт ответа» приглашения.
+    Secondary,
+    SecondaryFg,
+    SecondaryHover,
     /// Метка «Принято»: зелёная подложка и текст (DESIGN, токены категорий — зелёный).
     OkBg,
     OkFg,
@@ -171,10 +172,11 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::DayOverlapOn, "app.day.overlap.on", c(0xFFFFFF), c(0x1A1A1A), Role::LayerPanel),
     (Pm::DayAccepted, "app.day.accepted", c(0x0067C0), c(0x7CC4F0), Role::AccentFill),
     (Pm::DayAcceptedOn, "app.day.accepted.on", c(0xFFFFFF), c(0x1A1A1A), Role::AccentOn),
-    // Тонированная кнопка — DESIGN «Токены цвета», синяя подложка и её наведение.
-    (Pm::Tinted, "app.tinted", c(0xDFF0FF), c(0x23364F), Role::AccentSubtle),
-    (Pm::TintedFg, "app.tinted.fg", c(0x234E82), c(0xBFDDFF), Role::TextPrimary),
-    (Pm::TintedHover, "app.tinted.hover", c(0xD0E6FA), c(0x2C4466), Role::FillSubtleHover),
+    // Тонированная (второстепенная) кнопка, S5-19 — DESIGN «Токены цвета», синяя подложка, текст на ней и наведение;
+    // высокая контрастность — выделение ОС и текст на нём (`crate::buttons`).
+    (Pm::Secondary, "app.button.secondary", c(0xDFF0FF), c(0x23364F), Role::AccentSubtle),
+    (Pm::SecondaryFg, "app.button.secondary.fg", c(0x234E82), c(0xBFDDFF), Role::AccentOn),
+    (Pm::SecondaryHover, "app.button.secondary.hover", c(0xD0E6FA), c(0x2C4466), Role::AccentFillHover),
     (Pm::OkBg, "app.ok.bg", c(0xE5F4DD), c(0x2A3B20), Role::LayerPanel),
     (Pm::OkFg, "app.ok.fg", c(0x34591B), c(0xBAD9AB), Role::SuccessFg),
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
@@ -311,9 +313,9 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::DayOverlapOn,
     Pm::DayAccepted,
     Pm::DayAcceptedOn,
-    Pm::Tinted,
-    Pm::TintedFg,
-    Pm::TintedHover,
+    Pm::Secondary,
+    Pm::SecondaryFg,
+    Pm::SecondaryHover,
     Pm::OkBg,
     Pm::OkFg,
     Pm::CalOff,

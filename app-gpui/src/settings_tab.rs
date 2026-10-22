@@ -406,23 +406,6 @@ pub(crate) fn link(id: impl Into<ElementId>, label: String, l: &Look) -> Statefu
         .child(label)
 }
 
-/// Кнопка с рамкой (вторичная) или акцентная.
-pub(crate) fn button(id: impl Into<ElementId>, label: String, primary: bool, l: &Look) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .h(px(32.))
-        .px_3()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .rounded(l.px(Metric::RadiusControl))
-        .cursor_pointer()
-        .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
-        .when(!primary, |d| d.border_1().border_color(l.stroke()).bg(l.panel()).hover(|d| d.bg(l.hover())))
-        .child(label)
-}
-
 /// Карточка сбоку раздела.
 pub(crate) fn aside_card(title: String, lines: Vec<String>, l: &Look) -> Div {
     div()

@@ -1200,17 +1200,9 @@ impl Render for MailList {
         let l = look(cx);
         self.row_h = row_height(l.density());
         let confirm = (self.confirm.is_some() || self.confirm_many.is_some()).then(|| {
+            // Цвет кнопки — роль, не смысл (DESIGN «Цвет»): «да» — главная, «нет» — тонированная.
             let button = |id: &'static str, text: String, yes: bool| {
-                div()
-                    .id(id)
-                    .px_3()
-                    .py_0p5()
-                    .rounded(l.px(Metric::RadiusControl))
-                    .cursor_pointer()
-                    .when(yes, |d| d.bg(l.error_bg()).text_color(l.error()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!yes, |d| d.border_1().border_color(l.stroke()).hover(|d| d.bg(l.hover())))
-                    .child(text)
-                    .on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
+                crate::buttons::button(id, text, yes, &l).on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
             };
             div()
                 .flex()

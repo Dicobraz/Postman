@@ -26,7 +26,8 @@ use postman_core::contacts::AddressBook;
 use postman_core::sync::{Command, Event as SyncEvent};
 use postman_jmap::{ContactCard, Principal};
 
-use crate::calendar::{accent_button, add_days, avatar, button, chip_outline, day_start, g, hm, outline_button};
+use crate::buttons::plain as button;
+use crate::calendar::{add_days, avatar, chip_outline, day_start, g, hm};
 use crate::chrome::icon;
 use crate::roles::{Look, Pm};
 
@@ -1074,19 +1075,19 @@ impl ContactsView {
             .gap(px(8.))
             .when(has_mail, |d| {
                 d.child(
-                    accent_button("contact-write", &l)
+                    crate::buttons::primary("contact-write", &l)
                         .child(icon(g::MAIL, 14.))
                         .child(tr!("contacts-write"))
                         .on_click(cx.listener(|this, _, _, cx| this.write(cx))),
                 )
                 .child(
-                    outline_button("contact-meet", &l)
+                    crate::buttons::secondary("contact-meet", &l)
                         .child(icon(g::CALENDAR, 14.))
                         .child(tr!("contacts-meet"))
                         .on_click(cx.listener(|this, _, _, cx| this.meet(cx))),
                 )
                 .child(
-                    outline_button("contact-copy", &l)
+                    crate::buttons::secondary("contact-copy", &l)
                         .child(icon(g::COPY, 14.))
                         .child(tr!("contacts-copy"))
                         .on_click(cx.listener(|this, _, _, cx| this.copy_address(cx))),
@@ -1187,7 +1188,7 @@ impl ContactsView {
             .child(div().flex_1())
             .when(!e.card.emails.is_empty(), |d| {
                 d.child(
-                    outline_button("today-meet", l)
+                    crate::buttons::secondary("today-meet", l)
                         .h(px(26.))
                         .text_size(px(12.))
                         .child(tr!(if e.kind == Kind::Room { "contacts-book-room" } else { "contacts-meet" }))

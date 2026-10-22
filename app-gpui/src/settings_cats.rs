@@ -13,7 +13,8 @@ use postman_core::labels::{Categories, Category, Problem};
 use postman_core::palette::{self, Clash, Reserved};
 
 use crate::roles::Look;
-use crate::settings_tab::{SettingsEvent, SettingsView, aside_card, button, link, now_ms};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsEvent, SettingsView, aside_card, link, now_ms};
 
 /// Правка категории на месте.
 pub(crate) struct CatEdit {
