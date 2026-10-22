@@ -1,6 +1,7 @@
 //! «Настройки → Аккаунты» (S5-09, `Account.dc.html`): учётная запись (сервер, логин, состояние синхронизации, где
 //! пароль), общие ящики, безопасность подключения; «Добавить аккаунт» — карточка на месте (`signin.rs`), «Удалить» —
-//! подтверждением строкой. Postman держит одну учётную запись: новая заменяет текущую, общие ящики видны в дереве папок.
+//! подтверждением строкой. Учётных записей может быть несколько (S7-03б): первая — основная, «Добавить аккаунт» при
+//! живой учётной записи добавляет ещё одну рядом; каждая — группой в дереве папок, как общие ящики.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -137,18 +138,72 @@ impl SettingsView {
                 );
             }
         }
+        let shared_row = |name: &String| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .pl(px(48.))
+                .py_1()
+                .child(crate::chrome::icon(crate::chrome::glyph::FOLDER, 14.).text_color(l.text2()))
+                .child(div().flex_1().child(name.clone()))
+                .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("settings-account-shared")))
+        };
         for name in &self.info.shared {
+            list = list.child(shared_row(name));
+        }
+        // Дополнительные учётные записи (S7-03б): та же карточка, «Удалить» — подтверждением строкой.
+        for (n, (profile, a, shared)) in self.info.extra.iter().enumerate() {
+            let confirm = self.remove_extra.as_deref() == Some(profile.as_str());
+            let ask = profile.clone();
             list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .pl(px(48.))
-                    .py_1()
-                    .child(crate::chrome::icon(crate::chrome::glyph::FOLDER, 14.).text_color(l.text2()))
-                    .child(div().flex_1().child(name.clone()))
-                    .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("settings-account-shared"))),
+                card()
+                    .child(avatar(initials(&a.user)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(a.user.clone()))
+                            .child(div().text_size(px(12.)).text_color(l.text2()).truncate().child(host(&a.url).to_owned())),
+                    )
+                    .when(!confirm, |d| {
+                        d.child(link(("settings-extra-remove", n), tr!("settings-account-remove"), l).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.remove_extra = Some(ask.clone());
+                                cx.notify();
+                            },
+                        )))
+                    }),
             );
+            if confirm {
+                let gone = profile.clone();
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .p_2()
+                        .rounded(l.px(Metric::RadiusControl))
+                        .bg(l.warning_bg())
+                        .child(div().flex_1().child(tr!("settings-account-remove-confirm", user = a.user.clone())))
+                        .child(button(("settings-extra-remove-yes", n), tr!("settings-account-remove"), true, l).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.remove_extra = None;
+                                cx.emit(SettingsEvent::RemoveExtra(gone.clone()));
+                            },
+                        )))
+                        .child(link(("settings-extra-remove-no", n), tr!("settings-cancel"), l).on_click(cx.listener(|this, _, _, cx| {
+                            this.remove_extra = None;
+                            cx.notify();
+                        }))),
+                );
+            }
+            for name in shared {
+                list = list.child(shared_row(name));
+            }
         }
         let body = div()
             .flex()

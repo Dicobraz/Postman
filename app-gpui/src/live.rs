@@ -65,6 +65,141 @@ pub(crate) struct Live {
     labels_early: Vec<categories::Reply>,
     /// Запрос фильтров «Все папки» на сервере (S5-03, `Command::Query`): номер последнего.
     pub(crate) filter_ticket: Option<u64>,
+    /// Учётные записи профиля вместе (S7-03б, `fold`): отправители и отложенные отправки каждой, ответы на поиск.
+    pub(crate) profile: Profile,
+}
+
+/// Что приходит от нескольких учётных записей профиля и показывается вместе (S7-03б).
+#[derive(Default)]
+pub(crate) struct Profile {
+    /// Отправители по учётным записям (`None` — основная): «От» — все адреса, основная первой.
+    senders: Vec<(Option<String>, Vec<sync::Sender>)>,
+    /// Отложенные отправки по учётным записям; предел «Отправить позже» — основной.
+    scheduled: Vec<(Option<String>, Vec<postman_core::send_later::Scheduled>)>,
+    max_delay: u64,
+    /// Ответы на поиск «Все папки» (номер запроса → найденное и сколько всего): учётные записи отвечают по одной.
+    results: Vec<(u64, Vec<String>, u64)>,
+    /// Дополнительные учётные записи, у которых идёт синхронизация (`@<n>` → адрес и логин): «Настройки → Аккаунты»
+    /// и подпись их ошибок.
+    pub(crate) names: Vec<(String, Settings)>,
+    /// Добавляется со строки «Добавить аккаунт» (`@<n>`): ждём первого ответа её сервера.
+    pub(crate) adding: Option<String>,
+}
+
+/// Ответов на поиск — помнить не больше (старые запросы уже не показываются).
+const RESULTS_KEPT: usize = 8;
+
+impl Profile {
+    /// Пачка событий учётной записи `profile` → общий вид. Отправители и отложенные отправки — всех учётных записей
+    /// вместе; ответы на один поиск — вместе. У дополнительной (`Some`) — только почта, календарь и итоги её команд:
+    /// кто я, контакты, справочник, настройки, категории, задачи, связь и состояние — у основной. Её ошибки —
+    /// отдельно (тостом с её именем, без строки входа основной).
+    pub(crate) fn fold(&mut self, profile: Option<&str>, batch: Vec<Event>) -> (Vec<Event>, Vec<SyncError>) {
+        let mut out = Vec::with_capacity(batch.len());
+        let mut errors = Vec::new();
+        let key = profile.map(str::to_owned);
+        for ev in batch {
+            match ev {
+                Event::Senders(list) => {
+                    put(&mut self.senders, key.clone(), list);
+                    out.push(Event::Senders(self.senders.iter().flat_map(|(_, l)| l.iter().cloned()).collect()));
+                }
+                Event::Scheduled { list, max_delay } => {
+                    if profile.is_none() {
+                        self.max_delay = max_delay;
+                    }
+                    put(&mut self.scheduled, key.clone(), list);
+                    let list = self.scheduled.iter().flat_map(|(_, l)| l.iter().cloned()).collect();
+                    out.push(Event::Scheduled { list, max_delay: self.max_delay });
+                }
+                Event::SearchResults { ticket, ids, total } => {
+                    let (ids, total) = self.result(ticket, ids, total);
+                    out.push(Event::SearchResults { ticket, ids, total });
+                }
+                Event::Error(e) if profile.is_some() => errors.push(e),
+                Event::Status(_)
+                | Event::Me { .. }
+                | Event::Contacts(_)
+                | Event::Settings(_)
+                | Event::ContactsLoaded(_)
+                | Event::DirectoryLoaded(_)
+                | Event::ContactSaved { .. }
+                | Event::ContactDeleted { .. }
+                | Event::ContactFailed { .. }
+                | Event::Categories(_)
+                | Event::Tasks(_)
+                | Event::Connection(_)
+                | Event::Delegated { .. }
+                | Event::Withheld { .. }
+                | Event::FreeBusyShared { .. }
+                | Event::Features(_)
+                | Event::EventsFound { .. }
+                | Event::CalendarFailed(_)
+                    if profile.is_some() =>
+                {
+                    if let Event::CalendarFailed(e) = &ev {
+                        tracing::warn!("calendar of {profile:?}: {e}");
+                    }
+                }
+                ev => out.push(ev),
+            }
+        }
+        (out, errors)
+    }
+
+    /// Ответ одной учётной записи на поиск: найденное — вместе с прежними ответами на тот же запрос.
+    fn result(&mut self, ticket: u64, ids: Vec<String>, total: u64) -> (Vec<String>, u64) {
+        match self.results.iter_mut().find(|(t, _, _)| *t == ticket) {
+            Some((_, all, sum)) => {
+                for id in ids {
+                    if !all.contains(&id) {
+                        all.push(id);
+                    }
+                }
+                all.truncate(SEARCH_LIMIT);
+                *sum += total;
+                (all.clone(), *sum)
+            }
+            None => {
+                self.results.push((ticket, ids.clone(), total));
+                if self.results.len() > RESULTS_KEPT {
+                    self.results.remove(0);
+                }
+                (ids, total)
+            }
+        }
+    }
+
+    /// Адрес «От» → учётная запись (маршрут письма, `Backend::send`).
+    pub(crate) fn sender_routes(&self) -> Vec<(String, Option<String>)> {
+        self.senders
+            .iter()
+            .flat_map(|(p, l)| l.iter().map(move |s| (s.address.email.clone(), p.clone())))
+            .collect()
+    }
+
+    /// Дополнительная учётная запись удалена: её отправители и отложенные отправки — тоже.
+    pub(crate) fn forget(&mut self, profile: &str) {
+        self.senders.retain(|(p, _)| p.as_deref() != Some(profile));
+        self.scheduled.retain(|(p, _)| p.as_deref() != Some(profile));
+        self.names.retain(|(p, _)| p != profile);
+    }
+
+    /// Всё, что знает список «От» сейчас (после удаления учётной записи — заново всем частям экрана).
+    pub(crate) fn senders_event(&self) -> Event {
+        Event::Senders(self.senders.iter().flat_map(|(_, l)| l.iter().cloned()).collect())
+    }
+}
+
+/// Значение учётной записи в списке по учётным записям: основная — первой, дополнительные — по префиксу.
+fn put<T>(list: &mut Vec<(Option<String>, T)>, key: Option<String>, value: T) {
+    match list.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, v)) => *v = value,
+        None => {
+            list.push((key, value));
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
 }
 
 impl Live {
@@ -291,7 +426,7 @@ impl Mailer {
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
-        self.backend = Backend::Live { commands };
+        self.backend = Backend::Live { commands, extra: Vec::new(), senders: Vec::new() };
         // Область чтения: блобы и ответы на приглашения — через сервер; мой адрес придёт `Event::Me`.
         self.reading.update(cx, |r, _| {
             r.live = true;
@@ -337,6 +472,9 @@ impl Mailer {
         }
         self.load_labels(cx);
         self.load_account_prefs(cx);
+        // Дополнительные учётные записи профиля (S7-03б) — на том же кэше, рядом с основной.
+        self.live.profile = Default::default();
+        self.start_extras(cx);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             // Поток синхронизации закончился — отправитель пробуждений закрыт, задача завершается.
@@ -348,7 +486,7 @@ impl Mailer {
                 }
                 let alive = this.update(cx, |m, cx| {
                     if m.live.session == session {
-                        m.on_events(&batch, cx);
+                        m.on_profile_events(None, batch, cx);
                     }
                 });
                 if alive.is_err() {
@@ -430,6 +568,171 @@ impl Mailer {
         {
             x.queue(plan.index);
         }
+    }
+
+    /// Пачка событий учётной записи профиля (S7-03б): общий вид (`Profile::fold`) — частям экрана, ошибки
+    /// дополнительной — тостом с её именем.
+    pub(crate) fn on_profile_events(&mut self, profile: Option<&str>, batch: Vec<Event>, cx: &mut Context<Self>) {
+        let senders_before = self.live.profile.sender_routes();
+        let (events, errors) = self.live.profile.fold(profile, batch);
+        let routes = self.live.profile.sender_routes();
+        if routes != senders_before {
+            self.backend.set_senders(routes);
+        }
+        if !events.is_empty() {
+            self.on_events(&events, cx);
+        }
+        // Добавление со строки «Добавить аккаунт»: сервер ответил — карточка закрывается; отказал — причина в ней же,
+        // учётная запись не остаётся.
+        if profile.is_some() && self.live.profile.adding.as_deref() == profile {
+            if let Some(e) = errors.first() {
+                let text = error_text(e);
+                if let Some(panel) = &self.settings.add {
+                    panel.update(cx, |p, cx| p.failed(&text, cx));
+                }
+                self.live.profile.adding = None;
+                if let Some(p) = profile {
+                    self.remove_extra(p.to_owned(), cx);
+                }
+                return;
+            }
+            if events.iter().any(|e| matches!(e, Event::MailboxesChanged)) {
+                self.live.profile.adding = None;
+                self.cancel_add_account(cx);
+                self.refresh_settings_info(cx);
+            }
+        }
+        let name = profile.and_then(|p| self.live.profile.names.iter().find(|(q, _)| q == p)).map(|(_, s)| s.user.clone());
+        for e in fresh_errors(&mut self.live.last_error, errors) {
+            tracing::warn!("sync {profile:?}: {e}");
+            let text = tr!("sync-account-error", account = name.clone().unwrap_or_default(), error = error_text(&e));
+            self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
+        }
+    }
+
+    /// Дополнительная учётная запись профиля (S7-03б): своя синхронизация на том же кэше, ключи — с её префиксом.
+    pub(crate) fn start_extra(&mut self, extra: account::Extra, account: Account, cx: &mut Context<Self>) {
+        if !self.backend.is_live() {
+            return;
+        }
+        let session = self.live.session;
+        let profile = extra.profile.clone();
+        let (events, rx) = std::sync::mpsc::channel::<Event>();
+        let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
+        let wake = wake_tx.clone();
+        let repaint = move || {
+            let _ = wake.unbounded_send(());
+        };
+        tracing::info!("sync start {profile}: {}", account.url);
+        self.live.profile.names.retain(|(p, _)| *p != profile);
+        self.live.profile.names.push((profile.clone(), extra.settings.clone()));
+        let commands =
+            sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint);
+        let _ = wake_tx.unbounded_send(());
+        drop(wake_tx);
+        self.backend.add_extra(profile.clone(), commands);
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while wake_rx.next().await.is_some() {
+                while wake_rx.try_recv().is_ok() {}
+                let batch: Vec<Event> = rx.try_iter().collect();
+                if batch.is_empty() {
+                    continue;
+                }
+                let alive = this.update(cx, |m, cx| {
+                    // Учётную запись удалили или вошли заново — её события уже не нужны.
+                    if m.live.session == session && m.live.profile.names.iter().any(|(p, _)| *p == profile) {
+                        m.on_profile_events(Some(&profile), batch, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Дополнительные учётные записи из профиля — после основной (`start_sync`): без пароля в диспетчере — без
+    /// синхронизации («Настройки → Аккаунты» покажет их).
+    pub(crate) fn start_extras(&mut self, cx: &mut Context<Self>) {
+        let dir = crate::data_dir();
+        let task = cx.background_spawn(async move {
+            account::load_extras(&dir).into_iter().filter_map(|e| account::extra_account(&e).map(|a| (e, a))).collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let list = task.await;
+            let _ = this.update(cx, |m, cx| {
+                for (e, a) in list {
+                    m.start_extra(e, a, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// «Добавить аккаунт», когда учётная запись уже есть (S7-03б): ещё одна — рядом, со своей синхронизацией; та же,
+    /// что основная, — отказ в карточке.
+    pub(crate) fn add_extra_account(&mut self, account: Account, store: bool, cx: &mut Context<Self>) {
+        let settings = Settings::of(&account);
+        let same = self.live.account.as_ref() == Some(&settings) || self.live.profile.names.iter().any(|(_, s)| *s == settings);
+        if same {
+            if let Some(panel) = &self.settings.add {
+                panel.update(cx, |p, cx| p.failed(&tr!("settings-account-exists"), cx));
+            }
+            return;
+        }
+        let store = store && crate::security::effective(&crate::prefs::get(cx)).store_password;
+        let dir = crate::data_dir();
+        let saved = account.clone();
+        let task = cx.background_spawn(async move { account::add_extra(&dir, &saved, store) });
+        cx.spawn(async move |this, cx| {
+            let added = task.await;
+            let _ = this.update(cx, |m, cx| match added {
+                Ok(extra) => {
+                    m.live.profile.adding = Some(extra.profile.clone());
+                    m.start_extra(extra, account, cx);
+                }
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    if let Some(panel) = &m.settings.add {
+                        panel.update(cx, |p, cx| p.failed(&e, cx));
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// «Настройки → Аккаунты → Удалить» у дополнительной учётной записи: синхронизация останавливается, её
+    /// письма и папки уходят из кэша, адрес и пароль — из профиля.
+    pub(crate) fn remove_extra(&mut self, profile: String, cx: &mut Context<Self>) {
+        tracing::info!("account {profile} removed by the user");
+        self.backend.remove_extra(&profile);
+        self.live.profile.forget(&profile);
+        self.backend.set_senders(self.live.profile.sender_routes());
+        let senders = self.live.profile.senders_event();
+        self.on_events(&[senders], cx);
+        let (dir, cache, live) = (crate::data_dir(), self.cache.clone(), self.backend.is_live());
+        let task = cx.background_spawn(async move {
+            // Демо не трогает профиль на диске: там — настоящие учётные записи.
+            if live && let Err(e) = account::remove_extra(&dir, &profile) {
+                tracing::warn!("{e}");
+            }
+            if let Err(e) = cache.forget_profile(&profile) {
+                tracing::warn!("cache: {e}");
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let _ = this.update(cx, |m, cx| {
+                m.reload_folders(cx);
+                m.list.update(cx, |l, cx| l.refresh(cx));
+                m.cal.update(cx, |c, cx| c.refresh(cx));
+                m.refresh_settings_info(cx);
+            });
+        })
+        .detach();
     }
 
     fn sync_errors(&mut self, errors: Vec<SyncError>, auth: bool, cx: &mut Context<Self>) {
@@ -720,6 +1023,12 @@ impl Mailer {
 
     pub(crate) fn watch_signin(&mut self, panel: &Entity<SignIn>, window: &mut Window, cx: &mut Context<Self>) {
         self._subscriptions.push(cx.subscribe_in(panel, window, |this, panel, s: &Submit, window, cx| {
+            // Из настроек, когда учётная запись уже есть: ещё одна — рядом (S7-03б), карточка остаётся в настройках.
+            let from_settings = this.settings.add.as_ref().map(|p| p.entity_id()) == Some(panel.entity_id());
+            if from_settings && this.backend.is_live() && this.live.pending.is_none() {
+                this.add_extra_account(s.account.clone(), s.store, cx);
+                return;
+            }
             // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
             if this.live.signin.is_none() {
                 this.live.signin = Some(panel.clone());

@@ -138,8 +138,12 @@ impl Folders {
             .text_size(l.px(Metric::TypeCaption))
             .text_color(l.text2())
             .child(div().w(px(12.)).child(if open { "▾" } else { "▸" }))
-            // Значок «общий» и права в подсказке (S5-28, макет `SharedMailboxes`).
-            .child(crate::chrome::icon(crate::chrome::glyph::PEOPLE, 14.))
+            // Значок «общий» и права в подсказке (S5-28, макет `SharedMailboxes`); другая моя учётная запись (S7-03б) —
+            // значок почты.
+            .child(crate::chrome::icon(
+                if postman_cache::profile_of(Some(&a.id)) == Some(a.id.as_str()) { crate::chrome::glyph::MAIL } else { crate::chrome::glyph::PEOPLE },
+                14.,
+            ))
             .child(div().flex_1().min_w_0().truncate().child(a.name.clone()))
             .when(self.read_only(a), |d| d.child(div().flex_none().text_size(px(11.)).child(tr!("shared-read-only"))))
             .when(total > 0, |d| unread(d, total, l))
@@ -147,6 +151,21 @@ impl Folders {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
             .into_any_element()
     }
+}
+
+/// Ветки дерева (S7-03б): общие ящики основной учётной записи, затем каждая дополнительная — сама и её общие ящики;
+/// внутри — по имени.
+pub(crate) fn ordered(accounts: &[AccountRow]) -> Vec<AccountRow> {
+    let mut list = accounts.to_vec();
+    list.sort_by(|a, b| {
+        let key = |r: &AccountRow| {
+            let profile = postman_cache::profile_of(Some(&r.id)).map(str::to_owned);
+            let own = profile.as_deref() == Some(r.id.as_str());
+            (profile, !own, r.name.to_lowercase())
+        };
+        key(a).cmp(&key(b))
+    });
+    list
 }
 
 /// Высота строки папки: 32 px при обычной плотности (макет), на 4 px меньше — при компактной.
@@ -231,7 +250,7 @@ impl Render for Folders {
         }
         let own: Vec<AnyElement> = self.of(None).map(|m| self.folder(m, false, &l, cx)).collect();
         list = list.children(own);
-        for a in &self.accounts {
+        for a in &ordered(&self.accounts) {
             list = list.child(self.branch(a, &l, cx));
             if !self.collapsed.contains(&a.id) {
                 let folders: Vec<AnyElement> = self.of(Some(&a.id)).map(|m| self.folder(m, true, &l, cx)).collect();

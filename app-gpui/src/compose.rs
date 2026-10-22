@@ -896,6 +896,17 @@ impl Composers {
     }
 
     /// Адреса, от которых можно отправить (свой и общих ящиков), без повторов — для подписей в настройках (S5-09).
+    /// Адреса «От» моих учётных записей (S7-03б), без общих ящиков: (адрес, как показывать). Основная — первой.
+    pub(crate) fn own_senders(&self, live: bool) -> Vec<(String, String)> {
+        let demo = if live { Vec::new() } else { demo_senders() };
+        let senders = if live { &self.senders } else { &demo };
+        senders
+            .iter()
+            .filter(|s| s.account.as_deref().is_none_or(|a| postman_cache::profile_of(Some(a)) == Some(a)))
+            .map(|s| (s.address.email.clone(), s.address.display()))
+            .collect()
+    }
+
     pub(crate) fn sender_addresses(&self) -> Vec<String> {
         let mut out: Vec<String> = self.me.iter().map(|(a, _)| a.email.clone()).collect();
         for s in &self.senders {
@@ -1186,7 +1197,9 @@ pub(crate) fn demo_senders() -> Vec<Sender> {
         address: Address::new("", *email),
         signature: String::new(),
     });
-    std::iter::once(own).chain(shared).collect()
+    // Вторая учётная запись демо (S7-03б).
+    let second = Sender { account: Some(postman_demo::SECOND.0.to_owned()), address: Address::new("", postman_demo::SECOND.1), signature: String::new() };
+    std::iter::once(own).chain(shared).chain(std::iter::once(second)).collect()
 }
 
 #[cfg(test)]

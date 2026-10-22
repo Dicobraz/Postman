@@ -160,6 +160,7 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
     cache.upsert_emails(&batch)?;
     cache.set_recipients(&to)?;
     shared(&cache, now)?;
+    second(&cache, now)?;
     chain(&cache, now)?;
     delegations::letters(&cache, now)
 }
@@ -310,6 +311,53 @@ const CHAIN_4: &str = "Подтверждаю, до встречи.
 > пн, 3 нояб. 2026 г. в 12:10, Смирнова Анна <me@corp.example>:
 >> Алексей, добрый день!
 ";
+
+/// Вторая учётная запись профиля демо (S7-03б): префикс ключей и адрес — группа в дереве папок, «От» письма и
+/// встречи, свой календарь в «Моих календарях».
+pub const SECOND: (&str, &str) = ("@2", "a.smirnova@partner.example");
+
+/// Темы писем второй учётной записи демо.
+const SECOND_SUBJECTS: &[&str] = &["Договор с партнёром", "Re: График поставок", "Счёт № 3415", "Приглашение на выставку"];
+
+fn second(cache: &Cache, now: i64) -> postman_cache::Result<()> {
+    let (profile, email) = SECOND;
+    let scope = Some(profile);
+    cache.replace_accounts_of(scope, &[AccountRow { id: profile.into(), name: email.into(), is_personal: true, read_only: false }])?;
+    let mb = |id: &str, name: &str, order| MailboxRow {
+        id: scoped(scope, id),
+        parent_id: None,
+        name: name.into(),
+        role: Some(id.into()),
+        sort_order: order,
+        total: 0,
+        unread: 0,
+        rights: Rights::ALL,
+    };
+    let boxes =
+        vec![mb("inbox", "Входящие", 1), mb("drafts", "Черновики", 2), mb("sent", "Отправленные", 3), mb("trash", "Удалённые", 4)];
+    cache.replace_mailboxes(scope, &boxes)?;
+    let rows: Vec<EmailRow> = (0..8)
+        .map(|i| {
+            let (name, addr) = SENDERS[(i + 3) % SENDERS.len()];
+            EmailRow {
+                id: scoped(scope, &format!("demo{}", 500 + i)),
+                thread_id: scoped(scope, &format!("t{i}")),
+                mailbox_ids: vec![scoped(scope, "inbox")],
+                received_at: now - (i as i64 + 1) * 7200 - 1800,
+                subject: format!("{} {}", SECOND_SUBJECTS[i % SECOND_SUBJECTS.len()], 200 + i),
+                from_name: name.into(),
+                from_addr: addr.into(),
+                preview: PREVIEW.into(),
+                seen: i > 1,
+                flagged: false,
+                has_attachment: i % 3 == 0,
+                size: 8192,
+                keywords: Vec::new(),
+            }
+        })
+        .collect();
+    cache.upsert_emails(&rows)
+}
 
 /// Общие ящики демо (S4-06): ящик отдела, где можно всё, и ящик руководителя, открытый только для чтения.
 pub const SHARED: &[(&str, &str, bool)] = &[("sales", "sales@corp.example", false), ("boss", "director@corp.example", true)];
@@ -668,6 +716,22 @@ pub mod calendar {
         v.push(conference);
         v.sort_by_key(|e| e.span.start);
         v
+    }
+
+    /// Календарь второй учётной записи демо (S7-03б): владелец — она сама, как у календарей коллег.
+    pub fn second_calendar() -> Owner {
+        Owner { email: crate::SECOND.1.into(), name: crate::SECOND.1.into() }
+    }
+
+    /// События второй учётной записи демо-недели.
+    pub fn second_events() -> Vec<Event> {
+        let of = |id: &str, title: &str, day: i64, at: (i64, i64), mins: i64, place: &str| {
+            let mut e = event(id, title, day, at, mins, place, false, Me::Owner, "");
+            e.calendar_ids = vec!["s".into()];
+            e.owner = Some(second_calendar());
+            e
+        };
+        vec![of("s1", "Созвон с партнёром", 1, (16, 0), 60, "Teams"), of("s2", "Выставка: стенд", 4, (11, 0), 120, "Экспоцентр")]
     }
 
     /// Коллеги, открывшие мне календарь (S5-22): события их календарей — [`colleague_events`].

@@ -5953,6 +5953,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
  "windows 0.61.3",
  "windows-sys 0.61.2",

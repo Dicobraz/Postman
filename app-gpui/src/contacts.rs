@@ -1694,7 +1694,7 @@ impl crate::Mailer {
             }
             ContactsAction::Delete { id, ticket } => Command::DeleteContact { id: id.clone(), ticket: *ticket },
             ContactsAction::Availability { ticket, email, from, to } => {
-                Command::Availability { ticket: *ticket, emails: vec![email.clone()], from: *from, to: *to }
+                Command::Availability { ticket: *ticket, emails: vec![email.clone()], from: *from, to: *to, sender: None }
             }
             ContactsAction::Write(address) => {
                 self.open_compose(Draft { to: vec![address.clone()], ..Default::default() }, cx);

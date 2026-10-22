@@ -999,7 +999,7 @@ impl ReadingPane {
     pub(crate) fn invite_sync(&mut self, ev: &SyncEvent, cx: &mut Context<Self>) {
         match ev {
             // Мой день — только мои события (календари коллег — в календаре, S5-22).
-            SyncEvent::EventsLoaded { from, to, events, .. } => {
+            SyncEvent::EventsLoaded { from, to, events, account: None, .. } => {
                 let mine: Vec<postman_calendar::Event> = events.iter().filter(|e| e.owner.is_none()).cloned().collect();
                 self.invite_events(*from, *to, &mine, cx)
             }
