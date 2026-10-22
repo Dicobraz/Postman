@@ -111,6 +111,10 @@ cmd-task-prev = Предыдущая задача
 cmd-task-slot-next = Следующее свободное окно
 cmd-task-slot-prev = Предыдущее свободное окно
 cmd-task-block = Поставить время в календаре
+
+cmd-task-delegate = Поручить задачу
+cmd-task-remind = Напомнить исполнителю
+cmd-task-revoke = Забрать поручение
 cmd-invite-accept = Принять приглашение
 cmd-invite-tentative = Ответить «Под вопросом»
 cmd-invite-decline = Отклонить приглашение

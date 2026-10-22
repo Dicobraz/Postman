@@ -111,6 +111,10 @@ cmd-task-prev = Previous task
 cmd-task-slot-next = Next free slot
 cmd-task-slot-prev = Previous free slot
 cmd-task-block = Block time in calendar
+
+cmd-task-delegate = Delegate task
+cmd-task-remind = Remind assignee
+cmd-task-revoke = Take task back
 cmd-invite-accept = Accept invitation
 cmd-invite-tentative = Answer tentative
 cmd-invite-decline = Decline invitation

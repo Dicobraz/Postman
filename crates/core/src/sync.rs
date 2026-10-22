@@ -140,6 +140,9 @@ pub enum Command {
     /// Задачи (S6-02, `tasks.rs`): загрузка, сверка, правки → `Event::Tasks`. Правка без связи — в кэше, уходит
     /// по возвращении связи (`tasks::Request::Flush`).
     Tasks(tasks::Request),
+    /// Шаг поручения (S6-09, `assign.rs`): своя копия задачи уже в кэше (`tasks::save_local`) — сначала она на
+    /// сервер (без рассылки), затем письма iTIP шага → `Event::Delegated`. Без связи — в очередь, как правки.
+    Delegate { uid: String, drafts: Vec<Draft>, ticket: u64 },
 }
 
 impl Command {
@@ -157,6 +160,7 @@ impl Command {
                 Command::Patch { patches: patches.clone(), archive_name: archive_name.clone() }
             }
             Command::Tasks(r) => Command::Tasks(r.replayable()?),
+            Command::Delegate { uid, drafts, ticket } => Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket: *ticket },
             Command::ReportPhishing { ids, to, subject, text, ticket } => Command::ReportPhishing {
                 ids: ids.clone(),
                 to: to.clone(),
@@ -344,6 +348,8 @@ pub enum Event {
     /// Сообщение о фишинге (`Command::ReportPhishing`) отправлено (`error: None`) или не отправлено. Без связи
     /// события нет — команда ждёт в очереди.
     Reported { ticket: u64, error: Option<String> },
+    /// Шаг поручения (`Command::Delegate`) ушёл (`error: None`) или нет. Без связи события нет — ждёт в очереди.
+    Delegated { ticket: u64, uid: String, error: Option<String> },
     Error(SyncError),
 }
 
@@ -1425,6 +1431,23 @@ async fn handle(
                 // Без связи — ждёт в очереди (`link`), события нет.
                 Err(e) if ErrorKind::of(e) == ErrorKind::Network => {}
                 Err(e) => notify(Event::Reported { ticket, error: Some(e.to_string()) }),
+            }
+            r?;
+        }
+        Command::Delegate { uid, drafts, ticket } => {
+            let mut r = tasks::handle(&tasks::JmapStore::new(client), cache, tasks::Request::Flush, &|r| notify(Event::Tasks(r))).await;
+            if r.is_ok() {
+                for d in &drafts {
+                    if let Err(e) = send(accounts, cache, send_as, d, None, Release::Now).await {
+                        r = Err(e);
+                        break;
+                    }
+                }
+            }
+            match &r {
+                Ok(()) => notify(Event::Delegated { ticket, uid, error: None }),
+                Err(e) if ErrorKind::of(e) == ErrorKind::Network => {}
+                Err(e) => notify(Event::Delegated { ticket, uid, error: Some(e.to_string()) }),
             }
             r?;
         }

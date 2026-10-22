@@ -163,6 +163,7 @@ impl Mailer {
         let contacts_bar = cx.new(|cx| crate::contacts::ContactsBar::new(contacts.clone(), cx));
         let tasks = cx.new(|cx| crate::tasks::TasksView::new(cache.clone(), window, cx));
         let tasks_bar = cx.new(|cx| crate::tasks::TasksBar::new(tasks.clone(), cx));
+        reading.update(cx, |r, _| r.tasks = Some(tasks.downgrade()));
         let subscriptions = vec![
             cx.subscribe(&tasks, |this, _, action: &crate::tasks::TasksAction, cx| this.on_tasks(action, cx)),
             cx.subscribe(&contacts, |this, _, action: &crate::contacts::ContactsAction, cx| this.on_contacts(action, cx)),
@@ -218,6 +219,14 @@ impl Mailer {
                 ReadingEvent::Open(row) => this.open_letter(row.clone(), cx),
                 ReadingEvent::Unsend(s) => this.unsend_scheduled(s.clone(), cx),
                 ReadingEvent::Respond(row, mode) => this.respond_to(row.clone(), *mode, cx),
+                ReadingEvent::TaskMail(inc) => this.tasks.update(cx, |t, cx| t.receive_mail(inc, cx)),
+                ReadingEvent::TaskAction { uid, action } => {
+                    let found = this.tasks.update(cx, |t, cx| t.mail_action(uid, *action, cx));
+                    if found && action.is_none() {
+                        this.set_section(Section::Tasks, cx);
+                    }
+                    this.reading.update(cx, |_, cx| cx.notify());
+                }
                 ReadingEvent::TrashAnswered(row) => this.trash_answered(row.clone(), cx),
                 ReadingEvent::Sync(req) => {
                     if !this.backend.send(req.command()) {
@@ -348,6 +357,13 @@ impl Mailer {
         if let postman_core::sync::Event::Tasks(reply) = ev {
             self.tasks.update(cx, |t, cx| t.on_reply(reply, cx));
         }
+        if let postman_core::sync::Event::Me { address, .. } = ev {
+            let (me, book) = (address.clone(), self.compose.book.clone());
+            self.tasks.update(cx, |t, cx| {
+                t.set_book(book);
+                t.set_me(me, cx);
+            });
+        }
         let created = self.meetings.on_sync(ev, cx);
         self.meetings_created(created, cx);
         self.on_settings_sync(ev, cx);
@@ -355,6 +371,10 @@ impl Mailer {
         match ev {
             postman_core::sync::Event::Connection(c) => self.on_connection(*c, cx),
             postman_core::sync::Event::Reported { error, .. } => self.on_reported(error.as_deref(), cx),
+            postman_core::sync::Event::Delegated { error: Some(e), .. } => {
+                let text = tr!("assign-failed", error = e.clone());
+                self.toasts.update(cx, |t, cx| t.push(Toast::Error, text, cx));
+            }
             _ => {}
         }
     }
@@ -553,7 +573,10 @@ impl Render for Mailer {
                 this.tasks.update(cx, |t, cx| t.new_task(window, cx));
             }))
             .on_action(cx.listener(|this, _: &commands::task::Complete, _, cx| this.tasks.update(cx, |t, cx| t.toggle_done(cx))))
-            .on_action(cx.listener(|this, _: &commands::task::Due, _, cx| this.tasks.update(cx, |t, cx| t.toggle_due(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Due, window, cx| this.tasks.update(cx, |t, cx| t.toggle_due(window, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Delegate, window, cx| this.tasks.update(cx, |t, cx| t.delegate(window, cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Remind, _, cx| this.tasks.update(cx, |t, cx| t.remind(cx))))
+            .on_action(cx.listener(|this, _: &commands::task::Revoke, window, cx| this.tasks.update(cx, |t, cx| t.revoke(window, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Edit, window, cx| this.tasks.update(cx, |t, cx| t.rename(window, cx))))
             .on_action(cx.listener(|this, _: &commands::task::Delete, _, cx| this.tasks.update(cx, |t, cx| t.delete(cx))))
             .on_action(cx.listener(|this, _: &commands::task::Open, _, cx| this.tasks.update(cx, |t, cx| t.open_letter(cx))))

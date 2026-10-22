@@ -357,6 +357,17 @@ cargo test -p postman-core --test stand -- --ignored
     письмо приходит во «Входящие» с ключевым словом `pm.cat.tenders` в `keywords` (тест `sieve_rule_sets_category`,
     `stand_settings.rs`). Своё ключевое слово (не системный флаг) ставится как есть, регистр сохраняется.
 
+44. **Поручение путём Postman** (S6-09, тест `postman_delegation_cycle`, 2026-10-22). Своя запись поручившего —
+    `CalendarEvent/set` **без** рассылки, письма — свои iMIP (REQUEST исполнителю и наблюдателю, REPLY исполнителя с
+    COMMENT). Сервер исполнителя кладёт VTODO из письма в его календарь сам (как п. 40); **REPLY письмом сервер
+    поручившего применяет и к записи, созданной без рассылки**: PARTSTAT (ACCEPTED, IN-PROCESS, COMPLETED) и
+    PERCENT-COMPLETE — у участника; ход самой задачи (`progress`) не меняет — «готово» исполнителя у поручившего
+    остаётся «на проверку» до приёмки. REQUEST поручившего с `STATUS:COMPLETED` («принять результат») меняет
+    `progress` копии исполнителя на `completed`, но своё `X-POSTMAN-RESULT` из письма в копию не переносит (свойства
+    X- первого REQUEST доходят, п. 40) — «закрыто» Postman узнаёт по `progress` + PARTSTAT COMPLETED
+    (`assign::status`). COMMENT — по-прежнему только в письме (GAPS 42): Postman берёт его в ленту шагов при открытии
+    письма.
+
 ## S/MIME (S5-12 Ф2)
 
 - Шифрованное письмо (`application/pkcs7-mime; smime-type=enveloped-data`) сервер пропускает как есть: блоб письма у
