@@ -111,7 +111,7 @@ mod tests {
     use pets_ui::theme::{Color, FontSizes, HcColors, OsLook, ThemeSpec, contrast, resolve};
 
     fn theme(os: &OsLook) -> Look {
-        Look::new(&resolve(&ThemeSpec::default(), Some(&base(None)), os, FontSizes::default(), &ROLES))
+        Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, postman_core::prefs::Accent::System)), os, FontSizes::default(), &ROLES))
     }
 
     fn hex(c: gpui_kit::Hsla) -> String {

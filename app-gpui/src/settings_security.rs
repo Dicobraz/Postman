@@ -11,7 +11,8 @@ use postman_core::prefs::Images;
 use postman_worker::Level;
 
 use crate::roles::Look;
-use crate::settings_tab::{SettingsView, button, group, link, row, seg, seg_group, toggle};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, group, link, row, seg, seg_group, toggle};
 
 impl SettingsView {
     /// «Сбросить»: пароль учётной записи — из Диспетчера учётных данных (в фоне); вход спросим при следующей
