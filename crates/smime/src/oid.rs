@@ -83,6 +83,30 @@ pub const AES128_GCM: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.6");
 pub const AES256_GCM: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.46");
 pub const DES_EDE3_CBC: Oid = Oid::new_unwrap("1.2.840.113549.3.7");
 pub const RSA_OAEP: Oid = Oid::new_unwrap("1.2.840.113549.1.1.7");
+pub const AES192_GCM: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.26");
+pub const RC2_CBC: Oid = Oid::new_unwrap("1.2.840.113549.3.2");
+pub const DES_CBC: Oid = Oid::new_unwrap("1.3.14.3.2.7");
+
+// --- расшифровка (Ф2): обёртка ключа и ECDH (RFC 3394, RFC 5753, SEC 1) ---
+pub const AES128_WRAP: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.5");
+pub const AES192_WRAP: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.25");
+pub const AES256_WRAP: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.1.45");
+pub const ECDH_STD_SHA1: Oid = Oid::new_unwrap("1.3.133.16.840.63.0.2");
+pub const ECDH_STD_SHA224: Oid = Oid::new_unwrap("1.3.132.1.11.0");
+pub const ECDH_STD_SHA256: Oid = Oid::new_unwrap("1.3.132.1.11.1");
+pub const ECDH_STD_SHA384: Oid = Oid::new_unwrap("1.3.132.1.11.2");
+pub const ECDH_STD_SHA512: Oid = Oid::new_unwrap("1.3.132.1.11.3");
+pub const ECDH_COF_SHA1: Oid = Oid::new_unwrap("1.3.133.16.840.63.0.3");
+pub const ECDH_COF_SHA256: Oid = Oid::new_unwrap("1.3.132.1.14.1");
+pub const ECDH_COF_SHA384: Oid = Oid::new_unwrap("1.3.132.1.14.2");
+pub const ECDH_COF_SHA512: Oid = Oid::new_unwrap("1.3.132.1.14.3");
+/// ГОСТ 28147-89 (старые письма КриптоПро) и «Магма» — расшифровка ГОСТ не сделана.
+pub const GOST28147: Oid = Oid::new_unwrap("1.2.643.2.2.21");
+/// Набор параметров ГОСТ 28147-89 «КриптоПро A» (RFC 4357 §10.3).
+pub const GOST28147_PARAM_A: Oid = Oid::new_unwrap("1.2.643.2.2.31.1");
+pub const MAGMA_CTR_ACPKM: Oid = Oid::new_unwrap("1.2.643.7.1.1.5.1.1");
+pub const MAGMA_CTR_ACPKM_OMAC: Oid = Oid::new_unwrap("1.2.643.7.1.1.5.1.2");
+
 /// ГОСТ Р 34.12-2015 «Кузнечик» в CMS (рекомендации ТК 26, режим CTR-ACPKM, RFC 9189) [проверить номера документов
 /// ТК 26].
 pub const KUZNYECHIK_CTR_ACPKM: Oid = Oid::new_unwrap("1.2.643.7.1.1.5.2.1");
@@ -96,6 +120,7 @@ pub fn capability_name(oid: &str) -> Option<&'static str> {
         AES192_CBC => "AES-192-CBC",
         AES256_CBC => "AES-256-CBC",
         AES128_GCM => "AES-128-GCM",
+        AES192_GCM => "AES-192-GCM",
         AES256_GCM => "AES-256-GCM",
         DES_EDE3_CBC => "3DES",
         RSA_OAEP => "RSA-OAEP",

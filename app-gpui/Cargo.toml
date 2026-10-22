@@ -23,6 +23,7 @@ postman-worker.workspace = true
 # Типы итога проверки подписи S/MIME (S5-12); разбор — в воркере.
 postman-smime.workspace = true
 postman-demo.workspace = true
+zeroize = "1"
 postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"

@@ -21,7 +21,7 @@ fn sha256_hex(der: &[u8]) -> String {
 }
 
 /// CN имени или всё имя (RFC 4514), если CN нет.
-fn name_text(n: &Name) -> String {
+pub(crate) fn name_text(n: &Name) -> String {
     match n.common_name() {
         Ok(Some(cn)) => cn.value().into_owned(),
         _ => n.to_string(),

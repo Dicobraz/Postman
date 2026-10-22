@@ -125,6 +125,8 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             from_name: name.into(),
             from_addr: addr.into(),
             preview: match signed {
+                // Шифрованное: сервер текста не видит.
+                Some(s) if s.encrypted => String::new(),
                 Some(s) => smime::preview(s),
                 None if i % 13 == 2 => MENTION.into(),
                 None => PREVIEW.into(),
@@ -133,7 +135,15 @@ pub fn ensure(path: &Path, n: usize) -> postman_cache::Result<()> {
             flagged: next() % 50 == 0,
             has_attachment: next() % 7 == 0 || signed.is_some(),
             size: 4096 + next() % 100_000,
-            keywords: demo_keywords(i),
+            keywords: match signed {
+                Some(s) if s.encrypted => {
+                    let mut k = demo_keywords(i);
+                    k.push(postman_cache::ENCRYPTED.into());
+                    k.sort();
+                    k
+                }
+                _ => demo_keywords(i),
+            },
         });
         to.push((format!("demo{i}"), demo_recipients(i)));
         if batch.len() == batch.capacity() {
@@ -360,6 +370,23 @@ pub fn body(id: &str) -> BodyRow {
     let n: usize = id.trim_start_matches("demo").parse().unwrap_or(0);
     // Подписанное письмо (S5-12): тело — как его разобрал бы сервер, `smime.p7s` во вложениях, письмо целиком —
     // блоб `smime-<вид>`.
+    if let Some(s) = smime::sample_for(n).filter(|_| account.is_none() && smime::sample_for(n).is_some_and(|s| s.encrypted)) {
+        // Шифрованное (Ф2): тела нет, одно вложение `smime.p7m`, письмо целиком — блоб `smime-<вид>`.
+        return BodyRow {
+            to: vec![Addr { name: ME_NAME.into(), email: ME.into() }],
+            message_id: Some(format!("{id}@corp.example")),
+            attachments: vec![AttachmentRow {
+                blob_id: format!("p7m-{}", s.kind),
+                name: "smime.p7m".into(),
+                mime: "application/pkcs7-mime".into(),
+                size: smime::p7m_size(s.kind),
+                cid: None,
+                inline: false,
+            }],
+            blob_id: Some(format!("smime-{}", s.kind)),
+            ..Default::default()
+        };
+    }
     if let Some(s) = smime::sample_for(n).filter(|_| account.is_none()) {
         return BodyRow {
             to: vec![Addr { name: ME_NAME.into(), email: ME.into() }],

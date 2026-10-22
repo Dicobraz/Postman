@@ -145,6 +145,10 @@ pub struct EmailRow {
 }
 
 pub const SEEN: &str = "$seen";
+/// Локальная метка строки (S5-12 Ф2): письмо зашифровано S/MIME (корень — `application/pkcs7-mime`
+/// `enveloped-data`) — замок и «Зашифрованное письмо» в списке. Ставит синхронизация по заголовку `Content-Type`,
+/// на сервер не уходит (`postman_core::sync`).
+pub const ENCRYPTED: &str = "$pm-local-encrypted";
 pub const FLAGGED: &str = "$flagged";
 
 impl EmailRow {
