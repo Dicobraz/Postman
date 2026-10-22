@@ -19,7 +19,8 @@ use postman_core::prefs::{Calendar, CalendarView, DURATIONS, FreeColor, REMINDER
 use crate::calendar::{duration_text, g};
 use crate::chrome::{glyph, icon};
 use crate::roles::{Look, Pm};
-use crate::settings_tab::{SettingsView, aside_card, button, group, seg, seg_group, toggle};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, aside_card, group, seg, seg_group, toggle};
 
 /// Открытый список выбора.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

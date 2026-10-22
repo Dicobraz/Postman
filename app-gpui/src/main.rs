@@ -10,6 +10,7 @@
 // Release: без окна консоли (S4-01). Отладочная сборка — с консолью, журнал виден сразу.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod buttons;
 mod calendar;
 mod commands;
 mod ir_view;

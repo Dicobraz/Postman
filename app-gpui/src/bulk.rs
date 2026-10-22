@@ -1076,19 +1076,10 @@ impl Render for SummaryView {
         let flag_on = s.flagged < s.count || s.count == 0;
         // Клавиши — подсказкой «Название (клавиша)» и KeyTips, не в тексте (S5-18).
         let cell = |id: &'static str, g: Option<char>, label: String, command: &'static str| {
-            let c = div()
-                .id(id)
+            let c = crate::buttons::secondary(id, &l)
                 .h(px(36.))
-                .flex()
-                .items_center()
                 .gap(px(8.))
                 .px(px(10.))
-                .rounded(l.px(Metric::RadiusControl))
-                .bg(l.panel())
-                .border_1()
-                .border_color(l.stroke())
-                .cursor_pointer()
-                .hover(|d| d.bg(l.hover()))
                 .children(g.map(|g| icon(g, 16.)))
                 .child(div().flex_1().min_w_0().truncate().child(label.clone()));
             crate::keytips::command(c, command, Some(label), &l, cx)
@@ -1097,20 +1088,11 @@ impl Render for SummaryView {
         let sub = |s: crate::menu::Sub| cx.listener(move |_, ev: &ClickEvent, _, cx| cx.emit(SummaryAsk::Sub(s, ev.position())));
         let seen = if unread { tr!("bulk-read") } else { tr!("bulk-unread") };
         let flag = if flag_on { tr!("bulk-flag") } else { tr!("bulk-unflag") };
-        let phish = div()
-            .id("summary-phishing")
+        let phish = crate::buttons::secondary("summary-phishing", &l)
             .h(px(36.))
-            .flex()
-            .items_center()
             .gap(px(8.))
             .px(px(10.))
-            .rounded(l.px(Metric::RadiusControl))
-            .bg(l.panel())
-            .border_1()
-            .border_color(l.stroke())
-            .cursor_pointer()
-            .hover(|d| d.bg(l.hover()))
-            .child(mask(16., &l, l.panel()))
+            .child(mask(16., &l, l.pm(Pm::Secondary)))
             .child(div().flex_1().min_w_0().truncate().child(tr!("bulk-phishing")))
             .on_click(ask(Ask::Phishing));
         let grid = div()

@@ -17,7 +17,8 @@ use postman_core::prefs::KeyScheme;
 use crate::commands::{COMMANDS, SINGLE};
 use crate::keymap::{self, Column, KeySet, Place, human};
 use crate::roles::Look;
-use crate::settings_tab::{SettingsView, aside_card, button, keycap, link, seg, seg_group};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, aside_card, keycap, link, seg, seg_group};
 
 /// Состояние раздела.
 pub(crate) struct KeysState {

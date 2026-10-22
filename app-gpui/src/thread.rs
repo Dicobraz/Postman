@@ -259,18 +259,9 @@ impl ReadingPane {
     pub(crate) fn feed_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let l = crate::roles::look(cx);
         let f = self.feed.as_ref()?;
+        // Переключатели — тонированные кнопки (S5-19); включённый — с рамкой акцента.
         let button = |id: &'static str, label: String, on: bool| {
-            div()
-                .id(id)
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .border_1()
-                .border_color(l.border())
-                .cursor_pointer()
-                .hover(|d| d.bg(l.fill()))
-                .when(on, |d| d.bg(l.picked()).text_color(l.accent_text()))
-                .child(label)
+            crate::buttons::secondary(id, &l).h(px(26.)).px_2().border_1().border_color(if on { l.accent() } else { l.none() }).child(label)
         };
         let quotes = if self.quotes { tr!("thread-quotes-hide") } else { tr!("thread-quotes-show") };
         let bar = div()

@@ -697,7 +697,7 @@ impl ReadingPane {
             card = if save {
                 card.child(
                     div().flex().gap(px(8.)).child(
-                        crate::calendar::accent_button("pv-save-blocked", l)
+                        crate::buttons::primary("pv-save-blocked", l)
                             .child(icon(glyph::SAVE, 14.))
                             .child(tr!("att-pv-save"))
                             .on_click(cx.listener(move |this, _, _, cx| this.file_action(row.clone(), FileAct::SaveAs, cx))),

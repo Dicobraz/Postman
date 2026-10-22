@@ -293,7 +293,7 @@ impl SignIn {
     }
 
     fn content(&self, l: &crate::roles::Look, cx: &mut Context<Self>) -> Div {
-        let button = |id: &'static str, label: String, primary: bool| crate::vacation::button(id, label, primary);
+        let button = |id: &'static str, label: String, primary: bool| crate::buttons::plain(id, label, primary);
         let mut body = div().flex().flex_col().gap_4();
         let url = normalize_url(&self.url.read(cx).value());
         let user = self.user.read(cx).value().trim().to_owned();
