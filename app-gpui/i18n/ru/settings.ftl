@@ -425,7 +425,7 @@ settings-cal-preview-view = { $view } · шаг { $step }
 settings-cal-preview-days = Рабочих дней: { $n }, часы { $from }–{ $to }.
 settings-cal-preview-meeting = Новая встреча — { $duration }, напоминание: { $reminder }.
 settings-cal-preview-zone = Пояс: { $zone }.
-settings-cal-preview-stored = «Сохраняется» — выбор запомнен; в календаре он появится вместе с новыми видами и календарями коллег.
+settings-cal-preview-stored = «Сохраняется» — выбор запомнен; в календаре он появится вместе с напоминаниями и календарями коллег.
 
 # «Настройки»: Общие, Безопасность, Внешний вид (S5-30).
 settings-nav-security = Безопасность
