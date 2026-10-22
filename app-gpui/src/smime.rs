@@ -38,6 +38,8 @@ pub(crate) enum Seal {
     Done(Box<Verdict>),
     TooLarge,
     Failed(String),
+    /// Шифрованное письмо без подписи внутри (или ещё не открытое): значка подписи нет (S5-12 Ф2).
+    Unsigned,
 }
 
 /// Подпись открытого письма: итог, раскрыта ли карточка, блоб письма целиком, за которым пошли.
@@ -45,6 +47,10 @@ pub(crate) struct State {
     pub(crate) seal: Seal,
     pub(crate) open: bool,
     pub(crate) raw: Option<String>,
+    /// Шифрованное письмо (Ф2, `smime_enc.rs`): расшифровка и её итог.
+    pub(crate) lock: Option<crate::smime_enc::Lock>,
+    /// Байты письма целиком (шифрованные) — для вложений и повтора с PIN; только в памяти.
+    pub(crate) data: Option<Arc<Vec<u8>>>,
 }
 
 /// Письмо подписано или зашифровано S/MIME (по вложениям JMAP) — есть что проверять.
@@ -85,6 +91,7 @@ pub(crate) fn badge(seal: &Seal) -> (String, Tone, char) {
         Seal::Checking => return (tr!("smime-checking"), Tone::Neutral, glyph::SYNC),
         Seal::TooLarge => return (tr!("smime-too-large"), Tone::Neutral, glyph::WARNING),
         Seal::Failed(_) => return (tr!("smime-unverified"), Tone::Neutral, glyph::WARNING),
+        Seal::Unsigned => return (tr!("smime-encrypted"), Tone::Neutral, crate::smime_enc::LOCK),
         Seal::Done(v) => v,
     };
     let r = &v.report;
@@ -108,6 +115,7 @@ fn verdict_text(seal: &Seal) -> String {
         Seal::Checking => return tr!("smime-checking"),
         Seal::TooLarge => return tr!("smime-verdict-too-large"),
         Seal::Failed(e) => return tr!("smime-verdict-failed", error = e.as_str()),
+        Seal::Unsigned => return tr!("smime-verdict-encrypted"),
         Seal::Done(v) => v,
     };
     let r = &v.report;
@@ -192,6 +200,10 @@ fn revocation_text(v: &Verdict, demo: bool) -> String {
 
 impl ReadingPane {
     /// Окружение проверки: живой ящик — Windows, демо — корни демо-УЦ.
+    pub(crate) fn smime_context(&self) -> Env {
+        self.smime_env()
+    }
+
     fn smime_env(&self) -> Env {
         if self.live { Env::system() } else { demo_env() }
     }
@@ -205,7 +217,10 @@ impl ReadingPane {
             return;
         }
         let raw = r.body.as_ref().and_then(|b| b.blob_id.clone());
-        r.smime = Some(State { seal: Seal::Checking, open: false, raw: raw.clone() });
+        // Шифрованное (метка строки, Ф2): сразу «Расшифровка…»; итога подписи в кэше у него нет (не храним).
+        let encrypted = crate::smime_enc::is_encrypted(&r.row);
+        let lock = encrypted.then_some(crate::smime_enc::Lock::Opening);
+        r.smime = Some(State { seal: Seal::Checking, open: false, raw: raw.clone(), lock, data: None });
         let id = r.row.id.clone();
         let now = jiff::Timestamp::now().as_second();
         let key = id.clone();
@@ -215,7 +230,8 @@ impl ReadingPane {
             this.update(cx, |this, cx| {
                 let Some(r) = this.reading.as_mut().filter(|r| r.row.id == id) else { return };
                 // Подпись внутри: тело есть только в подписанном содержимом — нужен воркер.
-                match hit.filter(|v| v.report.kind != Kind::Opaque) {
+                let encrypted = r.smime.as_ref().is_some_and(|s| s.lock.is_some());
+                match hit.filter(|v| v.report.kind != Kind::Opaque && !encrypted) {
                     Some(v) => {
                         if let Some(s) = &mut r.smime {
                             s.seal = Seal::Done(Box::new(v));
@@ -251,6 +267,11 @@ impl ReadingPane {
     /// Байты письма пришли: проверка в воркере (фон), отзыв и кэш — ядро; поток интерфейса не ждёт.
     pub(crate) fn smime_verify(&mut self, data: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         let Some(r) = &self.reading else { return };
+        // Шифрованное — сразу расшифровка (подпись внутри проверит воркер там же).
+        if r.smime.as_ref().is_some_and(|s| s.lock.is_some()) {
+            return self.smime_decrypt(data, postman_core::smime::keys::Prompt::Silent, cx);
+        }
+        let again = data.clone();
         let (id, cache, env, worker) = (r.row.id.clone(), self.cache.clone(), self.smime_env(), self.worker.clone());
         let task = cx.background_spawn(async move {
             let now = jiff::Timestamp::now().as_second();
@@ -269,9 +290,16 @@ impl ReadingPane {
                 if r.smime.is_none() {
                     return;
                 }
-                // Зашифровано (расшифровка — Ф2) или подписи нет: значка нет, `smime.p7m` остаётся вложением.
+                // Зашифровано (метки строки не было — демо, старый кэш): расшифровка.
                 if let Ok((v, _)) = &result
-                    && (v.report.status == Status::NotSigned || matches!(v.report.kind, Kind::Encrypted | Kind::None))
+                    && v.report.kind == Kind::Encrypted
+                {
+                    this.smime_decrypt(again, postman_core::smime::keys::Prompt::Silent, cx);
+                    return;
+                }
+                // Подписи нет: значка нет.
+                if let Ok((v, _)) = &result
+                    && (v.report.status == Status::NotSigned || v.report.kind == Kind::None)
                 {
                     r.smime = None;
                     cx.notify();
@@ -311,6 +339,10 @@ impl ReadingPane {
     /// Значок в шапке письма.
     pub(crate) fn smime_badge(&self, l: &Look, cx: &mut Context<Self>) -> Option<AnyElement> {
         let s = self.reading.as_ref()?.smime.as_ref()?;
+        // Шифрованное без подписи (или пока не открыто): только «Зашифровано» (`lock_badge`).
+        if matches!(s.seal, Seal::Unsigned) || (s.lock.is_some() && matches!(s.seal, Seal::Checking)) {
+            return None;
+        }
         let (text, tone, g) = badge(&s.seal);
         let danger = tone == Tone::Danger;
         let fg = if danger { l.pm(Pm::ThreatFg) } else { l.text2() };
@@ -374,6 +406,9 @@ impl ReadingPane {
         let row = |k: String, v: AnyElement| div().flex().gap(px(12.)).child(label(k)).child(div().flex_1().min_w_0().child(v)).into_any_element();
         let text = |t: String| div().child(t).into_any_element();
         let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(cipher) = self.lock_cipher() {
+            rows.push(row(tr!("smime-row-encryption"), text(cipher)));
+        }
         if let Seal::Done(v) = &s.seal {
             let r = &v.report;
             if let Some(c) = r.certs.first() {

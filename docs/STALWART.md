@@ -345,6 +345,13 @@ cargo test -p postman-core --test stand -- --ignored
     пользователем (п. 29), без отбора на сервере, без iTIP и без показа в других клиентах — только если календарь
     недоступен.
 
+## S/MIME (S5-12 Ф2)
+
+- Шифрованное письмо (`application/pkcs7-mime; smime-type=enveloped-data`) сервер пропускает как есть: блоб письма у
+  получателя побайтно тот же, расшифровывается (`stand_smime::encrypted_mail_survives_the_server`, 2026-10-22).
+- `Email/get` со свойством `header:Content-Type:asRaw` Stalwart отвечает ключом `header:Content-Type` (без формы) —
+  Postman просит `header:Content-Type` (форма Raw — по умолчанию, RFC 8621 §4.1.3).
+
 ## Общие ящики на стенде (S4-06)
 
 - `shared-sales@itt.test` — группа (`x:Account/set` от имени администратора), user3 — участник; пароля нет.

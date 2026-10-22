@@ -14,6 +14,9 @@
 //! Обнаружение СКЗИ — за трейтом [`GostProvider`], тесты подменяют оба режима.
 
 #[cfg(windows)]
+mod cng;
+pub mod keys;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 use windows as sys;
@@ -256,6 +259,19 @@ pub fn finish(cache: &Cache, id: &str, report: Report, ctx: &Context, now: i64) 
     if v.report.status.signature_ok() || matches!(v.report.status, postman_smime::Status::Invalid) {
         store(cache, id, &v);
     }
+    if v.report.trusted() && v.report.address_ok && !matches!(v.revocation, Revocation::Revoked | Revocation::Rejected(_)) {
+        remember(cache, &v, now);
+    }
+    v
+}
+
+/// Подпись внутри расшифрованного письма (Ф2): подтверждение в Windows, сертификат подписанта — в сертификаты
+/// адресата; итог в кэш **не** пишется — письмо открывается каждый раз заново, а на диске остаётся только шифрованный
+/// блоб (решение владельца №4).
+pub fn assess(cache: &Cache, report: Report, ctx: &Context, now: i64) -> Verdict {
+    let chain = report.chain.clone();
+    let (revocation, gost) = confirm(&report, &chain, ctx);
+    let v = Verdict { report, chain, revocation, checked_at: now, gost };
     if v.report.trusted() && v.report.address_ok && !matches!(v.revocation, Revocation::Revoked | Revocation::Rejected(_)) {
         remember(cache, &v, now);
     }

@@ -16,6 +16,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use postman_ir::Document;
+use postman_smime::envelope::{Envelope, OpenError, Opened};
+use zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 
 pub use preview::{Entry, Listing, OfficeFormat, OfficeScan, Preview, PreviewKind};
@@ -53,6 +55,13 @@ pub enum Request {
     /// (`postman_smime::wire`); `now` — Unix-время проверки. Ответ — [`postman_smime::Report`], тело письма с
     /// подписью внутри (`signed-data`) — IR, DER цепочки — в бинарной части.
     SmimeVerify { now: u64 },
+    /// Получатели и шифр шифрованного письма S/MIME (S5-12 Ф2): письмо — в бинарной части. Ничего не
+    /// расшифровывает; ответ — [`postman_smime::envelope::Envelope`] (поля для ядра, решение владельца №1).
+    SmimeEnvelope,
+    /// Расшифровка (Ф2): в бинарной части — ключ содержимого, якоря и письмо (`postman_smime::wire::encode_open`).
+    /// `part` — `None`: тело (IR), вложения и подпись внутри, DER её цепочки — в бинарной части ответа; номер —
+    /// байты этого вложения в бинарной части ответа.
+    SmimeOpen { now: u64, part: Option<u32> },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -77,6 +86,35 @@ fn inner_document(content: &[u8]) -> Option<Document> {
         (Some(html), _) => Some(postman_ir::from_html(&html)),
         (None, Some(text)) => Some(postman_ir::from_plain(&text)),
         (None, None) => None,
+    }
+}
+
+fn smime_envelope(bin: &[u8]) -> Response {
+    Response::Envelope(postman_smime::envelope::envelope(bin))
+}
+
+/// Расшифровка в песочнице: тело → IR; вложение — байты (только в памяти, на диск — нигде).
+fn smime_open(bin: &[u8], now: u64, part: Option<u32>) -> (Response, Vec<u8>) {
+    let Some((trust, message, cek)) = postman_smime::wire::decode_open(bin) else {
+        return (Response::Err("запрос расшифровки повреждён".into()), Vec::new());
+    };
+    if let Some(index) = part {
+        return match postman_smime::envelope::part(message, cek, index) {
+            Ok(bytes) => (Response::Part, bytes.to_vec()),
+            Err(e) => (Response::Opened { opened: Box::new(Err(e)), doc: None }, Vec::new()),
+        };
+    }
+    match postman_smime::envelope::open(message, cek, &trust, now) {
+        Ok(o) => {
+            let doc = match (&o.html, &o.text) {
+                (Some(html), _) => Some(postman_ir::from_html(html)),
+                (None, Some(text)) => Some(postman_ir::from_plain(text)),
+                (None, None) => None,
+            };
+            let out = postman_smime::wire::encode_response(&o.inner.chain, None);
+            (Response::Opened { opened: Box::new(Ok(o)), doc }, out)
+        }
+        Err(e) => (Response::Opened { opened: Box::new(Err(e)), doc: None }, Vec::new()),
     }
 }
 
@@ -125,6 +163,12 @@ enum Response {
     Preview(Preview),
     /// Итог проверки подписи; DER цепочки — в бинарной части.
     Smime { report: Box<postman_smime::Report>, doc: Option<Document> },
+    /// Получатели и шифр (Ф2).
+    Envelope(Result<postman_smime::envelope::Envelope, postman_smime::envelope::OpenError>),
+    /// Итог расшифровки; DER цепочки подписи внутри — в бинарной части.
+    Opened { opened: Box<Result<postman_smime::envelope::Opened, postman_smime::envelope::OpenError>>, doc: Option<Document> },
+    /// Байты вложения расшифрованного письма — в бинарной части.
+    Part,
     Err(String),
 }
 
@@ -276,6 +320,12 @@ pub fn serve() -> ! {
                 out_bin = bin;
                 resp
             }
+            Ok(Request::SmimeEnvelope) => smime_envelope(&bin),
+            Ok(Request::SmimeOpen { now, part }) => {
+                let (resp, bin) = smime_open(&bin, now, part);
+                out_bin = bin;
+                resp
+            }
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
@@ -377,7 +427,13 @@ impl Client {
     pub fn render(&mut self, req: &Request) -> Result<Document, String> {
         match self.call(req, &[])?.0 {
             Response::Ok(doc) => Ok(doc),
-            Response::Image { .. } | Response::Calendar(_) | Response::Preview(_) | Response::Smime { .. } => Err("неожиданный ответ".into()),
+            Response::Image { .. }
+            | Response::Calendar(_)
+            | Response::Preview(_)
+            | Response::Smime { .. }
+            | Response::Envelope(_)
+            | Response::Opened { .. }
+            | Response::Part => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
     }
@@ -431,6 +487,53 @@ impl Client {
                 report.chain = chain;
                 Ok((report, doc))
             }
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
+    /// Получатели и шифр шифрованного письма `raw` (S5-12 Ф2) — для ядра: оно снимает ключ средствами ОС.
+    pub fn smime_envelope(&mut self, raw: &[u8]) -> Result<Result<Envelope, OpenError>, SmimeFailure> {
+        if raw.len() > postman_smime::MAX_MESSAGE {
+            return Err(SmimeFailure::TooLarge);
+        }
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimeEnvelope, raw, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Envelope(e), _) => Ok(e),
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
+    /// Расшифровать письмо `raw` ключом `cek` (Ф2): тело (IR), вложения, подпись внутри (DER цепочки — в
+    /// `Opened::inner.chain`).
+    pub fn smime_open(&mut self, raw: &[u8], cek: &[u8], trust: &postman_smime::Trust, now: u64) -> Result<Result<(Opened, Option<Document>), OpenError>, SmimeFailure> {
+        let bin = open_request(raw, cek, trust)?;
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimeOpen { now, part: None }, &bin, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Opened { opened, doc }, out) => match *opened {
+                Ok(mut o) => {
+                    let (chain, _) = postman_smime::wire::decode_response(&out).ok_or_else(|| SmimeFailure::Worker("неожиданный ответ".into()))?;
+                    o.inner.chain = chain;
+                    Ok(Ok((o, doc)))
+                }
+                Err(e) => Ok(Err(e)),
+            },
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
+    /// Байты вложения `index` расшифрованного письма (только в памяти).
+    pub fn smime_part(&mut self, raw: &[u8], cek: &[u8], index: u32) -> Result<Result<Zeroizing<Vec<u8>>, OpenError>, SmimeFailure> {
+        let bin = open_request(raw, cek, &postman_smime::Trust::default())?;
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimeOpen { now: 0, part: Some(index) }, &bin, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Part, out) => Ok(Ok(Zeroizing::new(out))),
+            (Response::Opened { opened, .. }, _) => match *opened {
+                Err(e) => Ok(Err(e)),
+                Ok(_) => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+            },
             (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
             _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
         }
@@ -515,6 +618,18 @@ impl Client {
             .map_err(|e| e.to_string())?;
         Ok(Running { stdin: p.stdin, responses: rx, kill: p.kill, exit_code: p.exit_code, answered: false })
     }
+}
+
+/// Запрос расшифровки: ключ, якоря, письмо; больше кадра — «слишком большое».
+fn open_request(raw: &[u8], cek: &[u8], trust: &postman_smime::Trust) -> Result<Zeroizing<Vec<u8>>, SmimeFailure> {
+    if raw.len() > postman_smime::MAX_MESSAGE {
+        return Err(SmimeFailure::TooLarge);
+    }
+    let bin = postman_smime::wire::encode_open(trust, raw, cek);
+    if bin.len() > MAX_FRAME {
+        return Err(SmimeFailure::TooLarge);
+    }
+    Ok(bin)
 }
 
 /// Код завершения с расшифровкой частых NTSTATUS.

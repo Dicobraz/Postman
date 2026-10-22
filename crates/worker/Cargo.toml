@@ -6,6 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+zeroize = "1"
 postman-ir.workspace = true
 # Проверка подписи S/MIME (S5-12): разбор CMS и цепочка — только здесь, в песочнице.
 postman-smime.workspace = true
