@@ -27,8 +27,10 @@ pub const X_SOMEDAY: &str = "x-postman-someday";
 pub const X_ORDER: &str = "x-postman-order";
 pub const X_MESSAGE_ID: &str = "x-postman-message-id";
 pub const X_EMAIL_ID: &str = "x-postman-email-id";
+/// «Время в календаре» (S6-08): `<начало UTC>/<конец UTC>/<id события>`.
+pub const X_BLOCK: &str = "x-postman-block";
 const COMPLETED: &str = "completed";
-const OURS: &[&str] = &[X_PROJECT, X_SOMEDAY, X_ORDER, X_MESSAGE_ID, X_EMAIL_ID, COMPLETED];
+const OURS: &[&str] = &[X_PROJECT, X_SOMEDAY, X_ORDER, X_MESSAGE_ID, X_EMAIL_ID, X_BLOCK, COMPLETED];
 
 /// Ход задачи (JSCalendar `progress`, iCalendar STATUS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -137,6 +139,29 @@ pub struct MailLink {
     pub email_id: Option<String>,
 }
 
+/// «Время в календаре» (S6-08): блок «занят» в своём календаре под задачу — событие `event_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimeBlock {
+    pub event_id: String,
+    /// Unix-секунды.
+    pub start: i64,
+    pub end: i64,
+}
+
+impl TimeBlock {
+    fn to_x(&self) -> String {
+        format!("{}/{}/{}", utc_ical(self.start), utc_ical(self.end), self.event_id)
+    }
+
+    fn from_x(s: &str) -> Option<Self> {
+        let mut it = s.splitn(3, '/');
+        let start = ical_utc(it.next()?)?;
+        let end = ical_utc(it.next()?)?;
+        let event_id = it.next()?.to_owned();
+        (end > start && !event_id.is_empty()).then_some(Self { event_id, start, end })
+    }
+}
+
 /// Роль в поручении (S6-09).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -220,6 +245,8 @@ pub struct Task {
     pub someday: bool,
     pub mail: Option<MailLink>,
     pub participants: Vec<TaskParticipant>,
+    /// «Время в календаре» (S6-08).
+    pub block: Option<TimeBlock>,
     pub sequence: i64,
     /// Чужие свойства iCalendar (jCal) — пишутся обратно как были.
     pub extra: Vec<Value>,
@@ -251,6 +278,7 @@ impl Task {
             someday: false,
             mail: None,
             participants: Vec::new(),
+            block: None,
             sequence: 0,
             extra: Vec::new(),
         }
@@ -340,6 +368,7 @@ impl Task {
             someday: ical.get(X_SOMEDAY).is_some_and(|x| x.trim() == "1" || x.eq_ignore_ascii_case("true")),
             mail,
             participants,
+            block: ical.get(X_BLOCK).and_then(|b| TimeBlock::from_x(b)),
             sequence: v["sequence"].as_i64().unwrap_or(0),
             extra,
         })
@@ -420,6 +449,9 @@ impl Task {
                 push(X_EMAIL_ID, json!(e));
             }
         }
+        if let Some(b) = &self.block {
+            push(X_BLOCK, json!(b.to_x()));
+        }
         if let Some(t) = self.completed_at {
             push(COMPLETED, json!(utc_ical(t)));
         }
@@ -492,7 +524,13 @@ impl Task {
             }
             if k == "iCalendar" {
                 let props = a.and_then(|x| x.get("properties")).cloned().unwrap_or_else(|| json!([]));
-                out.insert("iCalendar/properties".into(), props);
+                // Своих свойств не было — у сервера объекта `iCalendar` может не быть, путь в него не применится
+                // (`invalidProperties`): весь объект целиком.
+                if old.ical_properties().is_empty() {
+                    out.insert("iCalendar".into(), json!({ "name": "vtodo", "properties": props }));
+                } else {
+                    out.insert("iCalendar/properties".into(), props);
+                }
             } else {
                 out.insert(k.clone(), a.cloned().unwrap_or(Value::Null));
             }
@@ -567,6 +605,9 @@ impl Task {
             if let Some(e) = &m.email_id {
                 l.push(format!("X-POSTMAN-EMAIL-ID:{}", text(e)));
             }
+        }
+        if let Some(b) = &self.block {
+            l.push(format!("X-POSTMAN-BLOCK:{}", text(&b.to_x())));
         }
         for p in &self.participants {
             let cn = cn(&p.name);
@@ -865,6 +906,17 @@ mod tests {
         assert!(props.contains(&json!(["completed", {}, "unknown", "20270115T080000Z"])));
     }
 
+    /// Своих свойств не было: у сервера может не быть объекта `iCalendar` — патч целиком, а не путём внутрь.
+    #[test]
+    fn patch_without_ical_replaces_whole_object() {
+        let old = Task::new("u", "b", "x");
+        let mut t = old.clone();
+        t.project = Some("p".into());
+        let p = t.patch(&old);
+        assert_eq!(p["iCalendar"]["properties"], json!([["x-postman-project", {}, "unknown", "p"]]));
+        assert!(p.get("iCalendar/properties").is_none());
+    }
+
     #[test]
     fn due_dates_and_floating_time() {
         let mut t = Task::new("u", "b", "x");
@@ -926,6 +978,16 @@ mod tests {
         d.all_day = true;
         d.due = Some(Moment::new("2027-03-10T00:00:00".parse().unwrap(), None));
         assert!(d.to_ics(None, 0, &TimeZone::UTC).contains("DUE;VALUE=DATE:20270310\r\n"));
+    }
+
+    #[test]
+    fn time_block_round_trip() {
+        let mut t = Task::new("u", "b", "x");
+        t.block = Some(TimeBlock { event_id: "ev1".into(), start: 1_800_000_000, end: 1_800_003_600 });
+        let back = Task::from_jmap(&t.to_jmap()).unwrap();
+        assert_eq!(back.block, t.block);
+        assert!(t.to_ics(None, 0, &TimeZone::UTC).contains("X-POSTMAN-BLOCK:20270115T080000Z/20270115T090000Z/ev1"));
+        assert_eq!(TimeBlock::from_x("bad"), None);
     }
 
     #[test]
