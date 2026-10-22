@@ -11,7 +11,8 @@ use pets_i18n::tr;
 use postman_core::rules::{Action, Field, Rule};
 use postman_core::settings::RulesState;
 
-use crate::vacation::{button, checkbox};
+use crate::buttons::plain as button;
+use crate::vacation::checkbox;
 
 
 /// Действие в редакторе (без данных: папка и адрес — отдельно).

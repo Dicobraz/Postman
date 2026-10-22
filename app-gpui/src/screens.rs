@@ -116,6 +116,14 @@ enum Scene {
     ContactEdit,
     /// «Часто пишу» (S5-25): адресаты переписки по частоте, первая строка выбрана.
     ContactsFrequent,
+    /// Модуль «Задачи» (S6-05): «Сегодня», карточка задачи с подзадачами и заметкой (демо).
+    Tasks,
+    /// «Сегодня» с выбранной просроченной задачей: «Просрочено» сверху, метка срока в карточке.
+    TasksToday,
+    /// Проект с прогрессом слева и его задачи.
+    TasksProject,
+    /// «Выполненные»: сегодня, вчера.
+    TasksDone,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
@@ -148,6 +156,10 @@ enum Scene {
     Overdue,
     /// Вкладка «Настройки», раздел «Общие» (S5-09).
     SettingsGeneral,
+    /// «Настройки → Безопасность» (S5-30).
+    SettingsSecurity,
+    /// «Настройки → Внешний вид» (S5-30).
+    SettingsLook,
     /// «Настройки → Категории» с правкой новой категории: палитра с перечёркнутыми близкими цветами.
     SettingsCategories,
     /// «Настройки → Клавиатура»: своё сочетание у одной команды и конфликт у другой.
@@ -178,6 +190,8 @@ enum Scene {
     KeyTips,
     /// То же в схеме «Одиночные клавиши»: открыто приглашение без ответа — A / T / N на его кнопках.
     KeyTipsSingle,
+    /// Кнопки (S5-19): главная, тонированная и тонированная под указателем на каждой поверхности (`buttons::gallery`).
+    Buttons,
 }
 
 const SCENES: &[Scene] = &[
@@ -214,6 +228,10 @@ const SCENES: &[Scene] = &[
     Scene::Contacts,
     Scene::ContactEdit,
     Scene::ContactsFrequent,
+    Scene::Tasks,
+    Scene::TasksToday,
+    Scene::TasksProject,
+    Scene::TasksDone,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -221,6 +239,8 @@ const SCENES: &[Scene] = &[
     Scene::Vacation,
     Scene::Rules,
     Scene::SettingsGeneral,
+    Scene::SettingsSecurity,
+    Scene::SettingsLook,
     Scene::SettingsCategories,
     Scene::SettingsKeys,
     Scene::SettingsAccounts,
@@ -251,6 +271,7 @@ const SCENES: &[Scene] = &[
     Scene::FolderMenu,
     Scene::ThreadStack,
     Scene::ThreadList,
+    Scene::Buttons,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -312,6 +333,10 @@ impl Scene {
             Scene::Contacts => "contacts",
             Scene::ContactEdit => "contact-edit",
             Scene::ContactsFrequent => "contacts-frequent",
+            Scene::Tasks => "tasks",
+            Scene::TasksToday => "tasks-today",
+            Scene::TasksProject => "tasks-project",
+            Scene::TasksDone => "tasks-done",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
@@ -326,6 +351,8 @@ impl Scene {
             Scene::Lifecycle => "lifecycle",
             Scene::Overdue => "overdue",
             Scene::SettingsGeneral => "settings-general",
+            Scene::SettingsSecurity => "settings-security",
+            Scene::SettingsLook => "settings-look",
             Scene::SettingsCategories => "settings-categories",
             Scene::SettingsKeys => "settings-keys",
             Scene::SettingsAccounts => "settings-accounts",
@@ -341,6 +368,7 @@ impl Scene {
             Scene::Toasts => "toasts",
             Scene::KeyTips => "keytips",
             Scene::KeyTipsSingle => "keytips-single",
+            Scene::Buttons => "buttons",
         }
     }
 }
@@ -371,14 +399,21 @@ pub struct Driver {
     undo: Vec<postman_core::lifecycle::Patch>,
     /// Письмо с просроченным сроком (сцена `overdue`).
     overdue: Option<String>,
+    /// Сцена `buttons`: поверх окна — образцы кнопок.
+    gallery: bool,
 }
 
 impl Driver {
+    /// Показать образцы кнопок (сцена `buttons`).
+    pub(crate) fn gallery(&self) -> bool {
+        self.gallery
+    }
+
     /// Каталог создаётся сразу: ошибка — до открытия окна.
     pub fn new(dir: PathBuf, live: bool, suffix: &'static str) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let dir = std::path::absolute(&dir)?;
-        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix, undo: Vec::new(), overdue: None })
+        Ok(Self { dir, scene: 0, phase: Phase::Enter, live, signin: false, composer: None, suffix, undo: Vec::new(), overdue: None, gallery: false })
     }
 
     /// Окно открывается со строкой входа: снимается она.
@@ -455,6 +490,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     let mail_tab = m.tabs.iter().find(|t| t.kind == crate::tabs::TabKind::Mail).map(|t| t.id);
     if let Some(id) = mail_tab.filter(|_| !matches!(scene, Scene::TabMail)) {
         m.close_tab(id, window, cx);
+    }
+    // Образцы кнопок — только в своей сцене (S5-19).
+    if let Some(d) = &mut m.screens {
+        d.gallery = matches!(scene, Scene::Buttons);
     }
     // Боковая панель приглашения — только в своей сцене (S5-24).
     let side = matches!(scene, Scene::InviteSide);
@@ -638,6 +677,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             // Как удержание Ctrl: событие окна, таймер экрана почты (0,4 с).
             send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(true)));
         }
+        Scene::Buttons => m.set_section(Section::Mail, cx),
         Scene::KeyTipsSingle => {
             crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Single);
             let Some(i) = demo_row(m.list.read(cx), Scene::Invite) else { return Err("no invitation in the demo inbox".into()) };
@@ -737,6 +777,19 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.load_address_book(cx);
             m.contacts_frequent(cx);
             m.contacts.update(cx, |c, cx| c.show_frequent(cx));
+        }
+        Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
+            use postman_core::tasks::List;
+            m.set_section(Section::Tasks, cx);
+            m.tasks.update(cx, |t, cx| match scene {
+                Scene::TasksProject => t.set_nav(crate::tasks::Nav::Project(postman_demo::tasks::PROJECT.into()), cx),
+                Scene::TasksDone => t.set_nav(crate::tasks::Nav::List(List::Done), cx),
+                _ => {
+                    t.set_nav(crate::tasks::Nav::List(List::Today), cx);
+                    let title = if matches!(scene, Scene::Tasks) { postman_demo::tasks::MAIN } else { postman_demo::tasks::OVERDUE };
+                    t.select_title(title, cx);
+                }
+            });
         }
         Scene::Shared => {
             m.set_section(Section::Mail, cx);
@@ -871,6 +924,8 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             }
         }
         Scene::SettingsGeneral => m.open_settings(Some(SettingsSection::General), window, cx),
+        Scene::SettingsSecurity => m.open_settings(Some(SettingsSection::Security), window, cx),
+        Scene::SettingsLook => m.open_settings(Some(SettingsSection::Look), window, cx),
         Scene::SettingsCategories => {
             m.open_settings(Some(SettingsSection::Categories), window, cx);
             if let Some(v) = m.settings.view.clone() {
@@ -1016,6 +1071,8 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::SignIn => m.live.signin.is_some() && !m.tabs.is_active(crate::tabs::TabKind::Settings),
         Scene::SettingsGeneral
+        | Scene::SettingsSecurity
+        | Scene::SettingsLook
         | Scene::SettingsCategories
         | Scene::SettingsKeys
         | Scene::SettingsAccounts
@@ -1026,6 +1083,8 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         | Scene::SettingsSign => {
             let want = match scene {
                 Scene::SettingsGeneral => SettingsSection::General,
+                Scene::SettingsSecurity => SettingsSection::Security,
+                Scene::SettingsLook => SettingsSection::Look,
                 Scene::SettingsCategories => SettingsSection::Categories,
                 Scene::SettingsKeys => SettingsSection::Keys,
                 Scene::SettingsQuick => SettingsSection::Quick,
@@ -1068,6 +1127,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::ContactEdit => m.section == Section::Contacts && m.contacts.read(cx).editing(),
         Scene::ContactsFrequent => m.contacts.read(cx).frequent_shown() && m.contacts.read(cx).ready(),
+        Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
+            m.section == Section::Tasks && m.tasks.read(cx).ready()
+        }
         Scene::Vacation => {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);
@@ -1140,6 +1202,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Offline => m.offline.is_down() && list.offline.is_some(),
         Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
         Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
+        Scene::Buttons => m.screens.as_ref().is_some_and(|d| d.gallery),
         Scene::KeyTipsSingle => {
             let single = crate::prefs::get(cx).key_scheme == postman_core::prefs::KeyScheme::Single;
             crate::keytips::shown(cx) && single && reading.is_some_and(|r| r.doc.is_some() && r.invite.is_some())

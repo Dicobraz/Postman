@@ -80,6 +80,7 @@ impl Mailer {
             folders: folders.of(None).map(|m| (m.id.clone(), m.name.clone())).collect(),
             identities,
             cache: self.account_cache(),
+            sandbox: self.sandbox,
         }
     }
 

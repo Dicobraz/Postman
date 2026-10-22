@@ -692,16 +692,21 @@ impl ReadingPane {
                     .child(div().flex().gap(px(12.)).child(label(tr!("att-pv-why"))).child(div().flex_1().min_w_0().child(why))),
             );
             let row = p.row.clone();
-            card = card
-                .child(
+            // «Сохранить…» файла с макросами — по настройке «Безопасность» (S5-30, по умолчанию можно, решение №7).
+            let save = p.risk != Risk::Macros || crate::prefs::get(cx).security.macro_save;
+            card = if save {
+                card.child(
                     div().flex().gap(px(8.)).child(
-                        crate::calendar::accent_button("pv-save-blocked", l)
+                        crate::buttons::primary("pv-save-blocked", l)
                             .child(icon(glyph::SAVE, 14.))
                             .child(tr!("att-pv-save"))
                             .on_click(cx.listener(move |this, _, _, cx| this.file_action(row.clone(), FileAct::SaveAs, cx))),
                     ),
                 )
-                .child(div().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(tr!("att-pv-save-warning")));
+                .child(div().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(tr!("att-pv-save-warning")))
+            } else {
+                card.child(div().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(tr!("att-pv-save-off")))
+            };
         } else {
             let text = if scan.is_some() { tr!("att-pv-office-clean") } else { tr!("att-pv-none") };
             card = card.child(div().text_color(l.text2()).child(text)).child(div().flex().gap(px(8.)).children(self.file_buttons(p, l, cx)));

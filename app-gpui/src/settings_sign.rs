@@ -13,7 +13,8 @@ use pets_ui::theme::Metric;
 use postman_core::prefs::{AccountPrefs, Signature, Template, Writer};
 
 use crate::roles::Look;
-use crate::settings_tab::{SettingsView, button, group, link, now_ms, seg, seg_group};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, group, link, now_ms, seg, seg_group};
 
 /// Правка подписи или шаблона на месте.
 pub(crate) struct SignEdit {

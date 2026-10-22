@@ -1,7 +1,8 @@
 //! Вкладка «Настройки» (S5-09, `docs/DESIGN.md` «Настройки»): слева — разделы с поиском, справа — раздел. Разделы:
-//! Общие (тема, плотность, язык), Аккаунты (`settings_accounts.rs`), Категории (`settings_cats.rs`), Быстрые фильтры
+//! Общие (`settings_general.rs`), Аккаунты (`settings_accounts.rs`), Категории (`settings_cats.rs`), Быстрые фильтры
 //! и сроки, Чтение, Календарь (`settings_cal.rs`, S5-20), Подписи и шаблоны (`settings_sign.rs`), Клавиатура (`settings_keys.rs`), Правила и Автоответы
-//! (панели `rules.rs` и `vacation.rs` — их держит экран почты, `settings.rs`).
+//! (панели `rules.rs` и `vacation.rs` — их держит экран почты, `settings.rs`), Безопасность (`settings_security.rs`) и
+//! Внешний вид (`settings_look.rs`) — S5-30, порядок разделов — как в макетах «Настройки».
 //!
 //! Своё — в `postman_core::prefs` через `crate::prefs` (файл пишется в фоне); категории, удаление аккаунта и панели
 //! сервера — событиями [`SettingsEvent`] экрану почты.
@@ -10,9 +11,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
-use pets_ui::theme::{Metric, Role, Themes};
+use pets_ui::theme::{Metric, Role};
 use postman_core::labels::Categories;
-use postman_core::prefs::{Conversation, DAYS, HOURS, LANGUAGES, Pane, Quick};
+use postman_core::prefs::{Conversation, DAYS, HOURS, Pane, Quick};
 
 use crate::chrome::{glyph, icon};
 use crate::roles::Look;
@@ -26,22 +27,27 @@ pub(crate) enum Section {
     Quick,
     Reading,
     Calendar,
+    Security,
     Signatures,
     Keys,
+    Look,
     Rules,
     Vacation,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 10] = [
+    /// Порядок макетов «Настройки» (S5-30); подписи, правила и автоответы — после.
+    pub(crate) const ALL: [Section; 12] = [
         Section::General,
         Section::Accounts,
-        Section::Categories,
-        Section::Quick,
         Section::Reading,
         Section::Calendar,
-        Section::Signatures,
+        Section::Categories,
+        Section::Quick,
+        Section::Security,
         Section::Keys,
+        Section::Look,
+        Section::Signatures,
         Section::Rules,
         Section::Vacation,
     ];
@@ -54,6 +60,8 @@ impl Section {
             Section::Quick => "quick",
             Section::Reading => "reading",
             Section::Calendar => "calendar",
+            Section::Security => "security",
+            Section::Look => "look",
             Section::Signatures => "signatures",
             Section::Keys => "keys",
             Section::Rules => "rules",
@@ -81,6 +89,8 @@ impl Section {
             Section::Quick => '\u{E8FD}',
             Section::Reading => '\u{E8A1}',
             Section::Calendar => crate::calendar::g::CALENDAR,
+            Section::Security => '\u{E72E}',
+            Section::Look => '\u{E790}',
             Section::Signatures => '\u{E8AC}',
             Section::Keys => '\u{E765}',
             Section::Rules => glyph::RULES,
@@ -117,6 +127,8 @@ pub(crate) struct Info {
     pub(crate) identities: Vec<String>,
     /// Файл кэша учётной записи: рядом — её подписи и шаблоны.
     pub(crate) cache: Option<std::path::PathBuf>,
+    /// Песочница последнего разбора письма («Безопасность», S5-30); `None` — ещё не разбирали.
+    pub(crate) sandbox: Option<postman_worker::Level>,
 }
 
 /// Экрану почты.
@@ -161,6 +173,12 @@ pub(crate) struct SettingsView {
     pub(crate) cal_menu: Option<crate::settings_cal::Menu>,
     /// Прокрутка раздела: новый раздел — сверху; снимок `settings-calendar-free` — внизу.
     pub(crate) scroll: ScrollHandle,
+    /// «Общие» (S5-30): автозапуск, клиент `mailto:`, отчёт — из Windows.
+    pub(crate) os: crate::settings_general::OsState,
+    /// «Безопасность»: строка «Сбросить входы?», входы сброшены, раскрыта подсказка песочницы.
+    pub(crate) wipe_confirm: bool,
+    pub(crate) wiped: bool,
+    pub(crate) sandbox_help: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -222,8 +240,13 @@ impl SettingsView {
             phishing_error: false,
             cal_menu: None,
             scroll: ScrollHandle::new(),
+            os: Default::default(),
+            wipe_confirm: false,
+            wiped: false,
+            sandbox_help: false,
             _subscriptions: subscriptions,
         };
+        v.read_os(cx);
         v.sign_load(cx);
         v.check_password(cx);
         v
@@ -269,6 +292,7 @@ impl SettingsView {
         if self.cat_edit.take().is_some()
             || self.cat_purge.take().is_some()
             || std::mem::take(&mut self.remove_confirm)
+            || std::mem::take(&mut self.wipe_confirm)
             || self.cal_menu.take().is_some()
         {
             cx.notify();
@@ -406,23 +430,6 @@ pub(crate) fn link(id: impl Into<ElementId>, label: String, l: &Look) -> Statefu
         .child(label)
 }
 
-/// Кнопка с рамкой (вторичная) или акцентная.
-pub(crate) fn button(id: impl Into<ElementId>, label: String, primary: bool, l: &Look) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .h(px(32.))
-        .px_3()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .rounded(l.px(Metric::RadiusControl))
-        .cursor_pointer()
-        .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
-        .when(!primary, |d| d.border_1().border_color(l.stroke()).bg(l.panel()).hover(|d| d.bg(l.hover())))
-        .child(label)
-}
-
 /// Карточка сбоку раздела.
 pub(crate) fn aside_card(title: String, lines: Vec<String>, l: &Look) -> Div {
     div()
@@ -513,77 +520,6 @@ impl SettingsView {
                     .child(div().text_color(l.text2()).child(self.section.hint())),
             )
             .children(action)
-    }
-
-    fn general(&mut self, l: &Look, cx: &mut Context<Self>) -> Div {
-        let (choice, locked, ids, titles) = match Themes::try_get(cx) {
-            Some(t) => {
-                let s = t.state();
-                let ids: Vec<String> = s.ids().map(str::to_owned).collect();
-                let titles = ids.iter().map(|id| pets_ui::theme::title(id, s).to_string()).collect::<Vec<_>>();
-                (s.effective().to_owned(), s.locked(), ids, titles)
-            }
-            None => (pets_ui::theme::SYSTEM.to_owned(), false, vec![pets_ui::theme::SYSTEM.to_owned()], vec![String::new()]),
-        };
-        let themes: Vec<Stateful<Div>> = ids
-            .iter()
-            .zip(titles)
-            .enumerate()
-            .map(|(i, (id, title))| {
-                let id = id.clone();
-                seg(("settings-theme", i), title, choice == id, !locked, l).when(!locked, |d| {
-                    d.on_click(cx.listener(move |this, _, _, cx| {
-                        this.theme_error = crate::prefs::set_theme(&id, cx).err().map(|e| e.to_string());
-                        cx.notify();
-                    }))
-                })
-            })
-            .collect();
-        let row_px = l.density().row();
-        let densities: Vec<Stateful<Div>> = [(20u16, "settings-density-compact"), (24, "settings-density-normal"), (28, "settings-density-comfortable"), (32, "settings-density-spacious")]
-            .into_iter()
-            .map(|(px_row, key)| {
-                seg(("settings-density", px_row as usize), tr!(key, px = px_row), row_px == px_row, true, l).on_click(cx.listener(
-                    move |_, _, _, cx| {
-                        crate::prefs::set_density(px_row, cx);
-                        cx.notify();
-                    },
-                ))
-            })
-            .collect();
-        let lang = crate::prefs::get(cx).general.language;
-        let mut langs = vec![seg("settings-lang-auto", tr!("settings-lang-auto"), lang.is_none(), true, l).on_click(cx.listener(
-            |_, _, _, cx| {
-                crate::prefs::set_language(None, cx);
-                cx.notify();
-            },
-        ))];
-        for (i, code) in LANGUAGES.iter().copied().enumerate() {
-            let on = lang.as_deref() == Some(code);
-            langs.push(seg(("settings-lang", i), tr!(&format!("settings-lang-{code}")), on, true, l).on_click(cx.listener(
-                move |_, _, _, cx| {
-                    crate::prefs::set_language(Some(code), cx);
-                    cx.notify();
-                },
-            )));
-        }
-        let theme_hint = if locked { Some(tr!("pets-ui-theme-locked")) } else { self.theme_error.clone().or(Some(tr!("settings-theme-hint"))) };
-        div()
-            .flex()
-            .flex_col()
-            .child(group(tr!("settings-look"), l))
-            .child(row(tr!("settings-theme"), theme_hint, seg_group(themes, l), l))
-            .child(row(tr!("settings-density"), Some(tr!("settings-density-hint")), seg_group(densities, l), l))
-            .child(group(tr!("settings-language-group"), l))
-            .child(row(tr!("settings-language"), Some(tr!("settings-language-hint")), seg_group(langs, l), l))
-            // Безопасность (S5-08): куда пересылать письма «Сообщить о фишинге»; пусто — только в «Нежелательные».
-            .child(group(tr!("settings-security-group"), l))
-            .child(row(
-                tr!("settings-phishing"),
-                Some(if self.phishing_error { tr!("settings-phishing-bad") } else { tr!("settings-phishing-hint") }),
-                div().w(px(280.)).child(Input::new(&self.phishing)),
-                l,
-            ))
     }
 
     fn quick(&mut self, l: &Look, cx: &mut Context<Self>) -> Div {
@@ -860,6 +796,8 @@ impl SettingsView {
                 (None, self.reading(l, cx).into_any_element(), aside)
             }
             Section::Calendar => self.calendar(l, cx),
+            Section::Security => (None, self.security(l, cx).into_any_element(), Vec::new()),
+            Section::Look => (None, self.look(l, cx).into_any_element(), Vec::new()),
             Section::Categories => self.categories(l, window, cx),
             Section::Keys => self.keyboard(l, cx),
             Section::Signatures => self.signatures(l, window, cx),

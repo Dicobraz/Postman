@@ -41,7 +41,7 @@ pub mod attach {
 pub mod view {
     gpui_kit::actions!(
         view,
-        [Mail, Calendar, Contacts, Notifications, Filters, QuickFilters, SortByDate, SortBySender, SortBySize]
+        [Mail, Calendar, Contacts, Tasks, Notifications, Filters, QuickFilters, SortByDate, SortBySender, SortBySize]
     );
 }
 
@@ -83,6 +83,11 @@ pub mod contacts {
     gpui_kit::actions!(contacts, [New, Edit, Delete, Write, Meeting, CopyAddress]);
 }
 
+/// Задачи (S6-05): новая, выполнить / вернуть, срок, переименовать, удалить, открыть письмо, по списку.
+pub mod task {
+    gpui_kit::actions!(task, [New, Complete, Due, Edit, Delete, Open, Next, Prev]);
+}
+
 /// Ответ на приглашение в письме (S5-11): кнопки карточки; клавиши A / T / N — только в схеме «Одиночные клавиши»
 /// (S5-17).
 pub mod invite {
@@ -121,6 +126,10 @@ const CALENDAR: Option<&str> = Some("CalendarView && !Input");
 const CONTACTS: Option<&str> = Some("ContactsView && !Input");
 /// Раздел «Контакты», включая поле поиска.
 const CONTACTS_ANY: Option<&str> = Some("ContactsView");
+/// Раздел «Задачи» вне полей ввода (Space, Delete, F2, Insert, Enter, стрелки в полях — правка текста).
+const TASKS: Option<&str> = Some("TasksView && !Input");
+/// Раздел «Задачи», включая поля ввода.
+const TASKS_ANY: Option<&str> = Some("TasksView");
 /// Весь экран почты (любой раздел), включая поле поиска.
 const MAILER: Option<&str> = Some("Mailer");
 /// Письмо, в том числе поля ввода: `Composer > Input` глубже привязок поля (`ctrl-enter` в тексте —
@@ -156,7 +165,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.toggle_flag", &[], LIST),
     // Не Outlook (там Ctrl+F2…F12 по назначению): клавиши 1–9 — категории таблицы (DESIGN.md, «Настройки»).
     cmd("mail.categorize", &["1", "2", "3", "4", "5", "6", "7", "8", "9"], LIST),
-    cmd("mail.new", &["ctrl-n"], MAILER),
+    // В «Задачах» Ctrl+N — новая задача (`task.new`, S6 решение 6).
+    cmd("mail.new", &["ctrl-n"], Some("Mailer && !TasksView")),
     cmd("mail.reply", &["ctrl-r"], MAIL),
     cmd("mail.reply_all", &["ctrl-shift-r"], MAIL),
     cmd("mail.forward", &["ctrl-f"], MAIL),
@@ -203,6 +213,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.mail", &["ctrl-1"], None),
     cmd("view.calendar", &["ctrl-2"], None),
     cmd("view.contacts", &["ctrl-3"], None),
+    cmd("view.tasks", &["ctrl-4"], None),
     // Вкладки окна (S5-01): как в браузере и новом Outlook; «Почта» не закрывается. Ctrl+T — ещё вкладка почты на
     // текущей папке и фильтрах (S5-16); Ctrl+Shift+Tab — исключение правила, пара к Ctrl+Tab.
     cmd("tab.new", &["ctrl-t"], MAILER),
@@ -276,6 +287,17 @@ pub const COMMANDS: &[Command] = &[
     cmd("contacts.write", &[], CONTACTS_ANY),
     cmd("contacts.meeting", &[], CONTACTS_ANY),
     cmd("contacts.copy_address", &[], CONTACTS_ANY),
+    // Задачи (S6-05, решение 6 S6): Ctrl+N — новая задача (в модуле; в почте — письмо: контекст глубже), Space —
+    // выполнено / вернуть, Insert — срок (как в почте, S5-16), Del — удалить, F2 — переименовать, Enter — письмо
+    // задачи, стрелки — по списку. Ctrl+Shift+K Outlook не берём (не в исключениях правила).
+    cmd("task.new", &["ctrl-n"], TASKS_ANY),
+    cmd("task.complete", &["space"], TASKS),
+    cmd("task.due", &["insert"], TASKS),
+    cmd("task.edit", &["f2"], TASKS),
+    cmd("task.delete", &["delete"], TASKS),
+    cmd("task.open", &["enter"], TASKS),
+    cmd("task.next", &["down"], TASKS),
+    cmd("task.prev", &["up"], TASKS),
     // Ответ на приглашение — кнопками карточки (схема «Outlook»: буквы без модификатора не допускаются); A / T / N —
     // в схеме «Одиночные клавиши» (S5-17, решение владельца 2026-10-21, вопрос 3).
     cmd("invite.accept", &[], LIST),
@@ -387,11 +409,12 @@ pub(crate) mod rule {
         &["ctrl-shift-r", "ctrl-shift-q", "ctrl-shift-c", "ctrl-shift-b", "ctrl-shift-v", "ctrl-shift-tab"];
 
     /// Клавиши без модификатора (DESIGN «Хоткеи»): навигация и действие над выделенным; 1–9 — категории (решение №6);
+    /// Space — «выполнено» в задачах (S6 решение 6);
     /// End — пара к Home в списке; «Меню» — контекстное меню, как Shift+F10. Буквы без модификатора — только в схеме
     /// «Одиночные клавиши» (S5-17).
     pub(crate) const BARE_KEYS: &[&str] = &[
         "up", "down", "left", "right", "enter", "escape", "delete", "insert", "f2", "f3", "home", "end", "pageup", "pagedown",
-        "backspace", "menu", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "backspace", "menu", "space", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ];
 
     /// Сочетания, которые держит дизайн за будущими командами: привязать их раньше — нельзя (тест правила).

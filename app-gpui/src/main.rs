@@ -10,6 +10,7 @@
 // Release: без окна консоли (S4-01). Отладочная сборка — с консолью, журнал виден сразу.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod buttons;
 mod calendar;
 mod commands;
 mod ir_view;
@@ -48,6 +49,11 @@ mod chrome;
 mod prefs;
 mod keymap;
 mod keytips;
+mod diagnostics;
+mod settings_general;
+mod settings_security;
+mod settings_look;
+mod security;
 mod settings_tab;
 mod settings_cats;
 mod settings_cal;
@@ -64,6 +70,7 @@ mod notices;
 mod palette;
 mod search;
 mod smime;
+mod tasks;
 
 pub(crate) use mailer::{Mailer, Section};
 
@@ -108,6 +115,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("ru", include_str!("../i18n/ru/palette.ftl")),
     ("ru", include_str!("../i18n/ru/search.ftl")),
     ("ru", include_str!("../i18n/ru/smime.ftl")),
+    ("ru", include_str!("../i18n/ru/tasks.ftl")),
     ("en", include_str!("../i18n/en/app.ftl")),
     ("en", include_str!("../i18n/en/commands.ftl")),
     ("en", include_str!("../i18n/en/reading.ftl")),
@@ -132,6 +140,7 @@ pub const TEXTS: &[pets_i18n::Resource] = &[
     ("en", include_str!("../i18n/en/palette.ftl")),
     ("en", include_str!("../i18n/en/search.ftl")),
     ("en", include_str!("../i18n/en/smime.ftl")),
+    ("en", include_str!("../i18n/en/tasks.ftl")),
 ];
 
 pub(crate) fn format_date(ts: i64) -> String {
@@ -164,10 +173,14 @@ fn listen_second_instance(listener: pets_shell::Listener, (window, mailer): (Any
     });
     cx.spawn(async move |cx| {
         use futures::StreamExt as _;
-        while rx.next().await.is_some() {
+        while let Some(args) = rx.next().await {
             let _ = window.update(cx, |_, window, cx| {
                 window.activate_window();
-                mailer.update(cx, |m, cx| m.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("second-instance"), cx)));
+                // Ссылка `mailto:` из другой программы — новое письмо; иначе — «Postman уже открыт».
+                match args.iter().find(|a| a.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:"))) {
+                    Some(uri) => mailer.update(cx, |m, cx| m.open_mailto(uri, cx)),
+                    None => mailer.update(cx, |m, cx| m.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("second-instance"), cx))),
+                }
             });
         }
     })
@@ -185,6 +198,8 @@ Usage: postman [options]
   --density compact|normal|comfortable
                         list row density (default: normal)
   --sign-out            forget the saved sign-in
+  --minimized           start with the window minimized (autostart)
+  mailto:...            open a new message (default mail client)
   --bench               measure and exit: one key=value line on stdout
   --screens <dir> [--live] [--keep]
                         save screenshots (PNG) and exit: one 'screen <name> <path> <w>x<h>' line per file;
@@ -224,12 +239,18 @@ fn main() {
         bench::on_idle(sys::bench_idle_fields);
     }
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str);
-    pets_shell::init_logging("Postman", "POSTMAN_LOG");
     // Настройки пользователя (S5-09): замер и снимки — без файла, повторяемо; аргументы сильнее файла.
     let dir = data_dir();
     let screening = args.iter().any(|a| a == "--screens");
     let persist = !(bench || screening);
     let user_prefs = if persist { prefs::load(&dir) } else { postman_core::prefs::Prefs::default() };
+    // Журнал (S5-30): уровень — из «Настройки → Общие», если `POSTMAN_LOG` не задан; без консоли (release) — в файл
+    // папки журнала, по файлу на день, старше недели — удаляются.
+    if persist {
+        sys::shell::default_env("POSTMAN_LOG", user_prefs.general.log.filter());
+        diagnostics::start_log_file(&dir);
+    }
+    pets_shell::init_logging("Postman", "POSTMAN_LOG");
     let lang = prefs::language_at_start(value("--lang"), &user_prefs);
     let theme = prefs::theme_at_start(value("--theme"), &user_prefs);
     let density = prefs::density_at_start(value("--density"), &user_prefs);
@@ -277,10 +298,13 @@ fn main() {
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // Тема (S5-01): «как в ОС» или `--theme`, на лету; до первого окна — чтение реестра, микросекунды.
-        roles::init(&theme, density, cx);
+        roles::init(&theme, density, user_prefs.look.accent, cx);
+        security::apply(&user_prefs);
         // Клавиши — из реестра команд (S2-02) и свои из настроек (S5-09); в поле ввода клавиши без модификаторов — текст.
         commands::bind(cx, &user_prefs);
         prefs::init(user_prefs, prefs_path, cx);
+        let minimized = args.iter().any(|a| a == "--minimized");
+        let mailto = args.iter().find(|a| a.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:"))).cloned();
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         // Свой заголовок окна (S5-01): вкладки, перетаскивание, «─ □ ✕» — `chrome.rs`.
         let options = WindowOptions {
@@ -304,6 +328,16 @@ fn main() {
         });
         match opened {
             Ok(handle) => {
+                // `postman.exe mailto:…` (клиент по умолчанию, S5-30) — новое письмо; автозапуск — свёрнутым.
+                let (window, mailer) = handle.clone();
+                let _ = window.update(cx, |_, window, cx| {
+                    if minimized {
+                        window.minimize_window();
+                    }
+                    if let Some(uri) = &mailto {
+                        mailer.update(cx, |m, cx| m.open_mailto(uri, cx));
+                    }
+                });
                 if let Some(l) = listener {
                     listen_second_instance(l, handle, cx);
                 }

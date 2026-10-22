@@ -88,10 +88,23 @@ pub struct Client {
     mail_account: Option<String>,
 }
 
+/// Только TLS 1.3 («Настройки → Безопасность», S5-30); иначе — 1.2 и выше. Действует на новые подключения.
+static TLS13_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Минимальная версия TLS для новых подключений: `true` — только 1.3.
+pub fn set_tls13_only(on: bool) {
+    TLS13_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl Client {
     /// Автообнаружение: `GET {base}/.well-known/jmap`.
     pub async fn connect(base: &str, auth: Auth) -> Result<Self> {
         let mut builder = reqwest::Client::builder().user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")));
+        builder = builder.tls_version_min(if TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+            reqwest::tls::Version::TLS_1_3
+        } else {
+            reqwest::tls::Version::TLS_1_2
+        });
         if insecure_tls() {
             tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
             builder = builder.danger_accept_invalid_certs(true);

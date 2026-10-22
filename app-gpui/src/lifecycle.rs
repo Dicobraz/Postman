@@ -226,7 +226,7 @@ pub(crate) fn header_row(row: &EmailRow, l: &Look, cx: &App) -> Div {
         .children([Kind::Due, Kind::Remind, Kind::Wait, Kind::Expire].into_iter().map(button))
 }
 
-fn pick_text(p: Pick, kind: Kind) -> String {
+pub(crate) fn pick_text(p: Pick, kind: Kind) -> String {
     match p {
         Pick::Today => tr!("lifecycle-today"),
         Pick::Tomorrow => tr!("lifecycle-tomorrow"),
