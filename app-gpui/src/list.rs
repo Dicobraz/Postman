@@ -1200,17 +1200,9 @@ impl Render for MailList {
         let l = look(cx);
         self.row_h = row_height(l.density());
         let confirm = (self.confirm.is_some() || self.confirm_many.is_some()).then(|| {
+            // Цвет кнопки — роль, не смысл (DESIGN «Цвет»): «да» — главная, «нет» — тонированная.
             let button = |id: &'static str, text: String, yes: bool| {
-                div()
-                    .id(id)
-                    .px_3()
-                    .py_0p5()
-                    .rounded(l.px(Metric::RadiusControl))
-                    .cursor_pointer()
-                    .when(yes, |d| d.bg(l.error_bg()).text_color(l.error()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!yes, |d| d.border_1().border_color(l.stroke()).hover(|d| d.bg(l.hover())))
-                    .child(text)
-                    .on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
+                crate::buttons::button(id, text, yes, &l).on_click(cx.listener(move |this, _, _, cx| this.answer_purge(yes, cx)))
             };
             div()
                 .flex()
@@ -1457,8 +1449,10 @@ pub(crate) fn list_row(
 ) -> AnyElement {
     let from = if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name.clone() };
     let roomy = !l.compact();
+    // Аватары и превью — «Настройки → Внешний вид» (S5-30); в компактной плотности их нет всегда.
+    let (avatars, previews) = crate::prefs::with(cx, |p| (p.look.avatars, p.look.preview));
     let stripe = labels.stripe.map(|c| l.cat(c).dot);
-    let avatar = roomy.then(|| {
+    let avatar = (roomy && avatars).then(|| {
         let c = l.cat(labels.stripe.unwrap_or(postman_core::palette::NEUTRAL));
         div()
             .size(px(32.))
@@ -1539,7 +1533,7 @@ pub(crate) fn list_row(
     // «Назначено: …» — справа в строке темы, нейтральной меткой (S5-28, макет `SharedMailboxes`).
     let assigned = labels.assigned.clone().map(|t| crate::labels::chip(t, postman_core::palette::NEUTRAL, l).max_w(px(160.)));
     let subject = div().flex().items_center().gap(px(8.)).min_w_0().child(subject).children(assigned);
-    let preview = roomy.then(|| {
+    let preview = (roomy && previews).then(|| {
         div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(crate::search::marked(&r.preview, marks, l))
     });
     let lit = state.open || state.picked;

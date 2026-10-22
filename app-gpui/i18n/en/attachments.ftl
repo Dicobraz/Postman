@@ -63,3 +63,4 @@ att-pv-why = Why blocked
 att-pv-why-macros = Macros run code on the computer. Such files are not opened from mail.
 att-pv-why-exe = Programs and scripts from mail are not started.
 att-pv-save-warning = The file is saved marked “from the Internet”: Office opens it in Protected View with macros disabled.
+att-pv-save-off = Saving files with macros is turned off (Settings → Security).

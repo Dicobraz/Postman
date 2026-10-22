@@ -17,7 +17,8 @@ use postman_core::prefs::KeyScheme;
 use crate::commands::{COMMANDS, SINGLE};
 use crate::keymap::{self, Column, KeySet, Place, human};
 use crate::roles::Look;
-use crate::settings_tab::{SettingsView, aside_card, button, keycap, link, seg, seg_group};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsView, aside_card, keycap, link, seg, seg_group};
 
 /// Состояние раздела.
 pub(crate) struct KeysState {
@@ -218,22 +219,6 @@ impl SettingsView {
                     .child(div().w(px(320.)).child(Input::new(&self.keys.search))),
             )
             .child(div().text_size(px(12.)).text_color(l.text2()).child(note))
-            // KeyTips (S5-18): по макету — «Внешний вид» (S5-30), до него — здесь.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        crate::settings_tab::toggle("settings-keys-keytips", crate::prefs::get(cx).keytips, l).on_click(cx.listener(
-                            |_, _, _, cx| {
-                                let on = !crate::prefs::get(cx).keytips;
-                                crate::prefs::update(cx, |p| p.keytips = on);
-                            },
-                        )),
-                    )
-                    .child(tr!("settings-keys-keytips")),
-            )
             .child(conflicts_block)
             .child(table)
             .child(aside_card(tr!("settings-keys-layout"), vec![tr!("settings-keys-layout-1"), tr!("settings-keys-layout-2")], l));

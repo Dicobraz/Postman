@@ -300,18 +300,7 @@ fn check(id: &'static str, on: bool, label: String, enabled: bool) -> Stateful<D
         .child(label)
 }
 
-pub(crate) fn button(id: &'static str, label: String, primary: bool) -> Stateful<Div> {
-    let l = crate::roles::now();
-    div()
-        .id(id)
-        .px_4()
-        .py_1()
-        .rounded_md()
-        .cursor_pointer()
-        .when(primary, |d| d.text_color(l.on_accent()).bg(l.accent()).hover(|d| d.bg(l.accent_hover())))
-        .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
-        .child(label)
-}
+use crate::buttons::plain as button;
 
 impl Render for VacationPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

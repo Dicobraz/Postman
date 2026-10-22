@@ -18,7 +18,7 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
-use pets_ui::theme::{Metric, Role};
+use pets_ui::theme::Metric;
 use postman_calendar::{Event, EventStatus, Invitation, Participant, Partstat, WorkHours, layout_day};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::labels::Categories;
@@ -611,11 +611,11 @@ impl CalendarView {
                         .flex()
                         .gap(px(6.))
                         .child(
-                            accent_button("share", &l)
+                            crate::buttons::primary("share", &l)
                                 .child(tr!("cal-share-button"))
                                 .on_click(cx.listener(|this, _, window, cx| this.submit_share(window, cx))),
                         )
-                        .child(outline_button("share-cancel", &l).child(tr!("cal-share-cancel")).on_click(cx.listener(
+                        .child(crate::buttons::secondary("share-cancel", &l).child(tr!("cal-share-cancel")).on_click(cx.listener(
                             |this, _, _, cx| {
                                 this.share_open = false;
                                 cx.notify();
@@ -1070,7 +1070,7 @@ impl CalendarView {
             let from = e.organizer().map(|o| if o.name.is_empty() { o.email.clone() } else { o.name.clone() }).unwrap_or_default();
             let button = |id: &'static str, key: &str, s: Partstat, primary: bool, cx: &mut Context<Self>| {
                 let sending = answering == Some(s);
-                let b = if primary { accent_button(id, l) } else { outline_button(id, l) };
+                let b = if primary { crate::buttons::primary(id, l) } else { crate::buttons::secondary(id, l) };
                 b.flex_1()
                     .justify_center()
                     .when(answering.is_some(), |d| d.opacity(if sending { 1. } else { 0.5 }))
@@ -1292,7 +1292,7 @@ impl CalendarView {
             })
             .when(!write.is_empty() && has_people, |d| {
                 d.child(div().flex_1()).child(
-                    outline_button("write-all", l)
+                    crate::buttons::secondary("write-all", l)
                         .justify_center()
                         .child(icon(g::MAIL, 14.))
                         .child(tr!("cal-write-participants"))
@@ -1461,44 +1461,6 @@ impl crate::Mailer {
 }
 
 // --- общие элементы раздела (календарь, встреча, контакты) ---
-
-pub(crate) fn button(id: &'static str, text: String, primary: bool) -> Stateful<Div> {
-    let l = crate::roles::now();
-    if primary { accent_button(id, &l).child(text) } else { outline_button(id, &l).child(text) }
-}
-
-/// Акцентная кнопка 32 px.
-pub(crate) fn accent_button(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(32.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .rounded(l.px(Metric::RadiusControl))
-        .bg(l.accent())
-        .text_color(l.on_accent())
-        .cursor_pointer()
-        .hover(|d| d.bg(l.accent_hover()))
-}
-
-/// Кнопка с рамкой 32 px.
-pub(crate) fn outline_button(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(32.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .rounded(l.px(Metric::RadiusControl))
-        .border_1()
-        .border_color(l.stroke())
-        .bg(l.c(Role::FillControl))
-        .cursor_pointer()
-        .hover(|d| d.bg(l.hover()))
-}
 
 /// Кнопка-значок 28 px без рамки.
 pub(crate) fn icon_button(id: impl Into<ElementId>, glyph: char, l: &Look) -> Stateful<Div> {

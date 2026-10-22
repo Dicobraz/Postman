@@ -1290,18 +1290,6 @@ impl Composer {
             .into_any_element()
     }
 
-    fn line_button(id: &'static str, text: String, primary: bool, l: &Look) -> Stateful<Div> {
-        div()
-            .id(id)
-            .px_3()
-            .py_1()
-            .rounded(px(4.))
-            .cursor_pointer()
-            .when(primary, |d| d.bg(l.accent()).text_color(l.on_accent()).hover(|d| d.bg(l.accent_hover())))
-            .when(!primary, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
-            .child(text)
-    }
-
     /// Строки вопросов в письме: «Сохранить черновик?» и «Удалить черновик?».
     fn confirm_lines(&self, l: &Look, cx: &mut Context<Self>) -> Option<Div> {
         let line = || {
@@ -1312,15 +1300,15 @@ impl Composer {
                 line()
                     .child(tr!("compose-confirm-close"))
                     .child(
-                        Self::line_button("close-save", tr!("compose-confirm-yes"), true, l)
+                        crate::buttons::button("close-save", tr!("compose-confirm-yes"), true, l)
                             .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Save, window, cx))),
                     )
                     .child(
-                        Self::line_button("close-discard", tr!("compose-confirm-no"), false, l)
+                        crate::buttons::button("close-discard", tr!("compose-confirm-no"), false, l)
                             .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Discard, window, cx))),
                     )
                     .child(
-                        Self::line_button("close-cancel", tr!("compose-confirm-cancel"), false, l)
+                        crate::buttons::button("close-cancel", tr!("compose-confirm-cancel"), false, l)
                             .on_click(cx.listener(|this, _, window, cx| this.answer(CloseAnswer::Cancel, window, cx))),
                     ),
             );
@@ -1330,10 +1318,10 @@ impl Composer {
                 line()
                     .child(tr!("compose-delete-confirm"))
                     .child(
-                        Self::line_button("delete-yes", tr!("compose-confirm-yes"), true, l)
+                        crate::buttons::button("delete-yes", tr!("compose-confirm-yes"), true, l)
                             .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
                     )
-                    .child(Self::line_button("delete-no", tr!("compose-confirm-no"), false, l).on_click(cx.listener(
+                    .child(crate::buttons::button("delete-no", tr!("compose-confirm-no"), false, l).on_click(cx.listener(
                         |this, _, _, cx| {
                             this.model.confirm_delete = false;
                             cx.notify();
@@ -1459,10 +1447,10 @@ impl Composer {
             .child(label(tr!("send-later-time")))
             .child(div().w(px(72.)).child(Input::new(&self.later.time)))
             .child(
-                Self::line_button("later-schedule", tr!("send-later-schedule"), true, l)
+                crate::buttons::button("later-schedule", tr!("send-later-schedule"), true, l)
                     .on_click(cx.listener(|this, _, window, cx| this.schedule_picked(window, cx))),
             )
-            .child(Self::line_button("later-cancel", tr!("send-later-cancel"), false, l).on_click(cx.listener(
+            .child(crate::buttons::button("later-cancel", tr!("send-later-cancel"), false, l).on_click(cx.listener(
                 |this, _, _, cx| {
                     this.close_later(cx);
                 },

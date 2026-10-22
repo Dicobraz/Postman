@@ -35,6 +35,8 @@ pub(crate) struct Live {
     session: u64,
     /// Строка состояния: «Подключение…», «Синхронизировано».
     pub(crate) status: String,
+    /// Когда синхронизация последний раз закончилась (ЧЧ:ММ) — строка состояния задач (макет «Задачи»).
+    pub(crate) synced_at: Option<String>,
     /// Строка входа (нет учётной записи или вход ещё не подтверждён сервером).
     pub(crate) signin: Option<Entity<SignIn>>,
     /// Вход со строки входа: запомнить после первого ответа сервера, при ошибке — вернуть строку входа.
@@ -308,6 +310,7 @@ impl Mailer {
         self.list.update(cx, |l, cx| l.forget_me(cx));
         // Контакты и справочник — с сервера (S4-02): поток синхронизации присылает их после входа.
         self.contacts.update(cx, |c, cx| c.go_live(cx));
+        self.tasks.update(cx, |t, cx| t.go_live(cx));
         self.live.session = session;
         self.live.pending = confirm.then_some(account);
         self.live.extractor = index.clone().map(|i| Extractor::spawn(self.cache.clone(), i));
@@ -373,6 +376,9 @@ impl Mailer {
             self.remember(account, store, cx);
         }
         if let Some(s) = plan.status {
+            if s == Status::Synced {
+                self.live.synced_at = Some(jiff::Zoned::now().strftime("%H:%M").to_string());
+            }
             self.live.status = status_text(&s);
             cx.notify();
         }
@@ -404,6 +410,10 @@ impl Mailer {
         if plan.list {
             self.live.synced = true;
             self.list.update(cx, |l, cx| l.refresh(cx));
+            // Письма со сроком — задачи «Из почты» (S6-03).
+            if self.section == crate::Section::Tasks {
+                self.tasks.update(cx, |t, cx| t.letters_changed(cx));
+            }
         }
         for (ticket, ids) in plan.results {
             // Поиск командной строки (S5-10, `search.rs`) или фильтры «Все папки».
@@ -752,6 +762,8 @@ impl Mailer {
 
     /// «Проверить и подключить»: открыть кэш этой учётной записи (в фоне), затем экран на нём и синхронизацию.
     fn sign_in(&mut self, account: Account, store: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // «Не хранить» пароль (Безопасность или политика, S5-30) — сильнее галочки входа.
+        let store = store && crate::security::effective(&crate::prefs::get(cx)).store_password;
         self.live.pending_store = store;
         let path = account::cache_path(&crate::data_dir(), &account);
         // Снова вход в ту же учётную запись (сервер отклонил пароль): кэш и экран уже её.

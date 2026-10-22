@@ -3,6 +3,9 @@
 //! фиксированного набора тегов). Без I/O.
 
 pub mod display;
+pub mod mailto;
+
+pub use mailto::{Mailto, parse_mailto};
 
 use std::borrow::Cow;
 

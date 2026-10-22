@@ -653,6 +653,66 @@ pub mod calendar {
 }
 
 /// Демо-контакты (S4-02): личная адресная книга и справочник сотрудников; одни и те же от запуска к запуску.
+/// Задачи демо (S6-05): названия вымышленные; сроки — в днях от сегодня (час — `None`: без времени).
+pub mod tasks {
+    pub struct Task {
+        pub title: &'static str,
+        /// Категория таблицы по умолчанию (`pm.cat.<id>`).
+        pub category: Option<&'static str>,
+        pub project: Option<&'static str>,
+        pub due: Option<(i64, Option<i8>)>,
+        pub important: bool,
+    }
+
+    const fn t(
+        title: &'static str,
+        category: Option<&'static str>,
+        project: Option<&'static str>,
+        due: Option<(i64, Option<i8>)>,
+        important: bool,
+    ) -> Task {
+        Task { title, category, project, due, important }
+    }
+
+    /// Задача с подзадачами, заметкой и напоминанием (снимок `tasks`).
+    pub const MAIN: &str = "Отправить редакцию договора v3";
+    /// Просроченная (снимок `tasks-today`).
+    pub const OVERDUE: &str = "Согласовать отчёт по аудиту v2";
+    /// Проект снимка `tasks-project`.
+    pub const PROJECT: &str = "Пилот «Маяк»";
+    pub const NOTES: &str = "Учесть правки юриста по п. 7.2.\n- SLA — по согласованию\n- приложение 3 — перечень работ";
+    pub const SUBTASKS: &[(&str, bool)] =
+        &[("Учесть правки юриста", true), ("Согласовать SLA", true), ("Обновить приложение 3", false), ("Сравнить с редакцией v2", false)];
+    /// Повторяется каждый месяц.
+    pub const REPEAT: &str = "Продлить лицензии";
+    /// «Когда-нибудь».
+    pub const SOMEDAY: &str = "Идея: шаблон отчёта для клиентов";
+    /// Выполненные: название, категория, проект, сколько часов назад.
+    pub const DONE: &[(&str, Option<&str>, Option<&str>, i64)] = &[
+        ("Выгрузить журнал событий за квартал", Some("services"), None, 1),
+        ("Согласовать план обучения", Some("team"), Some("План IV кв."), 26),
+    ];
+
+    pub const OPEN: &[Task] = &[
+        t(MAIN, Some("clients"), Some("Договор «Север»"), Some((0, Some(16))), true),
+        t(OVERDUE, Some("pentest"), Some("Аудит «Луч»"), Some((-1, None)), true),
+        t("Проверить счета подрядчиков за месяц", Some("services"), None, Some((-3, None)), false),
+        t("Ресурсный план группы на следующий месяц", Some("team"), Some("План IV кв."), Some((0, Some(17))), false),
+        t("Проверить методику оценки рисков", Some("clients"), Some(PROJECT), Some((0, Some(18))), false),
+        t("Согласовать отпуск сотрудника", Some("team"), None, Some((0, None)), false),
+        t("Вопросы к созвону по тендеру", Some("tenders"), Some("Тендер № 7"), Some((0, None)), false),
+        t("Ответ по разъяснениям тендера", Some("tenders"), Some("Тендер № 7"), Some((1, Some(12))), false),
+        t("Напомнить про коммерческое предложение", Some("clients"), Some("Договор «Север»"), Some((2, None)), false),
+        t("Комментарии к статусу проектов", Some("team"), None, Some((3, None)), false),
+        t("Отчёт за месяц для клиента", Some("clients"), Some(PROJECT), Some((6, None)), false),
+        t("Итоговая презентация пилота", Some("clients"), Some(PROJECT), Some((9, None)), true),
+        t("Посмотреть доклад о защите агентов", None, None, None, false),
+        t("Разобрать заметки с конференции", None, None, None, false),
+        t(SOMEDAY, None, None, None, false),
+        t(REPEAT, Some("services"), None, Some((0, None)), false),
+    ];
+}
+
 pub mod contacts {
     /// Личный контакт.
     pub struct Card {

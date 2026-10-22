@@ -16,6 +16,7 @@ frame-scope-folder = Current folder
 frame-rail-mail = Mail
 frame-rail-calendar = Calendar
 frame-rail-contacts = Contacts
+frame-rail-tasks = Tasks
 frame-rail-settings = Settings
 frame-list-count = { $n ->
     [one] { $n } message
