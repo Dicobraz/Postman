@@ -1038,22 +1038,35 @@ impl Mailer {
     }
 
     pub(crate) fn watch_signin(&mut self, panel: &Entity<SignIn>, window: &mut Window, cx: &mut Context<Self>) {
-        self._subscriptions.push(cx.subscribe_in(panel, window, |this, panel, s: &Submit, window, cx| {
-            // Из настроек, когда учётная запись уже есть: ещё одна — рядом (S7-03б), карточка остаётся в настройках.
-            let from_settings = this.settings.add.as_ref().map(|p| p.entity_id()) == Some(panel.entity_id());
-            if from_settings && this.backend.is_live() && this.live.pending.is_none() {
-                this.add_extra_account(s.account.clone(), s.store, cx);
-                return;
-            }
-            // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
-            if this.live.signin.is_none() {
-                this.live.signin = Some(panel.clone());
-            }
-            this.sign_in(s.account.clone(), s.store, window, cx);
+        self._subscriptions.push(cx.subscribe_in(panel, window, |_, panel, s: &Submit, window, cx| {
+            // Вид сервера по адресу (S7-04в): JMAP, иначе IMAP на том же узле — в фоне, до входа.
+            let (mut account, store, panel) = (s.account.clone(), s.store, panel.clone());
+            let url = account.url.clone();
+            let task = cx.background_spawn(async move { postman_core::backend::detect_blocking(&url) });
+            cx.spawn_in(window, async move |this, cx| {
+                account.url = task.await;
+                let _ = this.update_in(cx, |m, window, cx| m.submit_account(&panel, account, store, window, cx));
+            })
+            .detach();
         }));
         self._subscriptions.push(cx.subscribe_in(panel, window, |this, _, _: &crate::signin::Cancel, _, cx| {
             this.cancel_add_account(cx);
         }));
+    }
+
+    /// «Проверить и подключить» с адресом, вид сервера которого уже известен.
+    fn submit_account(&mut self, panel: &Entity<SignIn>, account: Account, store: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Из настроек, когда учётная запись уже есть: ещё одна — рядом (S7-03б), карточка остаётся в настройках.
+        let from_settings = self.settings.add.as_ref().map(|p| p.entity_id()) == Some(panel.entity_id());
+        if from_settings && self.backend.is_live() && self.live.pending.is_none() {
+            self.add_extra_account(account, store, cx);
+            return;
+        }
+        // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
+        if self.live.signin.is_none() {
+            self.live.signin = Some(panel.clone());
+        }
+        self.sign_in(account, store, window, cx);
     }
 
     /// Адрес и логин учётной записи, с которой идёт синхронизация (для «Настройки → Аккаунты»).
