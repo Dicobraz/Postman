@@ -37,7 +37,7 @@ fn renders_and_survives_escape_attempts() {
     if cfg!(windows) && std::env::var_os("POSTMAN_REQUIRE_FULL_SANDBOX").is_none() {
         assert!(matches!(c.level(), Level::Full | Level::Partial));
     } else {
-        assert_eq!(c.level(), Level::Full);
+        assert_eq!(c.level(), Level::Full, "{:?}", c.fallback());
     }
     let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
     let mut probes = vec![Probe::Spawn(shell.into())];
