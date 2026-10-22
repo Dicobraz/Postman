@@ -186,7 +186,18 @@ impl Mailer {
                 if live && !self.backend.send(Command::Settings(Request::Rules)) {
                     self.sync_stopped(cx);
                 }
-                let panel = cx.new(|cx| RulesPanel::new(state, mailboxes, live, window, cx));
+                // Категории своего ящика (S5-26): действие «Категория».
+                let categories: Vec<crate::rules::CategoryChoice> = self
+                    .list
+                    .read(cx)
+                    .labels
+                    .for_account(None)
+                    .cloned()
+                    .unwrap_or_else(crate::labels::default_table)
+                    .visible()
+                    .map(|c| (c.keyword.clone(), c.name.clone(), c.shown_color()))
+                    .collect();
+                let panel = cx.new(|cx| RulesPanel::new(state, mailboxes, categories, live, window, cx));
                 let sub = cx.subscribe_in(&panel, window, |this, _, ev: &RulesEvent, _, cx| match ev {
                     RulesEvent::Save { rules, replace } => this.save_rules(rules.clone(), *replace, cx),
                 });
@@ -466,6 +477,7 @@ pub(crate) fn rules_sample(mailboxes: &[(String, String)]) -> RulesState {
     let rule = |enabled, field, value: &str, action| Rule { enabled, field, value: value.into(), action };
     RulesState {
         rules: vec![
+            rule(true, Field::Subject, "Тендер", Action::Category(postman_core::labels::category_keyword("tenders"))), // i18n-ok: образец правила (S5-26, снимок `rules` — его правка)
             rule(true, Field::Subject, "Отчёт", Action::Move { mailbox_id, name }), // i18n-ok: образец правила
             rule(true, Field::From, "ci@corp.example", Action::MarkRead),
             rule(true, Field::To, "director@corp.example", Action::Flag),
