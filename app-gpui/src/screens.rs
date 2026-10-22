@@ -250,6 +250,10 @@ enum Scene {
     KeyTipsSingle,
     /// Кнопки (S5-19): главная, тонированная и тонированная под указателем на каждой поверхности (`buttons::gallery`).
     Buttons,
+    /// «Нет у сервера — нет на экране» (S7-03): сервер только с почтой — рейл и разделы настроек без лишнего.
+    FeaturesMailOnly,
+    /// То же — «Настройки»: без «Календаря», «Правил» и «Автоответа».
+    FeaturesMailOnlySettings,
 }
 
 const SCENES: &[Scene] = &[
@@ -356,6 +360,9 @@ const SCENES: &[Scene] = &[
     Scene::ThreadStack,
     Scene::ThreadList,
     Scene::Buttons,
+    // Последней: дальше возможности сервера не возвращаются.
+    Scene::FeaturesMailOnly,
+    Scene::FeaturesMailOnlySettings,
 ];
 
 /// Живой ящик: запрос для поиска заранее не известен; ответ — на первое письмо; календарь — неделя с сервера,
@@ -479,6 +486,8 @@ impl Scene {
             Scene::KeyTips => "keytips",
             Scene::KeyTipsSingle => "keytips-single",
             Scene::Buttons => "buttons",
+            Scene::FeaturesMailOnly => "features-mail-only",
+            Scene::FeaturesMailOnlySettings => "features-mail-only-settings",
         }
     }
 }
@@ -614,6 +623,10 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
     if crate::keytips::shown(cx) && !matches!(scene, Scene::KeyTips | Scene::KeyTipsSingle) {
         send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(false)));
         crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Outlook);
+    }
+    // Сервер умеет всё — кроме своей сцены (S7-03).
+    if !matches!(scene, Scene::FeaturesMailOnly | Scene::FeaturesMailOnlySettings) && crate::features::get(cx) != postman_core::model::Features::ALL {
+        m.set_features(postman_core::model::Features::ALL, cx);
     }
     match scene {
         Scene::List => m.set_section(Section::Mail, cx),
@@ -844,6 +857,16 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             send_input(window, cx, PlatformInput::ModifiersChanged(ctrl(true)));
         }
         Scene::Buttons => m.set_section(Section::Mail, cx),
+        Scene::FeaturesMailOnly => {
+            // Открыт календарь — сервер без него возвращает в «Почту».
+            m.close_settings(window, cx);
+            m.set_section(Section::Calendar, cx);
+            m.set_features(postman_core::model::Features::NONE, cx);
+        }
+        Scene::FeaturesMailOnlySettings => {
+            m.set_features(postman_core::model::Features::NONE, cx);
+            m.open_settings(Some(SettingsSection::General), window, cx);
+        }
         Scene::KeyTipsSingle => {
             crate::prefs::update(cx, |p| p.key_scheme = postman_core::prefs::KeyScheme::Single);
             let Some(i) = demo_row(m.list.read(cx), Scene::Invite) else { return Err("no invitation in the demo inbox".into()) };
@@ -1535,6 +1558,14 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         }
         Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
         Scene::Buttons => m.screens.as_ref().is_some_and(|d| d.gallery),
+        Scene::FeaturesMailOnly => {
+            !m.tabs.is_active(crate::tabs::TabKind::Settings)
+                && m.section == Section::Mail
+                && crate::features::get(cx) == postman_core::model::Features::NONE
+        }
+        Scene::FeaturesMailOnlySettings => {
+            settings_on(m, SettingsSection::General, cx) && crate::features::get(cx) == postman_core::model::Features::NONE
+        }
         Scene::KeyTipsSingle => {
             let single = crate::prefs::get(cx).key_scheme == postman_core::prefs::KeyScheme::Single;
             crate::keytips::shown(cx) && single && reading.is_some_and(|r| r.doc.is_some() && r.invite.is_some())

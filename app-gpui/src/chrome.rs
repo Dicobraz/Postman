@@ -315,6 +315,9 @@ impl Mailer {
             crate::keytips::command(b, command(key), Some(tr!(key)), l, cx)
         };
         let module = |s: Section| self.tabs.active().kind.shows_mail() && self.section == s;
+        // «Нет у сервера — нет на экране» (S7-03): модуля, которого у сервера нет, на рейле нет.
+        let features = crate::features::get(cx);
+        let has = |key: &str| crate::features::available(command(key), features);
         div()
             .w(px(W_RAIL))
             .h_full()
@@ -326,13 +329,21 @@ impl Mailer {
             .pt(px(4.))
             .pb(px(8.))
             .child(button("rail-mail", glyph::MAIL, "frame-rail-mail", module(Section::Mail), || Box::new(view::Mail)))
-            .child(button("rail-calendar", glyph::CALENDAR, "frame-rail-calendar", module(Section::Calendar), || {
-                Box::new(view::Calendar)
-            }))
-            .child(button("rail-contacts", glyph::CONTACTS, "frame-rail-contacts", module(Section::Contacts), || {
-                Box::new(view::Contacts)
-            }))
-            .child(button("rail-tasks", crate::tasks::g::TASKS, "frame-rail-tasks", module(Section::Tasks), || Box::new(view::Tasks)))
+            .when(has("frame-rail-calendar"), |d| {
+                d.child(button("rail-calendar", glyph::CALENDAR, "frame-rail-calendar", module(Section::Calendar), || {
+                    Box::new(view::Calendar)
+                }))
+            })
+            .when(has("frame-rail-contacts"), |d| {
+                d.child(button("rail-contacts", glyph::CONTACTS, "frame-rail-contacts", module(Section::Contacts), || {
+                    Box::new(view::Contacts)
+                }))
+            })
+            .when(has("frame-rail-tasks"), |d| {
+                d.child(button("rail-tasks", crate::tasks::g::TASKS, "frame-rail-tasks", module(Section::Tasks), || {
+                    Box::new(view::Tasks)
+                }))
+            })
             .child(div().flex_1())
             .child(button("rail-settings", glyph::SETTINGS, "frame-rail-settings", settings_tab, || Box::new(settings::Open)))
     }

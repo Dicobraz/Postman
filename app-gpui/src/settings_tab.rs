@@ -37,6 +37,16 @@ pub(crate) enum Section {
 
 impl Section {
     /// Порядок макетов «Настройки» (S5-30); подписи, правила и автоответы — после.
+    /// Команда раздела, если ему нужно что-то от сервера («Нет у сервера — нет на экране», S7-03).
+    fn command(self) -> Option<&'static str> {
+        match self {
+            Section::Rules => Some("settings.rules"),
+            Section::Vacation => Some("settings.vacation"),
+            Section::Calendar => Some("settings.calendar"),
+            _ => None,
+        }
+    }
+
     pub(crate) const ALL: [Section; 12] = [
         Section::General,
         Section::Accounts,
@@ -106,9 +116,13 @@ pub(crate) fn matches(query: &str, title: &str, keywords: &str) -> bool {
     query.split_whitespace().all(|w| hay.contains(&fold(w)))
 }
 
-/// Разделы по запросу, в порядке навигации.
-pub(crate) fn found(query: &str) -> Vec<Section> {
-    Section::ALL.into_iter().filter(|s| matches(query, &s.title(), &s.keywords())).collect()
+/// Разделы по запросу, в порядке навигации; разделов, которых нет у сервера (S7-03), нет и здесь.
+pub(crate) fn found(query: &str, features: postman_core::model::Features) -> Vec<Section> {
+    Section::ALL
+        .into_iter()
+        .filter(|s| s.command().is_none_or(|id| crate::features::available(id, features)))
+        .filter(|s| matches(query, &s.title(), &s.keywords()))
+        .collect()
 }
 
 /// Что вкладке нужно знать об экране почты: учётная запись, папки, адреса отправителя.
@@ -194,7 +208,7 @@ impl SettingsView {
                     cx.notify();
                 }
                 InputEvent::PressEnter { .. } => {
-                    if let Some(&s) = found(&this.query).first() {
+                    if let Some(&s) = found(&this.query, crate::features::get(cx)).first() {
                         this.select(s, window, cx);
                     }
                 }
@@ -454,7 +468,7 @@ pub(crate) fn now_ms() -> i64 {
 
 impl SettingsView {
     fn nav(&self, l: &Look, cx: &mut Context<Self>) -> Div {
-        let shown = found(&self.query);
+        let shown = found(&self.query, crate::features::get(cx));
         let mut list = div().flex().flex_col().gap_0p5();
         for (i, s) in shown.iter().copied().enumerate() {
             let on = s == self.section;
@@ -893,7 +907,7 @@ fn pane_name(p: Pane) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Section, matches};
+    use super::{Section, found, matches};
 
     /// Поиск разделов: слова запроса в названии или ключевых словах, регистр и «ё» не важны.
     #[test]
@@ -905,6 +919,17 @@ mod tests {
         assert!(matches("ещё", "Клавиатура", "еще сочетания"), "ё = е");
         assert!(matches("hotkeys", "Keyboard", "shortcuts hotkeys keys"));
         assert!(!matches("theme keys", "Keyboard", "shortcuts hotkeys keys"), "все слова запроса");
+    }
+
+    #[test]
+    fn sections_without_the_server_feature_are_hidden() {
+        use postman_core::model::{Feature, Features};
+        assert_eq!(found("", Features::ALL), Section::ALL.to_vec());
+        let mail = Features::NONE;
+        let shown = found("", mail);
+        assert!(!shown.contains(&Section::Rules) && !shown.contains(&Section::Vacation) && !shown.contains(&Section::Calendar));
+        assert!(shown.contains(&Section::Accounts) && shown.contains(&Section::Categories));
+        assert!(found("", mail.with(Feature::Rules, true)).contains(&Section::Rules));
     }
 
     /// У каждого раздела — название и ключевые слова в обоих языках (`settings.ftl`).

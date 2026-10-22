@@ -98,3 +98,88 @@ pub struct VacationResponse {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
 }
+
+/// Область или функция, которой у сервера учётной записи может не быть (S7, «Нет у сервера — нет на экране»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// Календарь, встречи, приглашения с ответом через сервер.
+    Calendar,
+    /// Задачи и поручения (S6).
+    Tasks,
+    /// Личные контакты.
+    Contacts,
+    /// Справочник организации и подсказки из него.
+    Directory,
+    /// Занятость коллег («Помощник планирования»).
+    FreeBusy,
+    /// Правила почты на сервере.
+    Rules,
+    /// Автоответ на сервере.
+    Autoreply,
+    /// Квота ящика.
+    Quota,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 8] = [
+        Feature::Calendar,
+        Feature::Tasks,
+        Feature::Contacts,
+        Feature::Directory,
+        Feature::FreeBusy,
+        Feature::Rules,
+        Feature::Autoreply,
+        Feature::Quota,
+    ];
+
+    const fn bit(self) -> u16 {
+        1 << self as u16
+    }
+}
+
+/// Что умеет сервер учётной записи (ADR 0003). Пока сервер не ответил — [`Features::ALL`]: интерфейс не прячет
+/// разделы на время входа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Features(u16);
+
+impl Features {
+    pub const ALL: Features = {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < Feature::ALL.len() {
+            bits |= Feature::ALL[i].bit();
+            i += 1;
+        }
+        Features(bits)
+    };
+    pub const NONE: Features = Features(0);
+
+    pub fn has(self, f: Feature) -> bool {
+        self.0 & f.bit() != 0
+    }
+
+    #[must_use]
+    pub fn with(self, f: Feature, on: bool) -> Features {
+        if on { Features(self.0 | f.bit()) } else { Features(self.0 & !f.bit()) }
+    }
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Features::ALL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn features_set_and_clear() {
+        assert!(Feature::ALL.iter().all(|&f| Features::ALL.has(f) && !Features::NONE.has(f)));
+        let f = Features::ALL.with(Feature::Calendar, false).with(Feature::Rules, false);
+        assert!(!f.has(Feature::Calendar) && !f.has(Feature::Rules) && f.has(Feature::Tasks));
+        assert_eq!(f.with(Feature::Calendar, true).with(Feature::Rules, true), Features::ALL);
+        assert_eq!(Features::default(), Features::ALL);
+    }
+}

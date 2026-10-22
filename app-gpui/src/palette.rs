@@ -639,7 +639,8 @@ impl Mailer {
         let back = window.focused(cx);
         let set = crate::keymap::KeySet::of(&crate::prefs::get(cx));
         let mut items = Vec::new();
-        for c in crate::commands::COMMANDS.iter().filter(|c| !hidden(c.id)) {
+        let features = crate::features::get(cx);
+        for c in crate::commands::COMMANDS.iter().filter(|c| !hidden(c.id) && crate::features::available(c.id, features)) {
             let Ok(action) = cx.build_action(&c.action_name(), None) else { continue };
             if !window.is_action_available(action.as_ref(), cx) {
                 continue;
