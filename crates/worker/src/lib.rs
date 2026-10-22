@@ -7,6 +7,7 @@
 //! на Windows — без win32k. Зависание или падение воркера стоит одного письма:
 //! клиент убивает процесс и поднимает новый.
 
+pub mod mime;
 pub mod preview;
 mod sandbox;
 
@@ -35,6 +36,10 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Письмо целиком (RFC 5322) в бинарной части → тело и вложения (S7-04б, IMAP: MIME разбирает Postman).
+    Mime,
+    /// Байты вложения `index` письма из бинарной части → в бинарной части ответа.
+    MimePart { index: u32 },
     Html(String),
     Text(String),
     /// Приглашение iCalendar (.ics) в бинарной части; ответ — METHOD и JSCalendar (JSON).
@@ -188,6 +193,7 @@ fn probe(p: Probe) -> Response {
 #[derive(Debug, Serialize, Deserialize)]
 enum Response {
     Ok(Document),
+    Mime(Box<mime::Mime>),
     /// RGBA8 в бинарной части.
     Image { width: u32, height: u32 },
     Calendar(serde_json::Value),
@@ -323,6 +329,17 @@ pub fn serve() -> ! {
         }
         let mut out_bin = Vec::new();
         let resp = match serde_json::from_slice::<Request>(&frame) {
+            Ok(Request::Mime) => match mime::parse(&bin) {
+                Ok(m) => Response::Mime(Box::new(m)),
+                Err(e) => Response::Err(e),
+            },
+            Ok(Request::MimePart { index }) => match mime::part(&bin, index) {
+                Ok(bytes) => {
+                    out_bin = bytes;
+                    Response::Part
+                }
+                Err(e) => Response::Err(e),
+            },
             Ok(Request::Html(h)) => Response::Ok(postman_ir::from_html(&h)),
             Ok(Request::Text(t)) => Response::Ok(postman_ir::from_plain(&t)),
             Ok(Request::Calendar) => match parse_calendar(&bin) {
@@ -481,6 +498,7 @@ impl Client {
             | Response::Envelope(_)
             | Response::Opened { .. }
             | Response::Part
+            | Response::Mime(_)
             | Response::Prepared(_) => Err("неожиданный ответ".into()),
             Response::Err(e) => Err(e),
         }
@@ -621,6 +639,24 @@ impl Client {
             },
             (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
             _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
+    /// Разобрать письмо целиком (IMAP, S7-04б) в песочнице: тело и вложения.
+    pub fn mime(&mut self, raw: &[u8]) -> Result<mime::Mime, String> {
+        match self.call(&Request::Mime, raw)?.0 {
+            Response::Mime(m) => Ok(*m),
+            Response::Err(e) => Err(e),
+            _ => Err("неожиданный ответ".into()),
+        }
+    }
+
+    /// Байты вложения письма (номер из [`Client::mime`]) — в песочнице.
+    pub fn mime_part(&mut self, raw: &[u8], index: u32) -> Result<Vec<u8>, String> {
+        match self.call(&Request::MimePart { index }, raw)? {
+            (Response::Part, bytes) => Ok(bytes),
+            (Response::Err(e), _) => Err(e),
+            _ => Err("неожиданный ответ".into()),
         }
     }
 

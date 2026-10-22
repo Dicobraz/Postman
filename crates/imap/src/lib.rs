@@ -415,6 +415,13 @@ impl Session {
         timed(async { Ok(self.inner.append(folder, flags.as_deref(), None, raw).await?) }).await
     }
 
+    /// Поиск в выбранной папке по готовому условию IMAP (`HEADER Message-ID "<…>"`, `UID 1:100`).
+    pub async fn search(&mut self, query: &str) -> Result<Vec<u32>> {
+        let mut v: Vec<u32> = timed(async { Ok(self.inner.uid_search(query).await?) }).await?.into_iter().collect();
+        v.sort_unstable();
+        Ok(v)
+    }
+
     /// Поиск в выбранной папке: текст в заголовках и теле (`TEXT`, UTF-8).
     pub async fn search_text(&mut self, text: &str) -> Result<Vec<u32>> {
         let q = format!("CHARSET UTF-8 TEXT {}", quote(text));

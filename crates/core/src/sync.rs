@@ -339,7 +339,7 @@ impl SyncError {
         Self { kind: ErrorKind::of(e), stage, detail: e.to_string() }
     }
 
-    fn internal(detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(detail: impl std::fmt::Display) -> Self {
         Self { kind: ErrorKind::Internal, stage: Stage::Start, detail: detail.to_string() }
     }
 }

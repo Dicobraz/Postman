@@ -23,6 +23,17 @@ use crate::backend::Backend;
 use crate::list::Flagged;
 use crate::signin::{SignIn, Submit};
 
+/// Учётная запись IMAP + SMTP (S7-04б): адрес `imaps://…` или `imap://…` вместо адреса JMAP.
+fn imap_account(account: &Account) -> Option<postman_core::imap::ImapAccount> {
+    if !postman_core::imap::is_imap_url(&account.url) {
+        return None;
+    }
+    match &account.auth {
+        postman_core::model::Auth::Basic { user, password } => postman_core::imap::ImapAccount::from_url(&account.url, user, password),
+        postman_core::model::Auth::Bearer(_) => None,
+    }
+}
+
 /// Найти не больше — как у сервера (`SEARCH_LIMIT` синхронизации).
 const SEARCH_LIMIT: usize = 1000;
 
@@ -422,7 +433,10 @@ impl Mailer {
             cx.notify();
         });
         self.live.path = Some(account::cache_path(&crate::data_dir(), &account));
-        let commands = sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint);
+        let commands = match imap_account(&account) {
+            Some(a) => postman_core::imap::spawn(a, None, self.cache.clone(), index.clone(), events, repaint),
+            None => sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint),
+        };
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
@@ -626,8 +640,10 @@ impl Mailer {
         tracing::info!("sync start {profile}: {}", account.url);
         self.live.profile.names.retain(|(p, _)| *p != profile);
         self.live.profile.names.push((profile.clone(), extra.settings.clone()));
-        let commands =
-            sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint);
+        let commands = match imap_account(&account) {
+            Some(a) => postman_core::imap::spawn(a, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
+            None => sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
+        };
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
         self.backend.add_extra(profile.clone(), commands);

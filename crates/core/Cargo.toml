@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 postman-ir.workspace = true
 postman-jmap.workspace = true
+postman-imap.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
 postman-compose.workspace = true

@@ -70,7 +70,8 @@ cargo test -p postman-core --test stand -- --ignored
 | `stand_tasks::task_block_in_calendar` | S6-08: блок «Время в календаре» — событие «занят» (`PT30M`) со ссылкой на задачу (`relatedTo` с `parent`), у задачи на сервере — `X-POSTMAN-BLOCK` → «Убрать» — событие удалено |
 | `stand_tasks::alerts_server_mails_only_start_relative_email` | S6-01: напоминания через минуту: письмо «Notification: …» — только `action: email` относительно начала (событие, задача с `start`); по сроку задачи и `display` — ничего (п. 41) |
 
-Последний прогон — 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
+Последний прогон — 2026-10-23, IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
+`postman-imap` `stand` 4 из 4 (S7-04а), `postman-core` `stand_imap` 2 из 2 (S7-04б); 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
 ## Настройка сервера

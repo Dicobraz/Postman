@@ -182,10 +182,11 @@ impl SignIn {
     }
 }
 
-/// Адрес сервера: без пробелов и `/` в конце; без схемы — `https://`.
+/// Адрес сервера: без пробелов и `/` в конце; без схемы — `https://`. `imaps://` и `imap://` — учётная запись IMAP
+/// (S7-04б).
 pub(crate) fn normalize_url(raw: &str) -> String {
     let url = raw.trim().trim_end_matches('/');
-    if url.is_empty() || url.starts_with("http://") || url.starts_with("https://") {
+    if url.is_empty() || url.starts_with("http://") || url.starts_with("https://") || postman_core::imap::is_imap_url(url) {
         url.to_owned()
     } else {
         format!("https://{url}")
@@ -198,7 +199,7 @@ fn check_url(raw: &str) -> Result<String, String> {
     if t.is_empty() {
         return Err(tr!("signin-fill-url"));
     }
-    let rest = t.strip_prefix("https://").or_else(|| t.strip_prefix("http://")).unwrap_or(t);
+    let rest = ["https://", "http://", "imaps://", "imap://"].iter().find_map(|p| t.strip_prefix(p)).unwrap_or(t);
     if rest.trim_matches('/').is_empty() {
         return Err(tr!("signin-bad-url"));
     }
@@ -472,5 +473,8 @@ mod tests {
         assert!(check_url("").is_err());
         assert!(check_url("https://").is_err());
         assert!(check_url("mail example").is_err());
+        // Учётная запись IMAP (S7-04б): схема сохраняется, SMTP — в запросе.
+        assert_eq!(check_url("imaps://imap.example.com?smtp=smtp.example.com").as_deref(), Ok("imaps://imap.example.com?smtp=smtp.example.com"));
+        assert!(check_url("imaps://").is_err());
     }
 }
