@@ -12,6 +12,8 @@ pub const ATTR_CONTENT_TYPE: Oid = Oid::new_unwrap("1.2.840.113549.1.9.3");
 pub const ATTR_MESSAGE_DIGEST: Oid = Oid::new_unwrap("1.2.840.113549.1.9.4");
 pub const ATTR_SIGNING_TIME: Oid = Oid::new_unwrap("1.2.840.113549.1.9.5");
 pub const ATTR_SMIME_CAPABILITIES: Oid = Oid::new_unwrap("1.2.840.113549.1.9.15");
+/// `SMIMEEncryptionKeyPreference` (RFC 8551 §2.5.3).
+pub const ATTR_ENCRYPTION_KEY_PREFERENCE: Oid = Oid::new_unwrap("1.2.840.113549.1.9.16.2.11");
 /// Электронная почта в имени (устаревшее, RFC 5280 §4.1.2.6).
 pub const EMAIL_ADDRESS: Oid = Oid::new_unwrap("1.2.840.113549.1.9.1");
 /// EKU «Защита электронной почты».

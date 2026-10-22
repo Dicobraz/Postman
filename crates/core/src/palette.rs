@@ -90,6 +90,32 @@ pub const PALETTE: &[Color] = &[
     Color { key: GREY, light: sw(0xB7B7B7, 0xF5F5F5, 0x616161), dark: sw(0x5C5C5C, 0x323232, 0xA6A6A6) },
 ];
 
+/// Цвета календарей (S5-22): цвета таблицы DESIGN по порядку; свой календарь — синий. Больше календарей, чем цветов,
+/// — цвет повторяется, различает имя владельца.
+pub const CALENDAR: &[&str] = &[BLUE, GREEN, PINK, GRAPHITE, GREY];
+
+/// Цвета календарей владельцев `owners` (ключи, `""` — мой): сохранённые (`saved`, ручные и назначенные раньше)
+/// остаются; новым — наименее занятый цвет [`CALENDAR`] (при равенстве — по порядку). Устойчиво между запусками,
+/// если назначенное сохраняют.
+pub fn assign_calendar_colors(owners: &[String], saved: &std::collections::BTreeMap<String, String>) -> std::collections::BTreeMap<String, String> {
+    let mut out: std::collections::BTreeMap<String, String> =
+        saved.iter().filter(|(_, c)| CALENDAR.contains(&c.as_str())).map(|(k, c)| (k.clone(), c.clone())).collect();
+    let mut keys: Vec<&String> = owners.iter().collect();
+    keys.sort();
+    keys.dedup();
+    // Мой — первым: по умолчанию синий.
+    keys.sort_by_key(|k| !k.is_empty());
+    for k in keys {
+        if out.contains_key(k) {
+            continue;
+        }
+        let used = |c: &str| out.values().filter(|v| v.as_str() == c).count();
+        let pick = CALENDAR.iter().min_by_key(|c| used(c)).copied().unwrap_or(BLUE);
+        out.insert(k.clone(), pick.to_owned());
+    }
+    out
+}
+
 /// Прежние цвета (общие цвета Fluent 2, S5-02) → ближайший цвет таблицы: наименьшая ΔE2000 точки `primary` Fluent
 /// (одна на обе темы) к точке светлой темы. `blue` и `pink` — те же имена в новой палитре.
 pub const LEGACY: &[(&str, &str)] = &[
@@ -413,6 +439,28 @@ mod tests {
         // Белый и чёрный — L 1 и 0 без насыщенности.
         let w = rgb_to_oklch(0xFFFFFF);
         assert!((w.l - 1.0).abs() < 1e-3 && w.c < 1e-3);
+    }
+
+    /// Цвета календарей: мой — синий, новые — наименее занятые по порядку, 6-й повторяет; ручной и назначенный раньше
+    /// сохраняются; порядок прихода коллег не меняет назначение.
+    #[test]
+    fn calendar_colors_are_stable() {
+        use std::collections::BTreeMap;
+        let owners: Vec<String> = ["", "a@x", "b@x", "c@x", "d@x", "e@x"].map(String::from).to_vec();
+        let got = assign_calendar_colors(&owners, &BTreeMap::new());
+        assert_eq!(got[""], BLUE);
+        assert_eq!([&got["a@x"], &got["b@x"], &got["c@x"], &got["d@x"]], [GREEN, PINK, GRAPHITE, GREY]);
+        assert_eq!(got["e@x"], BLUE, "цветов пять — шестой повторяет");
+        let mut reversed = owners.clone();
+        reversed.reverse();
+        assert_eq!(assign_calendar_colors(&reversed, &BTreeMap::new()), got, "порядок прихода не важен");
+        // Сохранённое остаётся, новый коллега — свободный цвет; ручной цвет — как выбран.
+        let saved = BTreeMap::from([("".to_string(), PINK.to_string()), ("b@x".to_string(), PINK.to_string())]);
+        let next = assign_calendar_colors(&["".into(), "b@x".into(), "z@x".into()], &saved);
+        assert_eq!((next[""].as_str(), next["b@x"].as_str(), next["z@x"].as_str()), (PINK, PINK, BLUE));
+        // Неизвестный сохранённый цвет — назначается заново.
+        let odd = BTreeMap::from([("a@x".to_string(), "teal".to_string())]);
+        assert!(CALENDAR.contains(&assign_calendar_colors(&["a@x".into()], &odd)["a@x"].as_str()));
     }
 
     /// Пять цветов таблицы DESIGN, имена без повторов; прежние имена Fluent — к ближайшему цвету таблицы.

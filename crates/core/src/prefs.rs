@@ -258,11 +258,13 @@ pub struct Security {
     pub tls13: bool,
     /// Хранить пароль в Диспетчере учётных данных Windows (иначе — спрашивать при каждом запуске).
     pub store_password: bool,
+    /// Подписывать все письма S/MIME (решение владельца №7; S5-12 Ф3): «Подписать» в новом письме включено.
+    pub sign_all: bool,
 }
 
 impl Default for Security {
     fn default() -> Self {
-        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true }
+        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true, sign_all: true }
     }
 }
 
@@ -759,6 +761,11 @@ pub struct Calendar {
     /// События коллег — цветом календаря владельца; имя владельца в событии (S5-22).
     pub owner_colors: bool,
     pub owner_names: bool,
+    /// Цвет календаря владельца (S5-22): ключ — адрес владельца в нижнем регистре, `""` — мой; значение — цвет
+    /// `palette::CALENDAR`. Назначенные цвета тоже хранятся — не меняются между запусками.
+    pub calendar_colors: std::collections::BTreeMap<String, String>,
+    /// Скрытые календари коллег (ключи владельцев).
+    pub hidden_calendars: Vec<String>,
     /// Новые приглашения — в календарь «под вопросом».
     pub tentative_invites: bool,
     /// Письмо-приглашение — в «Удалённые» после ответа.
@@ -784,6 +791,8 @@ impl Default for Calendar {
             free_color: FreeColor::Brand,
             owner_colors: true,
             owner_names: true,
+            calendar_colors: std::collections::BTreeMap::new(),
+            hidden_calendars: Vec::new(),
             tentative_invites: true,
             delete_answered: true,
         }
@@ -1202,6 +1211,8 @@ mod tests {
             free_color: FreeColor::Slate,
             owner_colors: false,
             owner_names: false,
+            calendar_colors: std::collections::BTreeMap::from([("a@x".to_string(), "pink".to_string())]),
+            hidden_calendars: vec!["b@x".into()],
             tentative_invites: false,
             delete_answered: false,
             },

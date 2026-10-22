@@ -27,7 +27,9 @@ use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::Level as Toast;
 use pets_ui::theme::Metric;
-use postman_calendar::{Busy, BusyKind, Event, EventStatus, Invitation, Participant, Partstat, Span, WorkHours, layout_day};
+use postman_calendar::{
+    Busy, BusyKind, Event, EventStatus, Invitation, Owner, Participant, Partstat, Span, WorkHours, layout_day,
+};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::labels::Categories;
 use postman_core::prefs::{CalendarView as View, WeekStart};
@@ -60,6 +62,7 @@ const RESULTS: usize = 50;
 
 /// Значки Segoe Fluent Icons календаря, встречи и контактов.
 pub(crate) mod g {
+    pub(crate) const MORE: char = '\u{E712}';
     pub(crate) const PREV: char = '\u{E76B}';
     pub(crate) const NEXT: char = '\u{E76C}';
     pub(crate) const DOWN: char = '\u{E70D}';
@@ -288,6 +291,16 @@ pub(crate) struct CalendarView {
     me: Option<String>,
     /// Таблица категорий: цвет событий по их меткам.
     categories: Categories,
+    /// Коллеги, открывшие мне календарь (S5-22).
+    colleagues: Vec<Owner>,
+    /// Цвета календарей: ключ владельца (`""` — мой) → цвет `palette::CALENDAR`.
+    colors: std::collections::BTreeMap<String, String>,
+    /// Календарь, у которого открыт выбор цвета (ключ владельца).
+    color_menu: Option<String>,
+    /// Скрытые календари коллег и «Цвета по владельцу», «Имя владельца» — «Настройки → Календарь».
+    hidden: Vec<String>,
+    owner_colors: bool,
+    owner_names: bool,
     /// Ответ ушёл, итога нет: (uid, ответ).
     answering: Option<(String, Partstat)>,
     /// «Изменить ответ»: кнопки ответа снова видны.
@@ -340,6 +353,7 @@ impl CalendarView {
         let on_prefs = crate::prefs::observe_with(cx, |this: &mut Self, cx| this.prefs_changed(cx));
         let mut events = demo::my_events();
         events.extend(demo::other_events());
+        events.extend(demo::colleague_events());
         events.sort_by_key(|e| e.span.start);
         Self {
             hours: cal.work_hours(tz.clone()),
@@ -359,6 +373,12 @@ impl CalendarView {
             want: None,
             me: Some(postman_demo::ME.to_string()),
             categories: crate::labels::default_table(),
+            colleagues: demo::shared_calendars(),
+            colors: Self::assigned(&demo::shared_calendars(), &cal.calendar_colors),
+            color_menu: None,
+            hidden: cal.hidden_calendars.clone(),
+            owner_colors: cal.owner_colors,
+            owner_names: cal.owner_names,
             answering: None,
             changing: false,
             clock: None,
@@ -382,6 +402,13 @@ impl CalendarView {
     /// вид по умолчанию — период заново.
     fn prefs_changed(&mut self, cx: &mut Context<Self>) {
         let cal = crate::prefs::get(cx).calendar;
+        // Календари коллег (S5-22): цвета, скрытые, «Цвета по владельцу», «Имя владельца».
+        let colors = Self::assigned(&self.colleagues, &cal.calendar_colors);
+        let owners = (colors, cal.hidden_calendars.clone(), cal.owner_colors, cal.owner_names);
+        if owners != (self.colors.clone(), self.hidden.clone(), self.owner_colors, self.owner_names) {
+            (self.colors, self.hidden, self.owner_colors, self.owner_names) = owners;
+            cx.notify();
+        }
         let tz = cal.zone();
         let hours = cal.work_hours(tz.clone());
         let second = second_zone(&cal);
@@ -409,6 +436,7 @@ impl CalendarView {
     pub(crate) fn go_live(&mut self, cx: &mut Context<Self>) {
         self.live = true;
         self.events.clear();
+        self.colleagues.clear();
         self.loaded = false;
         self.selected = None;
         self.me = None;
@@ -517,8 +545,10 @@ impl CalendarView {
 
     pub(crate) fn on_sync(&mut self, ev: &SyncEvent, cx: &mut Context<Self>) {
         match ev {
-            SyncEvent::EventsLoaded { from, to, events } if self.pending == Some((*from, *to)) => {
+            SyncEvent::EventsLoaded { from, to, events, colleagues } if self.pending == Some((*from, *to)) => {
                 self.pending = None;
+                self.colleagues = colleagues.clone();
+                self.remember_colors(cx);
                 // Тот же период перечитан (push): подробности открытого события остаются, если оно есть; переход из
                 // найденного — открыть искомое.
                 let open = self.want.take().or_else(|| self.selected.and_then(|i| self.events.get(i)).map(|e| (e.uid.clone(), e.span.start)));
@@ -720,6 +750,17 @@ impl CalendarView {
         cx.notify();
     }
 
+    /// Подробности первого события из календаря коллеги (снимок `calendar-colleagues`), иначе — самого людного.
+    pub(crate) fn select_colleague(&mut self, cx: &mut Context<Self>) {
+        match self.events.iter().position(|e| e.owner.is_some() && !e.all_day) {
+            Some(i) => {
+                self.selected = Some(i);
+                cx.notify();
+            }
+            None => self.select_busiest(cx),
+        }
+    }
+
     /// Подробности приглашения, которое ждёт моего ответа (снимок `calendar`), иначе — самого людного события.
     pub(crate) fn select_pending(&mut self, cx: &mut Context<Self>) {
         let me = self.me.clone();
@@ -803,19 +844,124 @@ impl CalendarView {
         cx.notify();
     }
 
-    /// Цвета события: (полоса, подложка, текст) — категория по меткам или роли `app.event.*`.
+    /// Цвета календарей владельцев: сохранённые в «Настройки → Календарь» и назначенные новым (S5-22).
+    fn assigned(colleagues: &[Owner], saved: &std::collections::BTreeMap<String, String>) -> std::collections::BTreeMap<String, String> {
+        let keys: Vec<String> = std::iter::once(String::new()).chain(colleagues.iter().map(Owner::key)).collect();
+        postman_core::palette::assign_calendar_colors(&keys, saved)
+    }
+
+    /// Строка календаря слева: флажок показа, имя, образец цвета; щелчок по образцу — выбор из цветов календарей.
+    fn calendar_row(&self, id: impl Into<ElementId>, key: String, name: String, check: impl IntoElement, l: &Look, cx: &mut Context<Self>) -> Div {
+        let shown = key.is_empty() || !self.hidden.contains(&key);
+        let open = self.color_menu.as_deref() == Some(key.as_str());
+        let current = self.calendar_color(&key).to_owned();
+        let id: ElementId = id.into();
+        let menu_key = key.clone();
+        let swatch = div()
+            .id(id.clone())
+            .size(px(18.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|d| d.bg(l.hover()))
+            .text_color(l.text3())
+            .child(icon(g::MORE, 10.))
+            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!("cal-color-change")).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.color_menu = if this.color_menu.as_deref() == Some(menu_key.as_str()) { None } else { Some(menu_key.clone()) };
+                cx.notify();
+            }));
+        let row = div()
+            .h(px(32.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(check)
+            .child(div().flex_1().min_w_0().truncate().when(!shown, |d| d.text_color(l.text3())).child(name))
+            .child(swatch);
+        let colors = postman_core::palette::CALENDAR.iter().enumerate().map(|(n, c)| {
+            let (k, c) = (key.clone(), (*c).to_owned());
+            let on = c == current;
+            div()
+                .id(("cal-color", n))
+                .size(px(18.))
+                .rounded(px(4.))
+                .bg(l.cat(&c).dot)
+                .border_2()
+                .border_color(if on { l.text() } else { l.none() })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.set_calendar_color(&k, &c, cx)))
+        });
+        div().flex().flex_col().child(row).when(open, |d| d.child(div().flex().gap(px(6.)).pl(px(34.)).pb(px(6.)).children(colors)))
+    }
+
+    /// Цвет календаря выбран вручную — в «Настройки → Календарь».
+    fn set_calendar_color(&mut self, key: &str, color: &str, cx: &mut Context<Self>) {
+        let (k, c) = (key.to_owned(), color.to_owned());
+        self.colors.insert(k.clone(), c.clone());
+        self.color_menu = None;
+        crate::prefs::update(cx, move |p| {
+            p.calendar.calendar_colors.insert(k, c);
+        });
+        cx.notify();
+    }
+
+    /// Показать или скрыть календарь коллеги.
+    fn toggle_calendar(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(i) = self.hidden.iter().position(|k| k == key) {
+            self.hidden.remove(i);
+        } else {
+            self.hidden.push(key.to_owned());
+        }
+        let hidden = self.hidden.clone();
+        crate::prefs::update(cx, move |p| p.calendar.hidden_calendars = hidden);
+        cx.notify();
+    }
+
+    /// Назначенные цвета новых коллег — в настройки: цвет не меняется между запусками.
+    fn remember_colors(&mut self, cx: &mut Context<Self>) {
+        let saved = crate::prefs::get(cx).calendar.calendar_colors;
+        let next = Self::assigned(&self.colleagues, &saved);
+        if next != saved {
+            let keep = next.clone();
+            crate::prefs::update(cx, move |p| p.calendar.calendar_colors = keep);
+        }
+        self.colors = next;
+    }
+
+    /// Цвет календаря владельца `key` (`""` — мой).
+    fn calendar_color(&self, key: &str) -> &str {
+        self.colors.get(key).map_or(postman_core::palette::BLUE, String::as_str)
+    }
+
+    /// Календарь коллеги скрыт флажком слева.
+    fn hidden(&self, e: &Event) -> bool {
+        e.owner.as_ref().is_some_and(|o| self.hidden.contains(&o.key()))
+    }
+
+    /// Цвета события: (полоса, подложка, текст). Подложка и текст — цвет календаря владельца (S5-22, DESIGN
+    /// «Календарь»), полоса — категория события, как в строке письма; без категории — цвет календаря. «Цвета по
+    /// владельцу» выключены — событие коллеги цветом категории, как своё до S5-22.
     fn colors(&self, e: &Event, l: &Look) -> (Hsla, Hsla, Hsla) {
-        match self.categories.for_event(&e.keywords) {
-            Some(c) => {
-                let c = l.cat(c.shown_color());
-                (c.dot, c.bg, c.text)
-            }
-            None => (l.pm(Pm::EventBorder), l.pm(Pm::EventBg), l.text()),
+        let key = e.owner.as_ref().map(Owner::key).unwrap_or_default();
+        let cal = l.cat(self.calendar_color(&key));
+        let cat = self.categories.for_event(&e.keywords).map(|c| l.cat(c.shown_color()));
+        match cat {
+            Some(c) if e.owner.is_some() && !self.owner_colors => (c.dot, c.bg, c.text),
+            Some(c) => (c.dot, cal.bg, cal.text),
+            None => (cal.dot, cal.bg, cal.text),
         }
     }
 
-    /// Имя «календаря» события в подробностях: категория или «Мой календарь».
+    /// Имя «календаря» события в подробностях: владелец (календарь коллеги), категория или «Мой календарь».
     fn source_name(&self, e: &Event) -> String {
+        if let Some(o) = &e.owner {
+            return tr!("cal-colleague-calendar", name = o.name.clone());
+        }
         self.categories.for_event(&e.keywords).map(|c| c.name.clone()).unwrap_or_else(|| tr!("cal-my-calendar"))
     }
 
@@ -860,7 +1006,7 @@ impl CalendarView {
                 .text_color(l.text2())
                 .child(weekday_name(add_days(start, d)))
         }));
-        let weeks = (0..6).map(|w| {
+        let weeks: Vec<_> = (0..6).map(|w| {
             div().flex().pl(px(4.)).children((0..7).map(|d| {
                 let date = add_days(start, w * 7 + d);
                 let other = date.month() != month.month();
@@ -897,7 +1043,7 @@ impl CalendarView {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.go_to(date, cx)))
             }))
-        });
+        }).collect();
         let title = |key: &str| div().text_size(px(12.)).text_color(l.text2()).px(px(8.)).pt(px(10.)).pb(px(4.)).child(tr!(key));
         let check = div()
             .size(px(16.))
@@ -906,10 +1052,35 @@ impl CalendarView {
             .flex()
             .items_center()
             .justify_center()
-            .bg(l.pm(Pm::EventBorder))
+            .bg(l.cat(self.calendar_color("")).dot)
             .text_color(l.on_accent())
             .child(icon(g::CHECK, 10.));
-        let mine = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(10.)).child(check).child(tr!("cal-my-calendar"));
+        let mine = self.calendar_row("cal-mine", String::new(), tr!("cal-my-calendar"), check, &l, cx);
+        let colleagues: Vec<AnyElement> = self
+            .colleagues
+            .iter()
+            .enumerate()
+            .map(|(n, o)| {
+                let key = o.key();
+                let shown = !self.hidden.contains(&key);
+                let color = l.cat(self.calendar_color(&key)).dot;
+                let toggle = key.clone();
+                let check = div()
+                    .id(("cal-colleague-check", n))
+                    .size(px(16.))
+                    .flex_none()
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_color(color)
+                    .when(shown, |d| d.bg(color).text_color(l.on_accent()).child(icon(g::CHECK, 10.)))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_calendar(&toggle, cx)));
+                self.calendar_row(("cal-colleague", n), key, o.name.clone(), check, &l, cx).into_any_element()
+            })
+            .collect();
         let cats = self.categories.visible().map(|c| {
             let color = l.cat(c.shown_color());
             div()
@@ -991,6 +1162,7 @@ impl CalendarView {
             .child(div().h(px(1.)).mx(px(8.)).mt(px(10.)).mb(px(2.)).bg(l.border()))
             .child(title("cal-group-mine"))
             .child(mine)
+            .when(!colleagues.is_empty(), |d| d.child(title("cal-group-colleagues")).children(colleagues))
             .child(title("cal-group-categories"))
             .children(cats)
             .child(div().h(px(1.)).mx(px(8.)).mt(px(10.)).mb(px(2.)).bg(l.border()))
@@ -1087,7 +1259,7 @@ impl CalendarView {
             .events
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.all_day && event_look(e, me) != Shown::Hidden)
+            .filter(|(_, e)| e.all_day && event_look(e, me) != Shown::Hidden && !self.hidden(e))
             .filter_map(|(i, e)| {
                 let (a, b) = model::dates(e, tz);
                 let (c0, c1) = model::columns(days, a, b)?;
@@ -1221,7 +1393,7 @@ impl CalendarView {
             let is_today = date == today;
             let day0 = day_start(date, tz) + FIRST_HOUR * 3600;
             let (timed, _) = day_events(&self.events, date, tz);
-            let timed: Vec<usize> = timed.into_iter().filter(|&i| event_look(&self.events[i], me) != Shown::Hidden).collect();
+            let timed: Vec<usize> = timed.into_iter().filter(|&i| event_look(&self.events[i], me) != Shown::Hidden && !self.hidden(&self.events[i])).collect();
             let placed = layout_day(&timed.iter().map(|&i| self.events[i].span).collect::<Vec<_>>());
             let (ws, we) = if self.hours.days.contains(&date.weekday()) { (work_start, work_end) } else { (height, height) };
             let shade = [(0., ws), (we, height)].map(|(a, b)| {
@@ -1312,6 +1484,11 @@ impl CalendarView {
         let sub = match look {
             Shown::Pending => format!("{}–{} · {}", hm(e.span.start, tz), hm(e.span.end, tz), tr!("cal-waits-answer")),
             _ => format!("{}–{}{place}", hm(e.span.start, tz), hm(e.span.end, tz)),
+        };
+        // Имя владельца у события коллеги (S5-22, «Показывать имя владельца»).
+        let sub = match e.owner.as_ref().filter(|_| self.owner_names) {
+            Some(o) => format!("{} · {sub}", o.name),
+            None => sub,
         };
         let stripe: AnyElement = match look {
             // Без ответа (DESIGN «Календарь»): без заливки, контур и полоса цветом календаря на 70 % и 45 %.
@@ -1647,6 +1824,7 @@ impl CalendarView {
         let (bar, _, _) = self.colors(e, l);
         let answering = self.answering.as_ref().filter(|(u, _)| *u == e.uid).map(|(_, s)| *s);
         let (chip, outlined) = match (owner, status) {
+            _ if e.owner.is_some() && mine.is_none() => (tr!("cal-chip-colleague"), false),
             (true, _) => (tr!("cal-chip-organizer"), false),
             (false, Some(Partstat::NeedsAction)) | (false, None) => (tr!("cal-chip-waits"), true),
             (false, Some(Partstat::Tentative)) => (tr!("cal-chip-tentative"), false),
@@ -1762,7 +1940,8 @@ impl CalendarView {
                 .child(icon(glyph, 16.).mt(px(1.)).text_color(l.text2()))
                 .child(div().flex_1().min_w_0().child(main))
         };
-        let conflicts = postman_core::invite::conflicts(e.span, &e.uid, &self.events, me);
+        let my_events: Vec<Event> = self.events.iter().filter(|e| e.owner.is_none()).cloned().collect();
+        let conflicts = postman_core::invite::conflicts(e.span, &e.uid, &my_events, me);
         let conflict_text = conflicts.first().map(|c| {
             let more = conflicts.len().saturating_sub(1);
             let base = tr!("cal-conflict", title = c.title.clone(), time = format!("{}–{}", hm(c.span.start, tz), hm(c.span.end, tz)));

@@ -47,6 +47,20 @@ pub struct Participant {
     pub status: Partstat,
 }
 
+/// Владелец чужого календаря, открытого мне (S5-22): адрес (имя аккаунта у Stalwart) и имя из справочника.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Owner {
+    pub email: String,
+    pub name: String,
+}
+
+impl Owner {
+    /// Ключ цвета и показа: адрес в нижнем регистре.
+    pub fn key(&self) -> String {
+        self.email.to_lowercase()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: String,
@@ -67,6 +81,8 @@ pub struct Event {
     pub keywords: Vec<String>,
     /// Номер версии (`sequence`): организатор увеличивает его при изменении встречи.
     pub sequence: i64,
+    /// Чей календарь: `None` — мой, иначе — коллеги, открывшего его мне (S5-22).
+    pub owner: Option<Owner>,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +176,7 @@ impl Event {
                 k
             },
             sequence: raw.sequence.unwrap_or(0),
+            owner: None,
         })
     }
 

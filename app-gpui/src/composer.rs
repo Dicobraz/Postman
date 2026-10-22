@@ -65,6 +65,8 @@ impl EventEmitter<ComposerEvent> for Composer {}
 pub(crate) struct Open {
     /// Ответ на письмо общего ящика (S5-28): предупреждение у «От» и подсказки меню адресов.
     pub(crate) shared: Option<crate::shared::Reply>,
+    /// Свои адреса с сертификатом подписи (S5-12 Ф3).
+    pub(crate) signable: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) me: Option<(Address, String)>,
     pub(crate) senders: Vec<Sender>,
     pub(crate) max_delay: u64,
@@ -166,6 +168,9 @@ impl Composer {
     pub(crate) fn new(draft: Draft, open: Open, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (from, signature) = open.me.clone().map_or((None, String::new()), |(a, s)| (Some(a), s));
         let mut model = Model::new(draft, from, &signature, Instant::now());
+        // «Подписать» — по «Подписывать все письма», если для адреса «От» есть сертификат (решение владельца №7).
+        let signable = open.signable.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&model.from().email.to_lowercase());
+        model.sign = crate::prefs::get(cx).security.sign_all && signable;
         // Демо: Identity нет — «От» — первый адрес списка.
         if model.from().email.is_empty()
             && let Some(first) = open.senders.first()
@@ -890,7 +895,7 @@ impl Composer {
             Status::Blocked => (tr!("compose-blocked"), true),
             Status::NoServer(Purpose::Send | Purpose::SendLater(_)) => (tr!("compose-no-server-send"), true),
             Status::NoServer(_) => (tr!("compose-no-server-save"), true),
-            Status::Failed(e) => (tr!("compose-failed", error = e.clone()), true),
+            Status::Failed(e) => (failed_text(e), true),
             Status::Attach { name, error } => {
                 (tr!("compose-attach-failed", name = name.clone(), error = error.clone()), true)
             }
@@ -1198,6 +1203,21 @@ impl Composer {
                 ).children(menu(Menu::Signature).then(|| self.signature_menu(l, cx))),
             ))
             .child(div().flex_1())
+            // «Подписать» (S5-12 Ф3): S/MIME при отправке сертификатом адреса «От».
+            .child({
+                let on = self.model.sign;
+                let b = quiet("tb-sign", l)
+                    .border_1()
+                    .border_color(if on { l.stroke() } else { l.none() })
+                    .when(on, |d| d.bg(l.picked()))
+                    .child(icon(glyph::CERTIFICATE, 14.))
+                    .when(wide || on, |d| d.child(tr!("compose-sign")))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.model.sign = !this.model.sign;
+                        cx.notify();
+                    }));
+                b.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(if on { "compose-sign-on" } else { "compose-sign-off" })).build(window, cx))
+            })
             .child(
                 div().relative().child(
                     quiet("tb-mark", l)
@@ -2123,4 +2143,20 @@ pub(crate) fn md_style(m: &postman_compose::display::Look, l: &Look) -> Highligh
         None
     };
     s
+}
+
+/// Строка ошибки отправки; подпись S/MIME (код `smime-sign:…` от ядра) — своими словами.
+fn failed_text(e: &str) -> String {
+    let Some(at) = e.find("smime-sign:") else { return tr!("compose-failed", error = e.to_owned()) };
+    let rest = &e[at + "smime-sign:".len()..];
+    let (code, detail) = rest.split_once(':').unwrap_or((rest, ""));
+    match code {
+        "need-pin" => tr!("compose-sign-need-pin"),
+        "no-card" => tr!("compose-sign-no-card"),
+        "cancelled" => tr!("compose-sign-cancelled"),
+        "need-skzi" => tr!("compose-sign-need-skzi"),
+        "no-cert" => tr!("compose-sign-no-cert", address = detail.to_owned()),
+        "eight-bit" => tr!("compose-sign-eight-bit"),
+        _ => tr!("compose-sign-failed", error = detail.to_owned()),
+    }
 }
