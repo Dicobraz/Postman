@@ -19,6 +19,7 @@ use postman_calendar::assign::{self, Action, Incoming, Status, Step, StepKind};
 use postman_calendar::{Moment, Role, Task};
 use postman_compose::Address;
 use postman_core::assign::{self as flow, Plan, Received};
+use postman_core::send_later::Scheduled;
 
 use super::{TasksAction, TasksView, add_days, day_of, g};
 use crate::chrome::icon;
@@ -38,8 +39,17 @@ pub(crate) enum Edit {
     Decline,
     Propose,
     ChangeDue,
-    /// «Забрать задачу?» — строка подтверждения: CANCEL уже не вернуть.
-    Revoke,
+}
+
+/// Письма отмены, которые сервер держит окно «Отменить» (S6-11: «Забрать», «Удалить поручение»).
+#[derive(Debug, Clone)]
+pub(crate) struct Held {
+    uid: String,
+    /// Ответ сервера (`Event::Delegated`); `None` — ещё нет.
+    scheduled: Option<Vec<Scheduled>>,
+    /// «Отменить» нажато до ответа сервера.
+    undone: bool,
+    at: std::time::Instant,
 }
 
 /// Состояние форм поручения в разделе «Задачи».
@@ -55,6 +65,7 @@ pub(crate) struct State {
     pub(crate) suggest: Vec<Address>,
     /// Подсказки — для поля наблюдателя (иначе — исполнителя).
     suggest_watcher: bool,
+    held: Vec<Held>,
 }
 
 impl State {
@@ -82,7 +93,7 @@ impl State {
                 }
             }),
         ];
-        let s = Self { edit: None, person, watcher, comment, to: None, watchers: Vec::new(), due_days: None, suggest: Vec::new(), suggest_watcher: false };
+        let s = Self { edit: None, person, watcher, comment, to: None, watchers: Vec::new(), due_days: None, suggest: Vec::new(), suggest_watcher: false, held: Vec::new() };
         (s, subs)
     }
 }
@@ -166,11 +177,15 @@ fn kind_id(k: StepKind) -> &'static str {
     }
 }
 
+/// Что сделано шагом: «готово, на проверку», «новый срок: …».
+fn step_what(t: &Task, s: &Step, tz: &TimeZone) -> String {
+    let due = s.due.as_deref().and_then(|d| d.parse().ok()).map(|local| moment_text(&Moment { local, tz: t.due.as_ref().and_then(|m| m.tz.clone()) }, tz)).unwrap_or_default();
+    tr!(&format!("assign-what-{}", kind_id(s.kind)), due = due)
+}
+
 /// Строка ленты: «Петров Алексей — готово, на проверку».
 fn step_text(t: &Task, s: &Step, me: &str, tz: &TimeZone) -> String {
-    let due = s.due.as_deref().and_then(|d| d.parse().ok()).map(|local| moment_text(&Moment { local, tz: t.due.as_ref().and_then(|m| m.tz.clone()) }, tz)).unwrap_or_default();
-    let what = tr!(&format!("assign-what-{}", kind_id(s.kind)), due = due);
-    tr!("assign-step", who = who(t, &s.who, me), what = what)
+    tr!("assign-step", who = who(t, &s.who, me), what = step_what(t, s, tz))
 }
 
 /// Текст статуса со стороны поручившего или исполнителя.
@@ -259,14 +274,14 @@ impl TasksView {
     /// Мой адрес (Identity): поручения — с моей стороны.
     pub(crate) fn set_me(&mut self, me: Address, cx: &mut Context<Self>) {
         self.me = Some(me);
-        cx.notify();
+        self.reshow(cx);
     }
 
     pub(crate) fn set_book(&mut self, book: crate::compose::Book) {
         self.book = Some(book);
     }
 
-    fn me_email(&self) -> String {
+    pub(crate) fn me_email(&self) -> String {
         self.me.as_ref().map(|a| a.email.clone()).unwrap_or_default()
     }
 
@@ -302,7 +317,7 @@ impl TasksView {
         let focus = match edit {
             Edit::Assign { .. } => Some(self.deleg.person.clone()),
             Edit::Return | Edit::Decline | Edit::Propose => Some(self.deleg.comment.clone()),
-            Edit::ChangeDue | Edit::Revoke => None,
+            Edit::ChangeDue => None,
         };
         if let Some(f) = focus {
             f.update(cx, |s, cx| s.focus(window, cx));
@@ -389,7 +404,6 @@ impl TasksView {
             Edit::Decline => Action::Decline,
             Edit::Propose => Action::ProposeDue,
             Edit::ChangeDue => Action::ChangeDue,
-            Edit::Revoke => Action::Revoke,
         };
         if matches!(edit, Edit::Assign { .. }) && self.deleg.to.is_none() {
             return cx.emit(TasksAction::Toast(Toast::Info, tr!("assign-form-pick-first")));
@@ -419,6 +433,9 @@ impl TasksView {
     }
 
     fn deleg_act_on(&mut self, t: Task, action: Action, comment: String, cx: &mut Context<Self>) {
+        if action == Action::Revoke {
+            return self.take_back(t, false, cx);
+        }
         let today = day_of(self.now(), &self.tz).unwrap_or_default();
         let due = match action {
             Action::ChangeDue | Action::ProposeDue => self.deleg.due_days.map(|d| due_at(d, t.due.as_ref(), today)),
@@ -440,22 +457,286 @@ impl TasksView {
         }
     }
 
+    /// Письма шага. Мои письма поручившего — со словом поручения (`assign::keyword`): по нему «Ждём» находит их в
+    /// «Отправленных» (S6-11).
+    fn drafts_of(&self, plan: &Plan) -> Vec<postman_compose::Draft> {
+        let me = self.me.clone().unwrap_or_else(|| Address::new("", ""));
+        let title = &plan.task.title;
+        let mine = plan.task.is_delegated_by(&me.email);
+        plan.outgoing
+            .iter()
+            .map(|o| {
+                let mut d = flow::draft(o, &me, letter_subject(o.kind, title), letter_body(&plan.task, o.kind, &me, &self.tz));
+                if mine {
+                    d.keywords.push(assign::keyword(&plan.task.uid));
+                }
+                d
+            })
+            .collect()
+    }
+
     /// Итог действия: своя копия — правкой задачи, письма шага — синхронизации; демо — только копия и тост.
     fn deleg_run(&mut self, plan: Plan, cx: &mut Context<Self>) {
         let title = plan.task.title.clone();
-        let uid = plan.task.uid.clone();
-        let me = self.me.clone().unwrap_or_else(|| Address::new("", ""));
-        let drafts: Vec<postman_compose::Draft> = plan.outgoing.iter().map(|o| flow::draft(o, &me, letter_subject(o.kind, &title), letter_body(&plan.task, o.kind, &me, &self.tz))).collect();
         let first = plan.outgoing.first().map(|o| o.kind);
-        self.save(vec![plan.task], cx);
+        let sent = self.deleg_send(plan, cx);
         self.deleg_reset(cx);
         let text = first.map_or_else(|| tr!("assign-toast-saved"), |k| tr!(&format!("assign-toast-{}", kind_id(k)), title = title));
-        if self.live && !drafts.is_empty() {
-            cx.emit(TasksAction::Delegate { uid, drafts });
+        if sent {
             cx.emit(TasksAction::Toast(Toast::Success, text));
         } else {
             cx.emit(TasksAction::Toast(Toast::Info, tr!("assign-toast-demo", text = text)));
         }
+    }
+
+    /// Своя копия — правкой, письма — синхронизации; `false` — демо (писем нет).
+    fn deleg_send(&mut self, plan: Plan, cx: &mut Context<Self>) -> bool {
+        let uid = plan.task.uid.clone();
+        let drafts = self.drafts_of(&plan);
+        self.save(vec![plan.task], cx);
+        if self.live && !drafts.is_empty() {
+            cx.emit(TasksAction::Delegate { uid, drafts, hold: false });
+            return true;
+        }
+        false
+    }
+
+    /// «Забрать» (`delete: false` — задача снова моя, обычная) или «Удалить поручение» (Del): у исполнителя —
+    /// отмена (CANCEL), у меня — копия без поручения или ничего. Письмо отмены сервер держит окно «Отменить»
+    /// (как отправку письма, S5-06): «Отменить» в тосте — копия как была, письмо не уходит (решение владельца
+    /// 2026-10-22, макет «Поручил я»).
+    fn take_back(&mut self, t: Task, delete: bool, cx: &mut Context<Self>) {
+        let plan = match flow::act(&t, &self.me_email(), Action::Revoke, &flow::Input::default(), self.now(), &self.tz) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(uid = %t.uid, "delegation: {e}");
+                return cx.emit(TasksAction::Toast(Toast::Info, tr!("assign-invalid")));
+            }
+        };
+        let drafts = self.drafts_of(&plan);
+        let who = assign::assignee(&t).map(|p| if p.name.is_empty() { p.email.clone() } else { p.name.clone() }).unwrap_or_default();
+        let text = if delete {
+            self.remove(&t.uid, cx);
+            tr!("assign-toast-deleted", who = who)
+        } else {
+            let mine = assign::taken_back(&plan.task);
+            let list = self.list_of(&mine);
+            self.save(vec![mine], cx);
+            tr!("assign-toast-taken", list = list)
+        };
+        self.deleg_reset(cx);
+        let text = if self.live && !drafts.is_empty() {
+            let now = std::time::Instant::now();
+            self.deleg.held.retain(|h| h.uid != t.uid && now.duration_since(h.at) < std::time::Duration::from_secs(120));
+            self.deleg.held.push(Held { uid: t.uid.clone(), scheduled: None, undone: false, at: now });
+            cx.emit(TasksAction::Delegate { uid: t.uid.clone(), drafts, hold: true });
+            text
+        } else {
+            tr!("assign-toast-demo", text = text)
+        };
+        cx.emit(TasksAction::Undo { text, undo: super::Undo::Delegation(Box::new(t)) });
+    }
+
+    /// Список, куда задача попадёт: «Сегодня», «Предстоящие» или «Входящие».
+    fn list_of(&self, t: &Task) -> String {
+        let today = day_of(self.now(), &self.tz).unwrap_or_default();
+        let key = match t.due.as_ref().and_then(|d| d.date_in(&self.tz)) {
+            Some(d) if d <= today => "tasks-today",
+            Some(_) => "tasks-upcoming",
+            None if t.project.is_some() => return t.project.clone().unwrap_or_default(),
+            None => "tasks-inbox",
+        };
+        tr!(key)
+    }
+
+    /// Del: моё поручение — удалить (с отменой у исполнителя); чужое (мне поручили, наблюдаю) — не удалять.
+    /// `false` — выбранная не поручение.
+    pub(crate) fn delete_delegation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((t, st, owner)) = self.delegation() else { return false };
+        if !owner {
+            cx.emit(TasksAction::Toast(Toast::Info, tr!("assign-delete-not-mine")));
+        } else if st.is_final() {
+            return false;
+        } else {
+            self.take_back(t, true, cx);
+        }
+        true
+    }
+
+    /// «Отменить» после «Забрать» или «Удалить»: копия — как была; письма отмены — не отправлять (сервер ещё
+    /// держит их) или, если ответа сервера ещё нет, — сразу по ответу.
+    pub(crate) fn undo_delegation(&mut self, before: Task, cx: &mut Context<Self>) {
+        let uid = before.uid.clone();
+        self.save(vec![before], cx);
+        let Some(i) = self.deleg.held.iter().position(|h| h.uid == uid) else { return };
+        match self.deleg.held[i].scheduled.clone() {
+            Some(s) => {
+                self.deleg.held.remove(i);
+                self.withhold(s, cx);
+            }
+            None => self.deleg.held[i].undone = true,
+        }
+    }
+
+    /// Сервер принял письма шага (`Event::Delegated`).
+    pub(crate) fn on_delegated(&mut self, uid: &str, scheduled: &[Scheduled], cx: &mut Context<Self>) {
+        let Some(i) = self.deleg.held.iter().position(|h| h.uid == uid) else { return };
+        if self.deleg.held[i].undone {
+            self.deleg.held.remove(i);
+            self.withhold(scheduled.to_vec(), cx);
+        } else {
+            self.deleg.held[i].scheduled = Some(scheduled.to_vec());
+        }
+    }
+
+    fn withhold(&mut self, scheduled: Vec<Scheduled>, cx: &mut Context<Self>) {
+        if scheduled.is_empty() {
+            // Сервер не держал письмо (нет FUTURERELEASE) — оно уже ушло.
+            cx.emit(TasksAction::Toast(Toast::Info, tr!("assign-withhold-late")));
+        } else {
+            cx.emit(TasksAction::Withhold(scheduled));
+        }
+    }
+
+    /// Сколько исполнителей ждут принятия — «Напомнить всем» (мои, не наблюдаю).
+    pub(crate) fn remind_all_count(&self) -> usize {
+        let me = self.me_email();
+        self.tasks.iter().filter(|t| t.is_delegated_by(&me) && assign::status(t) == Some(Status::Waiting)).count()
+    }
+
+    /// «Напомнить всем» над «Ждут принятия»: каждому, кто ещё не принял, — напоминание (не чаще раза в сутки).
+    pub(crate) fn remind_all(&mut self, cx: &mut Context<Self>) {
+        let me = self.me_email();
+        let list: Vec<Task> = self.tasks.iter().filter(|t| t.is_delegated_by(&me) && assign::status(t) == Some(Status::Waiting)).cloned().collect();
+        let (mut n, mut soon, mut sent) = (0i64, 0i64, false);
+        for t in list {
+            match flow::act(&t, &me, Action::Remind, &flow::Input::default(), self.now(), &self.tz) {
+                Ok(plan) => {
+                    sent |= self.deleg_send(plan, cx);
+                    n += 1;
+                }
+                Err(flow::Error::TooSoon { .. }) => soon += 1,
+                Err(e) => tracing::warn!(uid = %t.uid, "delegation: {e}"),
+            }
+        }
+        let text = if n > 0 { tr!("assign-toast-reminded-all", n = n, soon = soon) } else { tr!("assign-remind-all-soon") };
+        let text = if sent || n == 0 { text } else { tr!("assign-toast-demo", text = text) };
+        cx.emit(TasksAction::Toast(if n > 0 { Toast::Success } else { Toast::Info }, text));
+    }
+
+    /// Вторая строка строки поручения: кто (исполнитель или поручивший) и последний шаг; наблюдаю — ещё и кто
+    /// поручил; предложенный срок — янтарём.
+    pub(crate) fn deleg_meta(&self, t: &Task, l: &Look) -> Vec<AnyElement> {
+        let me = self.me_email();
+        let owner = owner_side(t, &me);
+        let watched = assign::is_watched_by(t, &me);
+        let person = if owner || watched { assign::assignee(t) } else { t.organizer() };
+        let name = person.map(|p| if p.name.is_empty() { p.email.clone() } else { p.name.clone() }).unwrap_or_default();
+        let now = self.now();
+        let mut last = assign::steps(t)
+            .last()
+            .map(|s| {
+                let what = step_what(t, s, &self.tz);
+                tr!("deleg-last", when = when(s.at, now, &self.tz), what = what)
+            })
+            .unwrap_or_default();
+        if watched {
+            let by = t.organizer().map(|p| if p.name.is_empty() { p.email.clone() } else { p.name.clone() }).unwrap_or_default();
+            last = tr!("deleg-last-watched", who = by, last = last);
+        }
+        let mut out = vec![
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.))
+                .text_color(l.text())
+                .child(crate::calendar::avatar(&name, 18., l).text_size(px(9.)))
+                .child(div().whitespace_nowrap().child(name))
+                .into_any_element(),
+        ];
+        if !last.is_empty() {
+            out.push(div().min_w_0().truncate().child(last).into_any_element());
+        }
+        if let Some(p) = assign::proposed(t).filter(|_| assign::status(t) == Some(Status::Proposed)) {
+            let today = day_of(now, &self.tz).unwrap_or_default();
+            let d = p.date_in(&self.tz).unwrap_or(today);
+            out.push(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(l.pm(Pm::DeadlineFg))
+                    .child(tr!("deleg-proposes", due = due_label((d - today).get_days() as i64, today)))
+                    .into_any_element(),
+            );
+        }
+        out
+    }
+
+    /// Над списком «Поручений»: вкладки «Я поручил» | «Мне поручили» и «Только свои» (на «Я поручил»).
+    pub(crate) fn deleg_bar(&self, l: &Look, cx: &mut Context<Self>) -> Div {
+        let c = flow::counts(&self.tasks, &self.me_email(), self.own_only);
+        let tab = match self.nav {
+            super::Nav::Delegations(t) => t,
+            _ => flow::Tab::ByMe,
+        };
+        let seg = |id: &'static str, label: String, n: usize, which: flow::Tab, cx: &mut Context<Self>| {
+            let on = tab == which;
+            div()
+                .id(id)
+                .h(px(26.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(l.panel()).shadow_sm().font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |d| d.text_color(l.text2()))
+                .child(label)
+                .child(div().text_color(l.text2()).font_weight(FontWeight::NORMAL).child(n.to_string()))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(which, cx)))
+        };
+        let segs = div()
+            .flex()
+            .flex_none()
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded(px(6.))
+            .bg(l.fill())
+            .child(seg("deleg-tab-by-me", tr!("deleg-tab-by-me"), c.by_me_shown, flow::Tab::ByMe, cx))
+            .child(seg("deleg-tab-to-me", tr!("deleg-tab-to-me"), c.to_me, flow::Tab::ToMe, cx));
+        let own = (tab == flow::Tab::ByMe).then(|| {
+            div()
+                .id("deleg-own")
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .child(crate::list::checkbox(self.own_only, l))
+                .child(tr!("deleg-own-only"))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_own(cx)))
+        });
+        div().flex_none().flex().items_center().gap(px(16.)).px(px(14.)).pb(px(10.)).text_size(px(13.)).child(segs).children(own)
+    }
+
+    /// Под списком «Я поручил»: невыполненные поручения — в «Ждём» почты, «Открыть в почте».
+    pub(crate) fn deleg_hint(&self, l: &Look, cx: &mut Context<Self>) -> Div {
+        let c = flow::counts(&self.tasks, &self.me_email(), self.own_only);
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(l.border())
+            .text_size(px(12.))
+            .text_color(l.text2())
+            .child(div().flex_1().min_w_0().child(tr!("deleg-wait-hint", n = c.waiting as i64)))
+            .child(crate::settings_tab::link("deleg-open-wait", tr!("deleg-open-wait"), l).on_click(cx.listener(|_, _, _, cx| cx.emit(TasksAction::OpenWaiting))))
     }
 
     /// Space у поручения: главное действие стороны (принять результат, согласиться, принять, в работе, готово).
@@ -488,12 +769,12 @@ impl TasksView {
         }
     }
 
-    /// «Забрать» (командная строка): строка подтверждения в карточке.
-    pub(crate) fn revoke(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, st, true)) = self.delegation()
+    /// «Забрать» (командная строка): сразу, тост «Отменить» (S6-11).
+    pub(crate) fn revoke(&mut self, cx: &mut Context<Self>) {
+        if let Some((t, st, true)) = self.delegation()
             && assign::next(st, Action::Revoke).is_ok()
         {
-            self.deleg_open(Edit::Revoke, window, cx);
+            self.take_back(t, false, cx);
         }
     }
 
@@ -587,7 +868,6 @@ impl TasksView {
             Edit::Decline => (tr!("assign-comment-decline", who = other.clone()), tr!("assign-decline")),
             Edit::Propose => (tr!("assign-comment-propose", who = other.clone()), tr!("assign-send")),
             Edit::ChangeDue => (tr!("assign-due-note", who = other.clone()), tr!("assign-send")),
-            Edit::Revoke => (tr!("assign-revoke-ask", who = other.clone()), tr!("assign-revoke-yes")),
             Edit::Assign { .. } => (String::new(), String::new()),
         };
         let due = matches!(edit, Edit::Propose | Edit::ChangeDue);
@@ -719,16 +999,16 @@ impl TasksView {
                     b1.push(self.deleg_button("assign-accept-result", tr!("assign-accept-result"), true, Action::AcceptResult, &l, cx));
                     b1.push(self.deleg_opener("assign-return", tr!("assign-return"), false, Edit::Return, &l, cx));
                     b2.push(self.deleg_opener("assign-change-due", tr!("assign-change-due"), false, Edit::ChangeDue, &l, cx));
-                    b2.push(self.deleg_opener("assign-revoke", tr!("assign-revoke"), false, Edit::Revoke, &l, cx));
+                    b2.push(self.deleg_button("assign-revoke", tr!("assign-revoke"), false, Action::Revoke, &l, cx));
                 }
                 Status::Proposed => {
                     b1.push(self.deleg_button("assign-agree", tr!("assign-agree", due = proposed.clone().unwrap_or_default()), true, Action::AgreeDue, &l, cx));
                     b1.push(self.deleg_button("assign-keep", tr!("assign-keep"), false, Action::KeepDue, &l, cx));
-                    b2.push(self.deleg_opener("assign-revoke", tr!("assign-revoke"), false, Edit::Revoke, &l, cx));
+                    b2.push(self.deleg_button("assign-revoke", tr!("assign-revoke"), false, Action::Revoke, &l, cx));
                 }
                 Status::Declined => {
                     b1.push(self.deleg_opener("assign-reassign", tr!("assign-reassign"), true, Edit::Assign { reassign: true }, &l, cx));
-                    b1.push(self.deleg_opener("assign-revoke", tr!("assign-revoke"), false, Edit::Revoke, &l, cx));
+                    b1.push(self.deleg_button("assign-revoke", tr!("assign-revoke"), false, Action::Revoke, &l, cx));
                 }
                 Status::Waiting | Status::Accepted | Status::InProgress => {
                     let next = assign::next_reminder(t).filter(|n| now < *n);
@@ -738,7 +1018,7 @@ impl TasksView {
                     };
                     b1.push(remind);
                     b1.push(self.deleg_opener("assign-change-due", tr!("assign-change-due"), false, Edit::ChangeDue, &l, cx));
-                    b1.push(self.deleg_opener("assign-revoke", tr!("assign-revoke"), false, Edit::Revoke, &l, cx));
+                    b1.push(self.deleg_button("assign-revoke", tr!("assign-revoke"), false, Action::Revoke, &l, cx));
                 }
                 Status::Closed => done_text = Some(tr!("assign-closed")),
                 Status::Revoked => done_text = Some(tr!("assign-revoked-mine")),

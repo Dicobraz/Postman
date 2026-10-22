@@ -170,6 +170,12 @@ enum Scene {
     DelegationStatuses,
     /// Повтор (S6-07): варианты повтора в карточке.
     TaskRepeat,
+    /// «Поручения» → «Я поручил» (S6-11): группы, «Напомнить всем», «Только свои» снят — и где я наблюдатель.
+    DelegationsOut,
+    /// «Поручения» → «Мне поручили»: новые, в работе, на проверке.
+    DelegationsIn,
+    /// «Отправленные» с быстрым фильтром «Ждём»: письма моих невыполненных поручений и «Ждём ответа».
+    QuickWait,
     /// «Настройки → Автоответ» (S4-05, S5-29; демо — образец со своими текстами коллегам и внешним).
     Vacation,
     /// Ящик заполнен на 94 % (S5-29): индикатор в строке состояния и тост «Очистить вложения…».
@@ -302,6 +308,9 @@ const SCENES: &[Scene] = &[
     Scene::DelegationIn,
     Scene::DelegationSteps,
     Scene::DelegationStatuses,
+    Scene::DelegationsOut,
+    Scene::DelegationsIn,
+    Scene::QuickWait,
     Scene::DelegationMail,
     Scene::TaskRepeat,
     Scene::Compose,
@@ -433,6 +442,9 @@ impl Scene {
             Scene::DelegationSteps => "delegation-steps",
             Scene::DelegationStatuses => "delegation-statuses",
             Scene::TaskRepeat => "task-repeat",
+            Scene::DelegationsOut => "delegations-out",
+            Scene::DelegationsIn => "delegations-in",
+            Scene::QuickWait => "quick-wait",
             Scene::Vacation => "vacation",
             Scene::Quota => "quota",
             Scene::Rules => "rules",
@@ -999,6 +1011,35 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 }
             });
         }
+        Scene::DelegationsOut | Scene::DelegationsIn => {
+            use postman_core::assign::Tab;
+            use postman_demo::delegations as d;
+            m.set_section(Section::Tasks, cx);
+            m.tasks.update(cx, |t, cx| {
+                if matches!(scene, Scene::DelegationsOut) {
+                    t.own_only = false;
+                    t.set_tab(Tab::ByMe, cx);
+                    t.select_title(d::REVIEW, cx);
+                } else {
+                    t.set_tab(Tab::ToMe, cx);
+                    t.select_title(d::INCOMING, cx);
+                }
+            });
+        }
+        Scene::QuickWait => {
+            use postman_core::filters::Quick;
+            m.set_section(Section::Mail, cx);
+            m.open_mailbox("sent".into(), cx);
+            m.filters.update(cx, |f, cx| {
+                f.set(cx, |f| f.panel = false);
+                f.change(cx, |q| {
+                    q.scope = crate::filters::Where::Folder;
+                    q.criteria.clear_panel();
+                    q.criteria.quick.clear();
+                    q.criteria.quick.insert(Quick::Waiting);
+                });
+            });
+        }
         Scene::DelegationMail => {
             m.set_section(Section::Mail, cx);
             let Some(i) = demo_row(m.list.read(cx), scene) else { return Err("no delegation letter in the demo inbox".into()) };
@@ -1401,6 +1442,10 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             let t = m.tasks.read(cx);
             m.section == Section::Tasks && t.ready() && (!matches!(scene, Scene::Delegate) || t.screen_form_open())
         }
+        Scene::DelegationsOut | Scene::DelegationsIn => {
+            let t = m.tasks.read(cx);
+            m.section == Section::Tasks && t.ready() && matches!(t.nav, crate::tasks::Nav::Delegations(_))
+        }
         Scene::DelegationMail => {
             let list = m.list.read(cx);
             let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.clone());
@@ -1450,6 +1495,13 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                 && list.view.is_some()
                 && !list.computing
                 && rows_loaded
+        }
+        Scene::QuickWait => {
+            list.query.scope == crate::filters::Where::Folder
+                && list.query.criteria.quick.contains(&postman_core::filters::Quick::Waiting)
+                && list.view.is_some()
+                && !list.computing
+                && (rows_loaded || list.count == 0)
         }
         Scene::Quick => {
             let f = m.filters.read(cx);
