@@ -17,6 +17,7 @@ mod ec;
 pub mod gost;
 mod mime;
 pub mod oid;
+pub mod sign;
 mod signed;
 pub mod wire;
 

@@ -1742,6 +1742,20 @@ fn mailbox_by_role(cache: &Cache, scope: Option<&str>, role: &str) -> postman_jm
         .ok_or_else(|| postman_jmap::Error::Protocol(format!("no mailbox with role {role}")))
 }
 
+/// Код ошибки подписи для интерфейса: `smime-sign:<код>[:подробности]`.
+pub fn sign_code(e: &postman_smime::sign::SignError) -> String {
+    use postman_smime::sign::SignError as E;
+    match e {
+        E::NeedPin => "smime-sign:need-pin".into(),
+        E::NoCard => "smime-sign:no-card".into(),
+        E::Cancelled => "smime-sign:cancelled".into(),
+        E::NeedSkzi => "smime-sign:need-skzi".into(),
+        E::NoCertificate(a) => format!("smime-sign:no-cert:{a}"),
+        E::EightBit => "smime-sign:eight-bit".into(),
+        E::Failed(t) => format!("smime-sign:failed:{t}"),
+    }
+}
+
 fn raw_message(draft: &Draft) -> postman_jmap::Result<Vec<u8>> {
     let now = jiff::Timestamp::now().as_second();
     postman_compose::build(draft, now, &postman_compose::new_message_id(&draft.from, now))
@@ -1804,7 +1818,13 @@ async fn send(
         }
         r => r,
     };
-    let raw = raw_message(draft)?;
+    let mut raw = raw_message(draft)?;
+    // Подпись S/MIME (S5-12 Ф3) — молча: нужен PIN, нет карты или сертификата — письмо не уходит, ошибка с кодом
+    // (`smime-sign:<код>`) — строкой во вкладке письма.
+    if draft.sign {
+        let now = jiff::Timestamp::now().as_second();
+        raw = crate::smime::sign_outgoing(&raw, &draft.from.email, None, now).map_err(|e| postman_jmap::Error::Protocol(sign_code(&e)))?;
+    }
     let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &draft.keywords).await?;
     if let Some(old) = replace {
         let (acc, id) = accounts.locate(old)?;

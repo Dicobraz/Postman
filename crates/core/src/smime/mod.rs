@@ -14,6 +14,8 @@
 //! Обнаружение СКЗИ — за трейтом [`GostProvider`], тесты подменяют оба режима.
 
 #[cfg(windows)]
+mod sign_win;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 use windows as sys;
@@ -288,6 +290,34 @@ pub fn known_certs(cache: &Cache, address: &str) -> Vec<KnownCert> {
 
 #[cfg(windows)]
 pub use windows::confirm_with_root;
+
+/// Есть свой сертификат подписи для адреса `from` (решение №7: «Подписать» включено, только если есть чем).
+pub fn can_sign(from: &str, now: i64) -> bool {
+    #[cfg(windows)]
+    {
+        sign_win::can_sign(from, now)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (from, now);
+        false
+    }
+}
+
+/// Подписать своё письмо `raw` сертификатом адреса `from` (S5-12 Ф3): RSA и ECDSA — CNG, ГОСТ — только СКЗИ
+/// (решение владельца 2026-10-22). `hwnd` — окно для PIN ОС (`None` — молча: нужен PIN — ошибка `NeedPin`).
+pub fn sign_outgoing(raw: &[u8], from: &str, hwnd: Option<isize>, now: i64) -> Result<Vec<u8>, postman_smime::sign::SignError> {
+    #[cfg(windows)]
+    {
+        let gost = SystemGost.provider();
+        sign_win::sign_message(raw, from, hwnd, now, gost)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (raw, hwnd, now);
+        Err(postman_smime::sign::SignError::NoCertificate(from.into()))
+    }
+}
 
 #[cfg(test)]
 mod tests {

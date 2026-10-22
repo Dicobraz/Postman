@@ -32,3 +32,14 @@ compose-confirm-close = Save the draft?
 compose-confirm-yes = Yes
 compose-confirm-no = No
 compose-confirm-cancel = Cancel
+# S/MIME signing (S5-12 phase 3).
+compose-sign = Sign
+compose-sign-on = The message will be signed with the From address certificate — turn off
+compose-sign-off = Sign the message with the From address certificate
+compose-sign-need-pin = Not signed: smart card PIN required · turn off "Sign" or insert the card and retry
+compose-sign-no-card = Not signed: smart card not found · insert the card and retry
+compose-sign-cancelled = Not signed: PIN entry cancelled
+compose-sign-need-skzi = Not signed: GOST certificate needs a certified crypto provider (CryptoPro CSP or ViPNet CSP)
+compose-sign-no-cert = Not signed: no signing certificate for { $address } · turn off "Sign"
+compose-sign-eight-bit = Not signed: the message is not 7-bit
+compose-sign-failed = Not signed: { $error }

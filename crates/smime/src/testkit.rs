@@ -154,10 +154,31 @@ impl Key {
         AlgorithmIdentifierOwned { oid, parameters }
     }
 
+    /// RSA — PKCS#8 DER (тесты CNG: импорт временного ключа).
+    pub fn rsa_pkcs8(&self) -> Option<Vec<u8>> {
+        use rsa::pkcs8::EncodePrivateKey;
+        let Key::Rsa(k) = self else { return None };
+        k.to_pkcs8_der().ok().map(|d| d.as_bytes().to_vec())
+    }
+
+    /// EC — точка X‖Y и закрытое число (тесты CNG: `BCRYPT_ECCPRIVATE_BLOB`).
+    pub fn ec_raw(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        match self {
+            Key::P256(k) => Some((k.verifying_key().to_sec1_point(false).as_bytes()[1..].to_vec(), k.to_bytes().to_vec())),
+            Key::P384(k) => Some((k.verifying_key().to_sec1_point(false).as_bytes()[1..].to_vec(), k.to_bytes().to_vec())),
+            _ => None,
+        }
+    }
+
     /// Подпись `message` по схеме (хэш считается здесь).
     pub fn sign(&self, scheme: Scheme, message: &[u8]) -> Vec<u8> {
+        self.sign_digest(scheme, &scheme.hash().digest(message))
+    }
+
+    /// Подпись готового хэша (как CNG `NCryptSignHash`).
+    pub fn sign_digest(&self, scheme: Scheme, digest: &[u8]) -> Vec<u8> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
-        let digest = scheme.hash().digest(message);
+        let digest = digest.to_vec();
         match (self, scheme) {
             (Key::Rsa(k), Scheme::RsaPkcs1(h)) => {
                 let pad = match h {
@@ -680,5 +701,30 @@ impl Pki {
 
     pub fn trust(&self) -> crate::Trust {
         crate::Trust { roots: vec![crate::Anchor { der: self.root.der.clone(), corporate: true }], ..Default::default() }
+    }
+}
+
+/// Подписант исходящих для тестов (Ф3): сертификат, ключ и промежуточные (`crate::sign::Signer`).
+pub struct TestSigner<'a> {
+    pub cert: &'a Issued,
+    pub key: &'a Key,
+    pub chain: Vec<Vec<u8>>,
+}
+
+impl crate::sign::Signer for TestSigner<'_> {
+    fn certificate(&self) -> &[u8] {
+        &self.cert.der
+    }
+
+    fn chain(&self) -> &[Vec<u8>] {
+        &self.chain
+    }
+
+    fn scheme(&self) -> Scheme {
+        self.key.default_scheme()
+    }
+
+    fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, crate::sign::SignError> {
+        Ok(self.key.sign_digest(self.key.default_scheme(), digest))
     }
 }

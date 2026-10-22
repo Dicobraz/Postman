@@ -124,6 +124,8 @@ pub(crate) struct Model {
     pub(crate) body: String,
     /// Метка «Конфиденциально» (`marks::CONFIDENTIAL`; шифрования нет — S5-12).
     pub(crate) confidential: bool,
+    /// «Подписать» S/MIME (S5-12 Ф3): по умолчанию — «Подписывать все письма» в «Безопасности».
+    pub(crate) sign: bool,
     /// «Ждать ответа · N дней»: общее слово `pm.wait` и слово со сроком (`marks::wait_keyword`, S5-04).
     pub(crate) wait: Option<u8>,
     /// Категория письма — её ключевое слово (`pm.cat.<id>`).
@@ -208,6 +210,7 @@ impl Model {
             subject: base.subject.clone(),
             body,
             confidential,
+            sign: false,
             wait,
             category,
             signature: signature.trim_end().to_owned(),
@@ -344,6 +347,7 @@ impl Model {
         d.subject = self.subject.clone();
         d.markdown = self.body.clone();
         d.keywords = self.keywords(jiff::Zoned::now().date());
+        d.sign = for_send && self.sign;
         Ok(d)
     }
 
@@ -772,6 +776,8 @@ pub(crate) struct Inline {
 /// Открытые письма и то, что им нужно от экрана: отправитель и подпись (Identity), адресная книга.
 #[derive(Default)]
 pub(crate) struct Composers {
+    /// Свои адреса с сертификатом подписи (S5-12 Ф3): «Подписать» по умолчанию — только для них.
+    pub(crate) signable: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) open: Vec<Opened>,
     pub(crate) inline: Option<Inline>,
     me: Option<(Address, String)>,
@@ -797,6 +803,25 @@ impl Composers {
     /// Событие синхронизации: Identity и контакты — себе, итоги отправки — письмам (каждое ищет свой тикет).
     /// Отправленное письмо — экрану (окно «Отменить»).
     pub(crate) fn on_sync(&mut self, ev: &Event, cx: &mut App) -> Option<SentDraft> {
+        // Адреса со своим сертификатом подписи (S5-12 Ф3) — в фоне, по своим адресам «От».
+        if matches!(ev, Event::Me { .. } | Event::Senders(_)) {
+            let mut addrs: Vec<String> = self.me.iter().map(|(a, _)| a.email.clone()).collect();
+            addrs.extend(self.senders.iter().map(|s| s.address.email.clone()));
+            if let Event::Me { address, .. } = ev {
+                addrs.push(address.email.clone());
+            }
+            if let Event::Senders(list) = ev {
+                addrs.extend(list.iter().map(|s| s.address.email.clone()));
+            }
+            let signable = self.signable.clone();
+            cx.background_spawn(async move {
+                let now = jiff::Timestamp::now().as_second();
+                let found: std::collections::HashSet<String> =
+                    addrs.into_iter().filter(|a| postman_core::smime::can_sign(a, now)).map(|a| a.to_lowercase()).collect();
+                *signable.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = found;
+            })
+            .detach();
+        }
         match ev {
             Event::Scheduled { max_delay, .. } => self.max_delay = *max_delay,
             Event::Me { address, signature } => {
@@ -912,6 +937,7 @@ impl Mailer {
             .unwrap_or_default();
         let place = if how.letter.is_some() { Place::Inline } else { Place::Tab };
         let open = Open {
+            signable: self.compose.signable.clone(),
             senders,
             max_delay,
             me: self.compose.me.clone(),
