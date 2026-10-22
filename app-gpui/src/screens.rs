@@ -124,6 +124,16 @@ enum Scene {
     TasksProject,
     /// «Выполненные»: сегодня, вчера.
     TasksDone,
+    /// Поручения (S6-10): форма «Поручить» с выбранным исполнителем, наблюдателем и сроком.
+    Delegate,
+    /// Поручено мне: карточка с «Принять» / «Предложить срок» / «Отклонить».
+    DelegationIn,
+    /// Письмо-поручение: карточка поручения над текстом письма.
+    DelegationMail,
+    /// Я поручил, готово — на проверку: ход, результат, лента шагов, «Принять результат».
+    DelegationSteps,
+    /// Проект поручений демо: круги всех статусов в списке.
+    DelegationStatuses,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
@@ -232,6 +242,11 @@ const SCENES: &[Scene] = &[
     Scene::TasksToday,
     Scene::TasksProject,
     Scene::TasksDone,
+    Scene::Delegate,
+    Scene::DelegationIn,
+    Scene::DelegationSteps,
+    Scene::DelegationStatuses,
+    Scene::DelegationMail,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -337,6 +352,11 @@ impl Scene {
             Scene::TasksToday => "tasks-today",
             Scene::TasksProject => "tasks-project",
             Scene::TasksDone => "tasks-done",
+            Scene::Delegate => "delegate",
+            Scene::DelegationIn => "delegation-in",
+            Scene::DelegationMail => "delegation-mail",
+            Scene::DelegationSteps => "delegation-steps",
+            Scene::DelegationStatuses => "delegation-statuses",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
@@ -791,6 +811,31 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                 }
             });
         }
+        Scene::Delegate | Scene::DelegationIn | Scene::DelegationSteps | Scene::DelegationStatuses => {
+            use postman_demo::delegations as d;
+            m.set_section(Section::Tasks, cx);
+            m.tasks.update(cx, |t, cx| match scene {
+                Scene::Delegate => {
+                    t.set_nav(crate::tasks::Nav::List(postman_core::tasks::List::Today), cx);
+                    t.select_title(d::TO_ASSIGN, cx);
+                    t.screen_form(window, cx);
+                }
+                _ => {
+                    t.set_nav(crate::tasks::Nav::Project(d::PROJECT.into()), cx);
+                    // Статусы — первая строка (отклонённое: «Поручить другому»); ход и лента — готовое на проверку.
+                    match scene {
+                        Scene::DelegationIn => t.select_title(d::INCOMING, cx),
+                        Scene::DelegationSteps => t.select_title(d::REVIEW, cx),
+                        _ => {}
+                    }
+                }
+            });
+        }
+        Scene::DelegationMail => {
+            m.set_section(Section::Mail, cx);
+            let Some(i) = demo_row(m.list.read(cx), scene) else { return Err("no delegation letter in the demo inbox".into()) };
+            m.list.update(cx, |l, cx| l.select(i, cx));
+        }
         Scene::Shared => {
             m.set_section(Section::Mail, cx);
             let Some(id) = shared_inbox(m, cx) else { return Err("no shared mailbox in the folder tree".into()) };
@@ -1130,6 +1175,16 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
+        Scene::Delegate | Scene::DelegationIn | Scene::DelegationSteps | Scene::DelegationStatuses => {
+            let t = m.tasks.read(cx);
+            m.section == Section::Tasks && t.ready() && (!matches!(scene, Scene::Delegate) || t.screen_form_open())
+        }
+        Scene::DelegationMail => {
+            let list = m.list.read(cx);
+            let target = demo_row(list, scene).and_then(|i| list.row(i)).map(|r| r.id.clone());
+            let reading = m.reading.read(cx).reading.as_ref();
+            target.is_some() && reading.is_some_and(|r| Some(&r.row.id) == target.as_ref() && r.doc.is_some() && r.task_mail.is_some())
+        }
         Scene::Vacation => {
             // Живой ящик: автоответ прочитан с сервера (полоса — только если он включён).
             let live = m.screens.as_ref().is_some_and(|d| d.live);
@@ -1359,7 +1414,8 @@ fn demo_row(list: &crate::list::MailList, scene: Scene) -> Option<usize> {
             Scene::SmimeGost => signed("gost"),
             Scene::SmimeBad => signed("bad"),
             Scene::SmimeUntrusted => signed("untrusted"),
-            Scene::Invite => a.iter().any(crate::attachments::is_invite),
+            Scene::Invite => has("ics"),
+            Scene::DelegationMail => has("todo"),
             Scene::LetterImage => has("chart"),
             _ => has("pdf") && a.iter().any(|a| a.cid.is_some()),
         }

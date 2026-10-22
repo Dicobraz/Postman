@@ -40,6 +40,8 @@ pub(crate) struct Reading {
     /// `cid:`, за которыми уже пошли (байты, декодирование).
     pub(crate) requested: HashSet<String>,
     pub(crate) invite: Option<Card>,
+    /// Письмо-поручение (S6-10): вложение `text/calendar` с VTODO вместо приглашения.
+    pub(crate) task_mail: Option<Box<postman_calendar::assign::Incoming>>,
     /// Проверки документов Office в воркере (S5-07): `blob_id` → итог; `scanning` — ждут байтов или воркера.
     pub(crate) scans: HashMap<String, OfficeScan>,
     pub(crate) scanning: HashSet<String>,
@@ -60,6 +62,7 @@ impl Reading {
             images: Images::new(),
             requested: HashSet::new(),
             invite: None,
+            task_mail: None,
             scans: HashMap::new(),
             scanning: HashSet::new(),
             preview: None,
@@ -102,6 +105,8 @@ pub(crate) struct ReadingPane {
     pub(crate) save_all: Option<crate::preview::SaveAll>,
     /// Открытая папка: её вид беседы (лента, стопка, «как Outlook», S5-05б).
     pub(crate) folder: Option<String>,
+    /// Раздел «Задачи»: своя копия поручения для карточки письма-поручения (S6-10).
+    pub(crate) tasks: Option<WeakEntity<crate::tasks::TasksView>>,
     /// Идёт поиск (S5-10): строка запроса и слова — подсветка в теме и тексте, строка «Совпадения».
     pub(crate) marks: Option<(String, Arc<Vec<String>>)>,
     /// Текущее совпадение (S5-14, F3 / Shift+F3): номер по порядку чтения — тема, затем текст.
@@ -129,6 +134,10 @@ pub(crate) enum ReadingEvent {
     Unsend(postman_core::send_later::Scheduled),
     /// «Ответить» или «Переслать» у письма стопки (S5-05б).
     Respond(EmailRow, postman_compose::Mode),
+    /// Письмо-поручение разобрано (S6-10): учесть его в своей копии задачи (шаг, комментарий, срок).
+    TaskMail(Box<postman_calendar::assign::Incoming>),
+    /// Кнопка карточки поручения в письме: действие над задачей `uid`; `None` — открыть её в «Задачах».
+    TaskAction { uid: String, action: Option<postman_calendar::assign::Action> },
     /// Ответ на приглашение ушёл, «Удалять письмо-приглашение после ответа» включено (S5-20): письмо — в «Удалённые».
     TrashAnswered(EmailRow),
 }
@@ -178,6 +187,7 @@ impl ReadingPane {
             scheduled: Vec::new(),
             save_all: None,
             folder: None,
+            tasks: None,
             marks: None,
             hit: 0,
             hits: std::cell::Cell::new(0),
@@ -466,7 +476,7 @@ impl ReadingPane {
     /// Приглашение во вложениях — на разбор в песочницу (сначала байты).
     fn ensure_invite(&mut self, cx: &mut Context<Self>) {
         let Some(r) = &mut self.reading else { return };
-        if r.invite.is_some() {
+        if r.invite.is_some() || r.task_mail.is_some() {
             return;
         }
         let Some(a) = r.body.as_ref().and_then(|b| b.attachments.iter().find(|a| attachments::is_invite(a))).cloned() else {
@@ -592,20 +602,34 @@ impl ReadingPane {
                 let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
                 w.parse_calendar(&data)
             };
-            let inv = parsed.and_then(|v| Invitation::from_worker(&v, &tz))?;
+            let v = parsed?;
+            // VTODO — письмо-поручение (S6-10), не приглашение.
+            if let Ok(task) = postman_calendar::assign::Incoming::from_worker(&v) {
+                return Ok(Err(Box::new(task)));
+            }
+            let inv = Invitation::from_worker(&v, &tz)?;
             let stored = cache.state(&invite_card::state_key(&inv.event.uid)).ok().flatten();
             let answer = stored.as_deref().and_then(invite_card::decode);
-            Ok::<_, String>((inv, answer))
+            Ok::<_, String>(Ok((inv, answer)))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                let Some(card) = this.reading.as_mut().filter(|r| r.row.id == id).and_then(|r| r.invite.as_mut()) else { return };
+                let Some(r) = this.reading.as_mut().filter(|r| r.row.id == id) else { return };
+                if let Ok(Err(task)) = &result {
+                    r.invite = None;
+                    r.task_mail = Some(task.clone());
+                    cx.emit(ReadingEvent::TaskMail(task.clone()));
+                    cx.notify();
+                    return;
+                }
+                let Some(card) = r.invite.as_mut() else { return };
                 match result {
-                    Ok((inv, answer)) => {
+                    Ok(Ok((inv, answer))) => {
                         card.state = State::Ready(Box::new(inv));
                         card.answer = answer;
                     }
+                    Ok(Err(_)) => {}
                     Err(e) => card.state = State::Failed(e),
                 }
                 this.invite_ready(cx);
@@ -878,7 +902,20 @@ impl Render for ReadingPane {
                 .child(pane)
                 .into_any_element();
         }
-        let card = r.invite.as_ref().map(|c| invite_card::render(c, self.me.as_deref(), cx));
+        let card = r.invite.as_ref().map(|c| invite_card::render(c, self.me.as_deref(), cx)).or_else(|| {
+            // Письмо-поручение: карточка над текстом; своя копия задачи — из раздела «Задачи».
+            let inc = r.task_mail.as_ref()?;
+            let copy = self.tasks.as_ref().and_then(|t| t.upgrade()).and_then(|t| t.read(cx).tasks.iter().find(|x| x.uid == inc.task.uid).cloned());
+            let me = self.me.clone().unwrap_or_default();
+            let tz = crate::prefs::get(cx).calendar.zone();
+            let weak = cx.entity().downgrade();
+            let uid = inc.task.uid.clone();
+            let on = move |action: Option<postman_calendar::assign::Action>, _: &mut Window, cx: &mut App| {
+                let uid = uid.clone();
+                let _ = weak.update(cx, |_, cx| cx.emit(ReadingEvent::TaskAction { uid, action }));
+            };
+            Some(crate::tasks::mail_card(inc, copy.as_ref(), &me, &tz, cx, on))
+        });
         let body: AnyElement = match &r.doc {
             None => div().text_color(l.text2()).child("…").into_any_element(),
             Some(doc) => {

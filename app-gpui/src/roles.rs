@@ -89,10 +89,17 @@ pub(crate) enum Pm {
     Phish,
     /// Совпадение поиска (S5-10): янтарная подложка — янтарный только у сроков и совпадений (DESIGN «Цвет»).
     SearchHit,
+    /// Статусы поручения (S6-10, макеты «Поручил я», «Поручено мне»): круги 20 px — принял и в работе синие, готово
+    /// зелёное, отклонил тёмно-серый, ждёт — серый точечный; значок на заливке.
+    AssignBlue,
+    AssignGreen,
+    AssignDeclined,
+    AssignWait,
+    AssignGlyph,
 }
 
 impl Pm {
-    pub(crate) const COUNT: usize = Pm::SearchHit as usize + 1;
+    pub(crate) const COUNT: usize = Pm::AssignGlyph as usize + 1;
 }
 
 const fn c(v: u32) -> Color {
@@ -233,6 +240,12 @@ const FIXED: &[(Pm, &str, Color, Color, Role)] = &[
     (Pm::CalOff, "app.cal.off", c(0xFAFAFA), c(0x272727), Role::LayerPanel),
     (Pm::Phish, "app.phish", c(0xCD605A), c(0xD47C76), Role::CriticalFg),
     (Pm::SearchHit, "app.search.hit", c(0xF9EDD5), c(0x413315), Role::AccentSubtle),
+    // Статусы поручения — по макетам «Поручил я» и «Поручено мне».
+    (Pm::AssignBlue, "app.assign.blue", c(0x4687D8), c(0x689BDB), Role::AccentFill),
+    (Pm::AssignGreen, "app.assign.green", c(0x5F983A), c(0x7AA761), Role::SuccessFg),
+    (Pm::AssignDeclined, "app.assign.declined", c(0x303030), c(0xCECECE), Role::TextPrimary),
+    (Pm::AssignWait, "app.assign.wait", c(0xAAAAAA), c(0x6E6E6E), Role::TextSecondary),
+    (Pm::AssignGlyph, "app.assign.glyph", c(0xFFFFFF), c(0x2B2B2B), Role::LayerPanel),
 ];
 
 /// Цвет свободного времени (S5-20): только цвета бренда (решение владельца 2026-10-21) — розовый, синий,
@@ -372,6 +385,11 @@ const PMS: [Pm; Pm::COUNT] = [
     Pm::CalOff,
     Pm::Phish,
     Pm::SearchHit,
+    Pm::AssignBlue,
+    Pm::AssignGreen,
+    Pm::AssignDeclined,
+    Pm::AssignWait,
+    Pm::AssignGlyph,
 ];
 
 /// Цвета категории в теме.
@@ -807,7 +825,6 @@ mod tests {
         ("#AFD1FC", "app.event.border.selected, тёмная"),
         ("#3A5F8F", "app.fb.busy, тёмная: «занят» во встрече (макет, S5-23)"),
         ("#E6EEF8", "app.fb.busy.fg, тёмная: текст на «занят»"),
-        ("#6E6E6E", "app.fb.oof и app.fb.oof.line, светлая: «нет на месте» (S5-23)"),
         ("#4F4F4F", "app.fb.oof, тёмная"),
         ("#E6E6E6", "app.fb.oof.fg, тёмная"),
         ("#727272", "app.fb.unknown, тёмная: «нет данных» (S5-23)"),

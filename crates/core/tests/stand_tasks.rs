@@ -1129,3 +1129,108 @@ async fn mail_due_is_task() {
     assert_eq!(fixed[0].mail, None, "письмо удалено — задача без ссылки");
     sweep(&a, prefix, subject).await;
 }
+
+/// S6-09: поручение путём Postman (`postman_core::assign`): своя запись поручившего без рассылки и свои письма iMIP
+/// (REQUEST, REPLY с COMMENT). user1 поручает user2, user3 — наблюдатель: принять → в работе → готово → принять
+/// результат. Проверяется: копия у исполнителя из письма, PARTSTAT из писем REPLY у копии поручившего, созданной
+/// без рассылки [проверить — S6-01 этого не проверял], итог у наблюдателя. Комментарии сервер не хранит —
+/// их учитывает `assign::receive` (здесь — по тексту письма, как его разберёт воркер).
+/// Писем: user2 — 2, user3 — 3, user1 — 3.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn postman_delegation_cycle() {
+    use postman_calendar::assign::{self as model, Action, Incoming, Status};
+    use postman_core::assign::{self, Input, Received};
+    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    let (a, b, w) = (user(1).await, user(2).await, user(3).await);
+    let prefix = "postman-s609-deleg-";
+    let subject = "Postman s609 deleg";
+    for x in [&a, &b, &w] {
+        sweep(x, prefix, subject).await;
+    }
+    let tz = jiff::tz::TimeZone::get("Europe/Moscow").unwrap();
+    let run = stamp();
+    let uid = format!("{prefix}{run}@itt.test");
+    let title = format!("{subject} {run}");
+    let now = || jiff::Timestamp::now().as_second();
+    let parse = |ics: &str| Incoming::from_worker(&postman_worker::parse_calendar(ics.as_bytes()).unwrap()).unwrap();
+    let addr = |u: &User, n: &str| postman_compose::Address::new(n, &u.email);
+    let quiet = |_: Reply| {};
+    let (ca, cb) = (postman_cache::Cache::open_in_memory().unwrap(), postman_cache::Cache::open_in_memory().unwrap());
+    let (sa, sb) = (JmapStore::new(&a.jmap), JmapStore::new(&b.jmap));
+
+    // Поручить: своя запись (без рассылки) и письмо REQUEST исполнителю и наблюдателю.
+    let due = postman_calendar::Moment::new("2027-03-04T18:00:00".parse().unwrap(), Some("Europe/Moscow"));
+    let plan = assign::assign(&postman_calendar::Task::new(&uid, "", &title), &addr(&a, "User 1"), &[addr(&w, "User 3")], &Input { comment: "Нужен к четвергу".into(), due: Some(due), to: Some(addr(&b, "User 2")) }, now(), &tz).unwrap();
+    tasks::handle(&sa, &ca, Request::Save(Box::new(plan.task.clone())), &quiet).await.unwrap();
+    let out = &plan.outgoing[0];
+    for to in &out.to {
+        send_imip(&a, &to.email, &format!("Поручение: {title}"), &out.method, &out.ics).await;
+    }
+
+    // У исполнителя — копия из письма (сервер кладёт VTODO сам); шаг «поручено» с комментарием — из письма.
+    let raw = eventually("копия у исполнителя", DELIVERY, || by_uid(&b.jmap, &uid, postman_calendar::TASK_PROPERTIES)).await.expect("поручение не дошло (порог входящих, п. 17?)");
+    tasks::handle(&sb, &cb, Request::Load, &quiet).await.unwrap();
+    let mut mine = tasks::from_row(&cb.task(&uid).unwrap().expect("копия в кэше исполнителя")).unwrap();
+    assert!(mine.is_assigned_to(&b.email), "{raw}");
+    if let Received::Applied(t) = assign::receive(&mine, &parse(&out.ics), now()) {
+        mine = *t;
+    }
+    assert!(eventually("копия у наблюдателя", DELIVERY, || by_uid(&w.jmap, &uid, &["id"])).await.is_some());
+
+    // Шаги исполнителя: своя копия — правкой без рассылки, ответ — своим письмом REPLY.
+    let mut boss = tasks::from_row(&ca.task(&uid).unwrap().unwrap()).unwrap();
+    for (action, comment, want) in [
+        (Action::Accept, "", Status::Accepted),
+        (Action::Start, "Начал", Status::InProgress),
+        (Action::Finish, "Отчёт готов", Status::Done),
+    ] {
+        let p = assign::act(&mine, &b.email, action, &Input { comment: comment.into(), ..Input::default() }, now(), &tz).unwrap();
+        tasks::handle(&sb, &cb, Request::Save(Box::new(p.task.clone())), &quiet).await.unwrap();
+        mine = tasks::from_row(&cb.task(&uid).unwrap().unwrap()).unwrap();
+        for o in &p.outgoing {
+            for to in &o.to {
+                send_imip(&b, &to.email, &format!("Ответ: {title}"), &o.method, &o.ics).await;
+            }
+            // Сервер поручившего применяет REPLY к записи, созданной без рассылки? Сейчас — печатаем, что вышло.
+            let want_ps = model::assignee(&p.task).unwrap().status;
+            let applied = eventually("ответ у поручившего на сервере", DELIVERY, || async {
+                let v = by_uid(&a.jmap, &uid, postman_calendar::TASK_PROPERTIES).await?;
+                let t = postman_calendar::Task::from_jmap(&v).ok()?;
+                (model::assignee(&t)?.status == want_ps).then_some(())
+            })
+            .await;
+            let v = by_uid(&a.jmap, &uid, &["progress", "percentComplete"]).await.unwrap_or_default();
+            println!("{action:?}: сервер применил REPLY к копии поручившего — {}; ход {} {}", applied.is_some(), v["progress"], v["percentComplete"]);
+            if let Received::Applied(t) = assign::receive(&boss, &parse(&o.ics), now()) {
+                boss = *t;
+            }
+        }
+        assert_eq!(model::status(&boss), Some(want), "{action:?}");
+    }
+    assert_eq!(model::steps(&boss).last().map(|s| s.comment.as_str()), Some("Отчёт готов"), "комментарий — из письма");
+    tasks::handle(&sa, &ca, Request::Save(Box::new(boss.clone())), &quiet).await.unwrap();
+
+    // Принять результат: REQUEST исполнителю и наблюдателю; у исполнителя — закрыто.
+    let res = assign::act(&boss, &a.email, Action::AcceptResult, &Input::default(), now(), &tz).unwrap();
+    tasks::handle(&sa, &ca, Request::Save(Box::new(res.task.clone())), &quiet).await.unwrap();
+    for to in &res.outgoing[0].to {
+        send_imip(&a, &to.email, &format!("Принято: {title}"), "REQUEST", &res.outgoing[0].ics).await;
+    }
+    assert!(mail_arrives(&w, "s609", &format!("Принято: {title}"), DELIVERY).await, "итог не пришёл наблюдателю (порог входящих, п. 17?)");
+    let closed = eventually("итог у исполнителя", DELIVERY, || async {
+        let v = by_uid(&b.jmap, &uid, postman_calendar::TASK_PROPERTIES).await?;
+        let t = postman_calendar::Task::from_jmap(&v).ok()?;
+        (t.progress == postman_calendar::Progress::Completed).then_some(t)
+    })
+    .await;
+    let t = closed.expect("итог не применён к копии исполнителя");
+    println!("копия исполнителя после итога: X-POSTMAN-RESULT — {:?}", model::prop(&t, model::X_RESULT));
+    assert_eq!(model::status(&t), Some(Status::Closed), "закрыто у исполнителя и без разбора письма");
+    if let Received::Applied(t) = assign::receive(&mine, &parse(&res.outgoing[0].ics), now()) {
+        assert_eq!(model::status(&t), Some(Status::Closed));
+    }
+    for x in [&a, &b, &w] {
+        sweep(x, prefix, subject).await;
+    }
+}

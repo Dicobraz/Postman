@@ -388,6 +388,9 @@ pub fn body(id: &str) -> BodyRow {
     let (html, attachments) = if n % 100 == CHART_EVERY {
         // Большая картинка в тексте (S5-07б): кадр больше 1024 px по стороне.
         (CHART_HTML, vec![att("chart", "chart.png", "image/png", chart().len() as u64, Some("chart@corp"))])
+    } else if n % 100 == TASK_EVERY {
+        // Поручение письмом (S6-10): VTODO REQUEST — карточка поручения над текстом.
+        (TASK_HTML, vec![att("todo", "task.ics", "text/calendar", delegations::letter().len() as u64, None)])
     } else if n.is_multiple_of(10) {
         (INVITE_HTML, vec![att("ics", "invite.ics", "text/calendar", INVITE.len() as u64, None)])
     } else if n.is_multiple_of(2) {
@@ -434,6 +437,10 @@ pub fn invite() -> Vec<u8> {
 /// День встречи в файле приглашения (`DTSTART`, `DTEND`).
 const INVITE_DAY: &str = "20261021T";
 const INVITE_HTML: &str = "<p>Иван Петров приглашает вас на встречу «Обсуждение пилота SIEM».</p>";
+
+/// Письмо-поручение (S6-10) — `demo20`, `demo120`… (одно на сотню, вместо приглашения).
+pub const TASK_EVERY: usize = 20;
+const TASK_HTML: &str = "<p>Иванова Мария поручила вам задачу. Ответьте в Postman или ответным письмом.</p>";
 
 /// Письмо с большой картинкой в тексте — `demo4`, `demo104`… (одно на сотню: бенч открытия писем их почти не видит).
 const CHART_EVERY: usize = 4;
@@ -498,6 +505,7 @@ pub fn blob(blob_id: &str) -> Option<Vec<u8>> {
         "logo" => Some(LOGO.to_vec()),
         "chart" => Some(chart().to_vec()),
         "ics" => Some(invite()),
+        "todo" => Some(delegations::letter()),
         "pdf" => Some(REPORT.to_vec()),
         "zip" => Some(SCREENS.to_vec()),
         "xlsm" => Some(BUDGET.to_vec()),
@@ -695,6 +703,150 @@ pub mod tasks {
         t(SOMEDAY, None, None, None, false),
         t(REPEAT, Some("services"), None, Some((0, None)), false),
     ];
+}
+
+/// Поручения демо (S6-10): я поручил и мне поручили, все статусы; лента шагов — как её ведёт Postman
+/// (`postman_calendar::assign`). Коллеги — из справочника демо.
+pub mod delegations {
+    use postman_calendar::assign::{self, Step, StepKind};
+    use postman_calendar::{Moment, Progress, Role, Task, TaskParticipant, TaskPartstat};
+
+    /// Проект поручений демо: в нём видны все статусы (снимок `delegation-statuses`).
+    pub const PROJECT: &str = "Отчёт для заказчика";
+    /// Готово — на проверку (снимок `delegation-steps`).
+    pub const REVIEW: &str = "Итоговый отчёт по обследованию";
+    /// Поручено мне, ждёт ответа (снимок `delegation-in`).
+    pub const INCOMING: &str = "Проверить перечень работ к договору";
+    /// Поручить (снимок `delegate`): своя задача без поручения.
+    pub const TO_ASSIGN: &str = "Вопросы к созвону по тендеру";
+    /// Письмо-поручение (снимок `delegation-mail`).
+    pub const LETTER: &str = "Подготовить вопросы к созвону с заказчиком";
+
+    pub const PETROV: (&str, &str) = ("Петров Алексей", "a.petrov@corp.example");
+    pub const IVANOVA: (&str, &str) = ("Иванова Мария", "m.ivanova@corp.example");
+    pub const VOLKOV: (&str, &str) = ("Волков Сергей", "s.volkov@corp.example");
+    pub const KUZNETSOVA: (&str, &str) = ("Кузнецова Елена", "e.kuznetsova@corp.example");
+
+    const HOUR: i64 = 3600;
+
+    fn person(key: &str, who: (&str, &str), role: Role, status: TaskPartstat) -> TaskParticipant {
+        TaskParticipant { key: key.into(), name: who.0.into(), email: who.1.into(), role, status }
+    }
+
+    fn me() -> (&'static str, &'static str) {
+        (super::ME_NAME, super::ME)
+    }
+
+    fn day(today: jiff::civil::Date, n: i64, hour: i8) -> jiff::civil::DateTime {
+        today.checked_add(jiff::Span::new().days(n)).unwrap_or(today).at(hour, 0, 0, 0)
+    }
+
+    /// Поручение: кто поручил, кому, ответ исполнителя, срок (дней от сегодня, час), шаги (часов назад, кто, что,
+    /// комментарий).
+    #[allow(clippy::too_many_arguments)]
+    fn task(
+        n: usize,
+        title: &str,
+        owner: (&str, &str),
+        worker: (&str, &str),
+        status: TaskPartstat,
+        due: (i64, i8),
+        today: jiff::civil::Date,
+        now: i64,
+        steps: &[(i64, (&str, &str), StepKind, &str)],
+    ) -> Task {
+        let mut t = Task::new(&format!("demo-deleg-{n}@postman"), "demo", title);
+        t.project = Some(PROJECT.into());
+        t.due = Some(Moment::new(day(today, due.0, due.1), None));
+        t.participants = vec![person("owner", owner, Role::Owner, TaskPartstat::NeedsAction), person("assignee", worker, Role::Assignee, status)];
+        if matches!(status, TaskPartstat::InProcess | TaskPartstat::Completed) {
+            t.progress = Progress::InProcess;
+            t.percent = Some(if status == TaskPartstat::Completed { 100 } else { 40 });
+        }
+        for (ago, who, kind, comment) in steps {
+            assign::push_step(&mut t, Step { at: now - ago * HOUR, who: who.1.into(), kind: *kind, comment: (*comment).into(), due: None });
+        }
+        t
+    }
+
+    /// Все поручения демо; `today` и `now` — в поясе пользователя.
+    pub fn all(today: jiff::civil::Date, now: i64) -> Vec<Task> {
+        use StepKind as K;
+        use TaskPartstat as P;
+        let me = me();
+        let proposed = day(today, 6, 18);
+        let mut out = vec![
+            task(1, REVIEW, me, PETROV, P::Completed, (1, 18), today, now, &[
+                (72, me, K::Assigned, "Нужен к пятнице, с выводами для руководства"),
+                (71, PETROV, K::Accepted, ""),
+                (48, PETROV, K::Started, ""),
+                (1, PETROV, K::Finished, "Отчёт готов: добавил раздел о сегментации сети. Посмотри выводы — заказчик прочтёт их первыми."),
+            ]),
+            task(2, "Ресурсный план группы на ноябрь", me, IVANOVA, P::InProcess, (2, 12), today, now, &[
+                (30, me, K::Assigned, ""),
+                (29, IVANOVA, K::Accepted, ""),
+                (5, IVANOVA, K::Started, ""),
+            ]),
+            task(3, "Расчёт коммерческого предложения", me, VOLKOV, P::NeedsAction, (3, 18), today, now, &[(20, me, K::Assigned, "")]),
+            task(4, "Требования к мониторингу для ТЗ", me, KUZNETSOVA, P::NeedsAction, (1, 12), today, now, &[(26, me, K::Assigned, "")]),
+            task(5, "Заказать пропуска для аудиторов", me, VOLKOV, P::Declined, (1, 10), today, now, &[
+                (22, me, K::Assigned, ""),
+                (4, VOLKOV, K::Declined, "Пропуска оформляет хозяйственный отдел, у нас нет доступа к их системе."),
+            ]),
+            task(6, INCOMING, IVANOVA, me, P::NeedsAction, (1, 15), today, now, &[(1, IVANOVA, K::Assigned, "Посмотри, пожалуйста, до созвона — особенно п. 3.")]),
+            task(7, "Комментарии к статусу проектов", PETROV, me, P::Accepted, (3, 15), today, now, &[
+                (20, PETROV, K::Assigned, ""),
+                (18, me, K::Accepted, ""),
+            ]),
+            letter_task(today),
+        ];
+        // Предложенный срок — через неделю, с комментарием.
+        if let Some(t) = out.iter_mut().find(|t| t.uid == "demo-deleg-4@postman") {
+            assign::set_proposed(t, Some(&Moment::new(proposed, None)));
+            assign::push_step(t, Step {
+                at: now - 2 * HOUR,
+                who: KUZNETSOVA.1.into(),
+                kind: K::Proposed,
+                comment: "Жду ответа заказчика на разъяснения — раньше понедельника не соберу.".into(),
+                due: Some(proposed.strftime("%Y-%m-%dT%H:%M:%S").to_string()),
+            });
+        }
+        out
+    }
+
+    /// Задача письма-поручения: сервер уже положил её в мой календарь (как VTODO из iMIP, S6-01) — срок завтра.
+    fn letter_task(today: jiff::civil::Date) -> Task {
+        let mut t = Task::new("demo-deleg-mail@postman", "demo", LETTER);
+        t.notes = "Сроки поставки, требования к мониторингу, лицензии и SLA.".into();
+        t.due = Some(Moment::new(day(today, 1, 12), None));
+        t.participants = vec![person("owner", IVANOVA, Role::Owner, TaskPartstat::NeedsAction), person("assignee", me(), Role::Assignee, TaskPartstat::NeedsAction)];
+        t
+    }
+
+    /// Письмо-поручение демо: REQUEST от коллеги мне, срок — завтра (в любой день запуска оно впереди).
+    pub fn letter() -> Vec<u8> {
+        let now = jiff::Zoned::now();
+        let t = letter_task(now.date());
+        let ts = now.timestamp().as_second();
+        assign::request(&t, "Нужно до созвона в среду.", false, ts - 2 * HOUR, &jiff::tz::TimeZone::system()).into_bytes()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn every_status_is_shown() {
+            let list = all(jiff::civil::date(2026, 10, 21), 1_792_000_000);
+            let mut seen: Vec<&str> = list.iter().filter_map(assign::status).map(|s| s.id()).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen, ["accepted", "declined", "done", "in-progress", "proposed", "waiting"]);
+            assert_eq!(list.iter().filter(|t| t.is_assigned_to(crate::ME)).count(), 3);
+            let ics = String::from_utf8(letter()).unwrap();
+            assert!(ics.contains("METHOD:REQUEST") && ics.contains(crate::ME));
+        }
+    }
 }
 
 pub mod contacts {

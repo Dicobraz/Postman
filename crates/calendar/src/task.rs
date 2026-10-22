@@ -163,7 +163,7 @@ pub enum TaskPartstat {
 }
 
 impl TaskPartstat {
-    fn ical(self) -> &'static str {
+    pub(crate) fn ical(self) -> &'static str {
         match self {
             Self::NeedsAction => "NEEDS-ACTION",
             Self::Accepted => "ACCEPTED",
@@ -597,7 +597,7 @@ impl Task {
     }
 }
 
-fn mailto(a: &str) -> String {
+pub(crate) fn mailto(a: &str) -> String {
     match a.get(..7) {
         Some(p) if p.eq_ignore_ascii_case("mailto:") => a[7..].to_owned(),
         _ => a.to_owned(),
@@ -711,7 +711,7 @@ fn value_text(v: &Value) -> String {
     }
 }
 
-fn utc_ical(t: i64) -> String {
+pub(crate) fn utc_ical(t: i64) -> String {
     jiff::Timestamp::from_second(t).map(|t| t.strftime("%Y%m%dT%H%M%SZ").to_string()).unwrap_or_default()
 }
 
@@ -720,7 +720,7 @@ fn utc_json(t: i64) -> String {
 }
 
 /// `20261021T100000Z` или `2026-10-21T10:00:00Z` → Unix-секунды.
-fn ical_utc(s: &str) -> Option<i64> {
+pub(crate) fn ical_utc(s: &str) -> Option<i64> {
     let s = s.trim();
     if let Ok(t) = s.parse::<jiff::Timestamp>() {
         return Some(t.as_second());
@@ -730,7 +730,7 @@ fn ical_utc(s: &str) -> Option<i64> {
     dt.to_zoned(TimeZone::UTC).ok().map(|z| z.timestamp().as_second())
 }
 
-fn cn(name: &str) -> String {
+pub(crate) fn cn(name: &str) -> String {
     let n: String = name.chars().filter(|c| !matches!(c, '"' | '\r' | '\n')).collect();
     if n.is_empty() { String::new() } else { format!(";CN=\"{n}\"") }
 }

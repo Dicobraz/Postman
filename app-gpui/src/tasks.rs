@@ -35,6 +35,10 @@ use postman_core::tasks::{self as model, List, Reply, Request};
 use crate::chrome::icon;
 use crate::roles::Look;
 
+mod delegation;
+pub(crate) use delegation::mail_card;
+use delegation::Edit;
+
 const NAV_W: f32 = 236.;
 const CARD_W: f32 = 440.;
 const ROW_H: f32 = 44.;
@@ -65,6 +69,11 @@ pub(crate) mod g {
     pub(crate) const EDIT: char = '\u{E70F}';
     pub(crate) const DELETE: char = '\u{E74D}';
     pub(crate) const SEARCH: char = '\u{E721}';
+    /// Поручения (S6-10): «Поручить», «Забрать», «в работе», «отклонил».
+    pub(crate) const DELEGATE: char = '\u{E8FA}';
+    pub(crate) const REVOKE: char = '\u{E7A7}';
+    pub(crate) const PLAY: char = '\u{E768}';
+    pub(crate) const CANCEL: char = '\u{E711}';
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -263,6 +272,10 @@ pub(crate) enum TasksAction {
     Toast(Toast, String),
     /// Тост с «Отменить»: что вернуть.
     Undo { text: String, undo: Undo },
+    /// Письма шага поручения (S6-10): своя копия уже записана — `Command::Delegate`.
+    Delegate { uid: String, drafts: Vec<postman_compose::Draft> },
+    /// Форме «Поручить» нужна адресная книга окна письма (подсказки исполнителя).
+    NeedBook,
 }
 
 /// Что вернуть по «Отменить».
@@ -301,6 +314,12 @@ pub(crate) struct TasksView {
     /// Задачи пришли (снимки ждут их).
     pub(crate) loaded: bool,
     timer: Option<gpui_kit::Task<()>>,
+    /// Мой адрес: сторона в поручении, «От» писем шага. Демо — владелец демо-ящика.
+    me: Option<postman_compose::Address>,
+    /// Адресная книга окна письма: исполнитель и наблюдатели из справочника и контактов.
+    book: Option<crate::compose::Book>,
+    /// Формы поручения (S6-10).
+    deleg: delegation::State,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -324,6 +343,9 @@ impl TasksView {
                 }
             }
         });
+        let (deleg, deleg_subs) = delegation::State::new(window, cx);
+        let mut subscriptions = vec![on_search, on_quick];
+        subscriptions.extend(deleg_subs);
         let mut this = Self {
             live: false,
             cache,
@@ -345,7 +367,10 @@ impl TasksView {
             tz: crate::prefs::get(cx).calendar.zone(),
             loaded: true,
             timer: None,
-            _subscriptions: vec![on_search, on_quick],
+            me: Some(postman_compose::Address::new(postman_demo::ME_NAME, postman_demo::ME)),
+            book: None,
+            deleg,
+            _subscriptions: subscriptions,
         };
         this.load_letters(cx);
         this.reshow(cx);
@@ -355,6 +380,7 @@ impl TasksView {
     /// Живой ящик: задачи — с сервера (поток синхронизации присылает их сам после входа).
     pub(crate) fn go_live(&mut self, cx: &mut Context<Self>) {
         self.live = true;
+        self.me = None;
         self.tasks.clear();
         self.loaded = false;
         self.selected = None;
@@ -447,6 +473,7 @@ impl TasksView {
     fn select(&mut self, uid: String, cx: &mut Context<Self>) {
         if self.selected.as_deref() != Some(uid.as_str()) {
             self.draft = None;
+            self.deleg.edit = None;
             self.selected = Some(uid);
             self.due_open = false;
             self.title = None;
@@ -542,6 +569,10 @@ impl TasksView {
 
     /// Выполнить или вернуть выбранную (Space, круг в строке).
     pub(crate) fn toggle_done(&mut self, cx: &mut Context<Self>) {
+        // Поручение: Space — главное действие стороны (S6-10).
+        if self.deleg_primary(cx) {
+            return;
+        }
         if let Some(uid) = self.selected.clone() {
             self.toggle_done_of(&uid, cx);
         }
@@ -655,7 +686,11 @@ impl TasksView {
     }
 
     /// Срок (Insert): варианты в карточке.
-    pub(crate) fn toggle_due(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Поручение: Insert — изменить срок (поручивший) или предложить (исполнитель).
+        if self.deleg_due(window, cx) {
+            return;
+        }
         if self.selected.is_some() {
             self.due_open = !self.due_open;
             cx.notify();
@@ -729,6 +764,9 @@ impl TasksView {
 
     /// Esc: правка названия, варианты срока, поиск.
     pub(crate) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.deleg_escape(cx) {
+            return true;
+        }
         if self.draft.take().is_some() {
             self.title = None;
             self.selected = None;
@@ -1081,6 +1119,7 @@ impl TasksView {
         }
         let uid = t.uid.clone();
         let check_uid = t.uid.clone();
+        let deleg = postman_calendar::assign::status(t);
         let circle = div()
             .id(("task-check", ix))
             .size(px(20.))
@@ -1090,12 +1129,15 @@ impl TasksView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(checked, |d| d.bg(if done { l.text3() } else { l.accent() }).text_color(l.on_accent()).child(icon(g::CHECK, 11.)))
-            .when(!checked, |d| d.border_2().border_color(l.text3()).hover(|d| d.border_color(l.accent_text())))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.toggle_done_of(&check_uid, cx)
-            }));
+            .when_some(deleg, |d, st| d.child(delegation::status_circle(st, 20., l)))
+            .when(deleg.is_none() && checked, |d| d.bg(if done { l.text3() } else { l.accent() }).text_color(l.on_accent()).child(icon(g::CHECK, 11.)))
+            .when(deleg.is_none() && !checked, |d| d.border_2().border_color(l.text3()).hover(|d| d.border_color(l.accent_text())))
+            .when(deleg.is_none(), |d| {
+                d.on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_done_of(&check_uid, cx)
+                }))
+            });
         let title = div()
             .flex()
             .items_center()
@@ -1142,6 +1184,12 @@ impl TasksView {
     }
 
     fn card_pane(&self, t: &Task, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(Edit::Assign { reassign }) = self.deleg.edit {
+            return self.assign_form(t, reassign, cx);
+        }
+        if let Some((_, st, owner)) = self.delegation().filter(|(d, _, _)| d.uid == t.uid) {
+            return self.deleg_pane(t, st, owner, cx);
+        }
         let l = crate::roles::look(cx);
         let done = t.progress.is_closed();
         let pending = self.completing.is_pending(&t.uid);
@@ -1289,7 +1337,7 @@ impl TasksView {
             .cursor_pointer()
             .hover(|d| d.bg(l.hover()))
             .child(field(g::FLAG, "tasks-field-due", due_value))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_due(cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_due(window, cx)));
         let due_opts = self.due_open.then(|| {
             let now = jiff::Zoned::now().with_time_zone(self.tz.clone());
             let mut opts: Vec<AnyElement> = cycle::picks(Kind::Due)
@@ -1515,7 +1563,7 @@ pub(crate) fn due_badge(t: &Task, now: i64, tz: &TimeZone) -> Option<Badge> {
 }
 
 /// «Чт 22.10, до 18:00», «Сегодня», «Завтра, до 10:00».
-fn due_text(t: &Task, tz: &TimeZone) -> String {
+pub(crate) fn due_text(t: &Task, tz: &TimeZone) -> String {
     let Some(w) = mailtask::due_when(t, tz) else { return String::new() };
     let day = crate::calendar::long_day(w.date);
     match w.time {
@@ -1593,6 +1641,11 @@ impl Render for TasksBar {
         let has = sel.is_some();
         let done = sel.is_some_and(|t| t.progress.is_closed());
         let editable = sel.is_some_and(|t| !mailtask::is_letter(t));
+        let deleg = v.delegation();
+        let me_owner = deleg.as_ref().is_some_and(|(_, _, o)| *o);
+        let can = |a: postman_calendar::assign::Action| deleg.as_ref().is_some_and(|(_, st, o)| *o && postman_calendar::assign::next(*st, a).is_ok());
+        let can_delegate = editable && (deleg.is_none() || can(postman_calendar::assign::Action::Reassign));
+        let (can_remind, can_revoke) = (can(postman_calendar::assign::Action::Remind), can(postman_calendar::assign::Action::Revoke));
         let search_state = v.search.clone();
         use crate::commands::task as cmd;
         let action = |id: &'static str, glyph: char, text: String, command: &'static str, on: bool, act: fn() -> Box<dyn Action>, cx: &App| {
@@ -1634,6 +1687,12 @@ impl Render for TasksBar {
             .child(div().w(px(1.)).h(px(20.)).mx(px(8.)).bg(l.stroke()))
             .child(action("task-edit", g::EDIT, tr!("tasks-edit"), "task.edit", editable, || Box::new(cmd::Edit), cx))
             .child(action("task-delete", g::DELETE, tr!("tasks-delete"), "task.delete", has, || Box::new(cmd::Delete), cx))
+            .child(div().w(px(1.)).h(px(20.)).mx(px(8.)).bg(l.stroke()))
+            .child(action("task-delegate", g::DELEGATE, tr!("tasks-delegate"), "task.delegate", can_delegate, || Box::new(cmd::Delegate), cx))
+            .when(me_owner, |d| {
+                d.child(action("task-remind", g::RINGER, tr!("tasks-remind"), "task.remind", can_remind, || Box::new(cmd::Remind), cx))
+                    .child(action("task-revoke", g::REVOKE, tr!("tasks-revoke"), "task.revoke", can_revoke, || Box::new(cmd::Revoke), cx))
+            })
             .child(div().flex_1())
             .child(crate::keytips::badge(div().ml(px(12.)).w(px(300.)).flex_none().child(search), crate::keytips::key("search.focus", cx), &l, cx))
     }
@@ -1657,6 +1716,17 @@ impl crate::Mailer {
                 }
             }
             TasksAction::Toast(level, text) => self.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx)),
+            TasksAction::Delegate { uid, drafts } => {
+                let ticket = jiff::Timestamp::now().as_millisecond() as u64;
+                let cmd = postman_core::sync::Command::Delegate { uid: uid.clone(), drafts: drafts.clone(), ticket };
+                if self.backend.is_live() && !self.backend.send(cmd) {
+                    self.sync_stopped(cx);
+                }
+            }
+            TasksAction::NeedBook => {
+                let book = self.compose.book.clone();
+                self.tasks.update(cx, |t, _| t.set_book(book));
+            }
             TasksAction::Undo { text, undo } => {
                 let view = self.tasks.downgrade();
                 let undo = undo.clone();
@@ -1716,6 +1786,8 @@ pub(crate) fn demo(now: i64, tz: &TimeZone) -> Vec<Task> {
         t.set_done(true, now - hours * 3600);
         out.push(t);
     }
+    // Поручения (S6-10): я поручил и мне поручили — все статусы.
+    out.extend(postman_demo::delegations::all(today, now));
     out
 }
 
