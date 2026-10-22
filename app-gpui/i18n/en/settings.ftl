@@ -635,3 +635,5 @@ settings-tls-13 = TLS 1.3
 settings-tls-13-hint = TLS 1.3 only: servers with 1.2 stop connecting (from the next connection).
 settings-passwords-none = Do not store
 settings-passwords-none-hint = The password is asked at every start; nothing is kept between starts.
+settings-sign-all = Sign all messages
+settings-sign-all-hint = New messages are S/MIME signed with the From address certificate (turn off in a message). GOST — only with a certified crypto provider.

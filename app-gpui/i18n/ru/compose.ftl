@@ -32,3 +32,14 @@ compose-confirm-close = Сохранить черновик?
 compose-confirm-yes = Да
 compose-confirm-no = Нет
 compose-confirm-cancel = Отмена
+# Подпись S/MIME (S5-12 Ф3).
+compose-sign = Подписать
+compose-sign-on = Письмо будет подписано сертификатом адреса «От» — снять
+compose-sign-off = Подписать письмо сертификатом адреса «От»
+compose-sign-need-pin = Не подписано: нужен PIN смарт-карты · снимите «Подписать» или вставьте карту и повторите
+compose-sign-no-card = Не подписано: смарт-карта не найдена · вставьте карту и повторите
+compose-sign-cancelled = Не подписано: ввод PIN отменён
+compose-sign-need-skzi = Не подписано: сертификат ГОСТ, нужно сертифицированное СКЗИ (КриптоПро CSP или ViPNet CSP)
+compose-sign-no-cert = Не подписано: нет сертификата подписи для { $address } · снимите «Подписать»
+compose-sign-eight-bit = Не подписано: письмо не в 7 бит
+compose-sign-failed = Не подписано: { $error }

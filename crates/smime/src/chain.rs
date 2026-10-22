@@ -72,6 +72,18 @@ pub(crate) fn info(der: &[u8]) -> Option<CertInfo> {
     })
 }
 
+/// Свой сертификат годится для подписи почты: KeyUsage и EKU («Защита почты» или без EKU).
+pub(crate) fn can_sign_mail(der: &[u8]) -> bool {
+    use x509_cert::ext::pkix::ExtendedKeyUsage;
+    let Ok(c) = Certificate::from_der(der) else { return false };
+    let eku_ok = match c.tbs_certificate().get_extension::<ExtendedKeyUsage>() {
+        Ok(Some((_, eku))) => eku.0.contains(&crate::oid::EKU_EMAIL_PROTECTION),
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    eku_ok && usage_allows_signing(&c)
+}
+
 /// KeyUsage разрешает подпись (RFC 8550 §4.4.2): нет расширения — разрешает.
 fn usage_allows_signing(c: &Certificate) -> bool {
     match c.tbs_certificate().get_extension::<Ku>() {

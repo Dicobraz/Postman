@@ -20,6 +20,7 @@ pub mod envelope;
 pub mod gost;
 mod mime;
 pub mod oid;
+pub mod sign;
 mod signed;
 #[cfg(feature = "soft")]
 pub mod soft;
