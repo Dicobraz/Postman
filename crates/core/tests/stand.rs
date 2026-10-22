@@ -739,3 +739,44 @@ async fn calendar_change_arrives_by_push() {
     assert!(!mail, "календарное изменение перечитало письма");
     println!("calendar push → CalendarChanged in {elapsed:?}");
 }
+
+/// Поиск в календаре (S5-21): `CalendarEvent/query` с `filter.text` находит событие по слову темы и по месту, чужое
+/// слово — не находит. Событие — своё, без участников; затем удаляется. Находки — `docs/STALWART.md`.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn stand_calendar_search() {
+    use postman_core::schedule::{self, Meeting};
+
+    let a = user(1).await;
+    let stamp = stamp().replace('-', "");
+    let word = format!("поисксобытия{stamp}");
+    let place = format!("Переговорная{stamp}");
+    let start = start_in(12);
+    let meeting = Meeting {
+        uid: format!("postman-s521-search-{stamp}@itt.test"),
+        title: format!("Postman: {word}"),
+        location: place.clone(),
+        description: String::new(),
+        start,
+        time_zone: "Europe/Moscow".into(),
+        duration_secs: 1800,
+        attendees: Vec::new(),
+        optional: Vec::new(),
+    };
+    let identities = a.client.identities().await.unwrap();
+    let id = schedule::create(&a.client, &identities, &meeting).await.unwrap();
+    let tz = jiff::tz::TimeZone::get("Europe/Moscow").unwrap();
+    let at = start.to_zoned(tz).unwrap().timestamp().as_second();
+    let (from, to) = (at - 30 * 86_400, at + 30 * 86_400);
+    let by_title = eventually("поиск по слову темы", || async {
+        let found = schedule::search(&a.client, &word, from, to).await.unwrap();
+        (!found.is_empty()).then_some(found)
+    })
+    .await;
+    assert!(by_title.iter().any(|e| e.uid == meeting.uid), "по теме: {by_title:?}");
+    let by_place = schedule::search(&a.client, &place, from, to).await.unwrap();
+    eprintln!("поиск по месту: {} событий", by_place.len());
+    let none = schedule::search(&a.client, &format!("нетакогослова{stamp}"), from, to).await.unwrap();
+    assert!(none.iter().all(|e| e.uid != meeting.uid), "чужое слово нашло событие");
+    a.client.destroy_event(&id, false).await.unwrap();
+}

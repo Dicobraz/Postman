@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod buttons;
+mod cal_model;
 mod calendar;
 mod commands;
 mod ir_view;
