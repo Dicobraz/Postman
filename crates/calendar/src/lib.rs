@@ -9,7 +9,7 @@ mod invite;
 mod layout;
 mod task;
 
-pub use event::{Event, EventStatus, FreeBusy, NewEvent, Participant, Partstat, format_duration, parse_duration};
+pub use event::{Event, EventStatus, FreeBusy, NewEvent, Owner, Participant, Partstat, format_duration, parse_duration};
 pub use freebusy::{Busy, BusyKind, Cell, WorkHours, find_slots, grid, merge};
 pub use invite::{Invitation, imip_reply, participant_id, partstat_json, reply_subject};
 pub use layout::{Placed, layout_day};

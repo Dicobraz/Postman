@@ -566,7 +566,7 @@ const HOSTILE: &str = r#"<html><body onload="steal()"><script>alert('xss')</scri
 
 /// Демо-календарь на текущую рабочую неделю: мои события и занятость коллег.
 pub mod calendar {
-    use postman_calendar::{Busy, BusyKind, Event, EventStatus, FreeBusy, Participant, Partstat, Span};
+    use postman_calendar::{Busy, BusyKind, Event, EventStatus, FreeBusy, Owner, Participant, Partstat, Span};
 
     /// Понедельник текущей недели, 00:00 в системном часовом поясе (Unix-секунды).
     pub fn week_start() -> i64 {
@@ -613,6 +613,7 @@ pub mod calendar {
             recurring: false,
             keywords: if category.is_empty() { Vec::new() } else { vec![format!("pm.cat.{category}")] },
             sequence: 0,
+            owner: None,
         }
     }
 
@@ -646,6 +647,34 @@ pub mod calendar {
         v.push(conference);
         v.sort_by_key(|e| e.span.start);
         v
+    }
+
+    /// Коллеги, открывшие мне календарь (S5-22): события их календарей — [`colleague_events`].
+    pub fn shared_calendars() -> Vec<Owner> {
+        vec![
+            Owner { email: "m.ivanova@corp.example".into(), name: "Иванова Мария".into() },
+            Owner { email: "a.petrov@corp.example".into(), name: "Петров Алексей".into() },
+        ]
+    }
+
+    /// События календарей коллег демо-недели: владелец — у события, организатор — он сам.
+    pub fn colleague_events() -> Vec<Event> {
+        let owners = shared_calendars();
+        let of = |n: usize, id: &str, title: &str, day: i64, at: (i64, i64), mins: i64, place: &str| {
+            let o = owners[n].clone();
+            let mut e = event(id, title, day, at, mins, place, false, Me::Owner, "");
+            e.participants = vec![Participant { name: o.name.clone(), email: o.email.clone(), owner: true, attendee: true, optional: false, status: Partstat::Accepted }];
+            e.calendar_ids = vec!["c".into()];
+            e.owner = Some(o);
+            e
+        };
+        vec![
+            of(0, "c1", "Аудит доступа", 0, (14, 30), 60, "Переговорная 2"),
+            of(0, "c2", "Встреча с юристами", 2, (9, 0), 60, ""),
+            of(0, "c3", "Отпуск — подготовка", 4, (10, 0), 90, ""),
+            of(1, "c4", "Звонок поставщику", 1, (10, 30), 60, "Teams"),
+            of(1, "c5", "Совет директоров", 3, (16, 0), 90, "Зал совета"),
+        ]
     }
 
     /// События соседних недель и выходных (S5-21: виды «Неделя» и «Месяц» не пустые вокруг текущей недели): в
