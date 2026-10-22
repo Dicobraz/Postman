@@ -10,7 +10,7 @@ use windows_sys::Win32::Security::Cryptography::*;
 
 use super::{Confirm, Revocation};
 
-pub(super) use super::cng::unwrap_cek;
+pub(super) use super::cng::{gost_decrypt, unwrap_cek};
 
 const ENCODING: CERT_QUERY_ENCODING_TYPE = X509_ASN_ENCODING | PKCS_7_ASN_ENCODING;
 /// Сколько ждать CRL/OCSP по сети (все запросы цепочки вместе).

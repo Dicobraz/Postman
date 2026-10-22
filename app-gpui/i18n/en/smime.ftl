@@ -82,3 +82,4 @@ smime-enc-too-large = The message is too large to open safely
 smime-enc-failed = The message is not decrypted: { $error }
 smime-enc-part-open = Decrypted attachments are not opened from a temp folder — save it ("Save as").
 smime-enc-part-gone = The message was closed — open it again
+smime-enc-need-skzi = The message is encrypted with GOST: a certified crypto provider (CryptoPro CSP or ViPNet CSP) is required

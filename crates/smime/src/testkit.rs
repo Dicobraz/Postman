@@ -729,6 +729,9 @@ pub enum KeyAlg {
     RsaOaep(Hash),
     /// ECDH P-256/P-384, KDF этим хэшем, AES Key Wrap ключом `bits`.
     Ecdh(Hash, u16),
+    /// ГОСТ Р 34.10 (`GostR3410-KeyTransport`, RFC 4490): поля — правдоподобные, ключ не снимается (только разбор:
+    /// снимает СКЗИ).
+    GostTransport,
 }
 
 /// Получатель: сертификат, его ключ (для ECDH — открытый из него), алгоритм; `ski` — идентификатор SKI вместо
@@ -867,6 +870,18 @@ fn recipient_info(to: &To<'_>, cek: &[u8], n: u64) -> Vec<u8> {
             let point = eph.public_key().to_sec1_point(false);
             ecdh_ri(to, z.raw_secret_bytes(), point.as_bytes(), kdf, bits, cek)
         }
+        (KeyAlg::GostTransport, Key::Gost { .. }) => {
+            let spki = to.key.spki();
+            let key_oid = spki.algorithm.oid;
+            let params = spki.algorithm.parameters.as_ref().unwrap().to_der().unwrap();
+            // Эфемерный ключ — открытый ключ получателя (разбор не проверяет математику).
+            let bits = [vec![0u8], spki.subject_public_key.raw_bytes().to_vec()].concat();
+            let eph = tlv(0xA0, &[seq(&[oid_der(key_oid), params]), tlv(0x03, &bits)].concat());
+            let sek = seq(&[tlv(0x04, &seed("gost-ek", 32)), tlv(0x04, &seed("gost-mac", 4))]);
+            let tparams = [oid_der(oid::GOST28147_PARAM_A), eph, tlv(0x04, &seed("gost-ukm", 8))].concat();
+            let transport = seq(&[sek, tlv(0xA0, &tparams)]);
+            seq(&[tlv(0x02, &[0]), rid_der(to.cert, to.ski, false), alg_der(key_oid, None), tlv(0x04, &transport)])
+        }
         _ => panic!("ключ не подходит к алгоритму"),
     }
 }
@@ -911,6 +926,8 @@ pub fn enveloped(content: &[u8], to: &[To<'_>], cipher: crate::envelope::Cipher,
             let ct = cbc::Encryptor::<des::TdesEde3>::new_from_slices(cek, &iv[..8]).unwrap().encrypt_padded_vec_mut::<Pkcs7>(content);
             (alg_der(oid::DES_EDE3_CBC, Some(tlv(0x04, &iv[..8]))), ct, None)
         }
+        // ГОСТ 28147-89: шифровать нечем (только СКЗИ) — содержимое как есть, параметры настоящие.
+        Cipher::Gost28147 => (alg_der(oid::GOST28147, Some(seq(&[tlv(0x04, &iv[..8]), oid_der(oid::GOST28147_PARAM_A)]))), content.to_vec(), None),
         Cipher::AesGcm(bits) => {
             use aes_gcm::aead::AeadInPlace;
             use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, Nonce};

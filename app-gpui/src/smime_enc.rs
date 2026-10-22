@@ -41,6 +41,8 @@ pub(crate) enum Problem {
     NeedPin,
     NoCard,
     Cancelled,
+    /// Письмо ГОСТ, а сертифицированного СКЗИ нет (решение владельца 2026-10-22).
+    NeedSkzi,
     NotForYou(Vec<String>),
     Damaged,
     Unsupported(String),
@@ -55,6 +57,7 @@ impl Problem {
             KeyError::NeedPin => Problem::NeedPin,
             KeyError::NoCard => Problem::NoCard,
             KeyError::Cancelled => Problem::Cancelled,
+            KeyError::NeedSkzi => Problem::NeedSkzi,
             KeyError::NotForYou(l) => Problem::NotForYou(l),
             KeyError::Unsupported(a) => Problem::Unsupported(a),
             KeyError::Failed(e) => Problem::Failed(e),
@@ -84,6 +87,7 @@ impl Problem {
             Problem::NeedPin => tr!("smime-enc-need-pin"),
             Problem::NoCard => tr!("smime-enc-no-card"),
             Problem::Cancelled => tr!("smime-enc-cancelled"),
+            Problem::NeedSkzi => tr!("smime-enc-need-skzi"),
             Problem::NotForYou(who) => tr!("smime-enc-not-for-you", who = who.first().cloned().unwrap_or_default()),
             Problem::Damaged => tr!("smime-enc-damaged"),
             Problem::Unsupported(alg) => tr!("smime-enc-unsupported", alg = alg.clone()),
@@ -123,8 +127,25 @@ fn demo_keys() -> Arc<dyn KeyStore> {
     .clone()
 }
 
+/// Вложения расшифрованного письма — строками ленты (ключ — `smime-part:<id>:<номер>`).
+fn part_rows(key: &str, parts: &[postman_smime::envelope::Part]) -> Vec<AttachmentRow> {
+    parts
+        .iter()
+        .map(|p| AttachmentRow {
+            blob_id: format!("{PART}{key}:{}", p.index),
+            name: p.name.clone(),
+            mime: p.mime.clone(),
+            size: p.size,
+            cid: p.cid.clone(),
+            inline: p.inline,
+        })
+        .collect()
+}
+
 /// Итог фоновой расшифровки.
 struct Done {
+    /// ГОСТ: внутреннее письмо от СКЗИ (для вложений).
+    inner: Option<Arc<zeroize::Zeroizing<Vec<u8>>>>,
     cipher: Cipher,
     doc: Option<postman_ir::Document>,
     parts: Vec<AttachmentRow>,
@@ -145,9 +166,43 @@ impl ReadingPane {
         s.data = Some(data.clone());
         let id = r.row.id.clone();
         let key = id.clone();
+        let from = r.row.from_addr.to_lowercase();
+        let gost_inner = s.inner.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
             let now = jiff::Timestamp::now().as_second();
+            let trust = env.anchors.trust();
+            // ГОСТ: СКЗИ отдаёт внутреннее письмо (ключ из него не выходит), воркер его разбирает.
+            let gost = match gost_inner {
+                Some(i) => Some(i),
+                None if keys::remembered(&key).is_none() => {
+                    let envelope = {
+                        let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
+                        w.smime_envelope(&data)
+                    };
+                    let envelope = envelope.map_err(Problem::of_worker)?.map_err(Problem::of_open)?;
+                    if envelope.cipher == Ok(Cipher::Gost28147) {
+                        Some(Arc::new(store.gost(&envelope, prompt).map_err(Problem::of_key)?))
+                    } else {
+                        let cek = store.cek(&envelope, prompt).map_err(Problem::of_key)?;
+                        keys::remember(&key, cek);
+                        None
+                    }
+                }
+                None => None,
+            };
+            if let Some(inner) = gost {
+                let r = {
+                    let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
+                    w.smime_inner(&inner, &from, &trust, u64::try_from(now).unwrap_or(0), None)
+                };
+                let (opened, doc, _) = r.map_err(Problem::of_worker)?.map_err(Problem::of_open)?;
+                let opened = opened.ok_or_else(|| Problem::Failed("worker".into()))?;
+                let parts = part_rows(&key, &opened.parts);
+                let signed = opened.inner.kind != postman_smime::Kind::None;
+                let verdict = signed.then(|| postman_core::smime::assess(&cache, opened.inner, &env, now));
+                return Ok::<Done, Problem>(Done { inner: Some(inner), cipher: opened.cipher, doc, parts, verdict });
+            }
             let cek = match keys::remembered(&key) {
                 Some(c) => c,
                 None => {
@@ -159,28 +214,16 @@ impl ReadingPane {
                     store.cek(&envelope, prompt).map_err(Problem::of_key)?
                 }
             };
-            let trust = env.anchors.trust();
             let opened = {
                 let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
                 w.smime_open(&data, &cek, &trust, u64::try_from(now).unwrap_or(0))
             };
             let (opened, doc) = opened.map_err(Problem::of_worker)?.map_err(Problem::of_open)?;
             keys::remember(&key, cek);
-            let parts = opened
-                .parts
-                .iter()
-                .map(|p| AttachmentRow {
-                    blob_id: format!("{PART}{key}:{}", p.index),
-                    name: p.name.clone(),
-                    mime: p.mime.clone(),
-                    size: p.size,
-                    cid: p.cid.clone(),
-                    inline: p.inline,
-                })
-                .collect();
+            let parts = part_rows(&key, &opened.parts);
             let signed = opened.inner.kind != postman_smime::Kind::None;
             let verdict = signed.then(|| postman_core::smime::assess(&cache, opened.inner, &env, now));
-            Ok::<Done, Problem>(Done { cipher: opened.cipher, doc, parts, verdict })
+            Ok::<Done, Problem>(Done { inner: None, cipher: opened.cipher, doc, parts, verdict })
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -190,6 +233,7 @@ impl ReadingPane {
                 match result {
                     Ok(d) => {
                         s.lock = Some(Lock::Open(d.cipher));
+                        s.inner = d.inner;
                         s.seal = match d.verdict {
                             Some(v) => Seal::Done(Box::new(v)),
                             None => Seal::Unsigned,
@@ -231,7 +275,30 @@ impl ReadingPane {
     pub(crate) fn fetch_part(&mut self, a: &AttachmentRow, cx: &mut Context<Self>) -> bool {
         let Some(rest) = a.blob_id.strip_prefix(PART) else { return false };
         let Some((id, index)) = rest.rsplit_once(':').and_then(|(id, i)| Some((id.to_owned(), i.parse::<u32>().ok()?))) else { return true };
-        let data = self.reading.as_ref().filter(|r| r.row.id == id).and_then(|r| r.smime.as_ref()).and_then(|s| s.data.clone());
+        let state = self.reading.as_ref().filter(|r| r.row.id == id).and_then(|r| r.smime.as_ref());
+        // ГОСТ: вложение — из внутреннего письма от СКЗИ.
+        if let Some(inner) = state.and_then(|s| s.inner.clone()) {
+            if !self.in_flight.insert(a.blob_id.clone()) {
+                return true;
+            }
+            let (worker, blob) = (self.worker.clone(), a.blob_id.clone());
+            let task = cx.background_spawn(async move {
+                let mut w = worker.lock().unwrap_or_else(PoisonError::into_inner);
+                w.smime_inner(&inner, "", &Default::default(), 0, Some(index)).map(|r| r.map(|(_, _, bytes)| bytes))
+            });
+            cx.spawn(async move |this, cx| {
+                let r = task.await;
+                this.update(cx, |this, cx| match r {
+                    Ok(Ok(bytes)) => this.blob_ready_pub(&blob, Arc::new(bytes.to_vec()), cx),
+                    Ok(Err(e)) => this.blob_failed_pub(&blob, Problem::of_open(e).text(), cx),
+                    Err(e) => this.blob_failed_pub(&blob, Problem::of_worker(e).text(), cx),
+                })
+                .ok();
+            })
+            .detach();
+            return true;
+        }
+        let data = state.and_then(|s| s.data.clone());
         let (Some(data), Some(cek)) = (data, keys::remembered(&id)) else {
             self.blob_failed_pub(&a.blob_id, tr!("smime-enc-part-gone"), cx);
             return true;

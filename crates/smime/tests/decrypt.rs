@@ -57,7 +57,7 @@ fn rsa_recipients_and_ciphers() {
         match alg {
             KeyAlg::RsaPkcs1 => assert_eq!(r.wrap, Wrap::RsaPkcs1),
             KeyAlg::RsaOaep(h) => assert_eq!(r.wrap, Wrap::RsaOaep(h)),
-            KeyAlg::Ecdh(..) => unreachable!(),
+            KeyAlg::Ecdh(..) | KeyAlg::GostTransport => unreachable!(),
         }
         let got = soft::unwrap(std::slice::from_ref(&key), &env).unwrap();
         assert_eq!(got.as_slice(), k.as_slice(), "{alg:?}");
@@ -198,4 +198,30 @@ fn truncated_and_unsupported() {
     rc2[at + 7] = 0x02;
     let env = envelope::envelope(&letter(&rc2, Cipher::Des3)).unwrap();
     assert_eq!(env.cipher, Err("RC2".into()));
+}
+
+/// ГОСТ (RFC 4490): получатель и параметры содержимого разобраны для СКЗИ; ключ в памяти не снимается — «нужно
+/// СКЗИ» (решение владельца 2026-10-22), воркер содержимое ГОСТ не расшифровывает.
+#[test]
+fn gost_recipient_is_parsed_for_the_skzi() {
+    use postman_smime::envelope::{GostKey, OpenError as E};
+    use postman_smime::oid;
+    let pki = Pki::build(Key::gost("root", oid::TC26_256_A), Key::gost("user", oid::TC26_256_A), "ГОСТ УЦ", "Сидоров", "me@itt.test");
+    let cms = testkit::enveloped(&testkit::html_part(HTML), &[To { cert: &pki.user, key: &pki.user_key, alg: KeyAlg::GostTransport, ski: false }], Cipher::Gost28147, &[0; 32], false);
+    let m = letter(&cms, Cipher::Gost28147);
+    let env = envelope::envelope(&m).unwrap();
+    assert_eq!(env.cipher, Ok(Cipher::Gost28147));
+    let Wrap::Gost(t) = &env.recipients[0].wrap else { panic!("{:?}", env.recipients[0].wrap) };
+    assert_eq!(t.key, GostKey::G2012_256);
+    assert_eq!(t.param_set, oid::GOST28147_PARAM_A.to_string());
+    assert_eq!(t.public_param_set, oid::TC26_256_A.to_string());
+    assert_eq!((t.ukm.len(), t.encrypted_key.len(), t.mac.len(), t.ephemeral.len()), (8, 32, 4, 64));
+    let g = env.gost.as_ref().unwrap();
+    assert_eq!((g.iv.len(), g.param_set.as_str()), (8, oid::GOST28147_PARAM_A.to_string().as_str()));
+    assert_eq!(g.data, testkit::html_part(HTML), "шифр ГОСТ в тесте — заглушка: содержимое как есть");
+    let Key::Gost { .. } = pki.user_key else { unreachable!() };
+    assert!(matches!(envelope::open(&m, &[0; 32], &Default::default(), NOW), Err(E::Unsupported(_))));
+    // Письмо, расшифрованное в ядре (СКЗИ): тело и вложения — тем же разбором.
+    let o = envelope::open_inner(&g.data, "a@itt.test", Cipher::Gost28147, &Default::default(), NOW).unwrap();
+    assert_eq!(o.html.as_deref(), Some(HTML));
 }

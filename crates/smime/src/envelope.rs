@@ -49,8 +49,37 @@ pub enum Wrap {
     /// ECDH (RFC 5753): эфемерный ключ отправителя (точка без сжатия, `04‖X‖Y`), KDF X9.63 этим хэшем, AES Key
     /// Wrap ключом `wrap_bits`, `ukm` — если был.
     Ecdh { kdf: Hash, wrap_bits: u16, ephemeral: Vec<u8>, ukm: Option<Vec<u8>> },
-    /// Не поддерживается (имя или OID): ГОСТ, kekri, pwri…
+    /// ГОСТ Р 34.10 (RFC 4490 §5.2, `GostR3410-KeyTransport`): ключ снимает только СКЗИ (решение владельца
+    /// 2026-10-22) — ядро передаёт эти поля провайдеру ГОСТ, сам ключ ГОСТ Postman не держит.
+    Gost(GostTransport),
+    /// Не поддерживается (имя или OID): kekri, pwri…
     Unsupported(String),
+}
+
+/// Ключ ГОСТ получателя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GostKey {
+    G2001,
+    G2012_256,
+    G2012_512,
+}
+
+/// Поля `GostR3410-KeyTransport` (RFC 4490 §5.2, ГОСТ 28147-89 с экспортом ключа КриптоПро): всё разобрано
+/// воркером, ядру — значения.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GostTransport {
+    pub key: GostKey,
+    /// Набор параметров шифрования ключа (`encryptionParamSet`), OID строкой.
+    pub param_set: String,
+    /// Эфемерный ключ отправителя: точка (X‖Y, little-endian, как в `SubjectPublicKeyInfo` ГОСТ), набор
+    /// параметров ключа и хэша (OID строкой).
+    pub ephemeral: Vec<u8>,
+    pub public_param_set: String,
+    pub digest_param_set: Option<String>,
+    /// Синхропосылка (8 байтов), зашифрованный ключ (32) и имитовставка (4).
+    pub ukm: Vec<u8>,
+    pub encrypted_key: Vec<u8>,
+    pub mac: Vec<u8>,
 }
 
 /// Получатель письма.
@@ -83,6 +112,8 @@ pub enum Cipher {
     AesCbc(u16),
     AesGcm(u16),
     Des3,
+    /// ГОСТ 28147-89 (CFB, RFC 4490): содержимое расшифровывает СКЗИ в ядре — ключ из СКЗИ не выходит.
+    Gost28147,
 }
 
 impl Cipher {
@@ -91,6 +122,7 @@ impl Cipher {
         match self {
             Cipher::AesCbc(bits) | Cipher::AesGcm(bits) => usize::from(bits / 8),
             Cipher::Des3 => 24,
+            Cipher::Gost28147 => 32,
         }
     }
 
@@ -100,11 +132,12 @@ impl Cipher {
             Cipher::AesCbc(b) => format!("AES-{b}-CBC"),
             Cipher::AesGcm(b) => format!("AES-{b}-GCM"),
             Cipher::Des3 => "3DES".into(),
+            Cipher::Gost28147 => "ГОСТ 28147-89".into(),
         }
     }
 }
 
-/// Что видит ядро: получатели и шифр содержимого (без самого содержимого).
+/// Что видит ядро: получатели и шифр содержимого (без самого содержимого — кроме ГОСТ: его расшифровывает СКЗИ).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub recipients: Vec<Recipient>,
@@ -112,6 +145,17 @@ pub struct Envelope {
     pub cipher: Result<Cipher, String>,
     /// AuthEnvelopedData (RFC 5083).
     pub authenticated: bool,
+    /// ГОСТ 28147-89: IV, набор параметров и шифрованное содержимое — байтами, для СКЗИ в ядре.
+    #[serde(default)]
+    pub gost: Option<GostContent>,
+}
+
+/// Шифрованное содержимое ГОСТ 28147-89 (CFB) для СКЗИ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GostContent {
+    pub iv: Vec<u8>,
+    pub param_set: String,
+    pub data: Vec<u8>,
 }
 
 /// Почему письмо не открылось.
@@ -246,6 +290,7 @@ fn ktri(t: &Tlv<'_>) -> Option<Recipient> {
     let wrap = match alg.oid {
         oid::RSA_ENCRYPTION => Wrap::RsaPkcs1,
         oid::RSA_OAEP => oaep(alg.parameters.as_ref()),
+        oid::GOST2001_KEY | oid::GOST_KEY_256 | oid::GOST_KEY_512 => gost_transport(&alg.oid, &encrypted_key),
         other => Wrap::Unsupported(alg_name(&other)),
     };
     let label = label(&rid);
@@ -347,8 +392,51 @@ fn content_alg(alg: &AlgorithmIdentifierOwned) -> (Result<Cipher, String>, Vec<u
                 _ => (Err(format!("AES-{bits}-GCM parameters")), Vec::new(), 0),
             }
         }
+        // `Gost28147-89-Parameters { iv OCTET STRING (8), encryptionParamSet OID }` — IV и набор отдаются ядру
+        // (`Envelope::gost`), расшифровка — в СКЗИ.
+        oid::GOST28147 => (Ok(Cipher::Gost28147), Vec::new(), 0),
         other => (Err(alg_name(&other)), Vec::new(), 0),
     }
+}
+
+/// `GostR3410-KeyTransport` → поля для СКЗИ. Форма с «Кузнечиком»/«Магмой» (KExp15) — не поддерживается [проверить
+/// с КриптоПро CSP 5].
+fn gost_transport(key_oid: &Oid, der: &[u8]) -> Wrap {
+    let key = match *key_oid {
+        oid::GOST2001_KEY => GostKey::G2001,
+        oid::GOST_KEY_512 => GostKey::G2012_512,
+        _ => GostKey::G2012_256,
+    };
+    let parse = || -> Option<GostTransport> {
+        let (t, _) = ber::read(der)?;
+        let kids = t.children()?;
+        let sek = kids.first().filter(|s| s.tag == 0x30)?.children()?;
+        let encrypted_key = sek.first().filter(|k| k.tag == 0x04)?.value.to_vec();
+        let mac = sek.last().filter(|m| m.tag == 0x04)?.value.to_vec();
+        let tp = kids.get(1).filter(|p| p.tag == 0xA0)?.children()?;
+        let param_set = oid_of(tp.first()?)?.to_string();
+        let spki = tp.get(1).filter(|k| k.tag == 0xA0)?.children()?;
+        let alg = spki.first()?.children()?;
+        let params = alg.get(1)?.children()?;
+        let public_param_set = oid_of(params.first()?)?.to_string();
+        let digest_param_set = params.get(1).and_then(oid_of).map(|o| o.to_string());
+        let bits = spki.get(1).filter(|b| b.tag == 0x03)?.value;
+        // BIT STRING (0 неиспользуемых) с OCTET STRING точки внутри.
+        let (inner, _) = ber::read(bits.get(1..)?)?;
+        let ephemeral = (inner.tag == 0x04).then(|| inner.value.to_vec())?;
+        let ukm = tp.last().filter(|u| u.tag == 0x04 && u.value.len() == 8)?.value.to_vec();
+        (encrypted_key.len() == 32 && mac.len() == 4).then_some(GostTransport {
+            key,
+            param_set,
+            ephemeral,
+            public_param_set,
+            digest_param_set,
+            ukm,
+            encrypted_key,
+            mac,
+        })
+    };
+    parse().map_or_else(|| Wrap::Unsupported("ГОСТ: KExp15 / GostR3410-KeyTransport".into()), Wrap::Gost)
 }
 
 /// `encryptedContent [0] IMPLICIT OCTET STRING` — примитивный (DER) или составной (BER потоком у Outlook).
@@ -423,6 +511,19 @@ fn parse(cms: &[u8]) -> Result<Parsed, OpenError> {
     Ok(Parsed { recipients, content, authenticated })
 }
 
+/// Параметры ГОСТ 28147-89 из `contentEncryptionAlgorithm` (IV и набор) и шифрованное содержимое.
+fn gost_content(cms: &[u8], data: Vec<u8>) -> Option<GostContent> {
+    let (ci, _) = ber::read(cms)?;
+    let ed = ci.children()?.get(1)?.children()?.into_iter().next()?;
+    let parts = ed.children()?;
+    let eci = parts.iter().find(|p| p.tag == 0x30 && p.children().is_some_and(|k| k.first().and_then(oid_of) == Some(oid::DATA)))?;
+    let alg = eci.children()?.get(1)?.children()?;
+    let params = alg.get(1)?.children()?;
+    let iv = params.first().filter(|i| i.tag == 0x04 && i.value.len() == 8)?.value.to_vec();
+    let param_set = oid_of(params.get(1)?)?.to_string();
+    Some(GostContent { iv, param_set, data })
+}
+
 /// DER CMS шифрованного письма (корень — `application/pkcs7-mime`).
 fn cms_of(message: &[u8]) -> Result<(Vec<u8>, String), OpenError> {
     if message.len() > crate::MAX_MESSAGE {
@@ -443,8 +544,10 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, OpenError> + std::panic::UnwindSafe)
 /// Получатели и шифр письма `message` (RFC 5322 целиком) — для ядра. Ничего не расшифровывает.
 pub fn envelope(message: &[u8]) -> Result<Envelope, OpenError> {
     guarded(|| {
-        let p = parse(&cms_of(message)?.0)?;
-        Ok(Envelope { recipients: p.recipients, cipher: p.content.cipher, authenticated: p.authenticated })
+        let (cms, _) = cms_of(message)?;
+        let p = parse(&cms)?;
+        let gost = (p.content.cipher == Ok(Cipher::Gost28147)).then(|| gost_content(&cms, p.content.data.clone())).flatten();
+        Ok(Envelope { recipients: p.recipients, cipher: p.content.cipher, authenticated: p.authenticated, gost })
     })
 }
 
@@ -461,6 +564,8 @@ fn decrypt(c: &Content, cek: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpenError> {
         Cipher::AesCbc(_) => cbc::Decryptor::<aes::Aes256>::new_from_slices(cek, &c.iv).map_err(|_| OpenError::Damaged)?.decrypt_padded_vec_mut::<Pkcs7>(&c.data).map_err(damaged)?,
         Cipher::Des3 => cbc::Decryptor::<des::TdesEde3>::new_from_slices(cek, &c.iv).map_err(|_| OpenError::Damaged)?.decrypt_padded_vec_mut::<Pkcs7>(&c.data).map_err(damaged)?,
         Cipher::AesGcm(bits) => gcm(bits, cek, c)?,
+        // Ключ ГОСТ из СКЗИ не выходит: содержимое расшифровывает ядро (`open_inner`).
+        Cipher::Gost28147 => return Err(OpenError::Unsupported("ГОСТ 28147-89: нужно СКЗИ".into())),
     };
     Ok(Zeroizing::new(out))
 }
@@ -521,15 +626,20 @@ fn layers(message: &[u8], cek: &[u8], trust: &Trust, now: u64) -> Result<(Parsed
     let (cms, from) = cms_of(message)?;
     let p = parse(&cms)?;
     let inner = decrypt(&p.content, cek)?;
-    // Шифрование внутри шифрования — не открываем (слои: шифрование → подпись → тело).
-    if matches!(mime::find(&inner), Ok(mime::Found::Encrypted { .. })) {
+    let (body, report) = inner_layers(&inner, &from, trust, now)?;
+    Ok((p, body, report))
+}
+
+/// Расшифрованное внутреннее письмо: подпись внутри и тело для показа (шифрование внутри — не открываем).
+fn inner_layers(inner: &[u8], from: &str, trust: &Trust, now: u64) -> Result<(Vec<u8>, Report), OpenError> {
+    if matches!(mime::find(inner), Ok(mime::Found::Encrypted { .. })) {
         return Err(OpenError::Nested);
     }
-    let mut report = crate::verify(&inner, trust, now);
+    let mut report = crate::verify(inner, trust, now);
     // Внутренняя часть без заголовков письма: «От» — внешнего письма (его и показывает список).
     if report.from.is_empty() {
-        report.address_ok = report.status.signature_ok() && report.certs.first().is_some_and(|c| c.emails.iter().any(|e| e.eq_ignore_ascii_case(&from)));
-        report.from = from;
+        report.address_ok = report.status.signature_ok() && report.certs.first().is_some_and(|c| c.emails.iter().any(|e| e.eq_ignore_ascii_case(from)));
+        report.from = from.to_owned();
     }
     // Подпись внутри (`signed-data`): тело — подписанное содержимое; иначе — само внутреннее письмо.
     let body = match &report.content {
@@ -541,7 +651,7 @@ fn layers(message: &[u8], cek: &[u8], trust: &Trust, now: u64) -> Result<(Parsed
         }
         _ => inner.to_vec(),
     };
-    Ok((p, body, report))
+    Ok((body, report))
 }
 
 /// Расшифровать письмо `message` ключом `cek`: тело, вложения и подпись внутри (к якорям `trust`).
@@ -589,6 +699,30 @@ fn parts_of(msg: &mail_parser::Message<'_>) -> Vec<Part> {
         .collect()
 }
 
+/// Письмо, расшифрованное в ядре (ГОСТ — СКЗИ): тело, вложения, подпись внутри — как [`open`], без расшифровки.
+/// `from` — «От» внешнего письма.
+pub fn open_inner(inner: &[u8], from: &str, cipher: Cipher, trust: &Trust, now: u64) -> Result<Opened, OpenError> {
+    guarded(std::panic::AssertUnwindSafe(|| {
+        let (body, inner_report) = inner_layers(inner, from, trust, now)?;
+        let msg = mail_parser::MessageParser::default().parse(&body).ok_or_else(|| malformed("inner MIME"))?;
+        let html = msg.body_html(0).map(|h| h.into_owned());
+        let text = msg.body_text(0).map(|t| t.into_owned());
+        let parts = parts_of(&msg);
+        Ok(Opened { cipher, authenticated: false, inner: inner_report, html, text, parts })
+    }))
+}
+
+/// Вложение письма, расшифрованного в ядре.
+pub fn part_inner(inner: &[u8], index: u32) -> Result<Zeroizing<Vec<u8>>, OpenError> {
+    guarded(std::panic::AssertUnwindSafe(|| {
+        let (body, _) = inner_layers(inner, "", &Trust::default(), 0)?;
+        let msg = mail_parser::MessageParser::default().parse(&body).ok_or_else(|| malformed("inner MIME"))?;
+        let all = attachments(&msg);
+        let a = all.get(index as usize).ok_or_else(|| malformed("no such part"))?;
+        Ok(Zeroizing::new(a.contents().to_vec()))
+    }))
+}
+
 /// Байты вложения `index` расшифрованного письма.
 pub fn part(message: &[u8], cek: &[u8], index: u32) -> Result<Zeroizing<Vec<u8>>, OpenError> {
     guarded(std::panic::AssertUnwindSafe(|| {
@@ -601,6 +735,11 @@ pub fn part(message: &[u8], cek: &[u8], index: u32) -> Result<Zeroizing<Vec<u8>>
 }
 
 // --- общее для ядра и тестов: без разбора чужого DER ---
+
+/// DER OID из строки (блобы СКЗИ собирает ядро из значений, которые разобрал воркер).
+pub fn oid_der(text: &str) -> Option<Vec<u8>> {
+    Oid::new(text).ok()?.to_der().ok()
+}
 
 /// Серийный номер получателя (`INTEGER` big-endian как пришёл) совпадает с серийным номером сертификата в
 /// little-endian (`CERT_INFO.SerialNumber` Windows). Ведущие нули знака не важны.

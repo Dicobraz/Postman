@@ -64,6 +64,8 @@ impl SoftKey {
             Wrap::RsaOaep(Hash::Sha512) => self.key.decrypt(rsa::Oaep::<sha2::Sha512>::new(), data),
             Wrap::RsaOaep(h) => return Err(SoftError::Unsupported(format!("RSA-OAEP {h:?}"))),
             Wrap::Ecdh { .. } => return Err(SoftError::Unsupported("ECDH".into())),
+            // Ключи ГОСТ — только в СКЗИ (решение владельца 2026-10-22), в памяти их не бывает.
+            Wrap::Gost(_) => return Err(SoftError::Unsupported("ГОСТ: нужно СКЗИ".into())),
             Wrap::Unsupported(n) => return Err(SoftError::Unsupported(n.clone())),
         };
         Ok(r.ok().map(Zeroizing::new))

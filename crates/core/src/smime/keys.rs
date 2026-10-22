@@ -6,7 +6,9 @@
 //! Ключ содержимого живёт только в памяти: на сеанс — [`Session`] (LRU, обнуление при вытеснении и выходе), чтобы
 //! вложения расшифрованного письма открывались без второго PIN; на диск — ни ключ, ни текст (решение владельца №4).
 //!
-//! ГОСТ: ключи ГОСТ без СКЗИ хранить негде (решение о хранении не принято) — получатель ГОСТ — «не поддерживается».
+//! ГОСТ (решение владельца 2026-10-22): операции с закрытым ключом ГОСТ — только в сертифицированном СКЗИ (КриптоПро
+//! CSP, ViPNet CSP); ключ ГОСТ в файле не хранится никогда. Нет СКЗИ — [`KeyError::NeedSkzi`]. Ключ содержимого ГОСТ
+//! из СКЗИ не выходит: [`KeyStore::gost`] отдаёт уже расшифрованное внутреннее письмо (`skzi.rs`).
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -33,6 +35,8 @@ pub enum KeyError {
     Cancelled,
     /// Получатель наш, но алгоритм не поддерживается (имя).
     Unsupported(String),
+    /// Письмо ГОСТ, а сертифицированного СКЗИ на компьютере нет.
+    NeedSkzi,
     /// Другой сбой ОС (текст — для журнала).
     Failed(String),
 }
@@ -40,6 +44,11 @@ pub enum KeyError {
 /// Снимает ключ содержимого.
 pub trait KeyStore: Send + Sync {
     fn cek(&self, env: &Envelope, prompt: Prompt) -> Result<Cek, KeyError>;
+
+    /// ГОСТ 28147-89: внутреннее письмо, расшифрованное СКЗИ (ключ из СКЗИ не выходит). Без СКЗИ — «нужно СКЗИ».
+    fn gost(&self, _env: &Envelope, _prompt: Prompt) -> Result<super::skzi::Plain, KeyError> {
+        Err(KeyError::NeedSkzi)
+    }
 }
 
 /// Ключи пользователя в хранилище Windows `CurrentUser\My` (CNG: программный KSP, TPM, смарт-карта).
@@ -52,6 +61,18 @@ impl KeyStore for WindowsKeys {
         }
         super::sys::unwrap_cek(env, prompt)
     }
+
+    fn gost(&self, env: &Envelope, prompt: Prompt) -> Result<super::skzi::Plain, KeyError> {
+        use super::GostProvider;
+        gost_with(super::SystemGost.provider(), env, prompt)
+    }
+}
+
+/// ГОСТ: СКЗИ есть (`provider`) — расшифровка его средствами; нет — «нужно СКЗИ» (без попытки своими силами).
+pub fn gost_with(provider: Option<String>, env: &Envelope, prompt: Prompt) -> Result<super::skzi::Plain, KeyError> {
+    let Some(name) = provider else { return Err(KeyError::NeedSkzi) };
+    tracing::info!(provider = %name, "GOST decryption through the SKZI");
+    super::sys::gost_decrypt(env, prompt)
 }
 
 /// Ключи в памяти (демо-ящик, тесты): сертификат и ключ RSA.
@@ -177,6 +198,15 @@ mod tests {
     }
 
     /// Сеанс: последние [`SESSION_MAX`], повторное — наверх.
+    /// ГОСТ без СКЗИ — «нужно СКЗИ»; ключи в памяти ГОСТ не снимают никогда.
+    #[test]
+    fn gost_needs_skzi() {
+        let env = Envelope { recipients: vec![], cipher: Ok(Cipher::Gost28147), authenticated: false, gost: None };
+        assert_eq!(gost_with(None, &env, Prompt::Silent).unwrap_err(), KeyError::NeedSkzi);
+        let me = Pki::rsa("УЦ", "Смирнова", "me@itt.test");
+        assert_eq!(soft(&me).gost(&env, Prompt::Silent).unwrap_err(), KeyError::NeedSkzi);
+    }
+
     #[test]
     fn session_lru() {
         let mut s = Session::default();

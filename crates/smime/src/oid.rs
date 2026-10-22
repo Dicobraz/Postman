@@ -100,6 +100,8 @@ pub const ECDH_COF_SHA384: Oid = Oid::new_unwrap("1.3.132.1.14.2");
 pub const ECDH_COF_SHA512: Oid = Oid::new_unwrap("1.3.132.1.14.3");
 /// ГОСТ 28147-89 (старые письма КриптоПро) и «Магма» — расшифровка ГОСТ не сделана.
 pub const GOST28147: Oid = Oid::new_unwrap("1.2.643.2.2.21");
+/// Набор параметров ГОСТ 28147-89 «КриптоПро A» (RFC 4357 §10.3).
+pub const GOST28147_PARAM_A: Oid = Oid::new_unwrap("1.2.643.2.2.31.1");
 pub const MAGMA_CTR_ACPKM: Oid = Oid::new_unwrap("1.2.643.7.1.1.5.1.1");
 pub const MAGMA_CTR_ACPKM_OMAC: Oid = Oid::new_unwrap("1.2.643.7.1.1.5.1.2");
 

@@ -51,6 +51,8 @@ pub(crate) struct State {
     pub(crate) lock: Option<crate::smime_enc::Lock>,
     /// Байты письма целиком (шифрованные) — для вложений и повтора с PIN; только в памяти.
     pub(crate) data: Option<Arc<Vec<u8>>>,
+    /// ГОСТ: внутреннее письмо, расшифрованное СКЗИ (ключ из СКЗИ не выходит) — для вложений; только в памяти.
+    pub(crate) inner: Option<Arc<zeroize::Zeroizing<Vec<u8>>>>,
 }
 
 /// Письмо подписано или зашифровано S/MIME (по вложениям JMAP) — есть что проверять.
@@ -220,7 +222,7 @@ impl ReadingPane {
         // Шифрованное (метка строки, Ф2): сразу «Расшифровка…»; итога подписи в кэше у него нет (не храним).
         let encrypted = crate::smime_enc::is_encrypted(&r.row);
         let lock = encrypted.then_some(crate::smime_enc::Lock::Opening);
-        r.smime = Some(State { seal: Seal::Checking, open: false, raw: raw.clone(), lock, data: None });
+        r.smime = Some(State { seal: Seal::Checking, open: false, raw: raw.clone(), lock, data: None, inner: None });
         let id = r.row.id.clone();
         let now = jiff::Timestamp::now().as_second();
         let key = id.clone();

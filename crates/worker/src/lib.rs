@@ -62,6 +62,9 @@ pub enum Request {
     /// `part` — `None`: тело (IR), вложения и подпись внутри, DER её цепочки — в бинарной части ответа; номер —
     /// байты этого вложения в бинарной части ответа.
     SmimeOpen { now: u64, part: Option<u32> },
+    /// Письмо, расшифрованное в ядре СКЗИ (ГОСТ): в бинарной части — якоря и внутреннее письмо
+    /// (`postman_smime::wire::encode_request`); `from` — «От» внешнего письма. Ответ — как у `SmimeOpen`.
+    SmimeInner { now: u64, from: String, part: Option<u32> },
     /// Проверки песочницы для тестов: попытка открыть файл / сокет / зависнуть.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -105,6 +108,31 @@ fn smime_open(bin: &[u8], now: u64, part: Option<u32>) -> (Response, Vec<u8>) {
         };
     }
     match postman_smime::envelope::open(message, cek, &trust, now) {
+        Ok(o) => {
+            let doc = match (&o.html, &o.text) {
+                (Some(html), _) => Some(postman_ir::from_html(html)),
+                (None, Some(text)) => Some(postman_ir::from_plain(text)),
+                (None, None) => None,
+            };
+            let out = postman_smime::wire::encode_response(&o.inner.chain, None);
+            (Response::Opened { opened: Box::new(Ok(o)), doc }, out)
+        }
+        Err(e) => (Response::Opened { opened: Box::new(Err(e)), doc: None }, Vec::new()),
+    }
+}
+
+/// Письмо, расшифрованное СКЗИ в ядре: разбор — как после своей расшифровки.
+fn smime_inner(bin: &[u8], now: u64, from: &str, part: Option<u32>) -> (Response, Vec<u8>) {
+    let Some((trust, inner)) = postman_smime::wire::decode_request(bin) else {
+        return (Response::Err("запрос разбора повреждён".into()), Vec::new());
+    };
+    if let Some(index) = part {
+        return match postman_smime::envelope::part_inner(inner, index) {
+            Ok(bytes) => (Response::Part, bytes.to_vec()),
+            Err(e) => (Response::Opened { opened: Box::new(Err(e)), doc: None }, Vec::new()),
+        };
+    }
+    match postman_smime::envelope::open_inner(inner, from, postman_smime::envelope::Cipher::Gost28147, &trust, now) {
         Ok(o) => {
             let doc = match (&o.html, &o.text) {
                 (Some(html), _) => Some(postman_ir::from_html(html)),
@@ -326,6 +354,11 @@ pub fn serve() -> ! {
                 out_bin = bin;
                 resp
             }
+            Ok(Request::SmimeInner { now, from, part }) => {
+                let (resp, bin) = smime_inner(&bin, now, &from, part);
+                out_bin = bin;
+                resp
+            }
             #[cfg(debug_assertions)]
             Ok(Request::Probe(p)) => probe(p),
             Err(e) => Response::Err(e.to_string()),
@@ -524,6 +557,28 @@ impl Client {
         }
     }
 
+    /// Письмо, расшифрованное СКЗИ в ядре (ГОСТ): тело, вложения, подпись внутри; `part` — байты вложения.
+    pub fn smime_inner(&mut self, inner: &[u8], from: &str, trust: &postman_smime::Trust, now: u64, part: Option<u32>) -> Result<Result<Inner, OpenError>, SmimeFailure> {
+        if inner.len() > postman_smime::MAX_MESSAGE {
+            return Err(SmimeFailure::TooLarge);
+        }
+        let bin = Zeroizing::new(postman_smime::wire::encode_request(trust, inner));
+        let timeout = self.timeout.max(SMIME_TIMEOUT);
+        match self.call_for(&Request::SmimeInner { now, from: from.to_owned(), part }, &bin, timeout).map_err(SmimeFailure::Worker)? {
+            (Response::Part, out) => Ok(Ok((None, None, Zeroizing::new(out)))),
+            (Response::Opened { opened, doc }, out) => match *opened {
+                Ok(mut o) => {
+                    let (chain, _) = postman_smime::wire::decode_response(&out).ok_or_else(|| SmimeFailure::Worker("неожиданный ответ".into()))?;
+                    o.inner.chain = chain;
+                    Ok(Ok((Some(o), doc, Zeroizing::new(Vec::new()))))
+                }
+                Err(e) => Ok(Err(e)),
+            },
+            (Response::Err(e), _) => Err(SmimeFailure::Worker(e)),
+            _ => Err(SmimeFailure::Worker("неожиданный ответ".into())),
+        }
+    }
+
     /// Байты вложения `index` расшифрованного письма (только в памяти).
     pub fn smime_part(&mut self, raw: &[u8], cek: &[u8], index: u32) -> Result<Result<Zeroizing<Vec<u8>>, OpenError>, SmimeFailure> {
         let bin = open_request(raw, cek, &postman_smime::Trust::default())?;
@@ -619,6 +674,9 @@ impl Client {
         Ok(Running { stdin: p.stdin, responses: rx, kill: p.kill, exit_code: p.exit_code, answered: false })
     }
 }
+
+/// Разбор письма, расшифрованного СКЗИ: итог и тело (`part` — `None`) или байты вложения.
+pub type Inner = (Option<Opened>, Option<Document>, Zeroizing<Vec<u8>>);
 
 /// Запрос расшифровки: ключ, якоря, письмо; больше кадра — «слишком большое».
 fn open_request(raw: &[u8], cek: &[u8], trust: &postman_smime::Trust) -> Result<Zeroizing<Vec<u8>>, SmimeFailure> {

@@ -152,6 +152,7 @@ pub(super) fn decrypt_with(key: usize, wrap: &Wrap, data: &[u8], silent: bool, k
     match wrap {
         Wrap::RsaPkcs1 | Wrap::RsaOaep(_) => rsa_decrypt(key, wrap, data, silent, key_len),
         Wrap::Ecdh { .. } => ecdh(key, wrap, data, silent),
+        Wrap::Gost(_) => Err(KeyError::Unsupported("ГОСТ — через СКЗИ".into())),
         Wrap::Unsupported(n) => Err(KeyError::Unsupported(n.clone())),
     }
 }
@@ -254,6 +255,144 @@ pub(crate) fn unwrap_cek(env: &Envelope, prompt: Prompt) -> Result<Cek, KeyError
     // SAFETY: хранилище открыто выше.
     unsafe { CertCloseStore(store, 0) };
     result.unwrap_or_else(|| Err(KeyError::NotForYou(labels(env))))
+}
+
+/// ГОСТ через СКЗИ (CryptoAPI, `skzi.rs`): свой сертификат получателя, ключ — в провайдере СКЗИ; согласование
+/// ключа, сессионный ключ из `SIMPLEBLOB`, `CryptDecrypt` содержимого. [проверить с КриптоПро CSP]
+pub(crate) fn gost_decrypt(env: &Envelope, prompt: Prompt) -> Result<super::skzi::Plain, KeyError> {
+    let content = env.gost.as_ref().ok_or_else(|| KeyError::Unsupported("ГОСТ: нет параметров содержимого".into()))?;
+    let name = wide("MY");
+    let flags = CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
+    // SAFETY: имя хранилища — UTF-16 с нулём; хранилище закрывается ниже.
+    let store = unsafe { CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, flags, name.as_ptr().cast()) };
+    if store.is_null() {
+        return Err(KeyError::NotForYou(labels(env)));
+    }
+    let mut result: Option<Result<super::skzi::Plain, KeyError>> = None;
+    let mut ctx: *const CERT_CONTEXT = ptr::null();
+    'certs: loop {
+        // SAFETY: перебор; предыдущий контекст освобождает сама функция.
+        ctx = unsafe { CertEnumCertificatesInStore(store, ctx) };
+        if ctx.is_null() {
+            break;
+        }
+        for r in env.recipients.iter().filter(|r| matches(ctx, &r.rid)) {
+            let Wrap::Gost(t) = &r.wrap else { continue };
+            match gost_with_cert(ctx, t, content, prompt) {
+                Ok(plain) => {
+                    result = Some(Ok(plain));
+                    // SAFETY: перебор прерван — текущий контекст освобождаем сами.
+                    unsafe { CertFreeCertificateContext(ctx) };
+                    break 'certs;
+                }
+                Err(e @ (KeyError::NeedPin | KeyError::NoCard | KeyError::Cancelled)) => result = Some(Err(e)),
+                Err(e) => {
+                    tracing::warn!("GOST key: {e:?}");
+                    result.get_or_insert(Err(e));
+                }
+            }
+        }
+    }
+    // SAFETY: хранилище открыто выше.
+    unsafe { CertCloseStore(store, 0) };
+    result.unwrap_or_else(|| Err(KeyError::NotForYou(labels(env))))
+}
+
+/// Ключ CryptoAPI: освобождается в `Drop`.
+struct CapiKey(usize);
+
+impl Drop for CapiKey {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: ключ получен от CryptoAPI в этом модуле.
+            unsafe { CryptDestroyKey(self.0) };
+        }
+    }
+}
+
+fn last_error(what: &str) -> KeyError {
+    // SAFETY: код последней ошибки потока.
+    let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    let hr = if err & 0x8000_0000 != 0 { err as i32 } else { ((err & 0xFFFF) | 0x8007_0000) as i32 };
+    key_error(hr, what)
+}
+
+fn gost_with_cert(ctx: *const CERT_CONTEXT, t: &postman_smime::envelope::GostTransport, content: &postman_smime::envelope::GostContent, prompt: Prompt) -> Result<super::skzi::Plain, KeyError> {
+    use super::skzi;
+    let mut prov: HCRYPTPROV_OR_NCRYPT_KEY_HANDLE = 0;
+    let mut spec = 0u32;
+    let mut free = 0i32;
+    let hwnd;
+    let (flags, param): (u32, *const core::ffi::c_void) = match prompt {
+        Prompt::Silent => (CRYPT_ACQUIRE_SILENT_FLAG, ptr::null()),
+        Prompt::Window(h) => {
+            hwnd = h;
+            (CRYPT_ACQUIRE_WINDOW_HANDLE_FLAG, ptr::from_ref(&hwnd).cast())
+        }
+    };
+    // SAFETY: контекст из хранилища; провайдер СКЗИ (CryptoAPI, не CNG — ключи ГОСТ КриптоПро в режиме CSP).
+    if unsafe { CryptAcquireCertificatePrivateKey(ctx, flags, param, &mut prov, &mut spec, &mut free) } == 0 {
+        return Err(last_error("CryptAcquireCertificatePrivateKey (GOST)"));
+    }
+    let release = Release(if free != 0 { prov } else { 0 });
+    if spec == CERT_NCRYPT_KEY_SPEC {
+        return Err(KeyError::Unsupported("ГОСТ через CNG (KSP СКЗИ) [проверить]".into()));
+    }
+    let mut user: usize = 0;
+    // SAFETY: провайдер получен выше.
+    if unsafe { CryptGetUserKey(prov, spec, &mut user) } == 0 {
+        return Err(last_error("CryptGetUserKey"));
+    }
+    let user = CapiKey(user);
+    let blob = skzi::public_key_blob(t).ok_or_else(|| KeyError::Unsupported("ГОСТ: эфемерный ключ".into()))?;
+    let mut agree: usize = 0;
+    // SAFETY: блоб с длиной; ключ согласования освобождается `CapiKey`.
+    if unsafe { CryptImportKey(prov, blob.as_ptr(), blob.len() as u32, user.0, 0, &mut agree) } == 0 {
+        return Err(last_error("CryptImportKey (VKO)"));
+    }
+    let agree = CapiKey(agree);
+    let export = skzi::export_alg(t.key);
+    // SAFETY: `KP_ALGID` — `ALG_ID` по указателю.
+    if unsafe { CryptSetKeyParam(agree.0, KP_ALGID, ptr::from_ref(&export).cast(), 0) } == 0 {
+        return Err(last_error("CryptSetKeyParam(KP_ALGID)"));
+    }
+    let simple = skzi::simple_blob(t).ok_or_else(|| KeyError::Unsupported("ГОСТ: ключ сеанса".into()))?;
+    let mut session: usize = 0;
+    // SAFETY: блоб с длиной; ключ сеанса освобождается `CapiKey`.
+    if unsafe { CryptImportKey(prov, simple.as_ptr(), simple.len() as u32, agree.0, 0, &mut session) } == 0 {
+        // Имитовставка ключа не сошлась — письмо повреждено или не для этого ключа.
+        return Err(last_error("CryptImportKey (SIMPLEBLOB)"));
+    }
+    let session = CapiKey(session);
+    let oid = skzi::cipher_oid(content);
+    // SAFETY: набор параметров — строка с нулём; IV — 8 байтов.
+    unsafe {
+        CryptSetKeyParam(session.0, skzi::KP_CIPHEROID, oid.as_ptr(), 0);
+        if CryptSetKeyParam(session.0, KP_IV, content.iv.as_ptr(), 0) == 0 {
+            return Err(last_error("CryptSetKeyParam(KP_IV)"));
+        }
+    }
+    let mut data = Zeroizing::new(content.data.clone());
+    let mut len = data.len() as u32;
+    // SAFETY: буфер на `len` байтов; CFB не меняет длину.
+    if unsafe { CryptDecrypt(session.0, 0, 1, 0, data.as_mut_ptr(), &mut len) } == 0 {
+        return Err(last_error("CryptDecrypt (GOST)"));
+    }
+    data.truncate(len as usize);
+    drop(release);
+    Ok(data)
+}
+
+/// Провайдер CryptoAPI: освобождается в `Drop`, если он наш.
+struct Release(usize);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: провайдер получен `CryptAcquireCertificatePrivateKey` с признаком освобождения.
+            unsafe { CryptReleaseContext(self.0, 0) };
+        }
+    }
 }
 
 #[cfg(test)]

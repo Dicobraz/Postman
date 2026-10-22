@@ -16,6 +16,7 @@
 #[cfg(windows)]
 mod cng;
 pub mod keys;
+pub mod skzi;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
