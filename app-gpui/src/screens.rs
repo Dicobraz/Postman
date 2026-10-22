@@ -182,7 +182,7 @@ enum Scene {
     Buttons,
 }
 
-const SCENES: [Scene; 67] = [
+const SCENES: [Scene; 68] = [
     Scene::List,
     Scene::Letter,
     Scene::Attachments,
