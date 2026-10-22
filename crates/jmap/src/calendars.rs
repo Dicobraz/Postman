@@ -128,6 +128,32 @@ impl Client {
         Ok(g.list)
     }
 
+    /// Поиск событий по тексту (RFC 8984 / JMAP Calendars: `filter.text` — тема, описание, место, участники) в
+    /// интервале (UTC), повторения разворачивает сервер (S5-21) [проверить на стенде: `stand_calendar_search`].
+    pub async fn search_events(&self, text: &str, utc_after: &str, utc_before: &str, limit: usize) -> Result<Vec<Value>> {
+        let acc = self.calendar_account()?;
+        let filter = json!({ "text": text, "after": utc_after, "before": utc_before });
+        let calls = [
+            inv(
+                "CalendarEvent/query",
+                json!({ "accountId": acc, "filter": filter, "expandRecurrences": true, "sort": [{ "property": "start" }], "limit": limit }),
+                "q",
+            ),
+            inv(
+                "CalendarEvent/get",
+                json!({
+                    "accountId": acc,
+                    "#ids": { "resultOf": "q", "name": "CalendarEvent/query", "path": "/ids" },
+                    "properties": EVENT_PROPERTIES,
+                }),
+                "g",
+            ),
+        ];
+        let mut r = self.call(USING, &calls).await?;
+        let g: GetResponse<Value> = take(&mut r, "g")?;
+        Ok(g.list)
+    }
+
     /// Создать событие; `send` — разослать приглашения (iTIP/iMIP силами сервера).
     pub async fn create_event(&self, event: Value, send: bool) -> Result<String> {
         let acc = self.calendar_account()?;

@@ -112,6 +112,10 @@ pub mod shell {
     pub fn reveal(_path: &Path) -> Result<(), String> {
         Err("reveal is Windows only".into())
     }
+
+    pub fn notify(_title: &str, _body: &str) -> Result<(), String> {
+        Err("notifications are Windows only".into())
+    }
 }
 
 /// Снимок окна: RGBA, 8 бит на канал, строки сверху вниз.

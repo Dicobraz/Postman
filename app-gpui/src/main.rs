@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod buttons;
+mod cal_model;
 mod calendar;
 mod commands;
 mod ir_view;
@@ -70,6 +71,7 @@ mod notices;
 mod palette;
 mod search;
 mod smime;
+mod smime_enc;
 mod tasks;
 
 pub(crate) use mailer::{Mailer, Section};

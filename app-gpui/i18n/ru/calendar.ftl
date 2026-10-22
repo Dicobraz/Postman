@@ -1,12 +1,32 @@
 # Календарь (S3-05, вид — S5-11): неделя, подробности события, открытие занятости.
-cal-work-week = Раб. неделя
 cal-today = Сегодня
-cal-today-tip = Перейти к сегодня (Alt+Home)
-cal-prev-week-tip = Предыдущая неделя (Alt+↑)
-cal-next-week-tip = Следующая неделя (Alt+↓)
+cal-today-tip = Перейти к сегодня
 cal-new-meeting = Создать встречу
 cal-new-meeting-tip = Создать встречу
-cal-loading = Загрузка недели…
+
+# Виды и поиск (S5-21).
+cal-view-day = День
+cal-view-day-full = День
+cal-view-work-week = Раб. неделя
+cal-view-work-week-full = Рабочая неделя
+cal-view-week = Неделя
+cal-view-week-full = Неделя
+cal-view-month = Месяц
+cal-view-month-full = Месяц
+cal-month-more = +{ $n } ещё
+cal-short-day = { $wd }, { $day } { $month }
+cal-search-placeholder = Поиск в календаре
+cal-search-found = Найдено: { $n }
+cal-search-nothing = Ничего не найдено. Ищем по теме, месту, описанию и участникам.
+cal-search-server = Ищу на сервере…
+cal-search-failed = Сервер не ответил ({ $error }) — показано найденное в загруженных днях
+cal-search-scope-server = На сервере — год назад и вперёд; Enter — к событию
+cal-search-scope-loaded = По всем событиям календаря; Enter — к событию
+cal-legend-accepted = Приняли: { $n }
+cal-legend-tentative = Под вопросом: { $n }
+cal-legend-declined = Отклонили: { $n }
+cal-legend-none = Нет ответа: { $n }
+cal-loading = Загрузка…
 cal-day = { $d ->
     [0] Пн
     [1] Вт
@@ -102,10 +122,6 @@ cal-change-answer = Изменить ответ
 cal-conflict = Пересекается с «{ $title }», { $time }
 cal-conflict-more = и ещё { $n }
 cal-participants-n = Участники · { $n }
-cal-sum-accepted = приняли: { $n }
-cal-sum-tentative = под вопросом: { $n }
-cal-sum-declined = отклонили: { $n }
-cal-sum-none = нет ответа: { $n }
 cal-you = { $name } (вы)
 cal-organizer = организатор
 cal-optional = необязательный

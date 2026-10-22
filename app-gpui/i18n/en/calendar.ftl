@@ -1,12 +1,32 @@
 # Calendar (S3-05, look — S5-11): week, event details, sharing free/busy.
-cal-work-week = Work week
 cal-today = Today
-cal-today-tip = Go to today (Alt+Home)
-cal-prev-week-tip = Previous week (Alt+↑)
-cal-next-week-tip = Next week (Alt+↓)
+cal-today-tip = Go to today
 cal-new-meeting = New meeting
 cal-new-meeting-tip = New meeting
-cal-loading = Loading the week…
+
+# Views and search (S5-21).
+cal-view-day = Day
+cal-view-day-full = Day
+cal-view-work-week = Work week
+cal-view-work-week-full = Work week
+cal-view-week = Week
+cal-view-week-full = Week
+cal-view-month = Month
+cal-view-month-full = Month
+cal-month-more = +{ $n } more
+cal-short-day = { $wd }, { $month } { $day }
+cal-search-placeholder = Search the calendar
+cal-search-found = Found: { $n }
+cal-search-nothing = Nothing found. Searching subject, place, description and attendees.
+cal-search-server = Searching the server…
+cal-search-failed = The server did not answer ({ $error }) — showing matches in loaded days
+cal-search-scope-server = On the server — a year back and ahead; Enter opens the event
+cal-search-scope-loaded = All calendar events; Enter opens the event
+cal-legend-accepted = Accepted: { $n }
+cal-legend-tentative = Tentative: { $n }
+cal-legend-declined = Declined: { $n }
+cal-legend-none = No answer: { $n }
+cal-loading = Loading…
 cal-day = { $d ->
     [0] Mon
     [1] Tue
@@ -102,10 +122,6 @@ cal-change-answer = Change reply
 cal-conflict = Overlaps "{ $title }", { $time }
 cal-conflict-more = and { $n } more
 cal-participants-n = Attendees · { $n }
-cal-sum-accepted = accepted: { $n }
-cal-sum-tentative = tentative: { $n }
-cal-sum-declined = declined: { $n }
-cal-sum-none = no reply: { $n }
 cal-you = { $name } (you)
 cal-organizer = organizer
 cal-optional = optional

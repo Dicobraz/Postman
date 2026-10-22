@@ -157,6 +157,16 @@ pub async fn week_with_colleagues(client: &Client, from: i64, to: i64) -> Result
     Ok((events, colleagues))
 }
 
+/// Найденных событий в календаре — не больше (S5-21: список под поиском).
+pub const SEARCH_LIMIT: usize = 100;
+
+/// Поиск в календаре (S5-21): события с текстом `text` в `[from, to)` — по теме, месту, описанию и участникам на
+/// сервере (`filter.text`), по времени начала.
+pub async fn search(client: &Client, text: &str, from: i64, to: i64) -> Result<Vec<Event>> {
+    let values = client.search_events(text, &utc(from), &utc(to), SEARCH_LIMIT).await?;
+    Ok(parse_events(&values, &TimeZone::system()))
+}
+
 /// Занятость в `[from, to)`: моя (из моих событий) и каждого адреса (`None` — нет данных: сотрудник не найден,
 /// календарь не открыт мне или сервер не ответил).
 pub async fn availability(
