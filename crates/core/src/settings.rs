@@ -7,18 +7,37 @@
 //! Stalwart держит активным один скрипт Sieve, а автоответ — это его скрипт `vacation` (`docs/STALWART.md`).
 //! Поэтому при включённых правилах активен наш скрипт, а автоответ подключён к нему (`include`); `isEnabled`
 //! сервера тогда `false`, и клиент считает автоответ включённым по нашему скрипту ([`effective`]).
+//!
+//! Автоответ Postman (S5-29): тексты для своих и внешних, «только контактам», «не отвечать повторно» — свой скрипт
+//! `vacation` поверх того, что пишет `VacationResponse/set` (`autoreply.rs`), и событие «Вне офиса» в календаре.
 
 use postman_jmap::{
-    Activate, Client, QUOTA, Quota, SIEVE, SaveError, SieveScript, VACATION_RESPONSE, VacationResponse,
+    Activate, CALENDARS, Client, QUOTA, Quota, SIEVE, SaveError, SieveScript, VACATION_RESPONSE, VacationResponse,
 };
 
+use crate::autoreply::{self, Audience, AutoReply, Stored};
 use crate::rules::{self, Rule, SCRIPT_NAME, Script, VACATION_SCRIPT};
+
+/// Запись автоответа Postman (S5-29).
+#[derive(Debug, Clone)]
+pub struct AutoReplySave {
+    /// Включение и период; тема и текст — из `reply` ([`AutoReply::primary`]).
+    pub vacation: VacationResponse,
+    pub reply: AutoReply,
+    pub audience: Audience,
+    /// Название события «Вне офиса» на языке интерфейса.
+    pub ooo_title: String,
+    /// Пояс дней «Вне офиса» (IANA); пусто — пояс Windows.
+    pub zone: String,
+}
 
 pub enum Request {
     /// Автоответ, правила и квота — при входе.
     Load,
     /// Записать автоответ → `VacationSaved` (что сервер сохранил) или `Failed`.
     SetVacation(VacationResponse),
+    /// Автоответ Postman: `VacationResponse`, свой скрипт и «Вне офиса» → `VacationSaved`, `AutoReply` или `Failed`.
+    SetAutoReply(Box<AutoReplySave>),
     /// Квота заново (после изменений в ящике).
     Quota,
     /// Правила с сервера → `Rules`.
@@ -33,6 +52,8 @@ pub enum Reply {
     Vacation(VacationResponse),
     /// Автоответ записан; внутри — прочитанный после записи.
     VacationSaved(VacationResponse),
+    /// Настройки автоответа Postman из скрипта `vacation`; `None` — скрипт не наш (один текст сервера всем).
+    AutoReply(Option<AutoReply>),
     /// Заполненность ящика; `None` — сервер её не ограничивает.
     Quota(Option<Usage>),
     Rules(RulesState),
@@ -93,6 +114,8 @@ struct Sieve {
     /// Скрипт с нашим именем, изменённый вне Postman.
     ours_edited: Option<SieveScript>,
     vacation_active: bool,
+    /// Скрипт `vacation` и его текст (свой — с заголовком `autoreply::HEADER`).
+    vacation: Option<(SieveScript, String)>,
     foreign: Vec<Foreign>,
 }
 
@@ -104,6 +127,11 @@ impl Sieve {
     /// Автоответ работает через наш активный скрипт.
     fn vacation_in_rules(&self) -> bool {
         self.ours.as_ref().is_some_and(|(s, script)| s.is_active && script.vacation)
+    }
+
+    /// Настройки автоответа Postman в скрипте `vacation`.
+    fn stored(&self) -> Option<Stored> {
+        self.vacation.as_ref().and_then(|(_, text)| autoreply::parse(text))
     }
 
     fn state(&self) -> RulesState {
@@ -156,12 +184,25 @@ pub async fn handle(client: &Client, request: Request, notify: &impl Fn(Reply)) 
             }
             let sieve = sieve.unwrap_or_default();
             notify(vacation(client, &sieve).await);
+            if client.has(SIEVE) {
+                notify(Reply::AutoReply(sieve.stored().map(|s| s.reply)));
+            }
             notify(if client.has(SIEVE) { Reply::Rules(sieve.state()) } else { Reply::Unsupported(Area::Rules) });
             quota(client, notify).await;
         }
         Request::SetVacation(v) => match set_vacation(client, v).await {
             Ok((v, sieve)) => {
                 notify(Reply::VacationSaved(v));
+                if client.has(SIEVE) {
+                    notify(Reply::Rules(sieve.state()));
+                }
+            }
+            Err(e) => notify(Reply::Failed { area: Area::Vacation, error: e.to_string() }),
+        },
+        Request::SetAutoReply(save) => match set_autoreply(client, *save).await {
+            Ok((v, sieve, reply)) => {
+                notify(Reply::VacationSaved(v));
+                notify(Reply::AutoReply(reply));
                 if client.has(SIEVE) {
                     notify(Reply::Rules(sieve.state()));
                 }
@@ -192,7 +233,7 @@ async fn vacation(client: &Client, sieve: &Sieve) -> Reply {
         return Reply::Unsupported(Area::Vacation);
     }
     match client.vacation().await {
-        Ok(v) => Reply::Vacation(effective(v, sieve.vacation_in_rules())),
+        Ok(v) => Reply::Vacation(with_stored(effective(v, sieve.vacation_in_rules()), sieve.stored().as_ref())),
         Err(e) => Reply::Failed { area: Area::Vacation, error: e.to_string() },
     }
 }
@@ -207,6 +248,8 @@ async fn read_sieve(client: &Client) -> postman_jmap::Result<Sieve> {
         let name = script.name.clone().unwrap_or_default();
         if name == VACATION_SCRIPT {
             sieve.vacation_active = script.is_active;
+            let text = client.sieve_text(&script).await?;
+            sieve.vacation = Some((script, text));
             continue;
         }
         let text = client.sieve_text(&script).await?;
@@ -242,6 +285,87 @@ async fn set_vacation(client: &Client, v: VacationResponse) -> postman_jmap::Res
     let sieve = read_sieve(client).await?;
     let v = effective(client.vacation().await?, sieve.vacation_in_rules());
     Ok((v, sieve))
+}
+
+/// Период из своего скрипта, если сервер после записи скрипта его не вернул ([проверить на стенде]).
+fn with_stored(v: VacationResponse, stored: Option<&Stored>) -> VacationResponse {
+    let Some(s) = stored else { return v };
+    VacationResponse { from_date: v.from_date.or_else(|| s.from.clone()), to_date: v.to_date.or_else(|| s.to.clone()), ..v }
+}
+
+/// Автоответ Postman: `VacationResponse/set` (как раньше), «Вне офиса» в календаре, затем свой скрипт `vacation`
+/// с теми же включением и периодом.
+async fn set_autoreply(
+    client: &Client,
+    save: AutoReplySave,
+) -> postman_jmap::Result<(VacationResponse, Sieve, Option<AutoReply>)> {
+    let primary = save.reply.primary();
+    let text = |s: &str| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    let v = VacationResponse {
+        subject: text(&primary.subject),
+        text_body: Some(primary.body.trim_end().to_owned()).filter(|s| !s.is_empty()),
+        html_body: None,
+        ..save.vacation.clone()
+    };
+    let (v, sieve) = set_vacation(client, v).await?;
+    if !client.has(SIEVE) {
+        return Ok((v, sieve, None));
+    }
+    let previous = sieve.stored();
+    let ooo = out_of_office(client, &save, &v, previous.as_ref().and_then(|p| p.ooo.as_deref())).await;
+    let stored = Stored { reply: save.reply.clone(), from: v.from_date.clone(), to: v.to_date.clone(), ooo };
+    let script = autoreply::script(&stored, &save.audience);
+    let id = sieve.vacation.as_ref().map(|(s, _)| s.id.clone());
+    client.save_sieve(id.as_deref(), VACATION_SCRIPT, &script, Activate::Keep).await.map_err(save_error)?;
+    let sieve = read_sieve(client).await?;
+    let v = with_stored(effective(client.vacation().await?, sieve.vacation_in_rules()), sieve.stored().as_ref());
+    let reply = sieve.stored().map(|s| s.reply);
+    Ok((v, sieve, reply))
+}
+
+/// «Вне офиса»: прежнее событие Postman — прочь, новое — на период включённого автоответа. Ошибки календаря
+/// автоответ не останавливают (в журнал). Итог — uid нового события.
+async fn out_of_office(client: &Client, save: &AutoReplySave, v: &VacationResponse, old: Option<&str>) -> Option<String> {
+    if !client.has(CALENDARS) {
+        return None;
+    }
+    if let Some(uid) = old {
+        match client.event_by_uid(uid).await {
+            Ok(Some(e)) => {
+                if let Some(id) = e["id"].as_str()
+                    && let Err(e) = client.destroy_event(id, false).await
+                {
+                    tracing::warn!("out of office: old event is not removed: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("out of office: {e}"),
+        }
+    }
+    let (Some(from), Some(to)) = (v.from_date.as_deref(), v.to_date.as_deref()) else { return None };
+    if !save.reply.out_of_office || !v.is_enabled {
+        return None;
+    }
+    let tz = jiff::tz::TimeZone::get(&save.zone).unwrap_or_else(|_| jiff::tz::TimeZone::system());
+    let uid = crate::tasks::new_uid(jiff::Timestamp::now().as_nanosecond().unsigned_abs());
+    let calendar = match client.calendars().await {
+        Ok(mut cals) => {
+            cals.sort_by_key(|c| (!c.is_visible, c.sort_order));
+            cals.into_iter().next()?
+        }
+        Err(e) => {
+            tracing::warn!("out of office: {e}");
+            return None;
+        }
+    };
+    let event = autoreply::out_of_office(&save.ooo_title, from, to, &tz, &uid, &calendar.id)?;
+    match client.create_event(event, false).await {
+        Ok(_) => Some(uid),
+        Err(e) => {
+            tracing::warn!("out of office: event is not created: {e}");
+            None
+        }
+    }
 }
 
 fn save_error(e: SaveError) -> postman_jmap::Error {

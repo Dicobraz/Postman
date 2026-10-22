@@ -11,6 +11,7 @@ use pets_ui::Level as Toast;
 use crate::notices::Notices;
 use postman_cache::Cache;
 use postman_core::bench::{self, Bench, Step};
+use postman_core::prefs::CalendarView as CalView;
 use postman_worker::Level;
 
 use crate::*;
@@ -567,6 +568,10 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &commands::calendar::PrevWeek, _, cx| this.calendar_week(Some(-1), cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::NextWeek, _, cx| this.calendar_week(Some(1), cx)))
             .on_action(cx.listener(|this, _: &commands::calendar::Today, _, cx| this.calendar_week(None, cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::ViewDay, _, cx| this.calendar_view(CalView::Day, cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::ViewWorkWeek, _, cx| this.calendar_view(CalView::WorkWeek, cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::ViewWeek, _, cx| this.calendar_view(CalView::Week, cx)))
+            .on_action(cx.listener(|this, _: &commands::calendar::ViewMonth, _, cx| this.calendar_view(CalView::Month, cx)))
             .on_action(cx.listener(|this, _: &commands::contacts::New, window, cx| {
                 this.contacts.update(cx, |c, cx| c.new_contact(window, cx));
             }))
@@ -587,6 +592,9 @@ impl Render for Mailer {
             .on_action(cx.listener(|this, _: &search::Focus, window, cx| {
                 if this.section == Section::Contacts {
                     return this.contacts.update(cx, |c, cx| c.focus_search(window, cx));
+                }
+                if this.section == Section::Calendar {
+                    return this.cal.update(cx, |c, cx| c.focus_search(window, cx));
                 }
                 if this.section == Section::Tasks {
                     return this.tasks.update(cx, |t, cx| t.focus_search(window, cx));
@@ -669,6 +677,11 @@ impl Render for Mailer {
                 // Панель чтения скрыта (Настройки → Чтение): письмо на месте списка — назад к списку.
                 if this.section == Section::Mail && this.reading_instead_of_list(cx) {
                     this.reading.update(cx, |r, cx| r.clear(cx));
+                    return;
+                }
+                // В календаре — поиск над панелью события (S5-21).
+                if this.section == Section::Calendar && this.cal.update(cx, |c, cx| c.escape(window, cx)) {
+                    window.focus(&this.focus, cx);
                     return;
                 }
                 // В контактах — строка «Удалить контакт?», форма, поиск контактов.

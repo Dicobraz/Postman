@@ -43,6 +43,8 @@ fn search_query() -> &'static str {
 }
 /// Палитра с запросом: «от», набранное в английской раскладке, — команды, папки и письма (S5-10).
 const PALETTE_QUERY: &str = "jn";
+/// Запрос снимка `calendar-search`: место нескольких встреч демо (планёрки, демо продукта, итоги недели).
+const CALENDAR_QUERY: &str = "Переговорная 1"; // i18n-ok: место в демо-данных
 
 #[derive(Clone, Copy)]
 enum Scene {
@@ -103,6 +105,13 @@ enum Scene {
     Assistant,
     /// Календарь с подробностями самого людного события (S3-05).
     Event,
+    /// Виды календаря (S5-21): «День» — среда демо-недели, «Неделя» — с выходными, «Месяц» — клетки с полосами
+    /// многодневных и строками событий, «+N ещё».
+    CalendarDay,
+    CalendarWeek,
+    CalendarMonth,
+    /// Поиск над панелью события: найденное списком с датами (демо — по всем событиям).
+    CalendarSearch,
     /// Строка входа (нет учётной записи).
     SignIn,
     /// Новое письмо во вкладке (S5-06б): адресаты чипами (один внешний), текст, вложение, панель справа.
@@ -145,8 +154,10 @@ enum Scene {
     TaskTimeblock,
     /// Повтор (S6-07): варианты повтора в карточке.
     TaskRepeat,
-    /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
+    /// «Настройки → Автоответ» (S4-05, S5-29; демо — образец со своими текстами коллегам и внешним).
     Vacation,
+    /// Ящик заполнен на 94 % (S5-29): индикатор в строке состояния и тост «Очистить вложения…».
+    Quota,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
     Rules,
     /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06): никто не взял его в работу — полоса
@@ -250,6 +261,10 @@ const SCENES: &[Scene] = &[
     Scene::PaletteQuery,
     Scene::Calendar,
     Scene::Event,
+    Scene::CalendarDay,
+    Scene::CalendarWeek,
+    Scene::CalendarMonth,
+    Scene::CalendarSearch,
     Scene::Meeting,
     Scene::MeetingSlot,
     Scene::MeetingBlue,
@@ -295,6 +310,7 @@ const SCENES: &[Scene] = &[
     Scene::Bulk,
     Scene::ContextMenu,
     Scene::Phishing,
+    Scene::Quota,
     Scene::Offline,
     Scene::Toasts,
     Scene::KeyTips,
@@ -362,6 +378,10 @@ impl Scene {
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
+            Scene::CalendarDay => "calendar-day",
+            Scene::CalendarWeek => "calendar-week",
+            Scene::CalendarMonth => "calendar-month",
+            Scene::CalendarSearch => "calendar-search",
             Scene::SignIn => "firstrun",
             Scene::Compose => "compose",
             Scene::SendLater => "send-later",
@@ -384,6 +404,7 @@ impl Scene {
             Scene::TaskTimeblock => "task-timeblock",
             Scene::TaskRepeat => "task-repeat",
             Scene::Vacation => "vacation",
+            Scene::Quota => "quota",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
             Scene::Taken => "taken",
@@ -639,7 +660,33 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             let clock = today.to_zoned(jiff::tz::TimeZone::system()).ok().map(|z| z.timestamp().as_second());
             m.cal.update(cx, |c, cx| {
                 c.clock = clock;
+                c.escape(window, cx);
+                c.set_view(postman_core::prefs::CalendarView::WorkWeek, cx);
+                c.go_to_demo_week(cx);
                 c.select_pending(cx);
+            });
+        }
+        Scene::CalendarDay | Scene::CalendarWeek | Scene::CalendarMonth => {
+            use postman_core::prefs::CalendarView as V;
+            let view = match scene {
+                Scene::CalendarDay => V::Day,
+                Scene::CalendarWeek => V::Week,
+                _ => V::Month,
+            };
+            m.set_section(Section::Calendar, cx);
+            m.cal.update(cx, |c, cx| {
+                c.set_view(view, cx);
+                // День — среда демо-недели: пересечения и «под вопросом».
+                if view == V::Day { c.go_to_demo_day(2, cx) } else { c.go_to_demo_week(cx) }
+                c.select_pending(cx);
+            });
+        }
+        Scene::CalendarSearch => {
+            m.set_section(Section::Calendar, cx);
+            m.cal.update(cx, |c, cx| {
+                c.set_view(postman_core::prefs::CalendarView::WorkWeek, cx);
+                c.go_to_demo_week(cx);
+                c.type_query(CALENDAR_QUERY, window, cx);
             });
         }
         Scene::MeetingSlot => {
@@ -713,9 +760,25 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.open_menu_at_row(1, None, cx);
             m.screen_menu_last();
         }
+        Scene::Quota => {
+            // Окно почты, как на макете: полоса «Автоответ включён» (образец сцены `vacation`) и строка состояния.
+            m.close_settings(window, cx);
+            m.set_section(Section::Mail, cx);
+            m.close_menu(cx);
+            m.toasts.update(cx, |t, cx| t.hide_all(cx));
+            // 9,4 из 10 ГБ, как на макете; тост — заново (прежняя заполненность — ниже порога).
+            let limit: u64 = 10 << 30;
+            m.set_quota(None, cx);
+            m.set_quota(Some(postman_core::settings::Usage { used: (limit * 94).div_ceil(100), limit }), cx);
+        }
         Scene::Offline => {
             m.close_menu(cx);
             m.toasts.update(cx, |t, cx| t.hide_all(cx));
+            // После `quota` — снова 12 % из 2 ГБ.
+            if m.settings.quota.is_some_and(|u| u.percent() > postman_core::settings::WARN_PERCENT) {
+                let limit: u64 = 2 << 30;
+                m.set_quota(Some(postman_core::settings::Usage { used: limit / 8, limit }), cx);
+            }
             let own = postman_demo::ME.to_owned();
             m.folders.update(cx, |f, cx| {
                 f.own = Some(own);
@@ -997,6 +1060,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         Scene::Vacation => {
             m.set_section(Section::Mail, cx);
             if !m.backend.is_live() {
+                m.settings.autoreply = Some(crate::settings::reply_sample());
                 m.set_vacation_state(Some(crate::settings::screen_sample()), cx);
                 // Строка состояния — с заполненностью ящика: 12 % из 2 ГБ.
                 let limit: u64 = 2 << 30;
@@ -1174,6 +1238,17 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
                         && (!matches!(scene, Scene::MeetingSlot) || v.slot_cursor.is_some())
                 })
         }
+        Scene::CalendarDay | Scene::CalendarWeek | Scene::CalendarMonth => {
+            use postman_core::prefs::CalendarView as V;
+            let want = match scene {
+                Scene::CalendarDay => V::Day,
+                Scene::CalendarWeek => V::Week,
+                _ => V::Month,
+            };
+            let c = m.cal.read(cx);
+            m.section == Section::Calendar && c.view == want
+        }
+        Scene::CalendarSearch => m.section == Section::Calendar && m.cal.read(cx).results_ready(),
         Scene::Event => {
             // Живая неделя может быть пустой: тогда снимок — без подробностей.
             let c = m.cal.read(cx);
@@ -1314,6 +1389,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::ContextMenu | Scene::Phishing => m.menu.is_some() && rows_loaded,
         Scene::Offline => m.offline.is_down() && list.offline.is_some(),
         Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
+        Scene::Quota => {
+            m.toasts.read(cx).on_screen() > 0 && m.settings.quota.is_some() && !m.tabs.is_active(crate::tabs::TabKind::Settings)
+        }
         Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
         Scene::Buttons => m.screens.as_ref().is_some_and(|d| d.gallery),
         Scene::KeyTipsSingle => {

@@ -1,9 +1,11 @@
 //! Запрос поиска в командной строке (S5-10, `docs/DESIGN.md` «Палитра команд и поиск»): слова и условия
-//! `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:flagged`, `before:`/`after:`, `category:` —
+//! `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:flagged`, `before:`/`after:`, `category:`,
+//! `larger:` (размер, S5-29) —
 //! разбор ([`Query::parse`]), проверка письма по кэшу ([`Query::matches`]), условие `Email/query` для «Везде»
 //! ([`Query::server_filter`]) и чипы «Уточнить» ([`Refine`], [`suggest`]).
 //!
-//! Ключи — без регистра, есть русские: `от:`, `кому:`, `тема:`, `есть:вложения`, `до:`, `после:`, `категория:`.
+//! Ключи — без регистра, есть русские: `от:`, `кому:`, `тема:`, `есть:вложения`, `до:`, `после:`, `категория:`,
+//! `больше:`. Размер — `5M`, `500K`, `1G` (`5М`, `500К`, `1Г`, можно `МБ`), без единицы — байты.
 //! Значение с пробелами — в кавычках (`from:"Анна Смирнова"`). Даты: `2026-10-21`, `21.10.2026` или «назад»:
 //! `7d`, `2w`, `3m`, `1y` (`7д`, `2н`, `3м`, `1г`). Неизвестный ключ (`Re:`) — просто слово; ключ без значения
 //! (запрос ещё набирается) и непонятное значение — без условия.
@@ -69,6 +71,8 @@ pub struct Query {
     pub before: Option<When>,
     /// Имена категорий (как в таблице категорий).
     pub categories: Vec<String>,
+    /// Не меньше этого размера, байт.
+    pub larger: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +85,7 @@ enum Key {
     Before,
     After,
     Category,
+    Larger,
 }
 
 fn key(k: &str) -> Option<Key> {
@@ -93,6 +98,7 @@ fn key(k: &str) -> Option<Key> {
         "before" | "до" => Key::Before,
         "after" | "после" => Key::After,
         "category" | "cat" | "категория" => Key::Category,
+        "larger" | "size" | "больше" | "размер" => Key::Larger,
         _ => return None,
     })
 }
@@ -102,6 +108,23 @@ struct Token<'a> {
     raw: &'a str,
     key: Option<Key>,
     value: String,
+}
+
+/// Размер `5M`, `1.5G`, `500К`, `5МБ`; без единицы — байты.
+pub fn parse_size(v: &str) -> Option<u64> {
+    let v = folded(v.trim());
+    let split = v.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',')).unwrap_or(v.len());
+    let (num, unit) = v.split_at(split);
+    let n: f64 = num.replace(',', ".").parse().ok()?;
+    let mult: f64 = match unit.trim() {
+        "" | "b" | "б" => 1.0,
+        "k" | "kb" | "к" | "кб" => 1024.0,
+        "m" | "mb" | "м" | "мб" => 1024.0 * 1024.0,
+        "g" | "gb" | "г" | "гб" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    let bytes = n * mult;
+    (bytes.is_finite() && bytes >= 0.0).then_some(bytes as u64)
 }
 
 fn unquote(s: &str) -> String {
@@ -205,6 +228,7 @@ impl Query {
                 Some(Key::Before) => q.before = When::parse(v).or(q.before),
                 Some(Key::After) => q.after = When::parse(v).or(q.after),
                 Some(Key::Category) => q.categories.push(v.to_owned()),
+                Some(Key::Larger) => q.larger = parse_size(v).or(q.larger),
             }
         }
         q
@@ -223,6 +247,7 @@ impl Query {
             || self.flagged
             || self.after.is_some()
             || self.before.is_some()
+            || self.larger.is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -246,6 +271,7 @@ impl Query {
         env.after.is_none_or(|t| row.received_at >= t)
             && env.before.is_none_or(|t| row.received_at < t)
             && (!self.attachment || row.has_attachment)
+            && self.larger.is_none_or(|n| row.size >= n)
             && (!self.unread || !row.seen)
             && (!self.flagged || row.flagged)
             && self.from.iter().all(|v| contains(&from, v))
@@ -287,6 +313,9 @@ impl Query {
             and.push(Filter::Before(postman_jmap::unix_to_utc(t)));
         }
         and.extend(env.categories.iter().map(|k| Filter::HasKeyword(k.clone())));
+        if let Some(n) = self.larger {
+            and.push(Filter::MinSize(n));
+        }
         match and.len() {
             0 => None,
             1 => and.pop(),
@@ -643,5 +672,33 @@ mod tests {
         let q = Query::parse("договор from:Смирнова is:unread");
         assert_eq!(q.marks()[0], "договор");
         assert!(q.marks().contains(&"смирнова".to_string()));
+    }
+
+    /// Размер (S5-29, «Очистить вложения…»): `larger:5M` — условие сервера `minSize` и проверка по кэшу.
+    #[test]
+    fn larger_than_size() {
+        const MB: u64 = 1024 * 1024;
+        assert_eq!(parse_size("5M"), Some(5 * MB));
+        assert_eq!(parse_size("5мб"), Some(5 * MB));
+        assert_eq!(parse_size("1,5G"), Some(3 * 512 * MB));
+        assert_eq!(parse_size("500K"), Some(500 * 1024));
+        assert_eq!(parse_size("700"), Some(700));
+        assert_eq!(parse_size("много"), None);
+        assert_eq!(parse_size("5X"), None);
+        let q = Query::parse("has:attachment larger:5M before:1y");
+        assert_eq!((q.larger, q.attachment, q.before), (Some(5 * MB), true, Some(When::Ago(365))));
+        assert!(q.has_conditions());
+        assert_eq!(Query::parse("больше:2мб").larger, Some(2 * MB));
+        let env = q.env(&now(), |_| None, &[]);
+        let json = q.server_filter(&env).unwrap().to_json();
+        assert!(json["conditions"].as_array().unwrap().iter().any(|c| c["minSize"] == 5 * MB), "{json}");
+        let mut big = row("Анна", "Отчёт");
+        big.has_attachment = true;
+        big.size = 6 * MB;
+        let env = Query::parse("has:attachment larger:5M").env(&now(), |_| None, &[]);
+        let q = Query::parse("has:attachment larger:5M");
+        assert!(q.matches(&env, &big, &Recipients::default()));
+        big.size = 4 * MB;
+        assert!(!q.matches(&env, &big, &Recipients::default()));
     }
 }

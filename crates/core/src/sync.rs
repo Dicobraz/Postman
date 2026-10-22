@@ -107,6 +107,8 @@ pub enum Command {
     RespondInvite { invite: Box<Invitation>, status: Partstat, in_reply_to: Option<String> },
     /// События календаря в `[from, to)` (Unix-секунды), повторения разворачивает сервер → `EventsLoaded`.
     Events { from: i64, to: i64 },
+    /// Поиск в календаре по тексту в `[from, to)` → `EventsFound` (S5-21).
+    SearchEvents { text: String, from: i64, to: i64 },
     /// Занятость адресов и моя в `[from, to)` → `Availability`.
     Availability { ticket: u64, emails: Vec<String>, from: i64, to: i64 },
     /// Создать встречу и разослать приглашения → `MeetingCreated` или `MeetingFailed`.
@@ -310,6 +312,8 @@ pub enum Event {
     InviteFailed { uid: String, error: String },
     /// События календаря в `[from, to)` — без отменённых, по времени начала.
     EventsLoaded { from: i64, to: i64, events: Vec<postman_calendar::Event> },
+    /// Найдено в календаре по тексту `text` (S5-21); `error` — запрос не удался.
+    EventsFound { text: String, events: Vec<postman_calendar::Event>, error: Option<String> },
     /// Занятость для помощника: моя и по адресам; `None` — нет данных (календарь не открыт мне, сотрудник
     /// не найден): это не «свободен». `error` — запрос не удался целиком.
     Availability { ticket: u64, me: Vec<Busy>, people: Vec<(String, Option<Vec<Busy>>)>, error: Option<String> },
@@ -1324,6 +1328,12 @@ async fn handle(
             notify(match schedule::week(client, from, to).await {
                 Ok(events) => Event::EventsLoaded { from, to, events },
                 Err(e) => Event::CalendarFailed(e.to_string()),
+            });
+        }
+        Command::SearchEvents { text, from, to } => {
+            notify(match schedule::search(client, &text, from, to).await {
+                Ok(events) => Event::EventsFound { text, events, error: None },
+                Err(e) => Event::EventsFound { text, events: Vec::new(), error: Some(e.to_string()) },
             });
         }
         Command::Availability { ticket, emails, from, to } => {

@@ -656,6 +656,28 @@ pub mod calendar {
         v
     }
 
+    /// События соседних недель и выходных (S5-21: виды «Неделя» и «Месяц» не пустые вокруг текущей недели): в
+    /// занятость помощника и ленту приглашения не попадают.
+    pub fn other_events() -> Vec<Event> {
+        use Me::{Invited, Owner};
+        use Partstat::Accepted;
+        let mut v = vec![
+            event("o1", "Ретро квартала", -4, (15, 0), 60, "Переговорная 1", false, Invited(Accepted), "team"),
+            event("o2", "Аудит доступа", -3, (10, 0), 120, "Переговорная 2", false, Owner, "pentest"),
+            event("o3", "Велопрогулка", 5, (10, 0), 180, "Парк", false, Owner, ""),
+            event("o4", "Тендер: подача заявки", 8, (12, 0), 60, "", false, Owner, "tenders"),
+            event("o5", "Созвон с заказчиком", 9, (11, 0), 90, "Teams", false, Owner, "clients"),
+            event("o6", "Обучение: SOC", 15, (10, 0), 240, "Учебный класс", false, Invited(Accepted), "team"),
+            event("o7", "Демо продукта", -11, (14, 0), 60, "Переговорная 1", false, Invited(Accepted), "clients"),
+        ];
+        // Командировка: с субботы через выходные до вторника — полосой через границу недели.
+        let mut trip = event("o8", "Командировка", 12, (0, 0), 4 * 24 * 60, "Екатеринбург", false, Owner, "services");
+        trip.all_day = true;
+        v.push(trip);
+        v.sort_by_key(|e| e.span.start);
+        v
+    }
+
     /// Коллеги для «Помощника планирования»: (имя, адрес, занятость).
     pub fn colleagues() -> Vec<(&'static str, &'static str, Vec<Busy>)> {
         let b = |day, (h, m): (i64, i64), mins: i64, kind| Busy { span: Span::new(at(day, h, m), at(day, h, m) + mins * 60), kind };

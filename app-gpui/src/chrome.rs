@@ -337,6 +337,44 @@ impl Mailer {
             .child(button("rail-settings", glyph::SETTINGS, "frame-rail-settings", settings_tab, || Box::new(settings::Open)))
     }
 
+    /// Заполненность ящика (S5-29, макет «Главное окно: автоответ»): «Ящик: 9,4 из 10 ГБ» и полоска 64 px; больше
+    /// 90 % — значок и жирный текст, щелчок — тост «Очистить вложения…». Квоты нет — ничего.
+    fn quota_indicator(&self, l: &Look, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let u = self.settings.quota?;
+        let percent = u.percent();
+        let full = percent > postman_core::settings::WARN_PERCENT;
+        let me = self.compose.me().map(|(a, _)| a.email.clone()).unwrap_or_default();
+        let tip = tr!("status-quota-tip", account = me, quota = self.settings.quota_text(), percent = percent.min(999));
+        let fill = (percent.min(100) as f32) / 100.;
+        Some(
+            div()
+                .id("quota")
+                .h(px(22.))
+                .px(px(6.))
+                .mr(px(-6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(l.px(Metric::RadiusControl))
+                .when(full, |d| {
+                    d.text_color(l.text()).font_weight(FontWeight::SEMIBOLD).cursor_pointer().hover(|d| d.bg(l.hover()))
+                })
+                .when(full, |d| d.child(icon(glyph::WARNING, 12.)))
+                .child(self.settings.quota_text())
+                .child(
+                    div()
+                        .w(px(64.))
+                        .h(px(4.))
+                        .rounded(px(2.))
+                        .overflow_hidden()
+                        .bg(l.c(pets_ui::theme::Role::StrokeDivider))
+                        .child(div().h_full().w(relative(fill)).bg(if full { l.text() } else { l.text3() })),
+                )
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .when(full, |d| d.on_click(cx.listener(|this, _, _, cx| this.quota_toast(cx)))),
+        )
+    }
+
     /// Строка состояния: элементы, синхронизация, квота, последнее нажатие, песочница, уведомления.
     pub(crate) fn status_bar(&self, l: &Look, cx: &mut Context<Self>) -> Div {
         // Задачи (макет): слева — состояние синхронизации с точкой, затем «N задач из писем».
@@ -377,10 +415,10 @@ impl Mailer {
             .when(!tasks, |d| d.child(status.clone()))
             .child(sync)
             .when(tasks, |d| d.child(status))
-            .child(self.settings.quota_text())
             .child(div().flex_1())
             .child(self.last_key.clone())
             .child(self.sandbox.map(crate::reading::sandbox_label).unwrap_or_default())
+            .children(self.quota_indicator(l, cx))
             .child(
                 // 🔔 — история уведомлений панелью справа (S5-08); нажата, пока панель открыта.
                 div()

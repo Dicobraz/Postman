@@ -841,6 +841,17 @@ impl Composers {
         out
     }
 
+    /// Свои адреса (без общих ящиков): автоответ отвечает на письма им (`:addresses`, S5-29).
+    pub(crate) fn own_addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.me.iter().map(|(a, _)| a.email.clone()).collect();
+        for s in self.senders.iter().filter(|s| s.account.is_none()) {
+            if !out.iter().any(|e| e.eq_ignore_ascii_case(&s.address.email)) {
+                out.push(s.address.email.clone());
+            }
+        }
+        out
+    }
+
     /// Отправитель общего ящика `account` (ответ на письмо из него уходит от его имени), если сервер его дал.
     pub(crate) fn sender_for(&self, account: Option<&str>) -> Option<(Address, String)> {
         let account = account?;
