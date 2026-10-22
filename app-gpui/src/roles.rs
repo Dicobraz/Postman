@@ -9,6 +9,7 @@
 //! `postman_core::palette`; здесь они только становятся ролями `app.*`, чтобы тема пользователя могла их
 //! переопределить, а высокая контрастность — заменить системными.
 
+use postman_core::prefs::Accent;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -131,9 +132,59 @@ pub(crate) const CORE: &[(Role, Color, Color)] = &[
 ];
 
 /// Слой таблицы DESIGN поверх Fluent ([`CORE`]) и плотность — переопределения темы Postman.
-pub(crate) fn base(density: Option<Density>) -> ThemeSpec {
-    let table = |dark: bool| CORE.iter().map(|&(r, l, d)| (r.name().to_owned(), if dark { d } else { l })).collect();
+pub(crate) fn base(density: Option<Density>, accent: Accent) -> ThemeSpec {
+    let table = |dark: bool| {
+        let mut t: std::collections::BTreeMap<String, Color> =
+            CORE.iter().map(|&(r, l, d)| (r.name().to_owned(), if dark { d } else { l })).collect();
+        // Акцент «Внешнего вида» (S5-30): текст, заливка кнопки, тонированная подложка и текст на ней — из таблицы.
+        if let Some(&(_, light, dark_t)) = ACCENTS.iter().find(|(a, _, _)| *a == accent) {
+            let [text, fill, tint, tint_fg] = if dark { dark_t } else { light };
+            // Наведение и нажатие — та же заливка с прозрачностью 90 % и 80 %, как у синего; наведение тонированной —
+            // подложка с 8 % текста на ней.
+            t.insert(Role::AccentText.name().to_owned(), c(text));
+            t.insert(Role::AccentFill.name().to_owned(), c(fill));
+            t.insert(Role::AccentFillHover.name().to_owned(), a(0xE600_0000 | fill));
+            t.insert(Role::AccentFillPressed.name().to_owned(), a(0xCC00_0000 | fill));
+            t.insert(Role::AccentSubtle.name().to_owned(), c(tint));
+            t.insert(pm_name(Pm::Tinted).to_owned(), c(tint));
+            t.insert(pm_name(Pm::TintedFg).to_owned(), c(tint_fg));
+            t.insert(pm_name(Pm::TintedHover).to_owned(), c(mix(tint, tint_fg, 0.08)));
+        }
+        t.into_iter().collect()
+    };
     ThemeSpec { density, light: table(false), dark: table(true), ..ThemeSpec::default() }
+}
+
+/// Акценты «Настройки → Внешний вид» (S5-30, DESIGN «Токены цвета», значения макета `SettingsAppearance`): светлая
+/// и тёмная — [текст и ссылка, заливка кнопки, тонированная подложка, текст на ней]. Синий Postman — в [`CORE`].
+pub(crate) const ACCENTS: &[(Accent, [u32; 4], [u32; 4])] = &[
+    (Accent::Teal, [0x00756F, 0x00756F, 0xE1F3F1, 0x00524D], [0x4DC2B8, 0x11706A, 0x173B38, 0xA6E3DC]),
+    (Accent::Green, [0x3A7A1E, 0x3A7A1E, 0xE8F3E1, 0x2A5A15], [0x86C266, 0x3D7425, 0x26371E, 0xBEE0AA]),
+    (Accent::Violet, [0x6E4BB5, 0x6E4BB5, 0xEFEAF9, 0x4F3487], [0xB39DEB, 0x6A4CAE, 0x332A4A, 0xD7CBF5]),
+    (Accent::Graphite, [0x4D5965, 0x4D5965, 0xECEEF0, 0x36404A], [0xAEB8C2, 0x56616C, 0x33383D, 0xD3DAE0]),
+];
+
+/// Цвет точки акцента в настройках: заливка кнопки (светлая) или текст (тёмная), как в макете.
+pub(crate) fn accent_swatch(accent: Accent, dark: bool) -> Hsla {
+    match ACCENTS.iter().find(|(a, _, _)| *a == accent) {
+        Some(&(_, light, d)) => Hsla::from(if dark { c(d[0]) } else { c(light[1]) }),
+        None => {
+            let pick = |role: Role| CORE.iter().find(|(r, _, _)| *r == role).map(|&(_, l, d)| if dark { d } else { l });
+            Hsla::from(pick(if dark { Role::AccentText } else { Role::AccentFill }).unwrap_or(c(0)))
+        }
+    }
+}
+
+/// Смесь двух цветов `0xRRGGBB`: `t` — доля второго.
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |v: u32, s: u32| ((v >> s) & 0xFF) as f32;
+    let one = |s: u32| ((ch(a, s) * (1. - t) + ch(b, s) * t).round() as u32).min(255) << s;
+    one(16) | one(8) | one(0)
+}
+
+/// Акцент «Внешнего вида» — на лету: слой токенов заново (плотность — та же).
+pub(crate) fn set_accent(accent: Accent, density: Option<Density>, cx: &mut App) {
+    Themes::update(cx, |s| s.set_overrides(Some(base(density, accent))));
 }
 
 /// Цвета ролей Postman: (роль, имя, светлая, тёмная, при высокой контрастности — роль pets-ui). Роли из палитры
@@ -513,7 +564,7 @@ impl Default for Look {
         static LIGHT: LazyLock<Theme> = LazyLock::new(|| {
             pets_ui::theme::resolve(
                 &ThemeSpec::default(),
-                Some(&base(None)),
+                Some(&base(None, Accent::System)),
                 &pets_ui::theme::OsLook::default(),
                 pets_ui::theme::FontSizes::default(),
                 &ROLES,
@@ -565,12 +616,12 @@ pub(crate) fn density(arg: Option<&str>) -> Option<Density> {
 
 /// Темы при запуске (до первого окна): «как в ОС» или `--theme`, плотность `--density`; смена темы ОС, акцента
 /// или файла темы — на лету: [`Look`] пересчитывается, компоненты gpui-kit (поля ввода) — в тот же вид.
-pub(crate) fn init(choice: &str, density: Option<Density>, cx: &mut App) {
+pub(crate) fn init(choice: &str, density: Option<Density>, accent: Accent, cx: &mut App) {
     Themes::init(
         ThemeConfig {
             app: "Postman",
             choice: choice.to_owned(),
-            overrides: Some(base(density)),
+            overrides: Some(base(density, accent)),
             app_roles: ROLES.as_slice(),
             ..ThemeConfig::default()
         },
@@ -627,7 +678,27 @@ fn sync_components(l: &Look, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{Look, PMS, Pm, ROLES, base, pm_name};
+    use postman_core::prefs::Accent;
     use pets_ui::theme::{FontSizes, OsLook, ThemeSpec, resolve};
+
+
+    /// Акцент «Внешнего вида» (S5-30): заливка, текст и тонированная подложка — токены акцента; синий — по умолчанию.
+    #[test]
+    fn accent_tokens_apply() {
+        let hex = |c: gpui_kit::Hsla| {
+            let r = gpui_kit::Rgba::from(c);
+            format!("#{:02X}{:02X}{:02X}", (r.r * 255.).round() as u8, (r.g * 255.).round() as u8, (r.b * 255.).round() as u8)
+        };
+        let look = |dark: bool, accent: Accent| {
+            let os = OsLook { dark, ..OsLook::default() };
+            Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, accent)), os, FontSizes::default(), &ROLES))
+        };
+        let l = look(false, Accent::Teal);
+        assert_eq!([hex(l.accent()), hex(l.accent_text()), hex(l.picked()), hex(l.pm(Pm::TintedFg))], ["#00756F", "#00756F", "#E1F3F1", "#00524D"]);
+        let d = look(true, Accent::Violet);
+        assert_eq!([hex(d.accent()), hex(d.accent_text()), hex(d.pm(Pm::Tinted))], ["#6A4CAE", "#B39DEB", "#332A4A"]);
+        assert_eq!(hex(look(false, Accent::System).accent()), "#0067C0");
+    }
 
     #[test]
     fn every_role_is_declared_once() {
@@ -690,7 +761,7 @@ mod tests {
 
     /// Тема Postman, как после [`super::init`]: Fluent и слой таблицы DESIGN.
     fn theme(os: &OsLook) -> Look {
-        Look::new(&resolve(&ThemeSpec::default(), Some(&base(None)), os, FontSizes::default(), &ROLES))
+        Look::new(&resolve(&ThemeSpec::default(), Some(&base(None, Accent::System)), os, FontSizes::default(), &ROLES))
     }
 
     /// Тёмная и светлая тема — токены таблицы DESIGN; категории — тёмные варианты палитры.

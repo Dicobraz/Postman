@@ -1,12 +1,13 @@
 //! «Настройки → Безопасность» (S5-30, макет `SettingsSecurity`): содержимое писем, вложения, песочница, фишинг, входы
-//! и соединение. Политики Postman — не настройки, а сведения: внешние картинки не грузятся никогда, файлы с макросами
-//! не открываются (решение №7), TLS ≥ 1.2 и проверка отзыва. Настраиваются: предупреждение о подмене ссылки,
-//! «Сохранить…» файлов с макросами, адрес ИБ для фишинга; «Сбросить сохранённые входы» — пароль из Диспетчера
-//! учётных данных Windows.
+//! и соединение. Выбор — только строже прежнего (решение владельца 2026-10-22): картинки «никогда» или «спрашивать»,
+//! TLS 1.2 или 1.3, пароль — в Диспетчере учётных данных или не хранить; проверка отзыва — всегда (выключатель
+//! закреплён). Политика организации закрепляет значения (`security.rs`). Файлы с макросами не открываются (решение
+//! №7); «Сохранить…» — настройка.
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
+use postman_core::prefs::Images;
 use postman_worker::Level;
 
 use crate::roles::Look;
@@ -15,7 +16,7 @@ use crate::settings_tab::{SettingsView, button, group, link, row, seg, seg_group
 impl SettingsView {
     /// «Сбросить»: пароль учётной записи — из Диспетчера учётных данных (в фоне); вход спросим при следующей
     /// синхронизации.
-    fn wipe_sign_ins(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn wipe_sign_ins(&mut self, cx: &mut Context<Self>) {
         self.wipe_confirm = false;
         let Some(account) = self.info.account.clone() else { return };
         let task = cx.background_spawn(async move { crate::sys::credentials::delete(&account.credential_target()) });
@@ -42,6 +43,53 @@ impl SettingsView {
     pub(crate) fn security(&mut self, l: &Look, cx: &mut Context<Self>) -> Div {
         let p = crate::prefs::get(cx);
         let fixed = |id: &'static str, key: &str| seg_group([seg(id, tr!(key), true, false, l)], l);
+        let policy = crate::security::policy();
+        let eff = crate::security::effective(&p);
+        // Закреплено политикой — выбор недоступен, подсказка говорит об этом.
+        let pinned = |hint: String, by_policy: bool| if by_policy { format!("{hint} {}", tr!("settings-policy-pinned")) } else { hint };
+        let images = seg_group(
+            [(Images::Never, "settings-images-never"), (Images::Ask, "settings-images-ask")].map(|(v, key)| {
+                let enabled = policy.images.is_none();
+                seg(("settings-images", v as usize), tr!(key), eff.images == v, enabled, l).when(enabled, |d| {
+                    d.on_click(cx.listener(move |_, _, _, cx| {
+                        crate::prefs::update(cx, |p| p.security.images = v);
+                        cx.notify();
+                    }))
+                })
+            }),
+            l,
+        );
+        let tls = seg_group(
+            [(false, "settings-tls-12"), (true, "settings-tls-13")].map(|(v, key)| {
+                let enabled = policy.tls13.is_none();
+                seg(("settings-tls", v as usize), tr!(key), eff.tls13 == v, enabled, l).when(enabled, |d| {
+                    d.on_click(cx.listener(move |_, _, _, cx| {
+                        crate::prefs::update(cx, |p| p.security.tls13 = v);
+                        crate::security::apply(&crate::prefs::get(cx));
+                        cx.notify();
+                    }))
+                })
+            }),
+            l,
+        );
+        let passwords = seg_group(
+            [(true, "settings-passwords-vault"), (false, "settings-passwords-none")].map(|(v, key)| {
+                let enabled = policy.store_password.is_none();
+                seg(("settings-passwords", v as usize), tr!(key), eff.store_password == v, enabled, l).when(enabled, |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        crate::prefs::update(cx, |p| p.security.store_password = v);
+                        // «Не хранить» — сохранённый пароль удаляется сразу.
+                        if !v && this.stored == Some(true) {
+                            this.wipe_sign_ins(cx);
+                        }
+                        cx.notify();
+                    }))
+                })
+            }),
+            l,
+        );
+        // Проверка отзыва — всегда: выключатель закреплён включённым.
+        let revocation = div().opacity(0.6).child(crate::settings_tab::switch(true, l));
         // Песочница: уровень последнего разбора (экран почты); ещё не разбирали — «проверяется при первом письме».
         let (sandbox, sandbox_hint) = match self.info.sandbox {
             Some(Level::Full) => (tr!("settings-sandbox-full"), tr!("settings-sandbox-full-hint")),
@@ -94,7 +142,12 @@ impl SettingsView {
             .flex_col()
             .when_some(self.os.error.clone(), |d, e| d.child(div().pt_3().text_color(l.error()).child(e)))
             .child(group(tr!("settings-content-group"), l))
-            .child(row(tr!("settings-images"), Some(tr!("settings-images-hint")), fixed("settings-images-never", "settings-images-never"), l))
+            .child(row(
+                tr!("settings-images"),
+                Some(pinned(tr!(if eff.images == Images::Ask { "settings-images-ask-hint" } else { "settings-images-hint" }), policy.images.is_some())),
+                images,
+                l,
+            ))
             .child(row(
                 tr!("settings-link-mismatch"),
                 Some(tr!("settings-link-mismatch-hint")),
@@ -159,9 +212,19 @@ impl SettingsView {
                 l,
             ))
             .child(group(tr!("settings-signin-group"), l))
-            .child(row(tr!("settings-passwords"), Some(tr!("settings-passwords-hint")), div().text_color(l.text2()).child(tr!("settings-passwords-vault")), l))
-            .child(row(tr!("settings-tls"), Some(tr!("settings-tls-hint")), fixed("settings-tls-12", "settings-tls-12"), l))
-            .child(row(tr!("settings-revocation"), Some(tr!("settings-revocation-hint")), fixed("settings-revocation-on", "settings-revocation-on"), l))
+            .child(row(
+                tr!("settings-passwords"),
+                Some(pinned(tr!(if eff.store_password { "settings-passwords-hint" } else { "settings-passwords-none-hint" }), policy.store_password.is_some())),
+                passwords,
+                l,
+            ))
+            .child(row(
+                tr!("settings-tls"),
+                Some(pinned(tr!(if eff.tls13 { "settings-tls-13-hint" } else { "settings-tls-hint" }), policy.tls13.is_some())),
+                tls,
+                l,
+            ))
+            .child(row(tr!("settings-revocation"), Some(tr!("settings-revocation-hint")), revocation, l))
             .child(row(tr!("settings-wipe-title"), Some(wipe_hint), wipe, l))
     }
 }

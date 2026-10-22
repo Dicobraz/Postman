@@ -52,6 +52,7 @@ mod diagnostics;
 mod settings_general;
 mod settings_security;
 mod settings_look;
+mod security;
 mod settings_tab;
 mod settings_cats;
 mod settings_cal;
@@ -293,7 +294,8 @@ fn main() {
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // Тема (S5-01): «как в ОС» или `--theme`, на лету; до первого окна — чтение реестра, микросекунды.
-        roles::init(&theme, density, cx);
+        roles::init(&theme, density, user_prefs.look.accent, cx);
+        security::apply(&user_prefs);
         // Клавиши — из реестра команд (S2-02) и свои из настроек (S5-09); в поле ввода клавиши без модификаторов — текст.
         commands::bind(cx, &user_prefs);
         prefs::init(user_prefs, prefs_path, cx);

@@ -220,18 +220,20 @@ pub struct Look {
     pub animations: bool,
     /// Задержка KeyTips, мс (`KEYTIPS_DELAYS`).
     pub keytips_delay: u16,
+    /// Акцентный цвет.
+    pub accent: Accent,
 }
 
 impl Default for Look {
     fn default() -> Self {
-        Self { font_size: None, avatars: true, preview: true, animations: true, keytips_delay: 400 }
+        Self { font_size: None, avatars: true, preview: true, animations: true, keytips_delay: 400, accent: Accent::System }
     }
 }
 
 /// Размеры шрифта, px.
 pub const FONT_SIZES: std::ops::RangeInclusive<u16> = 12..=18;
 /// Размер шрифта по умолчанию, px.
-pub const DEFAULT_FONT_SIZE: u16 = 13;
+pub const DEFAULT_FONT_SIZE: u16 = 14;
 /// Задержки KeyTips, мс.
 pub const KEYTIPS_DELAYS: [u16; 3] = [200, 400, 800];
 
@@ -243,22 +245,67 @@ impl Look {
 }
 
 /// «Безопасность» (S5-30). Внешние картинки не грузятся никогда (политика, не настройка); макросы не открываются
-/// никогда (решение №7) — настройка только у сохранения.
+/// никогда (решение №7) — настройка только у сохранения. Выбор — только строже, чем по умолчанию (решение владельца
+/// 2026-10-22); политика организации может закрепить любое из значений (`app-gpui/src/security.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Security {
     /// Разрешить «Сохранить…» файлов с макросами (с пометкой «из Интернета», решение владельца №7).
     pub macro_save: bool,
+    /// Внешние картинки.
+    pub images: Images,
+    /// Только TLS 1.3 (иначе — 1.2 и выше).
+    pub tls13: bool,
+    /// Хранить пароль в Диспетчере учётных данных Windows (иначе — спрашивать при каждом запуске).
+    pub store_password: bool,
 }
 
 impl Default for Security {
     fn default() -> Self {
-        Self { macro_save: true }
+        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true }
+    }
+}
+
+/// Внешние картинки в письмах.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Images {
+    #[default]
+    Never,
+    /// Спрашивать в письме.
+    Ask,
+}
+
+/// Акцентный цвет («Внешний вид», S5-30; токены — DESIGN «Токены цвета»).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    /// Синий Postman (#0067C0) — по умолчанию.
+    #[default]
+    System,
+    Teal,
+    Green,
+    Violet,
+    Graphite,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 5] = [Accent::System, Accent::Teal, Accent::Green, Accent::Violet, Accent::Graphite];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Accent::System => "system",
+            Accent::Teal => "teal",
+            Accent::Green => "green",
+            Accent::Violet => "violet",
+            Accent::Graphite => "graphite",
+        }
     }
 }
 
 /// Плотности, которые можно выбрать (высота строки, px).
-pub const DENSITIES: [u16; 4] = [20, 24, 28, 32];
+/// Две, как в макете «Внешний вид» (решение владельца 2026-10-22): компактная и обычная.
+pub const DENSITIES: [u16; 2] = [20, 24];
 /// Языки интерфейса.
 pub const LANGUAGES: [&str; 2] = ["ru", "en"];
 
@@ -284,9 +331,8 @@ impl Prefs {
     /// одному разу, сроки — в пределах.
     pub fn normalized(mut self) -> Prefs {
         self.version = VERSION;
-        if self.general.density.is_some_and(|d| !DENSITIES.contains(&d)) {
-            self.general.density = None;
-        }
+        // Прежние «удобная» 28 и «просторная» 32 — к ближайшей из двух (обычная 24).
+        self.general.density = self.general.density.map(|d| if d <= 22 { 20 } else { 24 });
         if self.general.language.as_deref().is_some_and(|l| !LANGUAGES.contains(&l)) {
             self.general.language = None;
         }
@@ -1020,6 +1066,10 @@ mod tests {
         p.look.avatars = false;
         p.look.keytips_delay = 800;
         p.security.macro_save = false;
+        p.security.images = Images::Ask;
+        p.security.tls13 = true;
+        p.security.store_password = false;
+        p.look.accent = Accent::Teal;
         p.keys_single.insert("mail.archive".into(), vec!["y".into()]);
         p.save(&path).unwrap();
         let back = Prefs::load(&path).unwrap();
@@ -1044,10 +1094,19 @@ mod tests {
         p.general.quiet_to = 12;
         let p = p.normalized();
         assert_eq!(p.look.font_size, Some(18));
+        assert_eq!(Prefs::default().look.font_px(), 14, "по умолчанию — 14, как в макете");
         assert_eq!(p.look.font_px(), 18);
         assert_eq!(p.look.keytips_delay, 400);
         assert_eq!((p.general.quiet_from, p.general.quiet_to), (22, 8));
+        // Плотность: прежние 28 и 32 — обычная 24, 20 — компактная.
+        for (was, now) in [(20, 20), (24, 24), (28, 24), (32, 24)] {
+            let mut p = Prefs::default();
+            p.general.density = Some(was);
+            assert_eq!(p.normalized().general.density, Some(now), "{was}");
+        }
         let old: Prefs = serde_json::from_str(r#"{"version":1,"general":{"language":"ru"}}"#).unwrap();
+        assert_eq!(old.security, Security::default(), "по умолчанию — не слабее прежнего");
+        assert_eq!((old.security.images, old.security.tls13, old.security.store_password), (Images::Never, false, true));
         assert_eq!(old.general.language.as_deref(), Some("ru"));
         assert!(old.general.quiet && old.look.avatars && old.keytips, "прежний файл — умолчания новых полей");
         assert_eq!(LogLevel::Debug.filter(), "debug");

@@ -8,7 +8,7 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle};
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey,
     RegCreateKeyExW, RegDeleteKeyValueW, RegGetValueW, RegSetValueExW,
 };
 
@@ -66,6 +66,10 @@ fn set_string(path: &str, name: Option<&str>, value: &str) -> Result<(), String>
 
 /// Строковое значение; нет — `None`.
 fn get_string(path: &str, name: Option<&str>) -> Option<String> {
+    get_string_in(HKEY_CURRENT_USER, path, name)
+}
+
+fn get_string_in(root: HKEY, path: &str, name: Option<&str>) -> Option<String> {
     let wpath = wide(path);
     let wname = name.map(wide);
     let mut buf = vec![0u16; 1024];
@@ -73,7 +77,7 @@ fn get_string(path: &str, name: Option<&str>) -> Option<String> {
     // SAFETY: буфер и его размер в байтах; строки живут до конца вызова.
     let rc = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            root,
             wpath.as_ptr(),
             wname.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()),
             RRF_RT_REG_SZ,
@@ -108,6 +112,12 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
             Err(format!("RegDeleteKeyValueW: {rc}"))
         }
     }
+}
+
+/// Политика организации (`Software\Policies\Pets\Postman`, сначала HKLM, затем HKCU): строковое значение.
+pub fn policy(name: &str) -> Option<String> {
+    const PATH: &str = r"Software\Policies\Pets\Postman";
+    get_string_in(HKEY_LOCAL_MACHINE, PATH, Some(name)).or_else(|| get_string(PATH, Some(name)))
 }
 
 /// Значение автозапуска есть.

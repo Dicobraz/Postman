@@ -1,14 +1,15 @@
 //! «Настройки → Внешний вид» (S5-30, макет `SettingsAppearance`): тема, акцент, плотность, размер шрифта, аватары и
 //! превью, анимации, KeyTips (выключатель и задержка). Применяется сразу ко всем окнам.
 //!
-//! Акцент — системный (как в Windows): палитры макета (бирюзовый, зелёный, фиолетовый, графит) нет в таблице цветов
-//! `DESIGN.md`, «Бирюза не используется». Анимации — запоминаются (плавных переходов пока нет).
+//! Акцент — синий Postman или бирюзовый, зелёный, фиолетовый, графит (токены DESIGN, значения макета; решение
+//! владельца 2026-10-22). Плотность — две, как в макете; шрифт по умолчанию — 14. Анимации — запоминаются (плавных
+//! переходов пока нет).
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::{Metric, Role, Themes};
-use postman_core::prefs::{FONT_SIZES, KEYTIPS_DELAYS};
+use postman_core::prefs::{Accent, FONT_SIZES, KEYTIPS_DELAYS};
 
 use crate::chrome::icon;
 use crate::roles::Look;
@@ -44,7 +45,8 @@ impl SettingsView {
             .collect();
         let theme_hint = if locked { Some(tr!("pets-ui-theme-locked")) } else { self.theme_error.clone().or(Some(tr!("settings-theme-hint"))) };
         let row_px = l.density().row();
-        let densities: Vec<Stateful<Div>> = [(20u16, "settings-density-compact"), (24, "settings-density-normal"), (28, "settings-density-comfortable"), (32, "settings-density-spacious")]
+        // Две плотности, как в макете: прежние «удобная» и «просторная» — обычная (`Prefs::normalized`).
+        let densities: Vec<Stateful<Div>> = [(20u16, "settings-density-compact"), (24, "settings-density-normal")]
             .into_iter()
             .map(|(px_row, key)| {
                 seg(("settings-density", px_row as usize), tr!(key, px = px_row), row_px == px_row, true, l).on_click(cx.listener(
@@ -101,12 +103,42 @@ impl SettingsView {
                 }))
             })
         });
+        // Акцент: точки цвета с подписью; выбранный — в кольце акцента.
+        let accents = div().flex().items_center().gap_3().children(Accent::ALL.map(|a| {
+            let on = p.look.accent == a;
+            let dot = crate::roles::accent_swatch(a, l.dark());
+            div()
+                .id(("settings-accent", a as usize))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(px(24.))
+                        .rounded_full()
+                        .bg(dot)
+                        .when(on, |d| d.border_2().border_color(l.panel()).shadow_sm()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .when(on, |d| d.font_weight(FontWeight::SEMIBOLD).text_color(l.text()))
+                        .when(!on, |d| d.text_color(l.text2()))
+                        .child(tr!(&format!("settings-accent-{}", a.id()))),
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::prefs::set_accent(a, cx);
+                    cx.notify();
+                }))
+        }));
         div()
             .flex()
             .flex_col()
             .child(group(tr!("settings-look"), l))
             .child(row(tr!("settings-theme"), theme_hint, seg_group(themes, l), l))
-            .child(row(tr!("settings-accent"), Some(tr!("settings-accent-hint")), div().text_color(l.text2()).child(tr!("settings-accent-system")), l))
+            .child(row(tr!("settings-accent"), Some(tr!("settings-accent-hint")), accents, l))
             .child(row(tr!("settings-density"), Some(tr!("settings-density-hint")), seg_group(densities, l), l))
             .child(group(tr!("settings-text-group"), l))
             .child(row(tr!("settings-font"), Some(tr!("settings-font-hint")), font, l))

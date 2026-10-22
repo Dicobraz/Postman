@@ -113,6 +113,13 @@ pub(crate) fn set_density(row: u16, cx: &mut App) {
     update(cx, |p| p.general.density = density.map(|d| d.row()));
 }
 
+/// Акцент («Внешний вид», S5-30): тема — заново, на лету.
+pub(crate) fn set_accent(accent: postman_core::prefs::Accent, cx: &mut App) {
+    update(cx, |p| p.look.accent = accent);
+    let density = density_at_start(None, &get(cx));
+    crate::roles::set_accent(accent, density, cx);
+}
+
 /// Язык интерфейса на лету (`None` — язык Windows): тексты, которые экраны строят при отрисовке, — сразу; подписи,
 /// запомненные полями ввода, — после перезапуска.
 pub(crate) fn set_language(lang: Option<&str>, cx: &mut App) {
@@ -151,11 +158,11 @@ mod tests {
     fn start_values_prefer_arguments() {
         let mut p = Prefs::default();
         p.general.theme = Some("fluent-dark".into());
-        p.general.density = Some(28);
+        p.general.density = Some(20);
         p.general.language = Some("en".into());
         assert_eq!(theme_at_start(None, &p), "fluent-dark");
         assert_eq!(theme_at_start(Some("light"), &p), pets_ui::theme::FLUENT_LIGHT);
-        assert_eq!(density_at_start(None, &p), Some(Density::Comfortable));
+        assert_eq!(density_at_start(None, &p), Some(Density::Compact));
         assert_eq!(density_at_start(Some("compact"), &p), Some(Density::Compact));
         assert_eq!(language_at_start(None, &p), "en");
         assert_eq!(language_at_start(Some("ru"), &p), "ru");

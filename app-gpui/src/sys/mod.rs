@@ -95,6 +95,10 @@ pub mod shell {
         false
     }
 
+    pub fn policy(_name: &str) -> Option<String> {
+        None
+    }
+
     pub fn log_to_file(_path: &Path) -> bool {
         false
     }
