@@ -271,15 +271,7 @@ impl ReadingPane {
             .bg(l.picked())
             .child(div().flex_1().child(text))
             .child(
-                div()
-                    .id("unsend")
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(l.stroke())
-                    .cursor_pointer()
-                    .hover(|d| d.bg(l.hover()))
+                crate::buttons::secondary("unsend", &l)
                     .child(tr!("send-scheduled-cancel"))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReadingEvent::Unsend(s.clone())))),
             );

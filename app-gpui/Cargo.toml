@@ -15,6 +15,8 @@ path = "src/main.rs"
 alloc-count = []
 
 [dependencies]
+# Отчёт для поддержки (S5-30): архив журнала и настроек; тот же крейт, что у воркера.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 postman-ir.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
@@ -55,6 +57,7 @@ features = [
     "Win32_System_Console",
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ]

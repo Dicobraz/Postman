@@ -16,6 +16,7 @@ frame-scope-folder = Текущая папка
 frame-rail-mail = Почта
 frame-rail-calendar = Календарь
 frame-rail-contacts = Контакты
+frame-rail-tasks = Задачи
 frame-rail-settings = Настройки
 frame-list-count = { $n ->
     [one] { $n } письмо

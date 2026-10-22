@@ -8,7 +8,8 @@ use pets_i18n::tr;
 use pets_ui::theme::Metric;
 
 use crate::roles::Look;
-use crate::settings_tab::{SettingsEvent, SettingsView, aside_card, button, link};
+use crate::buttons::button;
+use crate::settings_tab::{SettingsEvent, SettingsView, aside_card, link};
 
 /// Инициалы для кружка: первые буквы имени до `@` (две), иначе первая буква.
 pub(crate) fn initials(user: &str) -> String {

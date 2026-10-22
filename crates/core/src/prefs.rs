@@ -55,9 +55,12 @@ pub struct Prefs {
     pub keys_rev: u32,
     /// Схема клавиш (S5-17, «Настройки → Клавиатура»): «Outlook» по умолчанию или «Одиночные клавиши».
     pub key_scheme: KeyScheme,
-    /// KeyTips (S5-18): удержание Ctrl показывает клавиши над кнопками. Место в макете — «Внешний вид» (S5-30), до
-    /// него — «Клавиатура».
+    /// KeyTips (S5-18): удержание Ctrl показывает клавиши над кнопками; выключатель — «Внешний вид» (S5-30).
     pub keytips: bool,
+    /// «Внешний вид» (S5-30): размер шрифта, аватары, превью, анимации, задержка KeyTips.
+    pub look: Look,
+    /// «Безопасность» (S5-30).
+    pub security: Security,
     /// Свои клавиши столбца «Одиночные клавиши» (как `keys`, но для слоя схемы); действуют, когда она выбрана.
     pub keys_single: BTreeMap<String, Vec<String>>,
 }
@@ -85,14 +88,17 @@ impl Default for Prefs {
             keys: BTreeMap::new(),
             keys_rev: 0,
             key_scheme: KeyScheme::Outlook,
+            look: Look::default(),
+            security: Security::default(),
             keytips: true,
             keys_single: BTreeMap::new(),
         }
     }
 }
 
-/// Вид: тема, плотность, язык. `None` — по умолчанию («как в ОС», 24 px, язык ОС).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Вид: тема, плотность, язык; запуск, уведомления, обновления, журнал (S5-30). `None` — по умолчанию («как в ОС»,
+/// 24 px, язык ОС).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
     /// Id темы pets-ui: `system`, `fluent-light`, `fluent-dark`, `high-contrast` или своей.
@@ -104,10 +110,202 @@ pub struct General {
     /// «Сообщить о фишинге» (S5-08): письмо ещё и вложением на этот адрес (служба безопасности); `None` — только в
     /// «Нежелательные» с меткой.
     pub phishing_report: Option<String>,
+    /// Запускать вместе с Windows (HKCU Run, окно свёрнутым).
+    pub autostart: bool,
+    /// Что открыть при запуске.
+    pub start: StartView,
+    /// Уведомления Windows о новых письмах.
+    pub notify: Notify,
+    /// Тихие часы: уведомления не всплывают, копятся в истории; часы — с `quiet_from` до `quiet_to`.
+    pub quiet: bool,
+    pub quiet_from: u8,
+    pub quiet_to: u8,
+    /// Звук «Новое письмо».
+    pub sound: bool,
+    /// Канал обновлений.
+    pub channel: Channel,
+    /// Уровень журнала (без `POSTMAN_LOG`; действует со следующего запуска).
+    pub log: LogLevel,
+}
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            density: None,
+            language: None,
+            phishing_report: None,
+            autostart: false,
+            start: StartView::Inbox,
+            notify: Notify::All,
+            quiet: true,
+            quiet_from: 22,
+            quiet_to: 8,
+            sound: false,
+            channel: Channel::Stable,
+            log: LogLevel::Info,
+        }
+    }
+}
+
+/// Стартовый экран.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartView {
+    #[default]
+    Inbox,
+    /// Вкладки, открытые при закрытии.
+    LastTabs,
+}
+
+/// Уведомления о новых письмах.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notify {
+    #[default]
+    All,
+    /// Упоминания, ответы в моих беседах, письма со сроком.
+    Important,
+    Off,
+}
+
+/// Канал обновлений.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    #[default]
+    Stable,
+    Preview,
+}
+
+/// Уровень журнала.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    pub const ALL: [LogLevel; 4] = [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug];
+
+    /// Фильтр `tracing` (`POSTMAN_LOG`).
+    pub fn filter(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+        }
+    }
+}
+
+/// Часы начала тихих часов и их конца (выбор в настройках).
+pub const QUIET_FROM: [u8; 4] = [20, 21, 22, 23];
+pub const QUIET_TO: [u8; 3] = [7, 8, 9];
+
+/// «Внешний вид» (S5-30).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Look {
+    /// Размер шрифта списка, писем и панелей, px (`FONT_SIZES`); `None` — по умолчанию ([`DEFAULT_FONT_SIZE`]).
+    pub font_size: Option<u16>,
+    /// Аватары и превью текста в строке письма (в компактной плотности — нет всегда).
+    pub avatars: bool,
+    pub preview: bool,
+    /// Плавные переходы (выключены в Windows — выключены и здесь).
+    pub animations: bool,
+    /// Задержка KeyTips, мс (`KEYTIPS_DELAYS`).
+    pub keytips_delay: u16,
+    /// Акцентный цвет.
+    pub accent: Accent,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self { font_size: None, avatars: true, preview: true, animations: true, keytips_delay: 400, accent: Accent::System }
+    }
+}
+
+/// Размеры шрифта, px.
+pub const FONT_SIZES: std::ops::RangeInclusive<u16> = 12..=18;
+/// Размер шрифта по умолчанию, px.
+pub const DEFAULT_FONT_SIZE: u16 = 14;
+/// Задержки KeyTips, мс.
+pub const KEYTIPS_DELAYS: [u16; 3] = [200, 400, 800];
+
+impl Look {
+    /// Размер шрифта, px: свой (в пределах) или по умолчанию.
+    pub fn font_px(&self) -> u16 {
+        self.font_size.filter(|s| FONT_SIZES.contains(s)).unwrap_or(DEFAULT_FONT_SIZE)
+    }
+}
+
+/// «Безопасность» (S5-30). Внешние картинки не грузятся никогда (политика, не настройка); макросы не открываются
+/// никогда (решение №7) — настройка только у сохранения. Выбор — только строже, чем по умолчанию (решение владельца
+/// 2026-10-22); политика организации может закрепить любое из значений (`app-gpui/src/security.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Security {
+    /// Разрешить «Сохранить…» файлов с макросами (с пометкой «из Интернета», решение владельца №7).
+    pub macro_save: bool,
+    /// Внешние картинки.
+    pub images: Images,
+    /// Только TLS 1.3 (иначе — 1.2 и выше).
+    pub tls13: bool,
+    /// Хранить пароль в Диспетчере учётных данных Windows (иначе — спрашивать при каждом запуске).
+    pub store_password: bool,
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self { macro_save: true, images: Images::Never, tls13: false, store_password: true }
+    }
+}
+
+/// Внешние картинки в письмах.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Images {
+    #[default]
+    Never,
+    /// Спрашивать в письме.
+    Ask,
+}
+
+/// Акцентный цвет («Внешний вид», S5-30; токены — DESIGN «Токены цвета»).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    /// Синий Postman (#0067C0) — по умолчанию.
+    #[default]
+    System,
+    Teal,
+    Green,
+    Violet,
+    Graphite,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 5] = [Accent::System, Accent::Teal, Accent::Green, Accent::Violet, Accent::Graphite];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Accent::System => "system",
+            Accent::Teal => "teal",
+            Accent::Green => "green",
+            Accent::Violet => "violet",
+            Accent::Graphite => "graphite",
+        }
+    }
 }
 
 /// Плотности, которые можно выбрать (высота строки, px).
-pub const DENSITIES: [u16; 4] = [20, 24, 28, 32];
+/// Две, как в макете «Внешний вид» (решение владельца 2026-10-22): компактная и обычная.
+pub const DENSITIES: [u16; 2] = [20, 24];
 /// Языки интерфейса.
 pub const LANGUAGES: [&str; 2] = ["ru", "en"];
 
@@ -133,9 +331,12 @@ impl Prefs {
     /// одному разу, сроки — в пределах.
     pub fn normalized(mut self) -> Prefs {
         self.version = VERSION;
-        if self.general.density.is_some_and(|d| !DENSITIES.contains(&d)) {
-            self.general.density = None;
-        }
+        // Прежние «удобная» 28 и «просторная» 32 — к ближайшей из двух (обычная 24).
+        self.general.density = match self.general.density {
+            Some(20) => Some(20),
+            Some(24 | 28 | 32) => Some(24),
+            _ => None,
+        };
         if self.general.language.as_deref().is_some_and(|l| !LANGUAGES.contains(&l)) {
             self.general.language = None;
         }
@@ -146,6 +347,16 @@ impl Prefs {
         self.keys_single.retain(|id, _| !id.is_empty());
         // Адрес для фишинга: пробелы по краям — прочь, пустой и без «@» — нет адреса.
         self.general.phishing_report = phishing_address(self.general.phishing_report.as_deref());
+        if !QUIET_FROM.contains(&self.general.quiet_from) {
+            self.general.quiet_from = General::default().quiet_from;
+        }
+        if !QUIET_TO.contains(&self.general.quiet_to) {
+            self.general.quiet_to = General::default().quiet_to;
+        }
+        self.look.font_size = self.look.font_size.map(|s| s.clamp(*FONT_SIZES.start(), *FONT_SIZES.end()));
+        if !KEYTIPS_DELAYS.contains(&self.look.keytips_delay) {
+            self.look.keytips_delay = Look::default().keytips_delay;
+        }
         self
     }
 }
@@ -835,6 +1046,7 @@ mod tests {
                 density: Some(20),
                 language: Some("en".into()),
                 phishing_report: Some("soc@corp.example".into()),
+                ..General::default()
             },
             ..Prefs::default()
         };
@@ -850,6 +1062,18 @@ mod tests {
         p.keys.insert("tab.close".into(), vec![]);
         p.key_scheme = KeyScheme::Single;
         p.keytips = false;
+        p.general.autostart = true;
+        p.general.notify = Notify::Important;
+        p.general.quiet_from = 21;
+        p.general.log = LogLevel::Debug;
+        p.look.font_size = Some(16);
+        p.look.avatars = false;
+        p.look.keytips_delay = 800;
+        p.security.macro_save = false;
+        p.security.images = Images::Ask;
+        p.security.tls13 = true;
+        p.security.store_password = false;
+        p.look.accent = Accent::Teal;
         p.keys_single.insert("mail.archive".into(), vec!["y".into()]);
         p.save(&path).unwrap();
         let back = Prefs::load(&path).unwrap();
@@ -860,6 +1084,36 @@ mod tests {
         assert_eq!(back.lifecycle.archive_newsletters(), Some(Duration::from_secs(14 * DAY)));
         // Временного файла не остаётся.
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    /// S5-30: значения вне выбора — к умолчанию; размер шрифта — в пределах 12…18, без своего — 13.
+    #[test]
+    fn appearance_and_general_are_clamped() {
+        let mut p = Prefs::default();
+        assert_eq!(p.look.font_px(), DEFAULT_FONT_SIZE);
+        assert!(p.security.macro_save, "решение №7: «Сохранить…» можно");
+        p.look.font_size = Some(40);
+        p.look.keytips_delay = 123;
+        p.general.quiet_from = 3;
+        p.general.quiet_to = 12;
+        let p = p.normalized();
+        assert_eq!(p.look.font_size, Some(18));
+        assert_eq!(Prefs::default().look.font_px(), 14, "по умолчанию — 14, как в макете");
+        assert_eq!(p.look.font_px(), 18);
+        assert_eq!(p.look.keytips_delay, 400);
+        assert_eq!((p.general.quiet_from, p.general.quiet_to), (22, 8));
+        // Плотность: прежние 28 и 32 — обычная 24, 20 — компактная.
+        for (was, now) in [(20, 20), (24, 24), (28, 24), (32, 24)] {
+            let mut p = Prefs::default();
+            p.general.density = Some(was);
+            assert_eq!(p.normalized().general.density, Some(now), "{was}");
+        }
+        let old: Prefs = serde_json::from_str(r#"{"version":1,"general":{"language":"ru"}}"#).unwrap();
+        assert_eq!(old.security, Security::default(), "по умолчанию — не слабее прежнего");
+        assert_eq!((old.security.images, old.security.tls13, old.security.store_password), (Images::Never, false, true));
+        assert_eq!(old.general.language.as_deref(), Some("ru"));
+        assert!(old.general.quiet && old.look.avatars && old.keytips, "прежний файл — умолчания новых полей");
+        assert_eq!(LogLevel::Debug.filter(), "debug");
     }
 
     /// Адрес «Сообщить о фишинге» (S5-08): обрезается; не адрес — нет пересылки.

@@ -17,7 +17,7 @@ use postman_calendar::{Event, Invitation, Partstat, Span, layout_day};
 use postman_core::invite::{Change, InviteState, Known, Outdated, Seen, classify, conflicts};
 use postman_core::sync::Event as SyncEvent;
 
-use crate::calendar::{FIRST_HOUR, HOURS, accent_button, add_days, day_start, duration_text, g, hm, zoned};
+use crate::calendar::{FIRST_HOUR, HOURS, add_days, day_start, duration_text, g, hm, zoned};
 use crate::chrome::icon;
 use crate::reading::{ReadingEvent, ReadingPane, SyncRequest};
 use crate::roles::{Look, Pm};
@@ -375,7 +375,7 @@ fn dots(inv: &Invitation, l: &Look) -> Div {
 /// Метка состояния справа от темы: «Ждёт ответа», «Принято», «Под вопросом», «Отклонено».
 fn chip(answered: Option<Partstat>, l: &Look) -> Div {
     let (key, bg, fg) = match answered {
-        None => ("invite-chip-waiting", l.pm(Pm::Tinted), l.pm(Pm::TintedFg)),
+        None => ("invite-chip-waiting", l.pm(Pm::Secondary), l.pm(Pm::SecondaryFg)),
         Some(Partstat::Accepted) => ("invite-chip-accepted", l.pm(Pm::OkBg), l.pm(Pm::OkFg)),
         Some(Partstat::Declined) => ("invite-chip-declined", l.fill(), l.text2()),
         Some(_) => ("invite-chip-tentative", l.fill(), l.text2()),
@@ -386,24 +386,6 @@ fn chip(answered: Option<Partstat>, l: &Look) -> Div {
 /// Длительность меткой: «1 ч».
 fn length_chip(secs: i64, l: &Look) -> Div {
     div().flex_none().px(px(8.)).rounded(px(4.)).text_size(px(11.)).line_height(px(16.)).bg(l.fill()).text_color(l.text2()).child(duration_text(secs))
-}
-
-/// Тонированная кнопка (DESIGN «Цвет»: второстепенные — синяя подложка без рамки).
-pub(crate) fn tinted_button(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
-    let hover = l.pm(Pm::TintedHover);
-    div()
-        .id(id)
-        .h(px(32.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(8.))
-        .rounded(px(4.))
-        .bg(l.pm(Pm::Tinted))
-        .text_color(l.pm(Pm::TintedFg))
-        .cursor_pointer()
-        .hover(move |d| d.bg(hover))
 }
 
 /// Кнопки ответа: «Принять» — заливка, «Под вопросом» и «Отклонить» — тонированные, у всех — значок в круге; клавиша
@@ -418,8 +400,8 @@ fn answer_buttons(card: &Card, side: bool, l: &Look, cx: &mut Context<ReadingPan
     .into_iter()
     .map(|(id, key, command, s)| {
         let primary = s == Partstat::Accepted;
-        let b = if primary { accent_button(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { tinted_button(id, l) };
-        let ink = if primary { l.on_accent() } else { l.pm(Pm::TintedFg) };
+        let b = if primary { crate::buttons::primary(id, l).justify_center().font_weight(FontWeight::SEMIBOLD) } else { crate::buttons::secondary(id, l) };
+        let ink = crate::buttons::ink(primary, l);
         let b = b
             .when(!side, |d| d.w(px(160.)).min_w(px(88.)).px(px(8.)))
             .when(sending.is_some(), |d| d.opacity(if sending == Some(s) { 1. } else { 0.5 }))
@@ -545,8 +527,8 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
             .gap(px(8.))
             .px(px(8.))
             .rounded(px(6.))
-            .bg(l.pm(Pm::Tinted))
-            .text_color(l.pm(Pm::TintedFg))
+            .bg(l.pm(Pm::Secondary))
+            .text_color(l.pm(Pm::SecondaryFg))
             .text_size(px(12.))
             .child(icon(g::CALENDAR, 14.))
             .child(div().min_w_0().truncate().child(tr!("invite-side-strip", when = when)))
@@ -661,7 +643,7 @@ pub(crate) fn render(card: &Card, me: Option<&str>, cx: &mut Context<ReadingPane
         .map(|d| match (&p.state, p.answered) {
             (InviteState::NotInvited, _) => d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-not-invited"))),
             (_, Some(s)) => d.child(done_text(s, &l)).child(
-                tinted_button("invite-change", &l).ml(px(12.)).child(tr!("cal-change-answer")).child(icon(g::DOWN, 10.)).on_click(change_answer(cx)),
+                crate::buttons::secondary("invite-change", &l).ml(px(12.)).child(tr!("cal-change-answer")).child(icon(g::DOWN, 10.)).on_click(change_answer(cx)),
             ),
             _ => d.children(answer_buttons(card, false, &l, cx)).when(card.sending.is_some(), |d| {
                 d.child(div().ml(px(8.)).text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-sending")))
@@ -919,7 +901,7 @@ fn timeline(card: &Card, inv: &Invitation, me: Option<&str>, tz: &TimeZone, side
                     .map(|d| match b.lane {
                         Lane::Invite if accepted => d.bg(invite).text_color(l.pm(Pm::DayAcceptedOn)),
                         Lane::Invite if declined => d.border_1().border_dashed().border_color(invite).text_color(l.text2()),
-                        Lane::Invite => d.bg(invite.opacity(0.35)).border_1().border_dashed().border_color(invite).text_color(l.pm(Pm::TintedFg)),
+                        Lane::Invite => d.bg(invite.opacity(0.35)).border_1().border_dashed().border_color(invite).text_color(l.pm(Pm::SecondaryFg)),
                         Lane::Conflict => d.bg(l.pm(Pm::DayOverlap)).text_color(l.pm(Pm::DayOverlapOn)),
                         Lane::Own => d.bg(l.pm(Pm::DayOwn)).text_color(l.pm(Pm::DayOwnFg)),
                     })
