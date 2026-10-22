@@ -134,6 +134,8 @@ enum Scene {
     TaskNotes,
     /// «Время в календаре» (S6-08): блок поставлен в ближайшее свободное окно.
     TaskTimeblock,
+    /// Повтор (S6-07): варианты повтора в карточке.
+    TaskRepeat,
     /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
     Vacation,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
@@ -247,6 +249,7 @@ const SCENES: &[Scene] = &[
     Scene::TaskCardMail,
     Scene::TaskNotes,
     Scene::TaskTimeblock,
+    Scene::TaskRepeat,
     Scene::Compose,
     Scene::SendLater,
     Scene::Checks,
@@ -357,6 +360,7 @@ impl Scene {
             Scene::TaskCardMail => "task-card-mail",
             Scene::TaskNotes => "task-notes",
             Scene::TaskTimeblock => "task-timeblock",
+            Scene::TaskRepeat => "task-repeat",
             Scene::Vacation => "vacation",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
@@ -798,7 +802,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.contacts_frequent(cx);
             m.contacts.update(cx, |c, cx| c.show_frequent(cx));
         }
-        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock | Scene::TaskRepeat => {
             use postman_core::tasks::List;
             m.set_section(Section::Tasks, cx);
             let first = m.list.read(cx).row(0).cloned();
@@ -814,6 +818,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
                         }
                     }
                     Scene::TaskNotes => t.focus_notes(window, cx),
+                    Scene::TaskRepeat => t.demo_repeat(cx),
                     _ => t.demo_block(cx),
                 }
             });
@@ -1170,7 +1175,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::Tasks | Scene::TasksToday | Scene::TasksProject | Scene::TasksDone => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
-        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock => {
+        Scene::TaskQuickAdd | Scene::TaskCard | Scene::TaskCardMail | Scene::TaskNotes | Scene::TaskTimeblock | Scene::TaskRepeat => {
             m.section == Section::Tasks && m.tasks.read(cx).ready()
         }
         Scene::Vacation => {
