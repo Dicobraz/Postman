@@ -324,6 +324,9 @@ pub fn finish(line: String) {
 pub const IDLE_LIFECYCLE_VAR: &str = "POSTMAN_BENCH_IDLE_LIFECYCLE";
 /// Простой без связи (S5-14): строка «нет связи» с обратным отсчётом повтора (таймер раз в секунду).
 pub const IDLE_OFFLINE_VAR: &str = "POSTMAN_BENCH_IDLE_OFFLINE";
+/// Простой в другом разделе (S5-32): `calendar`, `contacts` или `tasks` открывается в начале простоя — таймеры и
+/// перерисовки календаря (линия «сейчас», виды), контактов и задач (напоминания) попадают в `idle_cpu_pct`.
+pub const IDLE_SECTION_VAR: &str = "POSTMAN_BENCH_IDLE_SECTION";
 
 /// Порог рабочего набора в простое, МБ (S4-08): задан и превышен — бенч выходит с кодом 1 (для CI и стенда).
 pub const MAX_IDLE_RSS_VAR: &str = "POSTMAN_BENCH_MAX_IDLE_RSS_MB";
