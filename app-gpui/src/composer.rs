@@ -1123,7 +1123,7 @@ impl Composer {
 
     /// Панель: Ж К Ч | списки, ссылка, цитата | Вложить, Шаблон, Подпись … Метка.
     fn toolbar(&self, l: &Look, cx: &mut Context<Self>) -> Div {
-        let tb = l.pm(Pm::ToolbarAccent);
+        let tb = l.pm(Pm::LabelAccent);
         let fmt = |id: &'static str, f: Format, tip: &'static str, cx: &mut Context<Self>| {
             quiet(id, l)
                 .w(px(30.))
@@ -1873,7 +1873,7 @@ impl Composer {
     fn inline_header(&self, l: &Look, cx: &mut Context<Self>) -> Div {
         let button = |id: &'static str, g: char, key: &'static str| {
             quiet(id, l)
-                .text_color(l.pm(Pm::ToolbarAccent))
+                .text_color(l.pm(Pm::LabelAccent))
                 .child(icon(g, 14.))
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr!(key)).build(window, cx))
         };

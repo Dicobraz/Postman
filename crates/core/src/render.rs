@@ -46,6 +46,8 @@ impl Renderer {
             .name("render".into())
             .spawn(move || {
                 let mut client = Client::new(Client::default_exe(), TIMEOUT);
+                // Изоляция не полная — в журнал один раз, с причиной (отказ AppContainer).
+                let mut warned = false;
                 while let Ok(first) = jobs.recv() {
                     // При быстром листании важно только последнее тело; картинки — все по порядку.
                     let mut body = None;
@@ -62,6 +64,10 @@ impl Renderer {
                     if let Some((id, b)) = body {
                         let doc = render(&mut client, &b);
                         out.push(Rendered::Body { id, doc, level: client.level() });
+                        if client.level() == postman_worker::Level::Partial && !warned {
+                            warned = true;
+                            tracing::warn!(reason = client.fallback().unwrap_or("-"), "worker sandbox is partial");
+                        }
                     }
                     for (key, bytes) in images {
                         let result = client.decode_image(&bytes, MAX_IMAGE_SIDE);

@@ -137,18 +137,60 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// `relaxed` — сразу без AppContainer (строгий запуск уже не дал воркеру работать).
 pub(crate) fn spawn(exe: &Path, relaxed: bool) -> io::Result<Process> {
-    let sid = if relaxed || dropped("appcontainer") { None } else { app_container_sid() };
-    let Some(sid) = sid else {
+    if relaxed {
+        // Причину (воркер не ответил в AppContainer) знает клиент.
         return create(exe, None);
+    }
+    if dropped("appcontainer") {
+        return partial(exe, "POSTMAN_SANDBOX_DROP=appcontainer".into());
+    }
+    let sid = match app_container_sid() {
+        Ok(sid) => sid,
+        Err(hr) => return partial(exe, format!("профиль AppContainer: HRESULT 0x{hr:08X}")),
     };
-    match create(exe, Some(sid.0)) {
+    match create_in_container(exe, &sid) {
         Ok(mut p) => {
             p.level = Level::Full;
             Ok(p)
         }
-        // Любой отказ AppContainer — запуск с остальными ограничениями; причина — в ошибке, если и он не удался.
-        Err(strict) => create(exe, None).map_err(|e| io::Error::new(e.kind(), format!("{e}; в AppContainer: {strict}"))),
+        // Любой отказ AppContainer — запуск с остальными ограничениями; причина — в `fallback` и в ошибке, если и он
+        // не удался.
+        Err(strict) => partial(exe, format!("запуск в AppContainer: {strict}"))
+            .map_err(|e| io::Error::new(e.kind(), format!("{e}; в AppContainer: {strict}"))),
     }
+}
+
+/// Сколько ждём запуска в AppContainer при «файл не найден» и шаг повтора (см. [`create_in_container`]).
+const CONTAINER_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const CONTAINER_STEP: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Запуск в AppContainer. `CreateProcessW` с атрибутом AppContainer изредка отвечает ERROR_FILE_NOT_FOUND (2), хотя exe
+/// на месте и следующая попытка через 20–80 мс удаётся: так ОС ведёт себя, когда процессы AppContainer одного профиля
+/// создаются и завершаются параллельно (в том числе из разных процессов) — каталог объектов контейнера
+/// (`\Sessions\N\AppContainerNamedObjects\<SID>`) в этот момент пересоздаётся. Воспроизведение: тест `smime.rs`
+/// (три клиента параллельно) — 3 из 40 прогонов, вместе с `sandbox.rs` — 3 из 30; мьютекс на свои запуски и маркер
+/// контейнера, удерживаемый родителем, окно не закрывают. Ошибка временная и не наша — повторяем до [`CONTAINER_WAIT`],
+/// прежде чем уйти в частичную изоляцию (с повтором — 0 из 40 параллельных прогонов).
+fn create_in_container(exe: &Path, sid: &Sid) -> io::Result<Process> {
+    let start = std::time::Instant::now();
+    let mut attempt = 1u32;
+    loop {
+        match create(exe, Some(sid.0)) {
+            Err(e) if start.elapsed() < CONTAINER_WAIT && matches!(e.raw_os_error(), Some(2 | 3)) => {
+                std::thread::sleep(CONTAINER_STEP);
+                attempt += 1;
+            }
+            Err(e) if attempt > 1 => return Err(io::Error::new(e.kind(), format!("{e} (попыток: {attempt})"))),
+            other => return other,
+        }
+    }
+}
+
+/// Запуск без AppContainer с остальными ограничениями; `reason` — почему.
+fn partial(exe: &Path, reason: String) -> io::Result<Process> {
+    let mut p = create(exe, None)?;
+    p.fallback = Some(reason);
+    Ok(p)
 }
 
 /// Блок окружения воркера: только системные пути, никаких секретов родителя.
@@ -181,19 +223,20 @@ impl Drop for Sid {
     }
 }
 
-fn app_container_sid() -> Option<Sid> {
+/// SID профиля AppContainer воркера (создаётся при первом запуске); ошибка — HRESULT.
+fn app_container_sid() -> Result<Sid, u32> {
     let name = wide(PROFILE);
     let display = wide("Postman: разбор писем");
     let mut sid: PSID = null_mut();
     // SAFETY: строки нуль-терминированы; sid — выходной параметр.
     let hr = unsafe { CreateAppContainerProfile(name.as_ptr(), display.as_ptr(), display.as_ptr(), null(), 0, &mut sid) };
     if hr >= 0 {
-        return Some(Sid(sid));
+        return Ok(Sid(sid));
     }
     // Профиль уже есть (HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) — берём его SID.
     // SAFETY: см. выше.
     let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
-    (hr >= 0).then_some(Sid(sid))
+    if hr >= 0 { Ok(Sid(sid)) } else { Err(hr as u32) }
 }
 
 /// Пара анонимных каналов; конец для дочернего процесса наследуемый.
@@ -396,6 +439,7 @@ fn create(exe: &Path, sid: Option<PSID>) -> io::Result<Process> {
             done.then_some(code)
         }),
         level: Level::Partial,
+        fallback: None,
     })
 }
 

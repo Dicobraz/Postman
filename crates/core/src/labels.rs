@@ -102,7 +102,8 @@ pub struct Category {
     /// категории при сведении правок.
     pub keyword: String,
     pub name: String,
-    /// Цвет — имя общего цвета Fluent 2 (`blue`, [`palette::PALETTE`]); неизвестный рисуется нейтральным.
+    /// Цвет — имя цвета таблицы DESIGN (`blue`, [`palette::PALETTE`]); прежнее имя Fluent 2 рисуется ближайшим цветом
+    /// таблицы ([`palette::LEGACY`]), неизвестное — нейтральным.
     pub color: String,
     /// Клавиша 1–9, которая ставит и снимает категорию на выбранном письме.
     #[serde(default)]
@@ -113,6 +114,20 @@ pub struct Category {
     /// Удалена: не показывается, клавиша свободна; ключевое слово у писем остаётся.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+}
+
+impl Category {
+    /// Цвет для отрисовки и проверок — имя цвета таблицы. Прежнее имя Fluent у категории по умолчанию — её цвет по
+    /// умолчанию (Тендеры — розовый, Пентест — графит, Сервисы — серый; решение 2026-10-22), у остальных — ближайший
+    /// по ΔE ([`palette::resolve`]); неизвестное — нейтральный.
+    pub fn shown_color(&self) -> &'static str {
+        let legacy = palette::LEGACY.iter().any(|(old, _)| *old == self.color);
+        let default = || DEFAULTS.iter().find(|(id, _, _)| category_keyword(id) == self.keyword).map(|d| d.1);
+        match legacy.then(default).flatten() {
+            Some(color) => color,
+            None => palette::resolve(&self.color),
+        }
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -153,8 +168,8 @@ pub struct Categories {
 pub const DEFAULTS: &[(&str, &str, u8)] = &[
     ("clients", palette::BLUE, 1),
     ("team", palette::GREEN, 2),
-    ("tenders", palette::VIOLET, 3),
-    ("pentest", palette::TEAL, 4),
+    ("tenders", palette::PINK, 3),
+    ("pentest", palette::GRAPHITE, 4),
     ("services", palette::NEUTRAL, 5),
 ];
 
@@ -239,10 +254,10 @@ impl Categories {
                     return Err(Problem::DuplicateKey(k));
                 }
             }
-            if let Some((clash, delta)) = palette::clash(&c.color, &colors) {
+            if let Some((clash, delta)) = palette::clash(c.shown_color(), &colors) {
                 return Err(Problem::Colour { name: c.name.clone(), clash, delta });
             }
-            colors.push(&c.color);
+            colors.push(c.shown_color());
         }
         Ok(())
     }
@@ -284,7 +299,7 @@ impl Categories {
             .iter()
             .enumerate()
             .filter(|&(i, c)| !c.hidden && Some(i) != except)
-            .map(|(_, c)| c.color.as_str())
+            .map(|(_, c)| c.shown_color())
             .collect()
     }
 
@@ -304,10 +319,11 @@ impl Categories {
         Ok(name.to_owned())
     }
 
-    fn check_color(&self, name: &str, color: &str, except: Option<usize>) -> Result<(), Problem> {
+    /// Цвет годится — его имя в таблице (прежнее имя Fluent — новым, [`palette::resolve`]).
+    fn check_color(&self, name: &str, color: &str, except: Option<usize>) -> Result<&'static str, Problem> {
         match palette::clash(color, &self.used_colors(except)) {
             Some((clash, delta)) => Err(Problem::Colour { name: name.to_owned(), clash, delta }),
-            None => Ok(()),
+            None => Ok(palette::resolve(color)),
         }
     }
 
@@ -341,7 +357,7 @@ impl Categories {
             return Err(Problem::DuplicateKeyword(keyword));
         }
         let name = self.check_name(name, at)?;
-        self.check_color(&name, color, at)?;
+        let color = self.check_color(&name, color, at)?;
         self.check_key(key, at)?;
         let c = Category { keyword, name, color: color.to_owned(), key, changed: now, hidden: false };
         match at {
@@ -363,7 +379,7 @@ impl Categories {
     /// Другой цвет: ближе ΔE 25 к цвету другой категории таблицы или к занятому — отказ.
     pub fn recolor(&mut self, keyword: &str, color: &str, now: i64) -> Result<(), Problem> {
         let i = self.find_visible(keyword)?;
-        self.check_color(&self.list[i].name, color, Some(i))?;
+        let color = self.check_color(&self.list[i].name, color, Some(i))?;
         let c = &mut self.list[i];
         c.color = color.to_owned();
         c.changed = now;
@@ -443,7 +459,7 @@ impl Label<'_> {
     /// Цвет метки (имя Fluent; неизвестный — нейтральный).
     pub fn color(&self) -> &'static str {
         match self {
-            Label::Category(c) => palette::resolve(&c.color),
+            Label::Category(c) => c.shown_color(),
             Label::Thunderbird(_) => palette::NEUTRAL,
         }
     }
@@ -658,7 +674,7 @@ mod tests {
         assert!(matches!(t.check(), Err(Problem::BadKeyword(_))));
         t.list[2].keyword = "pm.cat.clients".into();
         assert!(matches!(t.check(), Err(Problem::DuplicateKeyword(_))));
-        // Шестая категория цветом рядом с синим.
+        // Шестая категория прежним цветом `royalBlue` — это графит, как у «Пентеста».
         let mut t = defaults();
         let keyword = t.new_keyword(1);
         let c =
@@ -718,41 +734,75 @@ mod tests {
         assert_eq!(Label::Category(&t.list[1]).color(), palette::NEUTRAL);
     }
 
+    /// Прежние цвета Fluent: категории по умолчанию — своим цветом по имени, остальные — ближайшим по ΔE.
+    #[test]
+    fn legacy_colors_of_defaults_follow_their_names() {
+        let mut t = defaults();
+        let set = |t: &mut Categories, kw: &str, color: &str| {
+            let i = t.find(kw).unwrap();
+            t.list[i].color = color.into();
+        };
+        set(&mut t, "pm.cat.tenders", "grape");
+        set(&mut t, "pm.cat.pentest", "lightTeal");
+        set(&mut t, "pm.cat.services", "mink");
+        set(&mut t, "pm.cat.team", "darkGreen");
+        let shown = |t: &Categories, kw: &str| t.by_keyword(kw).map(|(_, c)| c.shown_color());
+        assert_eq!(shown(&t, "pm.cat.tenders"), Some(palette::PINK));
+        assert_eq!(shown(&t, "pm.cat.pentest"), Some(palette::GRAPHITE), "по ΔE был бы серый");
+        assert_eq!(shown(&t, "pm.cat.services"), Some(palette::GREY), "по ΔE был бы графит");
+        assert_eq!(shown(&t, "pm.cat.team"), Some(palette::GREEN));
+        assert_eq!(t.check(), Ok(()));
+        // Своя категория с прежним цветом — ближайший по ΔE.
+        let k = t.new_keyword(1);
+        t.list.push(Category { keyword: k.clone(), name: "x".into(), color: "lightTeal".into(), key: None, changed: 1, hidden: false });
+        assert_eq!(shown(&t, &k), Some(palette::GREY));
+        // Неизвестный цвет у категории по умолчанию — нейтральный, не её цвет.
+        set(&mut t, "pm.cat.tenders", "chartreuse");
+        assert_eq!(shown(&t, "pm.cat.tenders"), Some(palette::NEUTRAL));
+    }
+
     /// Правка в настройках: добавить, переименовать, перекрасить с запретом близких цветов, клавиша, удалить.
     #[test]
     fn editing_api() {
         let mut t = defaults();
-        // Цвет рядом с синим, занятый красный, повтор имени, плохая клавиша, пустое имя — отказ.
-        assert!(matches!(t.add("Partners", "royalBlue", None, 10), Err(Problem::Colour { .. })));
+        // Свободных цветов нет: синий занят «Клиентами», прежнее имя Fluent — тот же синий, неизвестный — отказ.
         assert!(matches!(
-            t.add("Partners", "red", None, 10),
-            Err(Problem::Colour { clash: palette::Clash::Reserved(palette::Reserved::Threat), .. })
+            t.add("Partners", palette::BLUE, None, 10),
+            Err(Problem::Colour { clash: palette::Clash::Color(palette::BLUE), .. })
         ));
-        assert_eq!(t.add(" [team] ", "seafoam", None, 10), Err(Problem::DuplicateName("[team]".into())));
-        assert_eq!(t.add("Partners", "seafoam", Some(1), 10), Err(Problem::DuplicateKey(1)));
-        assert_eq!(t.add("Partners", "seafoam", Some(0), 10), Err(Problem::BadKey(0)));
-        assert_eq!(t.add("  ", "seafoam", None, 10), Err(Problem::BadName));
-        assert_eq!(t.add(&"я".repeat(NAME_MAX + 1), "seafoam", None, 10), Err(Problem::BadName));
+        assert!(matches!(
+            t.add("Partners", "cornflower", None, 10),
+            Err(Problem::Colour { clash: palette::Clash::Color(palette::BLUE), .. })
+        ));
+        assert!(matches!(t.add("Partners", "chartreuse", None, 10), Err(Problem::Colour { clash: palette::Clash::Unknown, .. })));
+        // Серый освобождается удалением «Сервисов».
+        assert_eq!(t.delete("pm.cat.services", 9), Ok(()));
+        assert_eq!(t.add(" [team] ", palette::GREY, None, 10), Err(Problem::DuplicateName("[team]".into())));
+        assert_eq!(t.add("Partners", palette::GREY, Some(1), 10), Err(Problem::DuplicateKey(1)));
+        assert_eq!(t.add("Partners", palette::GREY, Some(0), 10), Err(Problem::BadKey(0)));
+        assert_eq!(t.add("  ", palette::GREY, None, 10), Err(Problem::BadName));
+        assert_eq!(t.add(&"я".repeat(NAME_MAX + 1), palette::GREY, None, 10), Err(Problem::BadName));
         assert_eq!(t.list.len(), 5, "отказ ничего не добавляет");
-        // Палитра для новой: синий занят, его соседи близки, к пяти по умолчанию подходит только «морская пена».
+        // Палитра для новой — только цвета таблицы: синий занят, серый свободен.
         let colors = t.colors(None);
+        assert_eq!(colors.len(), palette::PALETTE.len());
         let state = |k: &str| colors.iter().find(|(c, _)| *c == k).map(|(_, s)| *s);
         assert!(matches!(state(palette::BLUE), Some(Some((palette::Clash::Color(palette::BLUE), _)))));
-        assert!(matches!(state("royalBlue"), Some(Some(_))));
-        assert_eq!(state("seafoam"), Some(None));
+        assert_eq!(state(palette::GREY), Some(None));
         assert_eq!(state("red"), None, "красного в выборе нет");
 
-        let k = t.add(" Partners ", "seafoam", Some(6), 10).unwrap();
+        // Прежнее имя (`lightTeal` — серый) сохраняется именем таблицы.
+        let k = t.add(" Partners ", "lightTeal", Some(6), 10).unwrap();
         assert_eq!(t.check(), Ok(()));
         let c = t.by_keyword(&k).unwrap().1;
-        assert_eq!((c.name.as_str(), c.color.as_str(), c.key, c.changed), ("Partners", "seafoam", Some(6), 10));
+        assert_eq!((c.name.as_str(), c.color.as_str(), c.key, c.changed), ("Partners", palette::GREY, Some(6), 10));
         // Свой цвет — не помеха себе.
-        assert!(t.colors(Some(&k)).iter().any(|(c, s)| *c == "seafoam" && s.is_none()));
+        assert!(t.colors(Some(&k)).iter().any(|(c, s)| *c == palette::GREY && s.is_none()));
         assert_eq!(t.rename(&k, "Партнёры", 11), Ok(()));
         assert_eq!(t.rename(&k, "[clients]", 11), Err(Problem::DuplicateName("[clients]".into())));
-        assert!(matches!(t.recolor(&k, "cornflower", 12), Err(Problem::Colour { .. })));
-        assert_eq!(t.recolor(&k, "seafoam", 12), Ok(()));
-        assert_eq!(t.set_key(&k, Some(5), 13), Err(Problem::DuplicateKey(5)));
+        assert!(matches!(t.recolor(&k, palette::BLUE, 12), Err(Problem::Colour { .. })));
+        assert_eq!(t.recolor(&k, palette::GREY, 12), Ok(()));
+        assert_eq!(t.set_key(&k, Some(4), 13), Err(Problem::DuplicateKey(4)));
         assert_eq!(t.set_key(&k, Some(7), 13), Ok(()));
         assert_eq!(t.by_key(7).map(|c| c.name.as_str()), Some("Партнёры"));
         assert_eq!(t.set_key(&k, None, 14), Ok(()));
@@ -779,7 +829,7 @@ mod tests {
         // Метка Thunderbird в таблицу — со своим словом; свободных цветов нет — сначала освободить.
         assert!(matches!(t.adopt("$label3", "Personal", "plum", None, 25), Err(Problem::Colour { .. })));
         assert_eq!(t.delete(&k, 25), Ok(()));
-        assert_eq!(t.adopt("$Label3", "Personal", "seafoam", None, 25), Ok(()));
+        assert_eq!(t.adopt("$Label3", "Personal", palette::GREY, None, 25), Ok(()));
         assert_eq!(t.by_keyword("$label3").map(|(_, c)| c.keyword.as_str()), Some("$label3"));
         assert_eq!(t.check(), Ok(()));
     }
@@ -796,8 +846,10 @@ mod tests {
         theirs.rename("pm.cat.tenders", "Theirs tenders", 50).unwrap();
         mine.rename("pm.cat.tenders", "Mine tenders", 60).unwrap();
         theirs.delete("pm.cat.services", 70).unwrap();
-        let a = mine.add("A", "seafoam", Some(6), 80).unwrap();
-        let b = theirs.add("B", "seafoam", Some(6), 90).unwrap();
+        // Цветов в таблице пять: серый для новой освобождается удалением «Сервисов» и у себя.
+        mine.delete("pm.cat.services", 65).unwrap();
+        let a = mine.add("A", palette::GREY, Some(6), 80).unwrap();
+        let b = theirs.add("B", palette::GREY, Some(6), 90).unwrap();
         assert_ne!(a, b);
         let merged = mine.merge(&theirs);
         let name = |t: &Categories, k: &str| t.by_keyword(k).map(|(_, c)| c.name.clone());

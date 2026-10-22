@@ -789,7 +789,7 @@ impl CalendarView {
     fn colors(&self, e: &Event, l: &Look) -> (Hsla, Hsla, Hsla) {
         match self.categories.for_event(&e.keywords) {
             Some(c) => {
-                let c = l.cat(&c.color);
+                let c = l.cat(c.shown_color());
                 (c.dot, c.bg, c.text)
             }
             None => (l.pm(Pm::EventBorder), l.pm(Pm::EventBg), l.text()),
@@ -893,7 +893,7 @@ impl CalendarView {
             .child(icon(g::CHECK, 10.));
         let mine = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(10.)).child(check).child(tr!("cal-my-calendar"));
         let cats = self.categories.visible().map(|c| {
-            let color = l.cat(&c.color);
+            let color = l.cat(c.shown_color());
             div()
                 .h(px(28.))
                 .px(px(8.))
@@ -1296,7 +1296,7 @@ impl CalendarView {
             _ => format!("{}–{}{place}", hm(e.span.start, tz), hm(e.span.end, tz)),
         };
         let stripe: AnyElement = match look {
-            // Без ответа (DESIGN): полоса цветом календаря на 45 %, контур — на 70 %.
+            // Без ответа (DESIGN «Календарь»): без заливки, контур и полоса цветом календаря на 70 % и 45 %.
             Shown::Pending => div().absolute().left_0().top_0().bottom_0().w(px(4.)).bg(bar.opacity(0.45)).into_any_element(),
             Shown::Tentative => div()
                 .absolute()
@@ -1326,7 +1326,7 @@ impl CalendarView {
             .text_size(px(12.))
             .line_height(px(15.))
             .text_color(fg)
-            .when(look == Shown::Pending, |d| d.bg(l.panel()).border_1().border_dashed().border_color(bar.opacity(0.7)))
+            .when(look == Shown::Pending, |d| d.bg(l.none()).border_1().border_dashed().border_color(bar.opacity(0.7)))
             .when(look != Shown::Pending, |d| d.bg(bg))
             .when(selected, |d| d.shadow(glow(bar)))
             .cursor_pointer()

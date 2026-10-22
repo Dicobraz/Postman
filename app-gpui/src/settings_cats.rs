@@ -31,7 +31,7 @@ pub(crate) fn clash_text(cats: &Categories, clash: Clash) -> String {
         Clash::Reserved(Reserved::Threat) => tr!("settings-cat-color-threat"),
         Clash::Reserved(Reserved::Deadline) => tr!("settings-cat-color-deadline"),
         Clash::Color(color) => {
-            let name = cats.visible().find(|c| palette::resolve(&c.color) == color).map(|c| c.name.clone()).unwrap_or_default();
+            let name = cats.visible().find(|c| c.shown_color() == color).map(|c| c.name.clone()).unwrap_or_default();
             tr!("settings-cat-color-near", name = name)
         }
         Clash::Unknown => tr!("settings-cat-color-unknown"),
@@ -84,7 +84,7 @@ fn free_key(cats: &Categories) -> Option<u8> {
 impl SettingsView {
     pub(crate) fn edit_category(&mut self, c: Option<&Category>, window: &mut Window, cx: &mut Context<Self>) {
         let (keyword, name, color, key) = match c {
-            Some(c) => (Some(c.keyword.clone()), c.name.clone(), palette::resolve(&c.color), c.key),
+            Some(c) => (Some(c.keyword.clone()), c.name.clone(), c.shown_color(), c.key),
             None => (None, String::new(), free_color(&self.cats), free_key(&self.cats)),
         };
         let state = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("settings-cat-name-placeholder")).default_value(name));
@@ -128,7 +128,7 @@ impl SettingsView {
     /// Вернуть удалённую категорию: прежний цвет может быть уже занят — тогда правка на месте с причиной.
     fn restore_category(&mut self, c: Category, window: &mut Window, cx: &mut Context<Self>) {
         let mut t = self.cats.clone();
-        match t.adopt(&c.keyword, &c.name, &c.color, None, now_ms()) {
+        match t.adopt(&c.keyword, &c.name, c.shown_color(), None, now_ms()) {
             Ok(()) => {
                 self.cats = t.clone();
                 cx.emit(SettingsEvent::Categories(t));
@@ -276,7 +276,11 @@ impl SettingsView {
                         .flex_col()
                         .gap_2()
                         .child(swatches)
-                        .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("settings-cat-colors-free", n = free, total = colors.len()))),
+                        .child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("settings-cat-colors-free", n = free, total = colors.len())))
+                        // Новая категория, а свободных цветов нет (цветов в палитре пять, решение владельца 2026-10-22).
+                        .when(free == 0 && e.keyword.is_none(), |d| {
+                            d.child(div().text_color(l.text()).child(tr!("settings-cat-colors-none", total = colors.len())))
+                        }),
                 ),
             )
             .child(div().flex().gap_4().child(label(tr!("settings-cat-key"))).child(keys))
@@ -323,7 +327,7 @@ impl SettingsView {
                     .gap_3()
                     .border_b_1()
                     .border_color(l.border())
-                    .child(Self::swatch(l, &c.color, 14.))
+                    .child(Self::swatch(l, c.shown_color(), 14.))
                     .child(div().flex_1().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(c.name.clone()))
                     .child(div().w(px(70.)).flex().child(c.key.map_or_else(|| div().text_color(l.text3()).child("—"), |k| crate::settings_tab::keycap(k.to_string(), l))))
                     .child(
@@ -363,7 +367,7 @@ impl SettingsView {
                 .gap_3()
                 .border_b_1()
                 .border_color(l.border())
-                .child(Self::swatch(l, &c.color, 12.).opacity(0.5))
+                .child(Self::swatch(l, c.shown_color(), 12.).opacity(0.5))
                 .child(div().flex_1().min_w_0().truncate().text_color(l.text2()).child(c.name.clone()))
                 .when(!confirm, |d| {
                     d.child(link(("settings-cat-restore", i), tr!("settings-cat-restore"), l).on_click(cx.listener(move |this, _, window, cx| {
@@ -427,16 +431,21 @@ mod tests {
     /// Правка на месте проверяется таблицей: близкий цвет (ΔE < 25) и занятая клавиша — отказ, остальное — новая таблица.
     #[test]
     fn category_edit_rules() {
-        let t = table();
+        let full = table();
+        // Цветов в таблице пять — все заняты категориями по умолчанию; серый освобождается удалением «services».
+        assert!(full.colors(None).iter().all(|(_, c)| c.is_some()));
+        let mut t = full.clone();
+        t.delete(&full.by_key(5).unwrap().keyword, 1).unwrap();
         // Новая категория: свободный цвет и клавиша.
         let free = t.colors(None).into_iter().find(|(_, c)| c.is_none()).map(|(k, _)| k).unwrap();
+        assert_eq!(free, palette::GREY);
         let added = apply(&t, None, "Partners", free, Some(6), 1).unwrap();
-        assert_eq!(added.visible().count(), 6);
+        assert_eq!(added.visible().count(), 5);
         assert_eq!(added.by_key(6).map(|c| c.name.as_str()), Some("Partners"));
         // Тот же цвет, что у «clients», — отказ ΔE.
         assert!(matches!(apply(&t, None, "Partners", palette::BLUE, None, 1), Err(Problem::Colour { .. })));
-        // Красный безопасности — отказ.
-        assert!(matches!(apply(&t, None, "Partners", "red", None, 1), Err(Problem::Colour { .. })));
+        // Цвета вне палитры — отказ.
+        assert!(matches!(apply(&t, None, "Partners", "chartreuse", None, 1), Err(Problem::Colour { .. })));
         // Клавиша занята «team».
         assert_eq!(apply(&t, None, "Partners", free, Some(2), 1), Err(Problem::DuplicateKey(2)));
         // Повтор имени и пустое имя.
