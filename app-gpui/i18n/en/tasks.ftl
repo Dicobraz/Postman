@@ -73,4 +73,8 @@ tasks-done-mail = Done · the email's due date is cleared
 tasks-reopened = The task is open again
 tasks-deleted = Task deleted
 tasks-deleted-mail = Deleted · the email's due date is cleared
+tasks-status-mail = { $n ->
+    [one] { $n } task from emails
+   *[other] { $n } tasks from emails
+}
 tasks-failed = The task was not saved on the server: { $error }

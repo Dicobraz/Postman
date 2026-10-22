@@ -165,7 +165,18 @@ impl Mailer {
     /// Название вкладки и есть ли в ней несохранённое (письмо — точка после названия).
     fn tab_title(&self, t: &Tab, cx: &App) -> (String, bool) {
         match t.kind {
-            TabKind::Main => (tr!("frame-tab-mail"), false),
+            // Главная вкладка — по модулю (макеты: «Задачи», «Календарь», «Контакты»); во вкладке почты раздел главной
+            // ждёт в `main_section`.
+            TabKind::Main => {
+                let section = if self.tabs.active().kind == TabKind::Mail { self.main_section.unwrap_or(self.section) } else { self.section };
+                let key = match section {
+                    Section::Mail => "frame-tab-mail",
+                    Section::Calendar => "frame-rail-calendar",
+                    Section::Contacts => "frame-rail-contacts",
+                    Section::Tasks => "frame-rail-tasks",
+                };
+                (tr!(key), false)
+            }
             TabKind::Mail => (self.mail_tab_title(t.id, cx), false),
             TabKind::Settings => (tr!("frame-tab-settings"), false),
             TabKind::Meeting => (self.meetings.title(t.id, cx), false),
@@ -326,7 +337,9 @@ impl Mailer {
 
     /// Строка состояния: элементы, синхронизация, квота, последнее нажатие, песочница, уведомления.
     pub(crate) fn status_bar(&self, l: &Look, cx: &mut Context<Self>) -> Div {
-        let status = self.items_status(cx);
+        // Задачи (макет): слева — состояние синхронизации с точкой, затем «N задач из писем».
+        let tasks = self.section == Section::Tasks && self.tabs.active().kind == TabKind::Main;
+        let status = if tasks { self.tasks.read(cx).status_text() } else { self.items_status(cx) };
         let (unread, open) = {
             let t = self.toasts.read(cx);
             (t.unread(), t.is_history_open())
@@ -339,6 +352,15 @@ impl Mailer {
                 .gap(px(6.))
                 .child(div().size(px(8.)).rounded_full().bg(l.text3()))
                 .child(text),
+            None if tasks && !self.live.status.is_empty() => div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().size(px(8.)).rounded_full().bg(if self.live.synced { l.success() } else { l.text3() }))
+                .child(match &self.live.synced_at {
+                    Some(t) if self.live.synced => format!("{} {t}", self.live.status),
+                    _ => self.live.status.clone(),
+                }),
             None => div().child(self.live.status.clone()),
         };
         div()
@@ -350,8 +372,9 @@ impl Mailer {
             .px(px(14.))
             .text_size(l.px(Metric::TypeCaption))
             .text_color(l.text2())
-            .child(status)
+            .when(!tasks, |d| d.child(status.clone()))
             .child(sync)
+            .when(tasks, |d| d.child(status))
             .child(self.settings.quota_text())
             .child(div().flex_1())
             .child(self.last_key.clone())
@@ -603,6 +626,20 @@ impl Mailer {
         if let Some(row) = self.cache.rows_by_ids(std::slice::from_ref(&id)).ok().and_then(|mut r| r.pop()) {
             self.open_letter(row, cx);
         }
+    }
+
+    /// Письмо — в новой вкладке почты (папка письма, письмо выбрано); вкладка, откуда открыли, остаётся как была
+    /// (S6-05: «Открыть письмо» из задачи).
+    pub(crate) fn open_letter_tab(&mut self, row: postman_cache::EmailRow, cx: &mut Context<Self>) {
+        let current = self.mail_state(cx);
+        let state = MailState { mailbox: row.mailbox_ids.first().cloned(), letter: Some(row.id.clone()), ..Default::default() };
+        if self.tabs.active().kind == TabKind::Main && self.section != Section::Mail {
+            self.main_section = Some(self.section);
+            self.section = Section::Mail;
+        }
+        self.tabs.open_mail(current);
+        self.restore_mail(state, cx);
+        cx.notify();
     }
 
     /// Название вкладки почты: открытая папка или «Все папки».

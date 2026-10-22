@@ -291,6 +291,8 @@ pub(crate) struct TasksView {
     query: String,
     /// «Добавить задачу» над списком.
     pub(crate) quick: Entity<InputState>,
+    /// Новая задача (Ctrl+N): карточка с полем названия, ещё не записана.
+    draft: Option<Task>,
     /// Правка названия (F2) — поле вместо заголовка карточки.
     title: Option<Entity<InputState>>,
     /// Варианты срока в карточке открыты (Insert).
@@ -337,6 +339,7 @@ impl TasksView {
             search,
             query: String::new(),
             quick,
+            draft: None,
             title: None,
             due_open: false,
             tz: crate::prefs::get(cx).calendar.zone(),
@@ -423,7 +426,8 @@ impl TasksView {
         }
         self.items = groups(&shown, &self.nav, &pending, now, &self.tz);
         self.shown = shown;
-        if self.selected.as_ref().is_none_or(|s| !self.shown.iter().any(|t| &t.uid == s)) {
+        let drafting = self.draft.as_ref().is_some_and(|d| self.selected.as_ref() == Some(&d.uid));
+        if !drafting && self.selected.as_ref().is_none_or(|s| !self.shown.iter().any(|t| &t.uid == s)) {
             self.selected = self.shown.first().map(|t| t.uid.clone());
             self.due_open = false;
             self.title = None;
@@ -442,6 +446,7 @@ impl TasksView {
 
     fn select(&mut self, uid: String, cx: &mut Context<Self>) {
         if self.selected.as_deref() != Some(uid.as_str()) {
+            self.draft = None;
             self.selected = Some(uid);
             self.due_open = false;
             self.title = None;
@@ -451,7 +456,7 @@ impl TasksView {
 
     pub(crate) fn selected_task(&self) -> Option<&Task> {
         let s = self.selected.as_deref()?;
-        self.shown.iter().find(|t| t.uid == s)
+        self.draft.as_ref().filter(|d| d.uid == s).or_else(|| self.shown.iter().find(|t| t.uid == s))
     }
 
     /// По списку вверх или вниз.
@@ -700,6 +705,20 @@ impl TasksView {
 
     fn finish_rename(&mut self, text: String, cx: &mut Context<Self>) {
         self.title = None;
+        if let Some(mut d) = self.draft.take() {
+            // Новая задача: без названия — не создавать.
+            if text.is_empty() {
+                self.selected = None;
+                self.reshow(cx);
+                return;
+            }
+            d.title = text;
+            let uid = d.uid.clone();
+            self.save(vec![d], cx);
+            self.selected = Some(uid);
+            cx.notify();
+            return;
+        }
         let Some(mut t) = self.selected_task().cloned() else { return };
         if !text.is_empty() && text != t.title {
             t.title = text;
@@ -710,6 +729,12 @@ impl TasksView {
 
     /// Esc: правка названия, варианты срока, поиск.
     pub(crate) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.draft.take().is_some() {
+            self.title = None;
+            self.selected = None;
+            self.reshow(cx);
+            return true;
+        }
         if self.title.take().is_some() || std::mem::take(&mut self.due_open) {
             cx.notify();
             return true;
@@ -723,11 +748,6 @@ impl TasksView {
         false
     }
 
-    /// Ctrl+N в модуле: к строке «Добавить задачу».
-    pub(crate) fn focus_quick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.quick.update(cx, |s, cx| s.focus(window, cx));
-    }
-
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |s, cx| s.focus(window, cx));
     }
@@ -739,25 +759,7 @@ impl TasksView {
         if title.is_empty() {
             return false;
         }
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let mut t = Task::new(&model::new_uid(nanos), "", title);
-        let today = day_of(self.now(), &self.tz).unwrap_or_default();
-        match &self.nav {
-            Nav::List(List::Today) => {
-                let (m, all_day) = mailtask::due_moment(When::day(today));
-                t.due = Some(m);
-                t.all_day = all_day;
-            }
-            Nav::List(List::Upcoming) => {
-                let (m, all_day) = mailtask::due_moment(When::day(add_days(today, 1)));
-                t.due = Some(m);
-                t.all_day = all_day;
-            }
-            Nav::List(List::Someday) => t.someday = true,
-            Nav::Project(p) => t.project = Some(p.clone()),
-            Nav::Category(k) => t.keywords = vec![k.clone()],
-            _ => {}
-        }
+        let t = self.draft_for_nav(title);
         let uid = t.uid.clone();
         self.save(vec![t], cx);
         self.select(uid, cx);
@@ -769,6 +771,43 @@ impl TasksView {
         if let Some(key) = self.selected_task().and_then(mailtask::letter_key).map(str::to_owned) {
             cx.emit(TasksAction::OpenLetter(key));
         }
+    }
+
+    /// Строка состояния: «N задач из писем».
+    pub(crate) fn status_text(&self) -> String {
+        let n = mailtask::from_mail(&self.tasks, &self.letters, &self.tz).len();
+        tr!("tasks-status-mail", n = n as i64)
+    }
+
+    /// Ctrl+N в модуле: новая задача — карточка с полем названия (в текущем списке: в «Сегодня» — срок сегодня,
+    /// в проекте — с ним). Enter — сохранить, Esc или пустое название — не создавать.
+    pub(crate) fn new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.draft_for_nav("");
+        self.selected = Some(t.uid.clone());
+        self.draft = Some(t);
+        self.due_open = false;
+        self.rename(window, cx);
+    }
+
+    /// Задача для текущего списка: срок, «Когда-нибудь», проект или категория — по нему.
+    fn draft_for_nav(&self, title: &str) -> Task {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let mut t = Task::new(&model::new_uid(nanos), "", title);
+        let today = day_of(self.now(), &self.tz).unwrap_or_default();
+        let due = |t: &mut Task, d: Date| {
+            let (m, all_day) = mailtask::due_moment(When::day(d));
+            t.due = Some(m);
+            t.all_day = all_day;
+        };
+        match &self.nav {
+            Nav::List(List::Today) => due(&mut t, today),
+            Nav::List(List::Upcoming) => due(&mut t, add_days(today, 1)),
+            Nav::List(List::Someday) => t.someday = true,
+            Nav::Project(p) => t.project = Some(p.clone()),
+            Nav::Category(k) => t.keywords = vec![k.clone()],
+            _ => {}
+        }
+        t
     }
 
     /// Снимок: выбрать задачу по названию (демо).
@@ -1613,10 +1652,7 @@ impl crate::Mailer {
             TasksAction::OpenLetter(key) => {
                 let rows = self.cache.rows_by_ids(std::slice::from_ref(key)).unwrap_or_default();
                 match rows.into_iter().next() {
-                    Some(row) => {
-                        self.set_section(crate::Section::Mail, cx);
-                        self.open_letter(row, cx);
-                    }
+                    Some(row) => self.open_letter_tab(row, cx),
                     None => self.toasts.update(cx, |t, cx| t.push(Toast::Info, tr!("tasks-letter-gone"), cx)),
                 }
             }

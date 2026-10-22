@@ -75,4 +75,9 @@ tasks-done-mail = Выполнено · срок у письма снят
 tasks-reopened = Задача снова в работе
 tasks-deleted = Задача удалена
 tasks-deleted-mail = Удалено · срок у письма снят
+tasks-status-mail = { $n ->
+    [one] { $n } задача из писем
+    [few] { $n } задачи из писем
+   *[many] { $n } задач из писем
+}
 tasks-failed = Задача не сохранена на сервере: { $error }

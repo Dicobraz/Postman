@@ -35,6 +35,8 @@ pub(crate) struct Live {
     session: u64,
     /// Строка состояния: «Подключение…», «Синхронизировано».
     pub(crate) status: String,
+    /// Когда синхронизация последний раз закончилась (ЧЧ:ММ) — строка состояния задач (макет «Задачи»).
+    pub(crate) synced_at: Option<String>,
     /// Строка входа (нет учётной записи или вход ещё не подтверждён сервером).
     pub(crate) signin: Option<Entity<SignIn>>,
     /// Вход со строки входа: запомнить после первого ответа сервера, при ошибке — вернуть строку входа.
@@ -373,6 +375,9 @@ impl Mailer {
             self.remember(account, store, cx);
         }
         if let Some(s) = plan.status {
+            if s == Status::Synced {
+                self.live.synced_at = Some(jiff::Zoned::now().strftime("%H:%M").to_string());
+            }
             self.live.status = status_text(&s);
             cx.notify();
         }

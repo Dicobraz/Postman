@@ -529,7 +529,7 @@ impl Render for Mailer {
                 if this.section != Section::Tasks {
                     this.set_section(Section::Tasks, cx);
                 }
-                this.tasks.update(cx, |t, cx| t.focus_quick(window, cx));
+                this.tasks.update(cx, |t, cx| t.new_task(window, cx));
             }))
             .on_action(cx.listener(|this, _: &commands::task::Complete, _, cx| this.tasks.update(cx, |t, cx| t.toggle_done(cx))))
             .on_action(cx.listener(|this, _: &commands::task::Due, _, cx| this.tasks.update(cx, |t, cx| t.toggle_due(cx))))
