@@ -64,6 +64,7 @@ mod notices;
 mod palette;
 mod search;
 mod smime;
+mod shared;
 
 pub(crate) use mailer::{Mailer, Section};
 
