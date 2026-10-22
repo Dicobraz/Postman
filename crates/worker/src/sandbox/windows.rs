@@ -160,7 +160,7 @@ pub(crate) fn spawn(exe: &Path, relaxed: bool) -> io::Result<Process> {
     }
 }
 
-/// Сколько ждём запуска в AppContainer при «файл не найден» и шаг повтора (см. [`create_in_container`]).
+/// Сколько ждём запуска в AppContainer при «файл не найден» (и ERROR_GEN_FAILURE) и шаг повтора (см. [`create_in_container`]).
 const CONTAINER_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 const CONTAINER_STEP: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -170,13 +170,14 @@ const CONTAINER_STEP: std::time::Duration = std::time::Duration::from_millis(20)
 /// (`\Sessions\N\AppContainerNamedObjects\<SID>`) в этот момент пересоздаётся. Воспроизведение: тест `smime.rs`
 /// (три клиента параллельно) — 3 из 40 прогонов, вместе с `sandbox.rs` — 3 из 30; мьютекс на свои запуски и маркер
 /// контейнера, удерживаемый родителем, окно не закрывают. Ошибка временная и не наша — повторяем до [`CONTAINER_WAIT`],
-/// прежде чем уйти в частичную изоляцию (с повтором — 0 из 40 параллельных прогонов).
+/// прежде чем уйти в частичную изоляцию (с повтором — 0 из 40 параллельных прогонов). Так же повторяем
+/// ERROR_GEN_FAILURE (31): та же гонка на runner CI (`verdicts_through_the_sandbox`, #88).
 fn create_in_container(exe: &Path, sid: &Sid) -> io::Result<Process> {
     let start = std::time::Instant::now();
     let mut attempt = 1u32;
     loop {
         match create(exe, Some(sid.0)) {
-            Err(e) if start.elapsed() < CONTAINER_WAIT && matches!(e.raw_os_error(), Some(2 | 3)) => {
+            Err(e) if start.elapsed() < CONTAINER_WAIT && matches!(e.raw_os_error(), Some(2 | 3 | 31)) => {
                 std::thread::sleep(CONTAINER_STEP);
                 attempt += 1;
             }
