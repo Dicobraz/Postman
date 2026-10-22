@@ -150,6 +150,9 @@ pub(crate) struct Model {
     /// Замечания «Перед отправкой» по тексту и по адресатам; снятые — ключами `Check::key`.
     text_checks: Vec<Check>,
     recipient_checks: Vec<Check>,
+    /// «Конфиденциально» (S5-12 Ф4): замечания по сертификатам и получатели для шифрования (ставит окно письма).
+    cert_checks: Vec<Check>,
+    pub(crate) encrypt_to: Vec<postman_smime::seal::To>,
     dismissed: HashSet<String>,
 }
 
@@ -226,6 +229,8 @@ impl Model {
             close_after_save: false,
             text_checks: Vec::new(),
             recipient_checks: Vec::new(),
+            cert_checks: Vec::new(),
+            encrypt_to: Vec::new(),
             dismissed: HashSet::new(),
         };
         // Нетронутое новое письмо — не «изменения»: закрывается без вопроса.
@@ -348,6 +353,15 @@ impl Model {
         d.markdown = self.body.clone();
         d.keywords = self.keywords(jiff::Zoned::now().date());
         d.sign = for_send && self.sign;
+        // «Конфиденциально» = шифрование (S5-12 Ф4); черновик — только себе (решение владельца №5).
+        d.encrypt_to = match (self.confidential, for_send) {
+            (false, _) => Vec::new(),
+            (true, true) => self.encrypt_to.clone(),
+            (true, false) => {
+                let me = d.from.email.to_lowercase();
+                self.encrypt_to.iter().filter(|t| t.prepared.emails.contains(&me) && !t.prepared.key.is_gost()).take(1).cloned().collect()
+            }
+        };
         Ok(d)
     }
 
@@ -509,9 +523,33 @@ impl Model {
         self.recipient_checks = checks::recipients(&self.recipients(), self.confidential, own, book);
     }
 
+    /// «Конфиденциально» (S5-12 Ф4): замечания по сертификатам и получатели шифрования; без метки — пусто.
+    pub(crate) fn set_encryption(&mut self, checks: Vec<Check>, to: Vec<postman_smime::seal::To>) {
+        self.cert_checks = checks;
+        self.encrypt_to = to;
+    }
+
+    /// «Убрать их»: адресаты без сертификата — из полей адресов. `true` — поля изменились.
+    pub(crate) fn remove_addresses(&mut self, addrs: &[String]) -> bool {
+        let mut changed = false;
+        for f in [Field::To, Field::Cc, Field::Bcc] {
+            let (closed, open) = segments(self.field(f));
+            let kept: Vec<String> = closed
+                .iter()
+                .filter(|s| !parse_addresses(s).0.first().is_some_and(|a| addrs.iter().any(|x| x.eq_ignore_ascii_case(&a.email))))
+                .cloned()
+                .collect();
+            if kept.len() != closed.len() {
+                self.set(f, compose_field(&kept, &open));
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Замечания, которые не сняли.
     pub(crate) fn checks(&self) -> impl Iterator<Item = &Check> {
-        self.text_checks.iter().chain(&self.recipient_checks).filter(|c| !self.dismissed.contains(&c.key()))
+        self.text_checks.iter().chain(&self.recipient_checks).chain(&self.cert_checks).filter(|c| !self.dismissed.contains(&c.key()))
     }
 
     /// Отправку держит замечание DLP.
@@ -776,6 +814,8 @@ pub(crate) struct Inline {
 /// Открытые письма и то, что им нужно от экрана: отправитель и подпись (Identity), адресная книга.
 #[derive(Default)]
 pub(crate) struct Composers {
+    /// Сертификаты шифрования адресатов (S5-12 Ф4): «Конфиденциально».
+    pub(crate) certs: crate::smime_seal::Certs,
     /// Свои адреса с сертификатом подписи (S5-12 Ф3): «Подписать» по умолчанию — только для них.
     pub(crate) signable: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) open: Vec<Opened>,
@@ -949,6 +989,7 @@ impl Mailer {
         let place = if how.letter.is_some() { Place::Inline } else { Place::Tab };
         let open = Open {
             signable: self.compose.signable.clone(),
+            certs: self.compose.certs.clone(),
             senders,
             max_delay,
             me: self.compose.me.clone(),

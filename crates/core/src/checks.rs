@@ -42,12 +42,57 @@ pub enum Check {
     External { count: usize, domains: Vec<String> },
     /// У получателя `name` есть адрес новее: `from` — в письме, `to` — последний (Unix-секунды `last`).
     Moved { name: String, from: String, to: String, last: i64 },
+    /// «Конфиденциально» (S5-12 Ф4): у адресатов (или у себя) нет сертификата шифрования — отправка держится
+    /// (решение владельца №6): убрать их или снять метку.
+    NoCertificate { names: Vec<String>, addresses: Vec<String> },
+    /// «Конфиденциально»: есть адресаты с ГОСТ и с RSA/EC — уйдут два письма (решение владельца 2026-10-22).
+    Split { gost: Vec<String> },
+}
+
+/// Семейство ключа сертификата шифрования (S5-12 Ф4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// RSA или EC.
+    Rsa,
+    Gost,
+}
+
+/// Замечания «Конфиденциально» по сертификатам: `known(адрес)` — семейства найденных сертификатов (`None` — ещё
+/// ищем, замечания по адресу нет). Свой адрес `from` — нужен сертификат каждого семейства, что есть у адресатов.
+pub fn certificates(list: &[Address], from: &str, known: &dyn Fn(&str) -> Option<Vec<Family>>) -> Vec<Check> {
+    let mut missing: Vec<(String, String)> = Vec::new();
+    let mut gost: Vec<String> = Vec::new();
+    let mut rsa = false;
+    for a in list {
+        let name = if a.name.is_empty() { a.email.clone() } else { a.name.clone() };
+        match known(&a.email) {
+            None => {}
+            Some(f) if f.contains(&Family::Rsa) => rsa = true,
+            Some(f) if f.contains(&Family::Gost) => gost.push(name),
+            Some(_) => missing.push((name, a.email.clone())),
+        }
+    }
+    if let Some(own) = known(from) {
+        let need_rsa = rsa || (gost.is_empty() && missing.is_empty());
+        if (need_rsa && !own.contains(&Family::Rsa)) || (!gost.is_empty() && !own.contains(&Family::Gost)) {
+            missing.push((from.to_owned(), from.to_owned()));
+        }
+    }
+    let mut out = Vec::new();
+    if !missing.is_empty() {
+        let (names, addresses) = missing.into_iter().unzip();
+        out.push(Check::NoCertificate { names, addresses });
+    }
+    if rsa && !gost.is_empty() {
+        out.push(Check::Split { gost });
+    }
+    out
 }
 
 impl Check {
     /// Отправка остановлена, пока замечание не снято: только DLP.
     pub fn blocks_send(&self) -> bool {
-        matches!(self, Check::Card { .. } | Check::Secret { .. })
+        matches!(self, Check::Card { .. } | Check::Secret { .. } | Check::NoCertificate { .. })
     }
 
     /// Ключ замечания: «Игнорировать» и «Это не карта» снимают его, пока текст тот же.
@@ -57,6 +102,8 @@ impl Check {
             Check::Secret { text, .. } => format!("secret:{text}"),
             Check::MissingAttachment { .. } => "attach".into(),
             Check::External { domains, .. } => format!("external:{}", domains.join(",")),
+            Check::NoCertificate { addresses, .. } => format!("nocert:{}", addresses.join(",")),
+            Check::Split { gost } => format!("split:{}", gost.join(",")),
             Check::Moved { from, to, .. } => format!("moved:{from}>{to}"),
         }
     }
@@ -406,6 +453,8 @@ mod tests {
                 Check::MissingAttachment { .. } => "attach",
                 Check::External { .. } => "external",
                 Check::Moved { .. } => "moved",
+                Check::NoCertificate { .. } => "nocert",
+                Check::Split { .. } => "split",
             })
             .collect()
     }
@@ -519,5 +568,31 @@ mod tests {
         let both = [Address::new("", "i.smirnova@partner.example"), Address::new("", "irina.s@partner.example")];
         assert!(recipients(&both, false, &[], &book).is_empty());
         assert!(recipients(&[Address::new("Ирина", "irina@new.example")], false, &[], &book).is_empty());
+    }
+
+    /// «Конфиденциально» (S5-12 Ф4): нет сертификата — держит отправку; ГОСТ и RSA — два письма; себе — нужное
+    /// семейство; ещё ищем — молчим.
+    #[test]
+    fn certificate_checks() {
+        let a = |e: &str| Address::new("", e);
+        let known = |e: &str| -> Option<Vec<Family>> {
+            match e {
+                "rsa@x" => Some(vec![Family::Rsa]),
+                "gost@x" => Some(vec![Family::Gost]),
+                "both@x" | "me@x" => Some(vec![Family::Rsa, Family::Gost]),
+                "me-rsa@x" => Some(vec![Family::Rsa]),
+                "pending@x" => None,
+                _ => Some(vec![]),
+            }
+        };
+        assert!(certificates(&[a("rsa@x"), a("both@x"), a("pending@x")], "me@x", &known).is_empty());
+        let c = certificates(&[a("rsa@x"), a("none@x")], "me@x", &known);
+        assert!(matches!(&c[..], [Check::NoCertificate { addresses, .. }] if addresses == &["none@x".to_string()]));
+        assert!(c[0].blocks_send());
+        let c = certificates(&[a("rsa@x"), a("gost@x")], "me@x", &known);
+        assert!(matches!(&c[..], [Check::Split { gost }] if gost == &["gost@x".to_string()]));
+        assert!(!c[0].blocks_send());
+        let c = certificates(&[a("gost@x")], "me-rsa@x", &known);
+        assert!(matches!(&c[..], [Check::NoCertificate { addresses, .. }] if addresses == &["me-rsa@x".to_string()]), "себе ГОСТ нет");
     }
 }

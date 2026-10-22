@@ -57,3 +57,10 @@ checks-days-ago = { $n ->
     [one] { $n } day ago
    *[other] { $n } days ago
 }
+checks-no-cert = No certificate: { $names }
+checks-no-cert-detail = "Confidential" means encrypted; without a certificate the recipient can't read it. It can't be sent while they're in the message.
+checks-no-cert-remove = Remove them
+checks-no-cert-unmark = Remove "Confidential"
+checks-no-cert-unmark-confirm = The message goes unencrypted · Yes, remove
+checks-split = Two messages will be sent: separately — { $names } (GOST)
+checks-split-detail = These recipients have GOST certificates, the others RSA or EC. Both messages go to Sent, both encrypted to you as well.
