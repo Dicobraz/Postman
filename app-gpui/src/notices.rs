@@ -240,6 +240,11 @@ impl Notices {
         self.history_open
     }
 
+    /// Тостов на экране сейчас (снимок `quota` ждёт свой).
+    pub(crate) fn on_screen(&self) -> usize {
+        self.stack.shown(Instant::now()).len()
+    }
+
     pub(crate) fn unread(&self) -> usize {
         self.stack.unread()
     }

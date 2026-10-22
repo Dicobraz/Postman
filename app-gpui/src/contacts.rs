@@ -507,6 +507,11 @@ impl ContactsView {
         self.entries().iter().find(|e| e.card.id == id)
     }
 
+    /// Адреса моих контактов: автоответ «только контактам» (S5-29).
+    pub(crate) fn personal_emails(&self) -> Vec<String> {
+        self.mine.iter().flat_map(|e| e.card.emails.iter().cloned()).collect()
+    }
+
     /// Переговорные и ресурсы справочника — во вкладку встречи: (имя, адрес).
     pub(crate) fn rooms(&self) -> Vec<(String, String)> {
         self.directory

@@ -63,7 +63,7 @@ impl Script {
 }
 
 /// Строка Sieve в кавычках: `\` и `"` экранируются.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
