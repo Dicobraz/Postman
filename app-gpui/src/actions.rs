@@ -162,7 +162,11 @@ impl Mailer {
     fn respond_now(&mut self, mode: Mode, id: &str, cx: &mut Context<Self>) -> bool {
         let live = self.backend.is_live();
         // Письмо общего ящика (S4-06) — ответ от его имени, если сервер дал его Identity; иначе от своего.
-        let identity = self.compose.sender_for(postman_cache::account_of(id)).or_else(|| self.compose.me().cloned());
+        let account = postman_cache::account_of(id);
+        // Демо: ответ из ящика отдела — от его адреса, как с сервером (S5-28: предупреждение у «От»).
+        let demo = if live { Vec::new() } else { crate::compose::demo_senders() };
+        let demo = demo.into_iter().find(|s| s.account.is_some() && s.account.as_deref() == account).map(|s| (s.address, s.signature));
+        let identity = self.compose.sender_for(account).or(demo).or_else(|| self.compose.me().cloned());
         let reading = self.reading.read(cx);
         let Some(r) = reading.reading.as_ref().filter(|r| r.row.id == id) else { return false };
         let (Some(body), Some(doc)) = (&r.body, &r.doc) else { return false };

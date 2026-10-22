@@ -194,7 +194,10 @@ impl Client {
 
 /// `POSTMAN_INSECURE_TLS=1` — не проверять сертификат сервера. Только для стенда с самоподписанным
 /// сертификатом без нужного имени (`docs/STALWART.md`); у рабочего сервера сертификат должен проверяться.
-/// TLS — rustls: только 1.2 и 1.3; сертификат и его отзыв проверяет ОС (`rustls-platform-verifier`).
+/// TLS — rustls: только 1.2 и 1.3; сертификат и его отзыв проверяет ОС (`rustls-platform-verifier` 0.7 на Windows —
+/// `CertGetCertificateChain` с `CERT_CHAIN_REVOCATION_CHECK_END_CERT`: только сертификат сервера, CRL и OCSP,
+/// тайм-аут 10 с). Отозван — отказ; статус не узнан (сервер отзыва недоступен) — соединение идёт
+/// (`CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS`).
 pub fn insecure_tls() -> bool {
     std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }

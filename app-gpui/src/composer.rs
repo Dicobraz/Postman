@@ -65,6 +65,8 @@ impl EventEmitter<ComposerEvent> for Composer {}
 pub(crate) struct Open {
     /// Сертификаты шифрования адресатов (S5-12 Ф4).
     pub(crate) certs: crate::smime_seal::Certs,
+    /// Ответ на письмо общего ящика (S5-28): предупреждение у «От» и подсказки меню адресов.
+    pub(crate) shared: Option<crate::shared::Reply>,
     /// Свои адреса с сертификатом подписи (S5-12 Ф3).
     pub(crate) signable: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) me: Option<(Address, String)>,
@@ -120,6 +122,8 @@ pub(crate) struct Composer {
     /// Сертификаты шифрования адресатов (S5-12 Ф4) и «Снять „Конфиденциально“» ждёт подтверждения.
     certs: crate::smime_seal::Certs,
     confirm_unmark: bool,
+    /// Ответ на письмо общего ящика (S5-28).
+    shared: Option<crate::shared::Reply>,
     to: Entity<InputState>,
     cc: Entity<InputState>,
     bcc: Entity<InputState>,
@@ -248,6 +252,7 @@ impl Composer {
             senders: open.senders,
             certs: open.certs,
             confirm_unmark: false,
+            shared: open.shared,
             to,
             cc,
             bcc,
@@ -982,7 +987,13 @@ impl Composer {
                     Some(_) => tr!("shared-compose-from-shared", address = s.address.display()),
                     None => s.address.display(),
                 };
+                // Ответ на письмо общего ящика (S5-28, макет): под адресом — куда уйдёт копия и кого увидит клиент.
+                let hint = self.shared.as_ref().map(|r| {
+                    div().text_size(px(11.)).text_color(l.text2()).child(r.hint(&s.address.email))
+                });
+                let text = div().flex().flex_col().child(text).children(hint);
                 menu_item(ElementId::NamedInteger("from-item".into(), i as u64), l, s.address.email.to_lowercase() == current)
+                    .when(self.shared.is_some(), |d| d.h_auto().py(px(6.)))
                     .child(text)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.model.set_from(address.clone());
@@ -2043,6 +2054,10 @@ impl Render for Composer {
             .when(inline, |d| d.children(self.attachment_chips(&l, cx)))
             .child(self.content(window))
             .when(inline, |d| d.children(self.inline_checks(&l, cx)))
+            // Ответ на письмо общего ящика (S5-28): «От» — свой адрес или письмо у коллеги.
+            .children(self.shared.as_ref().and_then(|r| r.note(&self.model.from().email)).map(|t| {
+                crate::shared::note_line(t, &l).my(px(6.))
+            }))
             .children(self.confirm_lines(&l, cx))
             .child(self.bottom_row(&l, cx));
         let root = div()

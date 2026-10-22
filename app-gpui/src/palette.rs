@@ -591,6 +591,7 @@ pub(crate) fn command_icon(id: &str) -> Option<char> {
         "invite.tentative" => TENTATIVE,
         "settings.open" => SETTINGS,
         "mail.signature" => CERTIFICATE,
+        "mail.take" => CONTACTS,
         "settings.vacation" => VACATION,
         "settings.rules" => RULES,
         "settings.calendar" => crate::calendar::g::CALENDAR,
