@@ -1,35 +1,118 @@
-# Настройки ящика на сервере: автоответ, заполненность ящика (S4-05), правила (S4-07).
+# Настройки ящика на сервере: автоответ (S4-05, S5-29), заполненность ящика, правила (S4-07).
 vacation-demo = Демо: автоответ хранится на сервере — нужна учётная запись.
 vacation-loading = Чтение настроек с сервера…
 vacation-unsupported = Сервер не поддерживает автоответ.
-vacation-enabled = Отправлять автоматические ответы
+vacation-enabled = Отвечать автоматически
+vacation-master-on = Включён · пока не выключите
+vacation-master-period = Включён · { $period }
+vacation-master-off = Выключен — письма приходят как обычно, без ответа
+vacation-period-group = Период
 vacation-period = Только в этот период
-vacation-from = с
+vacation-period-on = Сервер включит ответ в начале периода и выключит в конце — без вашего участия.
+vacation-period-off = Отвечает с момента сохранения, пока не выключите вручную.
+vacation-from = С
 vacation-to = по
+vacation-work-days = { $n ->
+    [one] { $n } рабочий день
+    [few] { $n } рабочих дня
+   *[other] { $n } рабочих дней
+}
 vacation-date-placeholder = ДД.ММ.ГГГГ ЧЧ:ММ
+vacation-day = { $wd }, { $day } { $month }
+vacation-since = с { $from }
+vacation-until = до { $to }
 vacation-subject = Тема
 vacation-subject-placeholder = Нет на месте
 vacation-body = Текст ответа
 vacation-body-placeholder = Я в отпуске до …; по срочным вопросам — …
+vacation-tab-internal = Внутри компании
+vacation-tab-external = Внешним
+vacation-internal-hint = Коллегам — кто замещает и как связаться
+vacation-contacts-only = Отвечать только контактам
+vacation-contacts-only-on = Остальным внешним — без ответа: меньше спама и утечек о вашем отсутствии.
+vacation-contacts-only-off = Ответ получит любой внешний отправитель, включая спамеров.
+vacation-markdown = Markdown
+vacation-extra-group = Дополнительно
+vacation-once = Не отвечать повторно одному адресату в течение { $n ->
+    [one] { $n } дня
+   *[other] { $n } дней
+}
+vacation-recommended = рекомендуется
+vacation-once-on = Длинная переписка с одним человеком получит один автоответ, а не по ответу на каждое письмо.
+vacation-once-off = Каждое письмо получит свой автоответ (не чаще раза в сутки — так устроен Sieve) — переписка засоряется.
+vacation-ooo = Ставить встречи в календарь как «Вне офиса»
+vacation-ooo-on = На период — событие «Вне офиса» на весь день: коллеги видят его при подборе времени встречи.
+vacation-ooo-off = Календарь не меняется: при подборе времени вы выглядите свободным.
+vacation-ooo-title = Вне офиса
+vacation-cancel = Отмена
 vacation-save = Сохранить
 vacation-saving = Сохранение…
+vacation-dirty = Есть несохранённые изменения
+vacation-saved-at = Сохранено на сервере · { $time }
 vacation-saved = Автоответ сохранён и включён.
 vacation-saved-off = Автоответ выключен.
 vacation-failed = Автоответ не сохранён: { $error }
 vacation-bad-from = Дата «с» не распознана: ДД.ММ.ГГГГ или ДД.ММ.ГГГГ ЧЧ:ММ.
 vacation-bad-to = Дата «по» не распознана: ДД.ММ.ГГГГ или ДД.ММ.ГГГГ ЧЧ:ММ.
 vacation-bad-order = Дата «по» раньше даты «с».
-vacation-bar-on = Автоответ включён: на входящие письма уходит ответ «Нет на месте».
-vacation-bar-period = Автоответ включён с { $from } по { $to }.
-vacation-bar-from = Автоответ включён с { $from }.
-vacation-bar-to = Автоответ включён по { $to }.
-vacation-bar-edit = Настроить
-vacation-bar-off = Выключить
-settings-quota = Ящик: { $percent } % из { $unit ->
-    [mb] { $n } МБ
-   *[gb] { $n } ГБ
+vacation-preview = Предпросмотр
+vacation-preview-off = Выключен
+vacation-preview-internal = Коллеге
+vacation-preview-external = Внешнему
+vacation-preview-to-colleague = Кому: коллеге @{ $domain }
+vacation-preview-to-external = Кому: внешнему адресату
+vacation-preview-empty = Текста нет — этой группе ответ не уходит.
+vacation-rule-internal = Получат: коллеги с адресами @{ $domain }
+vacation-rule-contacts = Получат: внешние адресаты из ваших контактов
+vacation-rule-everyone = Получат: все внешние адресаты
+vacation-rule-once = Одному адресату — не чаще раза в { $n ->
+    [one] { $n } день
+    [few] { $n } дня
+   *[other] { $n } дней
 }
-settings-quota-warn = Ящик заполнен на { $percent } %: удалите ненужные письма, иначе новые перестанут приходить.
+vacation-rule-each = На каждое письмо — отдельный ответ
+vacation-rule-period = Работает { $period }
+vacation-rule-always = Работает, пока не выключите
+vacation-tip = Подсказка
+vacation-tip-1 = Рассылкам, адресам noreply и другим автоответам ответ не уходит — без петель и лишних писем.
+vacation-tip-2 = Пока автоответ включён, в окне почты под командной строкой видна полоса «Автоответ включён» с кнопкой «Выключить».
+vacation-reach-colleagues-contacts = коллегам и внешним из контактов
+vacation-reach-everyone = коллегам и всем внешним
+vacation-reach-colleagues = только коллегам
+vacation-reach-contacts = внешним из контактов
+vacation-reach-external = всем внешним
+vacation-reach-nobody = никому: текстов нет
+vacation-bar-on = Автоответ включён
+vacation-bar-until = { " " }до { $to }
+vacation-bar-edit = Изменить
+vacation-bar-off = Выключить
+vacation-turned-off = Автоответ выключен
+vacation-undo = Отменить
+vacation-sample-internal-subject = Нет на месте до пятницы
+vacation-sample-internal-body = Коллеги, добрый день!
+
+    Я в отпуске **до пятницы**. Почту читаю с задержкой.
+
+    По срочным вопросам:
+    - проекты — [Иван Петров](mailto:i.petrov@corp.example)
+    - поддержка — [support@corp.example](mailto:support@corp.example)
+vacation-sample-external-subject = Автоответ: нет на месте до пятницы
+vacation-sample-external-body = Добрый день!
+
+    Спасибо за письмо. Я вне офиса до пятницы и отвечу после возвращения.
+
+    С уважением
+settings-decimal-sep = ,
+settings-quota = Ящик: { $used } из { $limit } { $unit ->
+    [mb] МБ
+   *[gb] ГБ
+}
+settings-quota-warn = Ящик заполнен на { $percent } % — { $used } из { $limit } { $unit ->
+    [mb] МБ
+   *[gb] ГБ
+}. Когда место кончится, новые письма перестанут приниматься.
+settings-quota-clean = Очистить вложения…
+status-quota-tip = { $account }: { $quota } ({ $percent } %)
 vacation-foreign-warning = На сервере активен фильтр «{ $name }», созданный не в Postman: включение автоответа его выключит.
 # Правила почты (S4-07).
 rules-demo = Демо: правила хранятся на сервере — нужна учётная запись.
@@ -121,9 +204,9 @@ settings-hint-keys = Каждое действие — команда. Свои 
 settings-nav-rules = Правила
 settings-nav-rules-keywords = правила фильтры sieve сортировка папки
 settings-hint-rules = Правила выполняет сервер при доставке письма — и когда Postman закрыт. Изменения сохраняются сразу.
-settings-nav-vacation = Автоответы
-settings-nav-vacation-keywords = автоответ отпуск нет на месте
-settings-hint-vacation = Ответ «Нет на месте» отправляет сервер — и когда Postman закрыт.
+settings-nav-vacation = Автоответ
+settings-nav-vacation-keywords = автоответ отпуск нет на месте вне офиса контакты
+settings-hint-vacation = Ответ «Нет на месте» хранится на сервере и уходит, даже когда Postman закрыт.
 # Общие.
 settings-look = Вид
 settings-theme = Тема
