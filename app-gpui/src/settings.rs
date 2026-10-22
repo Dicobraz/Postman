@@ -6,11 +6,12 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use jiff::tz::TimeZone;
 use pets_i18n::tr;
-use pets_ui::Level as Toast;
+use pets_ui::{Level as Toast, ToastAction};
+use postman_core::autoreply::{Audience, AutoReply, Text};
 use postman_core::categories;
 use postman_core::labels::Categories;
 use postman_core::rules::{Action, Field, Rule};
-use postman_core::settings::{Area, Foreign, Reply, Request, RulesState, Usage, WARN_PERCENT};
+use postman_core::settings::{Area, AutoReplySave, Foreign, Reply, Request, RulesState, Usage, WARN_PERCENT};
 use postman_core::sync::{Command, Event};
 use postman_jmap::VacationResponse;
 
@@ -24,6 +25,8 @@ use crate::vacation::{self, BarEvent, VacationBar, VacationEvent, VacationPanel}
 pub(crate) struct ServerSettings {
     /// Автоответ на сервере (`None` — ещё не пришёл или сервер его не знает).
     pub(crate) vacation: Option<VacationResponse>,
+    /// Настройки автоответа Postman (свой скрипт `vacation`, S5-29); `None` — их нет: один текст сервера всем.
+    pub(crate) autoreply: Option<AutoReply>,
     pub(crate) quota: Option<Usage>,
     /// Правила на сервере (`None` — ещё не пришли или сервер их не знает).
     pub(crate) rules: Option<RulesState>,
@@ -44,10 +47,31 @@ pub(crate) struct ServerSettings {
 }
 
 impl ServerSettings {
-    /// «Ящик: 12 % из 2 ГБ» для строки состояния; квоты нет — пусто.
+    /// «Ящик: 9,4 из 10 ГБ» для строки состояния; квоты нет — пусто.
     pub(crate) fn quota_text(&self) -> String {
         self.quota.map(quota_text).unwrap_or_default()
     }
+}
+
+/// Число с одним знаком после запятой («9,4» — разделитель из текстов языка; целое — без «,0»).
+fn decimal(n: f64, sep: &str) -> String {
+    let s = if (n - n.round()).abs() < 0.05 { format!("{}", n.round()) } else { format!("{n:.1}") };
+    s.replace('.', sep)
+}
+
+/// Занято и предел в единице предела (МБ или ГБ), одним знаком: (занято, предел, единица).
+pub(crate) fn usage_parts(u: Usage) -> (f64, f64, &'static str) {
+    let (unit, limit) = limit_parts(u.limit);
+    const MB: f64 = 1024.0 * 1024.0;
+    let div = if unit == "mb" { MB } else { MB * 1024.0 };
+    ((u.used as f64 / div * 10.0).round() / 10.0, limit, unit)
+}
+
+/// То же строками для текстов.
+fn usage_text(u: Usage) -> (String, String, &'static str) {
+    let sep = tr!("settings-decimal-sep");
+    let (used, limit, unit) = usage_parts(u);
+    (decimal(used, &sep), decimal(limit, &sep), unit)
 }
 
 /// Предел квоты: меньше гигабайта — в МБ (целые), иначе в ГБ с одним знаком.
@@ -58,8 +82,26 @@ pub(crate) fn limit_parts(bytes: u64) -> (&'static str, f64) {
 }
 
 fn quota_text(u: Usage) -> String {
-    let (unit, n) = limit_parts(u.limit);
-    tr!("settings-quota", percent = u.percent(), unit = unit, n = n)
+    let (used, limit, unit) = usage_text(u);
+    tr!("settings-quota", used = used, limit = limit, unit = unit)
+}
+
+/// Запрос «Очистить вложения…»: письма с вложениями больше 5 МБ старше года (макет «Главное окно: автоответ»).
+pub(crate) const CLEANUP_QUERY: &str = "has:attachment larger:5M before:1y";
+
+/// Образец автоответа Postman для демо и снимка `vacation`: свои тексты коллегам и внешним.
+pub(crate) fn reply_sample() -> AutoReply {
+    AutoReply {
+        internal: Text {
+            subject: tr!("vacation-sample-internal-subject"),
+            body: tr!("vacation-sample-internal-body"),
+        },
+        external: Text {
+            subject: tr!("vacation-sample-external-subject"),
+            body: tr!("vacation-sample-external-body"),
+        },
+        ..AutoReply::default()
+    }
 }
 
 impl Mailer {
@@ -164,14 +206,16 @@ impl Mailer {
             Section::Vacation if self.settings.vacation_panel.is_none() => {
                 let live = self.backend.is_live();
                 let state = self.settings.vacation.clone();
+                let reply = self.settings.autoreply.clone();
                 let warning = self.foreign_warning();
+                let me = self.vacation_me(cx);
                 let panel = cx.new(|cx| {
-                    let mut p = VacationPanel::new(state.as_ref(), live, window, cx);
+                    let mut p = VacationPanel::new(state.as_ref(), reply.as_ref(), me, live, window, cx);
                     p.warning = warning;
                     p
                 });
                 let sub = cx.subscribe_in(&panel, window, |this, _, ev: &VacationEvent, _, cx| match ev {
-                    VacationEvent::Save(v) => this.save_vacation(v.clone(), cx),
+                    VacationEvent::Save(v, reply) => this.save_autoreply(v.clone(), reply.clone(), cx),
                 });
                 self.settings._tab.push(sub);
                 self.settings.vacation_panel = Some(panel.clone());
@@ -301,6 +345,41 @@ impl Mailer {
         }
     }
 
+    /// Мой адрес и имя — предпросмотр автоответа.
+    fn vacation_me(&self, cx: &App) -> vacation::Me {
+        match self.compose.me() {
+            Some((a, _)) => vacation::Me { name: a.name.clone(), email: a.email.clone() },
+            None => {
+                let email = self.reading.read(cx).me.clone().unwrap_or_else(|| postman_demo::ME.to_owned());
+                vacation::Me { name: String::new(), email }
+            }
+        }
+    }
+
+    /// Кому отвечать: свои домены и адреса, адреса моих контактов.
+    fn audience(&self, cx: &App) -> Audience {
+        let mine = self.compose.own_addresses();
+        Audience { domains: Audience::domains_of(&mine), contacts: self.contacts.read(cx).personal_emails(), mine }
+    }
+
+    /// Автоответ Postman (S5-29): `VacationResponse`, свой скрипт и «Вне офиса».
+    fn save_autoreply(&mut self, v: VacationResponse, reply: AutoReply, cx: &mut Context<Self>) {
+        let save = AutoReplySave {
+            vacation: v,
+            reply,
+            audience: self.audience(cx),
+            ooo_title: tr!("vacation-ooo-title"),
+            zone: crate::prefs::get(cx).calendar.zone.unwrap_or_default(),
+        };
+        if self.backend.send(Command::Settings(Request::SetAutoReply(Box::new(save)))) {
+            return;
+        }
+        self.not_sent(cx);
+        if let Some(p) = &self.settings.vacation_panel {
+            p.update(cx, |p, cx| p.not_saved(cx));
+        }
+    }
+
     fn save_rules(&mut self, rules: Vec<Rule>, replace: bool, cx: &mut Context<Self>) {
         if self.backend.send(Command::Settings(Request::SaveRules { rules, replace })) {
             return;
@@ -316,10 +395,24 @@ impl Mailer {
         if self.backend.is_live() { self.sync_stopped(cx) } else { self.needs_server(cx) }
     }
 
-    /// «Выключить» на полосе: тот же автоответ, выключенный.
+    /// «Выключить» на полосе: тот же автоответ, выключенный; тост — «Отменить» (включить снова).
     fn vacation_off(&mut self, cx: &mut Context<Self>) {
+        self.vacation_switch(false, cx);
+        let mailer = cx.entity().downgrade();
+        let action = ToastAction::new(tr!("vacation-undo"), move |_, cx| {
+            let _ = mailer.update(cx, |m, cx| m.vacation_switch(true, cx));
+        });
+        self.toasts.update(cx, |t, cx| t.push_action(Toast::Info, tr!("vacation-turned-off"), action, cx));
+    }
+
+    /// Включить или выключить автоответ, как он есть на сервере.
+    fn vacation_switch(&mut self, on: bool, cx: &mut Context<Self>) {
         let Some(v) = self.settings.vacation.clone() else { return };
-        self.save_vacation(VacationResponse { is_enabled: false, ..v }, cx);
+        let v = VacationResponse { is_enabled: on, ..v };
+        match self.settings.autoreply.clone() {
+            Some(reply) => self.save_autoreply(v, reply, cx),
+            None => self.save_vacation(v, cx),
+        }
     }
 
     /// Активный скрипт сервера не из Postman: включение автоответа его выключит (`docs/STALWART.md`).
@@ -335,14 +428,24 @@ impl Mailer {
         let rules = self.settings.rules_panel.clone();
         match reply {
             Reply::Vacation(v) => {
+                let reply = self.settings.autoreply.clone();
                 if let Some(p) = &vacation {
-                    p.update(cx, |p, cx| p.server_state(v, cx));
+                    p.update(cx, |p, cx| p.server_state(v, reply.as_ref(), cx));
                 }
                 self.set_vacation_state(Some(v.clone()), cx);
             }
+            Reply::AutoReply(reply) => {
+                self.settings.autoreply = reply.clone();
+                if let (Some(p), Some(v)) = (&vacation, self.settings.vacation.clone()) {
+                    p.update(cx, |p, cx| p.server_state(&v, reply.as_ref(), cx));
+                }
+                let v = self.settings.vacation.clone();
+                self.set_vacation_state(v, cx);
+            }
             Reply::VacationSaved(v) => {
+                let reply = self.settings.autoreply.clone();
                 match &vacation {
-                    Some(p) => p.update(cx, |p, cx| p.saved(v, cx)),
+                    Some(p) => p.update(cx, |p, cx| p.saved(v, reply.as_ref(), cx)),
                     None => {
                         let text = if v.is_enabled { tr!("vacation-saved") } else { tr!("vacation-saved-off") };
                         self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
@@ -423,15 +526,18 @@ impl Mailer {
 
     /// Автоответ на сервере изменился: полоса появляется, меняет текст или уходит.
     pub(crate) fn set_vacation_state(&mut self, v: Option<VacationResponse>, cx: &mut Context<Self>) {
-        let text = v.as_ref().filter(|v| v.is_enabled).map(|v| vacation::bar_text(v, &TimeZone::system()));
+        let reply = self.settings.autoreply.clone();
+        let text =
+            v.as_ref().filter(|v| v.is_enabled).map(|v| vacation::bar_text(v, reply.as_ref(), &TimeZone::system()));
         self.settings.vacation = v;
         match (text, &self.settings.bar) {
-            (Some(text), Some(bar)) => bar.update(cx, |b, cx| {
-                b.text = text;
+            (Some((until, reach)), Some(bar)) => bar.update(cx, |b, cx| {
+                b.until = until;
+                b.reach = reach;
                 cx.notify();
             }),
-            (Some(text), None) => {
-                let bar = cx.new(|_| VacationBar { text });
+            (Some((until, reach)), None) => {
+                let bar = cx.new(|_| VacationBar { until, reach });
                 self.settings
                     ._subscriptions
                     .push(cx.subscribe(&bar, |this, _, BarEvent::TurnOff, cx| this.vacation_off(cx)));
@@ -447,12 +553,33 @@ impl Mailer {
         let percent = usage.map_or(0, |u| u.percent());
         if percent > WARN_PERCENT && !self.settings.quota_warned {
             self.settings.quota_warned = true;
-            let text = tr!("settings-quota-warn", percent = percent);
-            self.toasts.update(cx, |t, cx| t.push(Toast::Warning, text, cx));
+            self.quota_toast(cx);
         } else if percent <= WARN_PERCENT {
             self.settings.quota_warned = false;
         }
         cx.notify();
+    }
+}
+
+impl Mailer {
+    /// Тост о заполненности с «Очистить вложения…» (S5-29): поиск «Везде» больших писем с вложениями.
+    pub(crate) fn quota_toast(&mut self, cx: &mut Context<Self>) {
+        let Some(u) = self.settings.quota else { return };
+        let (used, limit, unit) = usage_text(u);
+        let text = tr!("settings-quota-warn", percent = u.percent(), used = used, limit = limit, unit = unit);
+        let mailer = cx.entity().downgrade();
+        let action = ToastAction::new(tr!("settings-quota-clean"), move |window, cx| {
+            let _ = mailer.update(cx, |m, cx| m.clean_attachments(window, cx));
+        });
+        self.toasts.update(cx, |t, cx| t.push_action(Toast::Warning, text, action, cx));
+    }
+
+    /// «Очистить вложения…»: «Почта», поиск «Везде» по [`CLEANUP_QUERY`].
+    pub(crate) fn clean_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(crate::Section::Mail, cx);
+        self.bar.update(cx, |b, _| b.scope = crate::bar::Scope::All);
+        self.search.update(cx, |s, cx| s.set_value(CLEANUP_QUERY, window, cx));
+        self.run_search(CLEANUP_QUERY, cx);
     }
 }
 
@@ -495,12 +622,18 @@ pub(crate) fn rules_sample(mailboxes: &[(String, String)]) -> RulesState {
 
 #[cfg(test)]
 mod tests {
-    use super::limit_parts;
+    use super::{Usage, decimal, limit_parts, usage_parts};
 
     #[test]
     fn quota_limit_units() {
         assert_eq!(limit_parts(500 * 1024 * 1024), ("mb", 500.0));
         assert_eq!(limit_parts(2 * 1024 * 1024 * 1024), ("gb", 2.0));
         assert_eq!(limit_parts(1536 * 1024 * 1024), ("gb", 1.5));
+        // «9,4 из 10 ГБ» (макет): занято — в той же единице, одним знаком; целое — без «,0».
+        let gb = 1024 * 1024 * 1024u64;
+        let u = Usage { used: gb * 94 / 10, limit: 10 * gb };
+        assert_eq!(usage_parts(u), (9.4, 10.0, "gb"));
+        assert_eq!((decimal(9.4, ","), decimal(10.0, ",")), ("9,4".to_string(), "10".to_string()));
+        assert_eq!(usage_parts(Usage { used: 300 * 1024 * 1024, limit: 500 * 1024 * 1024 }), (300.0, 500.0, "mb"));
     }
 }

@@ -157,8 +157,10 @@ enum Scene {
     TaskTimeblock,
     /// Повтор (S6-07): варианты повтора в карточке.
     TaskRepeat,
-    /// Панель «Автоматические ответы» и полоса «Автоответ включён» (S4-05; демо — образец).
+    /// «Настройки → Автоответ» (S4-05, S5-29; демо — образец со своими текстами коллегам и внешним).
     Vacation,
+    /// Ящик заполнен на 94 % (S5-29): индикатор в строке состояния и тост «Очистить вложения…».
+    Quota,
     /// Панель «Правила» (S4-07): демо — образец с редактором первого правила, живой ящик — правила с сервера.
     Rules,
     /// «Входящие» общего ящика в дереве папок, первое письмо открыто (S4-06).
@@ -307,6 +309,7 @@ const SCENES: &[Scene] = &[
     Scene::Bulk,
     Scene::ContextMenu,
     Scene::Phishing,
+    Scene::Quota,
     Scene::Offline,
     Scene::Toasts,
     Scene::KeyTips,
@@ -401,6 +404,7 @@ impl Scene {
             Scene::TaskTimeblock => "task-timeblock",
             Scene::TaskRepeat => "task-repeat",
             Scene::Vacation => "vacation",
+            Scene::Quota => "quota",
             Scene::Rules => "rules",
             Scene::Shared => "shared",
             Scene::Labels => "labels",
@@ -759,9 +763,25 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
             m.open_menu_at_row(1, None, cx);
             m.screen_menu_last();
         }
+        Scene::Quota => {
+            // Окно почты, как на макете: полоса «Автоответ включён» (образец сцены `vacation`) и строка состояния.
+            m.close_settings(window, cx);
+            m.set_section(Section::Mail, cx);
+            m.close_menu(cx);
+            m.toasts.update(cx, |t, cx| t.hide_all(cx));
+            // 9,4 из 10 ГБ, как на макете; тост — заново (прежняя заполненность — ниже порога).
+            let limit: u64 = 10 << 30;
+            m.set_quota(None, cx);
+            m.set_quota(Some(postman_core::settings::Usage { used: (limit * 94).div_ceil(100), limit }), cx);
+        }
         Scene::Offline => {
             m.close_menu(cx);
             m.toasts.update(cx, |t, cx| t.hide_all(cx));
+            // После `quota` — снова 12 % из 2 ГБ.
+            if m.settings.quota.is_some_and(|u| u.percent() > postman_core::settings::WARN_PERCENT) {
+                let limit: u64 = 2 << 30;
+                m.set_quota(Some(postman_core::settings::Usage { used: limit / 8, limit }), cx);
+            }
             let own = postman_demo::ME.to_owned();
             m.folders.update(cx, |f, cx| {
                 f.own = Some(own);
@@ -1028,6 +1048,7 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         Scene::Vacation => {
             m.set_section(Section::Mail, cx);
             if !m.backend.is_live() {
+                m.settings.autoreply = Some(crate::settings::reply_sample());
                 m.set_vacation_state(Some(crate::settings::screen_sample()), cx);
                 // Строка состояния — с заполненностью ящика: 12 % из 2 ГБ.
                 let limit: u64 = 2 << 30;
@@ -1357,6 +1378,9 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
         Scene::ContextMenu | Scene::Phishing => m.menu.is_some() && rows_loaded,
         Scene::Offline => m.offline.is_down() && list.offline.is_some(),
         Scene::Toasts => m.toasts.read(cx).is_history_open() && !m.offline.is_down(),
+        Scene::Quota => {
+            m.toasts.read(cx).on_screen() > 0 && m.settings.quota.is_some() && !m.tabs.is_active(crate::tabs::TabKind::Settings)
+        }
         Scene::KeyTips => crate::keytips::shown(cx) && reading.is_some_and(|r| r.doc.is_some()),
         Scene::Buttons => m.screens.as_ref().is_some_and(|d| d.gallery),
         Scene::KeyTipsSingle => {

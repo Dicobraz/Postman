@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use postman_compose::{Address, Draft};
 use postman_core::rules::{Action, Field, Rule};
-use postman_core::settings::{self, Reply, Request, RulesState};
+use postman_core::autoreply::{Audience, AutoReply, Text};
+use postman_core::settings::{self, AutoReplySave, Reply, Request, RulesState};
 use postman_jmap::{Activate, Auth, Client, Envelope, Invocation, SaveError, VacationResponse};
 use serde_json::{Value, json};
 
@@ -150,6 +151,93 @@ async fn vacation_reply_round_trip() {
     result.unwrap();
     assert!(off_ok, "автоответ не выключился");
     assert!(!b.client.vacation().await.unwrap().is_enabled);
+}
+
+/// S5-29 [проверить]: свой скрипт `vacation` Postman — коллеге (свой домен) уходит текст «Внутри компании»,
+/// настройки читаются обратно из скрипта, `VacationResponse/get` после записи скрипта работает, событие «Вне офиса»
+/// ставится на период и убирается при выключении.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn autoreply_split_texts() {
+    let (a, b) = (user(1).await, user(2).await);
+    let stamp = stamp();
+    let before = b.client.vacation().await.unwrap();
+    let internal = format!("Postman inside {stamp}");
+    let external = format!("Postman outside {stamp}");
+    let reply = AutoReply {
+        internal: Text { subject: internal.clone(), body: "Коллеги, я в отпуске (**тест стенда**).".into() },
+        external: Text { subject: external.clone(), body: "Спасибо за письмо (тест стенда).".into() },
+        ..AutoReply::default()
+    };
+    let now = jiff::Timestamp::now();
+    let period = |h: i64| now.checked_add(jiff::SignedDuration::from_hours(h)).unwrap().to_string();
+    let save = |on: bool, reply: AutoReply| AutoReplySave {
+        vacation: VacationResponse {
+            is_enabled: on,
+            from_date: Some(period(-1)),
+            to_date: Some(period(48)),
+            subject: None,
+            text_body: None,
+            html_body: None,
+        },
+        reply,
+        audience: Audience { domains: Audience::domains_of(&[a.email.clone(), b.email.clone()]), contacts: vec![], mine: vec![b.email.clone()] },
+        ooo_title: format!("Вне офиса {stamp}"),
+        zone: "Europe/Moscow".into(),
+    };
+
+    let result = async {
+        let replies = settings(&b.client, Request::SetAutoReply(Box::new(save(true, reply.clone())))).await;
+        if let Some(Reply::Failed { error, .. }) = replies.first() {
+            return Err(format!("автоответ Postman не записан: {error}"));
+        }
+        let saved = replies.iter().find_map(|r| match r {
+            Reply::VacationSaved(v) => Some(v.clone()),
+            _ => None,
+        });
+        let back = replies.iter().find_map(|r| match r {
+            Reply::AutoReply(r) => Some(r.clone()),
+            _ => None,
+        });
+        if !saved.as_ref().is_some_and(|v| v.is_enabled) {
+            return Err(format!("VacationResponse/get после своего скрипта: {saved:?}"));
+        }
+        if back.flatten().as_ref() != Some(&reply) {
+            return Err("настройки не прочитаны из скрипта vacation".into());
+        }
+        // «Вне офиса» — событие на период.
+        let events = b.client.events(None, &period(-48), &period(96)).await.unwrap_or_default();
+        if !events.iter().any(|e| e["title"].as_str() == Some(format!("Вне офиса {stamp}").as_str())) {
+            return Err("событие «Вне офиса» не появилось".into());
+        }
+        send(&a, &b.email, &format!("Postman probe {stamp}"), "Проверка автоответа Postman.").await;
+        let got = eventually(|| async {
+            find(&a, &stamp).await.into_iter().find_map(|e| e.subject.filter(|s| s == &internal || s == &external))
+        })
+        .await;
+        match got {
+            Some(s) if s == internal => Ok(()),
+            Some(s) => Err(format!("коллеге ушёл не тот текст: {s}")),
+            None => Err(format!("автоответ не пришёл за {DELIVERY:?}")),
+        }
+    }
+    .await;
+
+    // Уборка: выключить (событие «Вне офиса» уходит), затем автоответ как был.
+    let off = settings(&b.client, Request::SetAutoReply(Box::new(save(false, AutoReply { out_of_office: false, ..reply })))).await;
+    let ooo_left = b
+        .client
+        .events(None, &period(-48), &period(96))
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e["title"].as_str() == Some(format!("Вне офиса {stamp}").as_str()));
+    let _ = settings(&b.client, Request::SetVacation(VacationResponse { is_enabled: false, ..before })).await;
+    destroy_all(&a, &stamp).await;
+    destroy_all(&b, &stamp).await;
+    result.unwrap();
+    assert!(off.iter().any(|r| matches!(r, Reply::VacationSaved(v) if !v.is_enabled)), "автоответ не выключился");
+    assert!(!ooo_left, "событие «Вне офиса» осталось");
 }
 
 /// S4-05: квота читается (у пользователя без ограничений — `None`), запрос без ошибки.
