@@ -20,10 +20,10 @@ use crate::schedule::{self, Meeting};
 use crate::send_later::{self, Scheduled};
 use crate::tasks;
 use postman_search::SearchIndex;
-pub use postman_jmap::Release;
-use postman_jmap::{Auth, Client, EmailAddress, EmailBody, EmailSummary, Envelope, Filter, Identity, Mailbox, utc_to_unix};
+pub use crate::model::Release;
+use crate::model::{Auth, ContactCard, Filter, Principal};
+use postman_jmap::{Client, EmailAddress, EmailBody, EmailSummary, Envelope, Identity, Mailbox, utc_to_unix};
 use postman_jmap::{MailboxRights, SharedAccount, UnsendError};
-use postman_jmap::{ContactCard, Principal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 /// Канал команд синхронизации (UI держит отправителя).
 pub use tokio::sync::mpsc::UnboundedSender;
@@ -650,7 +650,7 @@ async fn run(
     notify: &impl Fn(Event),
 ) -> Result<(), SyncError> {
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
-    let client = Client::connect(&account.url, account.auth).await.map_err(|e| SyncError::new(Stage::Connect, &e))?;
+    let client = Client::connect(&account.url, (&account.auth).into()).await.map_err(|e| SyncError::new(Stage::Connect, &e))?;
     notify(Event::Status(Status::SignedIn { user: client.session().username.clone() }));
     let own_id = client.mail_account().map_err(|e| SyncError::new(Stage::Connect, &e))?.to_string();
 
@@ -1238,7 +1238,7 @@ async fn handle(
         }
         Command::Query { filter, mailbox, ticket } => {
             let (acc, mb) = query_scope(accounts, mailbox.as_deref())?;
-            let page = acc.client.filtered(&in_mailbox(mb, filter), SEARCH_LIMIT).await?;
+            let page = acc.client.filtered(&(&in_mailbox(mb, filter)).into(), SEARCH_LIMIT).await?;
             save_summaries(cache, index, &page.emails, acc.scope(), notify)?;
             let ids = page.ids.iter().map(|id| acc.key(id)).collect();
             notify(Event::SearchResults { ticket, ids, total: page.total });
@@ -1246,7 +1246,7 @@ async fn handle(
         Command::Counts { filters, mailbox, ticket } => {
             let counted = match query_scope(accounts, mailbox.as_deref()) {
                 Ok((acc, mb)) => {
-                    let filters: Vec<Filter> = filters.into_iter().map(|f| in_mailbox(mb, f)).collect();
+                    let filters: Vec<postman_jmap::Filter> = filters.into_iter().map(|f| (&in_mailbox(mb, f)).into()).collect();
                     acc.client.count(&filters).await
                 }
                 Err(e) => Err(e),
@@ -1401,8 +1401,8 @@ async fn handle(
         Command::Contacts => load_people(client, notify).await,
         Command::SaveContact { card, old, ticket } => {
             let saved = match &old {
-                Some(old) => client.update_contact(old, &card).await.map(|()| old.id.clone()),
-                None => client.create_contact(&card).await,
+                Some(old) => client.update_contact(&(&**old).into(), &(&*card).into()).await.map(|()| old.id.clone()),
+                None => client.create_contact(&(&*card).into()).await,
             };
             notify(match saved {
                 Ok(id) => Event::ContactSaved { ticket, id },
@@ -1638,10 +1638,10 @@ async fn newsletters(
     let inbox = unscoped(&inbox_key).1.to_owned();
     let seen = || vec![Filter::InMailbox(inbox.clone()), Filter::HasKeyword(postman_cache::SEEN.into())];
     // Свежие — чтобы знать последнюю от отправителя; старые — чтобы дойти до них в большом ящике.
-    let mut letters = acc.client.list_letters(&Filter::And(seen()), lifecycle::NEWS_LIMIT).await?;
+    let mut letters = acc.client.list_letters(&(&Filter::And(seen())).into(), lifecycle::NEWS_LIMIT).await?;
     let mut old = seen();
     old.push(Filter::Before(postman_jmap::unix_to_utc(cutoff)));
-    for l in acc.client.list_letters(&Filter::And(old), lifecycle::NEWS_LIMIT).await? {
+    for l in acc.client.list_letters(&(&Filter::And(old)).into(), lifecycle::NEWS_LIMIT).await? {
         if !letters.iter().any(|x| x.id == l.id) {
             letters.push(l);
         }
@@ -1767,7 +1767,7 @@ async fn load_people(client: &Client, notify: &impl Fn(Event)) {
         return notify(Event::DirectoryLoaded(Vec::new()));
     }
     match client.directory(DIRECTORY_LIMIT).await {
-        Ok(people) => notify(Event::DirectoryLoaded(crate::contacts::directory(people))),
+        Ok(people) => notify(Event::DirectoryLoaded(crate::contacts::directory(people.into_iter().map(Principal::from).collect()))),
         Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
     }
 }
@@ -1780,6 +1780,7 @@ async fn load_cards(client: &Client, notify: &impl Fn(Event)) {
     }
     match client.contact_cards().await {
         Ok(cards) => {
+            let cards: Vec<ContactCard> = cards.into_iter().map(ContactCard::from).collect();
             let pairs = cards.iter().flat_map(|c| c.emails.iter().map(|e| (c.name.clone(), e.clone()))).collect();
             notify(Event::Contacts(pairs));
             notify(Event::ContactsLoaded(cards));
@@ -1922,7 +1923,7 @@ async fn send(
     if !draft.encrypt_to.is_empty() {
         raw = crate::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_jmap::Error::Protocol(seal_code(&e)))?;
     }
-    let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release, &server_words(&draft.keywords)).await?;
+    let sub = acc.client.submit(raw, &sender.identity.id, &envelope, &drafts, &sent, release.into(), &server_words(&draft.keywords)).await?;
     if let Some(old) = replace {
         let (acc, id) = accounts.locate(old)?;
         acc.client.destroy_email(id).await?;

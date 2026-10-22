@@ -11,7 +11,7 @@
 //! (запрос ещё набирается) и непонятное значение — без условия.
 
 use postman_cache::{EmailRow, FLAGGED, Recipients, SEEN};
-use postman_jmap::Filter;
+use crate::model::Filter;
 
 use crate::fuzzy::{folded, highlight_terms};
 
@@ -690,7 +690,7 @@ mod tests {
         assert!(q.has_conditions());
         assert_eq!(Query::parse("больше:2мб").larger, Some(2 * MB));
         let env = q.env(&now(), |_| None, &[]);
-        let json = q.server_filter(&env).unwrap().to_json();
+        let json = postman_jmap::Filter::from(&q.server_filter(&env).unwrap()).to_json();
         assert!(json["conditions"].as_array().unwrap().iter().any(|c| c["minSize"] == 5 * MB), "{json}");
         let mut big = row("Анна", "Отчёт");
         big.has_attachment = true;

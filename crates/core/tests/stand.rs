@@ -512,12 +512,12 @@ async fn contacts_are_edited_and_directory_is_listed() {
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn contacts_through_sync() {
     use postman_core::sync::{self, Account, Command, Event as SyncEvent};
-    use postman_jmap::ContactCard;
+    use postman_core::model::ContactCard;
 
     let email = env("POSTMAN_STAND_USER3");
     let account = Account {
         url: env("POSTMAN_STAND_URL"),
-        auth: Auth::Basic { user: email.clone(), password: env("POSTMAN_STAND_PASSWORD3") },
+        auth: postman_core::model::Auth::Basic { user: email.clone(), password: env("POSTMAN_STAND_PASSWORD3") },
     };
     let cache = postman_cache::Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -604,7 +604,7 @@ async fn calendar_through_sync() {
     // user1 — поток синхронизации приложения.
     let account = Account {
         url: env("POSTMAN_STAND_URL"),
-        auth: Auth::Basic { user: a.email.clone(), password: env("POSTMAN_STAND_PASSWORD1") },
+        auth: postman_core::model::Auth::Basic { user: a.email.clone(), password: env("POSTMAN_STAND_PASSWORD1") },
     };
     let cache = postman_cache::Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -684,7 +684,7 @@ type SyncEvents = std::sync::mpsc::Receiver<postman_core::sync::Event>;
 fn sync_of(n: u8, password: String) -> (postman_core::sync::UnboundedSender<postman_core::sync::Command>, SyncEvents) {
     use postman_core::sync::{self, Account};
     let user = env(&format!("POSTMAN_STAND_USER{n}"));
-    let account = Account { url: env("POSTMAN_STAND_URL"), auth: Auth::Basic { user, password } };
+    let account = Account { url: env("POSTMAN_STAND_URL"), auth: postman_core::model::Auth::Basic { user, password } };
     let (tx, rx) = std::sync::mpsc::channel();
     let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
     (commands, rx)

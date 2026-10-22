@@ -13,7 +13,7 @@ use postman_core::labels::Categories;
 use postman_core::rules::{Action, Field, Rule};
 use postman_core::settings::{Area, AutoReplySave, Foreign, Reply, Request, RulesState, Usage, WARN_PERCENT};
 use postman_core::sync::{Command, Event};
-use postman_jmap::VacationResponse;
+use postman_core::model::VacationResponse;
 
 use crate::Mailer;
 use crate::rules::{RulesEvent, RulesPanel};

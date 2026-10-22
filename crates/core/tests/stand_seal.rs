@@ -87,7 +87,7 @@ async fn encrypted_round_trip() {
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let account = Account { url: env("POSTMAN_STAND_URL"), auth: Auth::Basic { user: from.clone(), password: env("POSTMAN_STAND_PASSWORD1") } };
+    let account = Account { url: env("POSTMAN_STAND_URL"), auth: postman_core::model::Auth::Basic { user: from.clone(), password: env("POSTMAN_STAND_PASSWORD1") } };
     let commands = sync::spawn(account, Cache::open_in_memory().unwrap(), None, tx, || {});
     let wait = |what: &str, pick: &dyn Fn(&Event) -> bool| -> Event {
         let start = Instant::now();

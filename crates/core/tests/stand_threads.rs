@@ -161,7 +161,7 @@ async fn reply_chain_is_one_thread_with_new_text_only() {
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let commands =
-        sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth(3) }, cache.clone(), None, tx, || {});
+        sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth(3).into() }, cache.clone(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| {
         matches!(e, Event::Status(Status::Synced)).then_some(())
     });

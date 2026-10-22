@@ -84,7 +84,7 @@ type Events = std::sync::mpsc::Receiver<Event>;
 fn sync_user3() -> (sync::UnboundedSender<Command>, Events, Cache) {
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth() }, cache.clone(), None, tx, || {});
+    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache.clone(), None, tx, || {});
     (commands, rx, cache)
 }
 

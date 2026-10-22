@@ -15,7 +15,7 @@ use jiff::tz::TimeZone;
 use pets_i18n::tr;
 use pets_ui::theme::{Metric, Role};
 use postman_core::autoreply::{AutoReply, Reach, Text};
-use postman_jmap::VacationResponse;
+use postman_core::model::VacationResponse;
 
 use crate::chrome::{glyph, icon};
 use crate::compose::{Format, apply_format};

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use postman_core::sync::Account;
-use postman_jmap::Auth;
+use postman_core::model::Auth;
 use serde::{Deserialize, Serialize};
 
 use crate::sys;

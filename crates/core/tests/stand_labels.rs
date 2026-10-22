@@ -164,7 +164,7 @@ async fn categories_through_sync() {
 
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth() }, cache.clone(), None, tx, || {});
+    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache.clone(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| {
         matches!(e, Event::Status(Status::Synced)).then_some(())
     });
@@ -190,7 +190,7 @@ async fn categories_through_sync() {
 
     assert!(
         commands
-            .send(Command::Query { filter: Filter::HasKeyword(mine.clone()), mailbox: Some(inbox.clone()), ticket: 7 })
+            .send(Command::Query { filter: postman_core::model::Filter::HasKeyword(mine.clone()), mailbox: Some(inbox.clone()), ticket: 7 })
             .is_ok()
     );
     let (ids, total) = wait_for(&rx, "письма по метке", |e| match e {
@@ -198,7 +198,7 @@ async fn categories_through_sync() {
         _ => None,
     });
     assert_eq!((ids, total), (vec![id.clone()], 1));
-    let filters = vec![Filter::HasKeyword(mine.clone()), Filter::NotKeyword(mine.clone())];
+    let filters = vec![postman_core::model::Filter::HasKeyword(mine.clone()), postman_core::model::Filter::NotKeyword(mine.clone())];
     assert!(commands.send(Command::Counts { filters, mailbox: None, ticket: 8 }).is_ok());
     let counts = wait_for(&rx, "счётчики", |e| match e {
         Event::Counts { ticket: 8, counts } => Some(counts.clone()),

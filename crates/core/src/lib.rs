@@ -4,6 +4,7 @@
 pub mod assign;
 pub mod attach;
 pub mod autoreply;
+pub mod backend;
 pub mod bulk;
 pub mod bench;
 pub mod categories;
@@ -20,6 +21,7 @@ pub mod lifecycle;
 pub mod mailtask;
 pub mod link;
 pub mod marks;
+pub mod model;
 pub mod palette;
 pub mod prefs;
 pub mod query;

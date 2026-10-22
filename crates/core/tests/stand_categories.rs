@@ -210,7 +210,7 @@ async fn tables_through_sync_and_shared_mailbox() {
 
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth() }, cache, None, tx, || {});
+    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache, None, tx, || {});
     // При входе — ответ на каждый аккаунт: свой, общий ящик и папка shared-ro, открытая user3 (у неё файлы
     // закрыты — `Unsupported`).
     let readonly = other.session().shared_accounts().into_iter().find(|a| a.name == "shared-ro@itt.test").map(|a| a.id);

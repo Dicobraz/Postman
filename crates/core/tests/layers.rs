@@ -27,6 +27,10 @@ const UI_LAYER: u8 = 3;
 /// Библиотеки интерфейса и системных диалогов: только в L3.
 const UI_CRATES: &[&str] = &["gpui", "egui", "eframe", "winit", "rfd"];
 
+/// Протокольные клиенты серверов (ADR 0003): их знает только `core`, интерфейс видит нейтральную модель
+/// (`postman_core::model`). Новый путь к серверу — сюда.
+const PROTOCOL_CRATES: &[&str] = &["postman-jmap", "postman-imap", "postman-dav", "postman-ews"];
+
 fn cargo_tree(args: &[&str]) -> Vec<String> {
     let out = Command::new(env!("CARGO"))
         .args(["tree", "--offline", "--prefix", "none", "-e", "normal"])
@@ -73,5 +77,14 @@ fn lower_layers_do_not_depend_on_higher() {
             assert!(dl <= l, "{name} (L{l}) зависит от {dep} (L{dl})");
             assert!(dep != "postman-demo" || l == UI_LAYER, "{name} (L{l}) зависит от демо-данных");
         }
+    }
+}
+
+#[test]
+fn interface_does_not_know_protocols() {
+    for &(name, _) in LAYERS.iter().filter(|(_, l)| *l == UI_LAYER) {
+        let deps: BTreeSet<String> = cargo_tree(&["-p", name, "--depth", "1"]).into_iter().collect();
+        let known: Vec<_> = PROTOCOL_CRATES.iter().filter(|p| deps.contains(**p)).collect();
+        assert!(known.is_empty(), "{name} зависит от протокольных крейтов (только через postman-core): {known:?}");
     }
 }
