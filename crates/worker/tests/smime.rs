@@ -88,3 +88,40 @@ fn size_limits() {
     let huge = vec![b'a'; 70 * 1024 * 1024];
     assert_eq!(c.smime_verify(&huge, &pki.trust(), NOW).unwrap_err(), SmimeFailure::TooLarge);
 }
+
+/// Расшифровка в песочнице (S5-12 Ф2, 12.2в): два прохода (получатели → ключ ядра → тело), зашифрованное и
+/// подписанное — два слоя, подпись верна; вложение по номеру; неверный ключ — «повреждено», воркер жив.
+#[test]
+fn decryption_through_the_sandbox() {
+    use postman_smime::envelope::{Cipher, OpenError, Wrap};
+    use postman_smime::soft::{self, SoftKey};
+    use postman_smime::testkit::{KeyAlg, To};
+    let mut c = client();
+    let me = Pki::rsa("Postman Test Root", "Смирнова", "user3@itt.test");
+    let sender = Pki::rsa("Postman Test Root", "Иванов", "user1@itt.test");
+    let inner = testkit::mixed_part(HTML, ("Смета.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", b"PK\x03\x04 test"));
+    let signed = testkit::signed_part(&inner, &sender.user, &sender.user_key, &[&sender.root], &Sign::default());
+    let cek: Vec<u8> = (0..32).map(|i| i as u8 ^ 0x5a).collect();
+    let to = [To { cert: &me.user, key: &me.user_key, alg: KeyAlg::RsaOaep(postman_smime::Hash::Sha256), ski: false }];
+    let cms = testkit::enveloped(&signed, &to, Cipher::AesGcm(256), &cek, false);
+    let m = testkit::encrypted_letter(&head("user1@itt.test"), &cms, true);
+
+    let env = c.smime_envelope(&m).unwrap().unwrap();
+    assert_eq!(env.cipher, Ok(Cipher::AesGcm(256)));
+    assert_eq!(env.recipients[0].wrap, Wrap::RsaOaep(postman_smime::Hash::Sha256));
+    let Key::Rsa(k) = &me.user_key else { unreachable!() };
+    let key = SoftKey::new(&me.user.der, &soft::pkcs1_der(k).unwrap()).unwrap();
+    let got = soft::unwrap(std::slice::from_ref(&key), &env).unwrap();
+    let (opened, doc) = c.smime_open(&m, &got, &sender.trust(), NOW).unwrap().unwrap();
+    assert_eq!((opened.inner.kind, &opened.inner.status), (Kind::Detached, &Status::Valid));
+    assert_eq!(opened.inner.chain.first(), Some(&sender.user.der), "цепочка подписи внутри — в бинарной части");
+    assert_eq!(postman_ir::to_markdown(&doc.unwrap()), "Подписанное письмо.");
+    assert_eq!(opened.parts.len(), 1);
+    assert_eq!(c.smime_part(&m, &got, 0).unwrap().unwrap().as_slice(), b"PK\x03\x04 test");
+
+    let mut wrong = got.to_vec();
+    wrong[0] ^= 1;
+    assert_eq!(c.smime_open(&m, &wrong, &sender.trust(), NOW).unwrap().unwrap_err(), OpenError::Damaged);
+    assert_eq!(c.smime_envelope(b"From: a@x\r\n\r\nhi").unwrap(), Err(OpenError::NotEncrypted));
+    assert!(c.render(&Request::Text("ok".into())).is_ok());
+}

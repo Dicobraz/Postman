@@ -12,7 +12,8 @@ use crate::{oid, signed};
 
 pub(crate) enum Found {
     None { from: String },
-    Encrypted { from: String },
+    /// Шифровано: DER CMS (`None` — тело не снялось).
+    Encrypted { cms: Option<Vec<u8>>, from: String },
     /// Подписанная часть (канонизированная) и DER подписи (`smime.p7s`).
     Detached { signed: Vec<u8>, signature: Vec<u8>, from: String },
     /// DER `signed-data` (`smime.p7m`).
@@ -121,11 +122,11 @@ pub(crate) fn find(message: &[u8]) -> Result<Found, String> {
         "application/pkcs7-mime" | "application/x-pkcs7-mime" => {
             let smime = ct.attribute("smime-type").unwrap_or_default().to_ascii_lowercase();
             if smime == "enveloped-data" || smime == "authenveloped-data" {
-                return Ok(Found::Encrypted { from });
+                return Ok(Found::Encrypted { cms: decoded(message), from });
             }
             let cms = decoded(message).ok_or("pkcs7-mime body")?;
             match signed::content_type(&cms) {
-                Some(oid::ENVELOPED_DATA) | Some(oid::AUTH_ENVELOPED_DATA) => Ok(Found::Encrypted { from }),
+                Some(oid::ENVELOPED_DATA) | Some(oid::AUTH_ENVELOPED_DATA) => Ok(Found::Encrypted { cms: Some(cms), from }),
                 Some(oid::SIGNED_DATA) => Ok(Found::Opaque { cms, from }),
                 Some(_) => Ok(Found::None { from }),
                 None => Err("pkcs7-mime is not CMS".into()),

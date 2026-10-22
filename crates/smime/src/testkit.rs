@@ -682,3 +682,322 @@ impl Pki {
         crate::Trust { roots: vec![crate::Anchor { der: self.root.der.clone(), corporate: true }], ..Default::default() }
     }
 }
+
+// --- шифрованные письма (Ф2) ---
+
+use p256::elliptic_curve::sec1::ToSec1Point as _;
+
+/// Детерминированный «случайный» источник для тестового шифрования RSA (rand_core 0.10).
+pub struct TestRng(u64);
+
+impl TestRng {
+    pub fn new(seed: u64) -> TestRng {
+        TestRng(seed.max(1))
+    }
+}
+
+impl rand_core::TryRng for TestRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        self.try_next_u64().map(|v| v as u32)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        // xorshift64*: тестам нужна воспроизводимость, не стойкость.
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        Ok(self.0.wrapping_mul(0x2545_F491_4F6C_DD1D))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        for chunk in dst.chunks_mut(8) {
+            let v = self.try_next_u64()?.to_le_bytes();
+            chunk.copy_from_slice(&v[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for TestRng {}
+
+/// Как зашифровать ключ содержимого для получателя.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAlg {
+    RsaPkcs1,
+    RsaOaep(Hash),
+    /// ECDH P-256/P-384, KDF этим хэшем, AES Key Wrap ключом `bits`.
+    Ecdh(Hash, u16),
+    /// ГОСТ Р 34.10 (`GostR3410-KeyTransport`, RFC 4490): поля — правдоподобные, ключ не снимается (только разбор:
+    /// снимает СКЗИ).
+    GostTransport,
+}
+
+/// Получатель: сертификат, его ключ (для ECDH — открытый из него), алгоритм; `ski` — идентификатор SKI вместо
+/// издателя и серийного номера.
+pub struct To<'a> {
+    pub cert: &'a Issued,
+    pub key: &'a Key,
+    pub alg: KeyAlg,
+    pub ski: bool,
+}
+
+fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = crate::ber::header(tag, content.len());
+    out.extend_from_slice(content);
+    out
+}
+
+fn seq(parts: &[Vec<u8>]) -> Vec<u8> {
+    tlv(0x30, &parts.concat())
+}
+
+fn oid_der(o: Oid) -> Vec<u8> {
+    o.to_der().unwrap()
+}
+
+fn alg_der(o: Oid, params: Option<Vec<u8>>) -> Vec<u8> {
+    let mut parts = vec![oid_der(o)];
+    parts.extend(params);
+    seq(&parts)
+}
+
+fn hash_alg_der(h: Hash) -> Vec<u8> {
+    alg_der(h.oid(), None)
+}
+
+/// AES Key Wrap (RFC 3394) — тестам, чтобы собрать ECDH-получателя.
+pub fn wrap_key(kek: &[u8], key: &[u8]) -> Vec<u8> {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    fn run<C: BlockEncrypt + KeyInit + aes::cipher::BlockSizeUser<BlockSize = aes::cipher::consts::U16>>(kek: &[u8], key: &[u8]) -> Vec<u8> {
+        let cipher = C::new_from_slice(kek).unwrap();
+        let n = key.len() / 8;
+        let mut a = [0xA6u8; 8];
+        let mut r = key.to_vec();
+        for j in 0..6 {
+            for i in 1..=n {
+                let mut block = aes::cipher::Block::<C>::default();
+                block[..8].copy_from_slice(&a);
+                block[8..].copy_from_slice(&r[(i - 1) * 8..i * 8]);
+                cipher.encrypt_block(&mut block);
+                let t = ((n * j) + i) as u64;
+                a.copy_from_slice(&block[..8]);
+                for (k, b) in t.to_be_bytes().iter().enumerate() {
+                    a[k] ^= b;
+                }
+                r[(i - 1) * 8..i * 8].copy_from_slice(&block[8..]);
+            }
+        }
+        [a.to_vec(), r].concat()
+    }
+    match kek.len() {
+        16 => run::<aes::Aes128>(kek, key),
+        24 => run::<aes::Aes192>(kek, key),
+        _ => run::<aes::Aes256>(kek, key),
+    }
+}
+
+fn rid_der(cert: &Issued, ski: bool, kari: bool) -> Vec<u8> {
+    let tbs = cert.cert.tbs_certificate();
+    if ski {
+        let id = match tbs.get_extension::<SubjectKeyIdentifier>() {
+            Ok(Some((_, s))) => s.0.as_bytes().to_vec(),
+            _ => panic!("нет SKI"),
+        };
+        // ktri: [0] IMPLICIT OCTET STRING; kari: [0] IMPLICIT RecipientKeyIdentifier { OCTET STRING }.
+        if kari { tlv(0xA0, &tlv(0x04, &id)) } else { tlv(0x80, &id) }
+    } else {
+        seq(&[tbs.issuer().to_der().unwrap(), tbs.serial_number().to_der().unwrap()])
+    }
+}
+
+fn kdf_oid(h: Hash) -> Oid {
+    match h {
+        Hash::Sha1 => oid::ECDH_STD_SHA1,
+        Hash::Sha384 => oid::ECDH_STD_SHA384,
+        Hash::Sha512 => oid::ECDH_STD_SHA512,
+        _ => oid::ECDH_STD_SHA256,
+    }
+}
+
+fn wrap_alg_oid(bits: u16) -> Oid {
+    match bits {
+        128 => oid::AES128_WRAP,
+        192 => oid::AES192_WRAP,
+        _ => oid::AES256_WRAP,
+    }
+}
+
+fn recipient_info(to: &To<'_>, cek: &[u8], n: u64) -> Vec<u8> {
+    let mut rng = TestRng::new(n.wrapping_mul(7919) + 3);
+    match (to.alg, to.key) {
+        (KeyAlg::RsaPkcs1 | KeyAlg::RsaOaep(_), Key::Rsa(k)) => {
+            let public = k.to_public_key();
+            let (alg, ek) = match to.alg {
+                KeyAlg::RsaOaep(h) => {
+                    let ek = match h {
+                        Hash::Sha1 => public.encrypt(&mut rng, rsa::Oaep::<sha1::Sha1>::new(), cek),
+                        Hash::Sha384 => public.encrypt(&mut rng, rsa::Oaep::<sha2::Sha384>::new(), cek),
+                        Hash::Sha512 => public.encrypt(&mut rng, rsa::Oaep::<sha2::Sha512>::new(), cek),
+                        _ => public.encrypt(&mut rng, rsa::Oaep::<sha2::Sha256>::new(), cek),
+                    }
+                    .unwrap();
+                    // RSAES-OAEP-params: [0] hash, [1] MGF1(hash); SHA-1 — по умолчанию (пусто).
+                    let params = if h == Hash::Sha1 {
+                        seq(&[])
+                    } else {
+                        seq(&[tlv(0xA0, &hash_alg_der(h)), tlv(0xA1, &alg_der(oid::MGF1, Some(hash_alg_der(h))))])
+                    };
+                    (alg_der(oid::RSA_OAEP, Some(params)), ek)
+                }
+                _ => (alg_der(oid::RSA_ENCRYPTION, Some(vec![0x05, 0x00])), public.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, cek).unwrap()),
+            };
+            let version = if to.ski { 2 } else { 0 };
+            seq(&[tlv(0x02, &[version]), rid_der(to.cert, to.ski, false), alg, tlv(0x04, &ek)])
+        }
+        (KeyAlg::Ecdh(kdf, bits), Key::P256(k)) => {
+            let eph = p256::SecretKey::from_slice(&seed(&format!("eph-{n}"), 32)).unwrap();
+            let peer = p256::PublicKey::from(k.verifying_key());
+            let z = p256::ecdh::diffie_hellman(eph.to_nonzero_scalar(), peer.as_affine());
+            let point = eph.public_key().to_sec1_point(false);
+            ecdh_ri(to, z.raw_secret_bytes(), point.as_bytes(), kdf, bits, cek)
+        }
+        (KeyAlg::Ecdh(kdf, bits), Key::P384(k)) => {
+            let eph = p384::SecretKey::from_slice(&seed(&format!("eph-{n}"), 48)).unwrap();
+            let peer = p384::PublicKey::from(k.verifying_key());
+            let z = p384::ecdh::diffie_hellman(eph.to_nonzero_scalar(), peer.as_affine());
+            let point = eph.public_key().to_sec1_point(false);
+            ecdh_ri(to, z.raw_secret_bytes(), point.as_bytes(), kdf, bits, cek)
+        }
+        (KeyAlg::GostTransport, Key::Gost { .. }) => {
+            let spki = to.key.spki();
+            let key_oid = spki.algorithm.oid;
+            let params = spki.algorithm.parameters.as_ref().unwrap().to_der().unwrap();
+            // Эфемерный ключ — открытый ключ получателя (разбор не проверяет математику).
+            let bits = [vec![0u8], spki.subject_public_key.raw_bytes().to_vec()].concat();
+            let eph = tlv(0xA0, &[seq(&[oid_der(key_oid), params]), tlv(0x03, &bits)].concat());
+            let sek = seq(&[tlv(0x04, &seed("gost-ek", 32)), tlv(0x04, &seed("gost-mac", 4))]);
+            let tparams = [oid_der(oid::GOST28147_PARAM_A), eph, tlv(0x04, &seed("gost-ukm", 8))].concat();
+            let transport = seq(&[sek, tlv(0xA0, &tparams)]);
+            seq(&[tlv(0x02, &[0]), rid_der(to.cert, to.ski, false), alg_der(key_oid, None), tlv(0x04, &transport)])
+        }
+        _ => panic!("ключ не подходит к алгоритму"),
+    }
+}
+
+fn ecdh_ri(to: &To<'_>, z: &[u8], point: &[u8], kdf: Hash, bits: u16, cek: &[u8]) -> Vec<u8> {
+    let ukm = b"postman-ukm".to_vec();
+    let kek = crate::envelope::ecdh_kek(z, kdf, bits, Some(&ukm)).unwrap();
+    let ek = wrap_key(&kek, cek);
+    let mut bit = vec![0u8];
+    bit.extend_from_slice(point);
+    let originator = tlv(0xA0, &tlv(0xA1, &[alg_der(oid::EC_PUBLIC_KEY, None), tlv(0x03, &bit)].concat()));
+    let ukm = tlv(0xA1, &tlv(0x04, &ukm));
+    let alg = alg_der(kdf_oid(kdf), Some(alg_der(wrap_alg_oid(bits), None)));
+    let keys = seq(&[seq(&[rid_der(to.cert, to.ski, true), tlv(0x04, &ek)])]);
+    tlv(0xA1, &[tlv(0x02, &[3]), originator, ukm, alg, keys].concat())
+}
+
+/// Собрать `ContentInfo` с EnvelopedData (CBC, 3DES) или AuthEnvelopedData (GCM) над `content` ключом `cek`.
+/// `tamper` — испортить последний байт шифра (тег GCM или блок CBC).
+pub fn enveloped(content: &[u8], to: &[To<'_>], cipher: crate::envelope::Cipher, cek: &[u8], tamper: bool) -> Vec<u8> {
+    use crate::envelope::Cipher;
+    use aes::cipher::block_padding::Pkcs7;
+    use aes::cipher::{BlockEncryptMut, KeyIvInit};
+    let infos: Vec<u8> = to.iter().enumerate().map(|(i, t)| recipient_info(t, cek, i as u64)).collect::<Vec<_>>().concat();
+    let iv: Vec<u8> = seed("iv", 16);
+    let data_ct = oid_der(oid::DATA);
+    let (alg, mut ct, mut mac) = match cipher {
+        Cipher::AesCbc(bits) => {
+            let o = match bits {
+                128 => oid::AES128_CBC,
+                192 => oid::AES192_CBC,
+                _ => oid::AES256_CBC,
+            };
+            let ct = match bits {
+                128 => cbc::Encryptor::<aes::Aes128>::new_from_slices(cek, &iv).unwrap().encrypt_padded_vec_mut::<Pkcs7>(content),
+                192 => cbc::Encryptor::<aes::Aes192>::new_from_slices(cek, &iv).unwrap().encrypt_padded_vec_mut::<Pkcs7>(content),
+                _ => cbc::Encryptor::<aes::Aes256>::new_from_slices(cek, &iv).unwrap().encrypt_padded_vec_mut::<Pkcs7>(content),
+            };
+            (alg_der(o, Some(tlv(0x04, &iv))), ct, None)
+        }
+        Cipher::Des3 => {
+            let ct = cbc::Encryptor::<des::TdesEde3>::new_from_slices(cek, &iv[..8]).unwrap().encrypt_padded_vec_mut::<Pkcs7>(content);
+            (alg_der(oid::DES_EDE3_CBC, Some(tlv(0x04, &iv[..8]))), ct, None)
+        }
+        // ГОСТ 28147-89: шифровать нечем (только СКЗИ) — содержимое как есть, параметры настоящие.
+        Cipher::Gost28147 => (alg_der(oid::GOST28147, Some(seq(&[tlv(0x04, &iv[..8]), oid_der(oid::GOST28147_PARAM_A)]))), content.to_vec(), None),
+        Cipher::AesGcm(bits) => {
+            use aes_gcm::aead::AeadInPlace;
+            use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, Nonce};
+            let nonce = &iv[..12];
+            let mut buf = content.to_vec();
+            let tag = match bits {
+                128 => Aes128Gcm::new_from_slice(cek).unwrap().encrypt_in_place_detached(Nonce::from_slice(nonce), &[], &mut buf).unwrap().to_vec(),
+                _ => Aes256Gcm::new_from_slice(cek).unwrap().encrypt_in_place_detached(Nonce::from_slice(nonce), &[], &mut buf).unwrap().to_vec(),
+            };
+            let o = if bits == 128 { oid::AES128_GCM } else { oid::AES256_GCM };
+            // GCMParameters: nonce и длина тега 16.
+            (alg_der(o, Some(seq(&[tlv(0x04, nonce), tlv(0x02, &[16])]))), buf, Some(tag))
+        }
+    };
+    if tamper {
+        match mac.as_mut() {
+            Some(t) => t[0] ^= 1,
+            None => {
+                if let Some(b) = ct.last_mut() {
+                    *b ^= 1;
+                }
+            }
+        }
+    }
+    let eci = seq(&[data_ct, alg, tlv(0x80, &ct)]);
+    let any_v2 = to.iter().any(|t| t.ski || matches!(t.alg, KeyAlg::Ecdh(..)));
+    let (ct_oid, body) = match mac {
+        Some(tag) => (oid::AUTH_ENVELOPED_DATA, seq(&[tlv(0x02, &[0]), tlv(0x31, &infos), eci, tlv(0x04, &tag)])),
+        None => (oid::ENVELOPED_DATA, seq(&[tlv(0x02, &[if any_v2 { 2 } else { 0 }]), tlv(0x31, &infos), eci])),
+    };
+    seq(&[oid_der(ct_oid), tlv(0xA0, &body)])
+}
+
+/// Письмо `application/pkcs7-mime; smime-type=enveloped-data` (или `authEnveloped-data`) с CMS `cms`.
+pub fn encrypted_letter(h: &Head<'_>, cms: &[u8], authenticated: bool) -> Vec<u8> {
+    let kind = if authenticated { "authEnveloped-data" } else { "enveloped-data" };
+    let mut out = head(h).into_bytes();
+    out.extend(
+        format!(
+            "Content-Type: application/pkcs7-mime; smime-type={kind}; name=\"smime.p7m\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"smime.p7m\"\r\n\r\n{}\r\n",
+            base64(cms)
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// Внутреннее письмо с HTML и вложением (для шифрования): `multipart/mixed`.
+pub fn mixed_part(html: &str, attachment: (&str, &str, &[u8])) -> Vec<u8> {
+    let (name, mime, data) = attachment;
+    let b = "----=_Mixed_Postman_Test";
+    let mut out = format!("Content-Type: multipart/mixed; boundary=\"{b}\"\r\n\r\n--{b}\r\n").into_bytes();
+    out.extend(html_part(html));
+    out.extend(
+        format!(
+            "\r\n--{b}\r\nContent-Type: {mime}; name=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\n{}\r\n--{b}--\r\n",
+            base64(data)
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// Внутреннее письмо, подписанное `signer` (`multipart/signed` без заголовков письма) — подписать, затем
+/// зашифровать (RFC 8551 §3.7).
+pub fn signed_part(inner: &[u8], signer: &Issued, key: &Key, chain: &[&Issued], opts: &Sign) -> Vec<u8> {
+    let scheme = opts.scheme.unwrap_or_else(|| key.default_scheme());
+    let p7s = signed_data(inner, signer, key, chain, opts);
+    let full = multipart_signed(&Head { from: "x@x", to: "x@x", subject: "x", date: "Wed, 21 Oct 2026 10:00:00 +0300" }, inner, &p7s, micalg(scheme.hash()));
+    // Без заголовков письма: от `Content-Type` до конца.
+    let at = full.windows(13).position(|w| w == b"Content-Type:").unwrap();
+    full[at..].to_vec()
+}

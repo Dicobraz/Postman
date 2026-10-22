@@ -1,0 +1,23 @@
+From: Сидоров Игорь <i.sidorov@corp.example>
+To: Смирнова Анна <me@corp.example>
+Subject: =?utf-8?B?0JrQvtC90YTQuNC00LXQvdGG0LjQsNC70YzQvdC+OiDRiNGC0LDRgtC90L7QtSDRgNCw0YHQv9C40YHQsNC90LjQtQ==?=
+Date: Wed, 21 Oct 2026 09:30:00 +0300
+Message-ID: <f50df8814e55337c@postman.test>
+MIME-Version: 1.0
+Content-Type: application/pkcs7-mime; smime-type=authEnveloped-data; name="smime.p7m"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7m"
+
+MIIC0AYLKoZIhvcNAQkQARegggK/MIICuwIBADGCAawwggGoAgEAMGUwXzEoMCYGA1UECgwf0JrQ
+vtGA0L/QvtGA0LDRhtC40Y8gKNC00LXQvNC+KTEzMDEGA1UEAwwq0JrQvtGA0L/QvtGA0LDRgtC4
+0LLQvdGL0Lkg0KPQpiAo0LTQtdC80L4pAgJ3AjA4BgkqhkiG9w0BAQcwK6ANMAsGCWCGSAFlAwQC
+AaEaMBgGCSqGSIb3DQEBCDALBglghkgBZQMEAgEEggEAhtlxCmggdcPuhreSALqe9meINylahQ9k
+w1kXwLN8t7Jo1iV3xZfRmEBTqBPr9shH/6phFIDlROK8awlD952O5vUVRyCYTpyJZoooGenvMBES
+2f8lsrIWDMpA0GgbRHZP3p3mgHl+i6O23eVGQbKGtGlf0Tfzir+aYgDs4zzQzwyWUu6Yl9iaz/OX
+/lrCfn5phuEK+goOZP0851T3oanOtzrHcd70vBlWT4E9TszePed5n/x7gdqLbymTuIqe11v2sgw5
+D/TXLSILKYN6xmnUSTdneY81oa9iugqs7xy/V7rHmyhz1nofZGljSWt/V2sG9Ke+rdvAWZX+OVP6
+U/N9LjCB8wYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAwXWy45OXBdIFPlnBoCARCAgcXW4cE4
+wvmr6jnDRzfqRzSg7Le5uXnCLQu+3V8pfNe7Syh77oD56ZUJSJkEb0zPHVafgPqOXX5EtTTwqvtm
+8Gd9g5H4y68WU/eYTllXl+Y+bfY/+Wof1KLbvWPFmhd4JT9ahLXFdxh9QFT8oF+jVCUYoNooLZ2n
+kOHu+wKfU4tMGipOBD5bber5ezZzoTKZ2uC4qCipe/BlwCY3f1IggXZQe3UC6QEm1EPRPbg+IDXO
+7HjtY4ouYDqnPSMd09FMlKfDMFO2LgQQ7KYrxa2nmtOcyAZUTB5Qlg==

@@ -15,6 +15,8 @@ pub struct Sample {
     pub html: &'static str,
     /// Что подписано (у `bad` — исходный текст).
     pub signed_html: &'static str,
+    /// Зашифровано S/MIME (Ф2): сервер текста не видит, в списке — замок, тело — после расшифровки демо-ключом.
+    pub encrypted: bool,
 }
 
 const RSA_HTML: &str = "<p>Коллеги, добрый день!</p><p>Направляю подписанную версию договора поставки. Письмо подписано \
@@ -34,6 +36,7 @@ pub const SAMPLES: &[Sample] = &[
         subject: "Договор поставки: подписанная версия",
         html: RSA_HTML,
         signed_html: RSA_HTML,
+        encrypted: false,
     },
     Sample {
         kind: "gost",
@@ -42,6 +45,7 @@ pub const SAMPLES: &[Sample] = &[
         subject: "Акт сверки за III квартал",
         html: GOST_HTML,
         signed_html: GOST_HTML,
+        encrypted: false,
     },
     Sample {
         kind: "bad",
@@ -50,6 +54,7 @@ pub const SAMPLES: &[Sample] = &[
         subject: "Счёт на оплату №2041",
         html: BAD_SHOWN,
         signed_html: BAD_SIGNED,
+        encrypted: false,
     },
     Sample {
         kind: "untrusted",
@@ -58,8 +63,42 @@ pub const SAMPLES: &[Sample] = &[
         subject: "Коммерческое предложение",
         html: UNTRUSTED_HTML,
         signed_html: UNTRUSTED_HTML,
+        encrypted: false,
+    },
+    // Шифрованные (S5-12 Ф2): мне и подписано, не мне, повреждено.
+    Sample {
+        kind: "enc",
+        from_name: "Петров Иван",
+        from_addr: "i.petrov@corp.example",
+        subject: "Конфиденциально: условия сделки",
+        html: ENC_HTML,
+        signed_html: ENC_HTML,
+        encrypted: true,
+    },
+    Sample {
+        kind: "enc-other",
+        from_name: "Служба ИБ",
+        from_addr: "security@corp.example",
+        subject: "Пароли к тестовому стенду",
+        html: ENC_OTHER_HTML,
+        signed_html: ENC_OTHER_HTML,
+        encrypted: true,
+    },
+    Sample {
+        kind: "enc-bad",
+        from_name: "Сидоров Игорь",
+        from_addr: "i.sidorov@corp.example",
+        subject: "Конфиденциально: штатное расписание",
+        html: ENC_BAD_HTML,
+        signed_html: ENC_BAD_HTML,
+        encrypted: true,
     },
 ];
+
+const ENC_HTML: &str = "<p>Анна, добрый день!</p><p>Условия сделки: скидка 12%, оплата в три этапа. Письмо зашифровано — \
+не пересылайте его открытым.</p><p>Иван Петров</p>";
+const ENC_OTHER_HTML: &str = "<p>Пароли к стенду — во вложении.</p>";
+const ENC_BAD_HTML: &str = "<p>Штатное расписание на 2027 год — во вложении.</p>";
 
 /// Демо-письмо `n` — подписанный образец (одно на сотню для каждого вида, в начале ящика).
 pub fn sample_for(n: usize) -> Option<&'static Sample> {
@@ -68,6 +107,9 @@ pub fn sample_for(n: usize) -> Option<&'static Sample> {
         3 | 13 => SAMPLES.get(1),
         5 | 15 => SAMPLES.get(2),
         7 | 17 => SAMPLES.get(3),
+        9 | 19 => SAMPLES.get(4),
+        21 => SAMPLES.get(5),
+        23 => SAMPLES.get(6),
         _ => None,
     }
 }
@@ -99,12 +141,26 @@ pub fn raw(kind: &str) -> Option<&'static [u8]> {
         "gost" => include_bytes!("smime/gost.eml"),
         "bad" => include_bytes!("smime/bad.eml"),
         "untrusted" => include_bytes!("smime/untrusted.eml"),
+        "enc" => include_bytes!("smime/enc.eml"),
+        "enc-other" => include_bytes!("smime/enc-other.eml"),
+        "enc-bad" => include_bytes!("smime/enc-bad.eml"),
         _ => return None,
     })
 }
 
 /// Подпись образца (`smime.p7s` — вложение в ленте; её байты демо не нужны интерфейсу, только размер).
 pub const P7S_SIZE: u64 = 2_300;
+
+/// Демо-ключ владельца ящика (Смирнова Анна, `me@corp.example`): сертификат (DER) и тестовый ключ RSA PKCS#1 —
+/// для расшифровки демо-писем без хранилища Windows. Ключ — тестовый, из `postman_smime::testkit`.
+pub fn my_key() -> (&'static [u8], &'static [u8]) {
+    (include_bytes!("smime/me-cert.der"), include_bytes!("smime/me-key.der"))
+}
+
+/// Размер `smime.p7m` шифрованного образца (вложение в ленте до расшифровки).
+pub fn p7m_size(kind: &str) -> u64 {
+    raw(kind).map_or(0, |r| r.len() as u64 * 3 / 4)
+}
 
 /// Корни демо-УЦ (DER) и метка «корпоративный»: корпоративный RSA и ГОСТ-УЦ контрагента; у `untrusted` корня нет.
 pub fn anchors() -> Vec<(Vec<u8>, bool)> {
