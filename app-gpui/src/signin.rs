@@ -12,7 +12,7 @@ use gpui_kit::*;
 use pets_i18n::tr;
 use pets_ui::theme::{Metric, Themes};
 use postman_core::sync::Account;
-use postman_jmap::Auth;
+use postman_core::model::Auth;
 
 use crate::account::Settings;
 use crate::settings_tab::{seg, seg_group};
@@ -212,7 +212,7 @@ fn check_url(raw: &str) -> Result<String, String> {
 
 /// Строка «Безопасность подключения»: TLS и проверка сертификата (`POSTMAN_INSECURE_TLS` — стенд — предупреждение).
 pub(crate) fn security_line() -> (String, bool) {
-    if postman_jmap::insecure_tls() { (tr!("signin-tls-insecure"), false) } else { (tr!("signin-tls"), true) }
+    if postman_core::backend::insecure_tls() { (tr!("signin-tls-insecure"), false) } else { (tr!("signin-tls"), true) }
 }
 
 impl SignIn {

@@ -71,7 +71,7 @@ async fn submit(c: &Client, subject: &str, release: Release) -> Submitted {
     let now = jiff::Timestamp::now().as_second();
     let raw = postman_compose::build(&d, now, &postman_compose::new_message_id(&d.from, now)).unwrap();
     let envelope = Envelope { mail_from: me, rcpt_to: vec![env("POSTMAN_STAND_USER3")] };
-    c.submit(raw, &identity.id, &envelope, &role(c, "drafts").await, &role(c, "sent").await, release, &[]).await.unwrap()
+    c.submit(raw, &identity.id, &envelope, &role(c, "drafts").await, &role(c, "sent").await, release.into(), &[]).await.unwrap()
 }
 
 /// Письмо с темой во «Входящих» user3 (id сервера).
@@ -179,7 +179,7 @@ async fn send_later_through_sync() {
     }
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth(1) }, cache, None, tx, || {});
+    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth(1).into() }, cache, None, tx, || {});
     wait_for(&rx, "синхронизация", |e| matches!(e, Event::Status(Status::Synced)).then_some(()));
     let max = wait_for(&rx, "отложенные", |e| match e {
         Event::Scheduled { max_delay, .. } => Some(*max_delay),

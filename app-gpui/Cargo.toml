@@ -28,7 +28,6 @@ postman-calendar.workspace = true
 gpui-kit = "0.7"
 jiff = "0.2"
 postman-core.workspace = true
-postman-jmap.workspace = true
 postman-search.workspace = true
 serde.workspace = true
 serde_json.workspace = true

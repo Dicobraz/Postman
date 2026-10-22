@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use postman_core::link::Connection;
 use postman_core::sync::{self, Account, Command, ErrorKind, Event};
-use postman_jmap::Auth;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -29,7 +28,7 @@ fn next_connection(rx: &Receiver<Event>) -> (Connection, Vec<ErrorKind>) {
 
 #[test]
 fn unreachable_server_goes_offline_queues_and_retries_on_demand() {
-    let account = Account { url: "http://127.0.0.1:9".into(), auth: Auth::Basic { user: "u".into(), password: "p".into() } };
+    let account = Account { url: "http://127.0.0.1:9".into(), auth: postman_core::model::Auth::Basic { user: "u".into(), password: "p".into() } };
     let (tx, rx) = std::sync::mpsc::channel();
     let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
 

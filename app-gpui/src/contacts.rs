@@ -24,7 +24,7 @@ use postman_calendar::{Busy, BusyKind, Span};
 use postman_compose::{Address, Draft, parse_addresses};
 use postman_core::contacts::AddressBook;
 use postman_core::sync::{Command, Event as SyncEvent};
-use postman_jmap::{ContactCard, Principal};
+use postman_core::model::{ContactCard, Principal};
 
 use crate::buttons::plain as button;
 use crate::calendar::{add_days, avatar, chip_outline, day_start, g, hm};
@@ -1849,19 +1849,15 @@ mod tests {
         };
         let mut text = FormText::of(&old);
         assert_eq!(text.card("c1"), Ok(old.clone()), "форма без правок — та же карточка");
-        assert!(text.card("c1").unwrap().patch(&old).is_empty());
 
         text.emails = "a.petrov@x.ru, Алексей <a@home.ru>;".into();
         text.phones = " ".into();
         text.title = " Директор ".into();
         let card = text.card("c1").unwrap();
         assert_eq!(card.emails, ["a.petrov@x.ru", "a@home.ru"]);
-        let patch = card.patch(&old);
-        let mut keys: Vec<&str> = patch.keys().map(String::as_str).collect();
-        keys.sort();
-        assert_eq!(keys, ["emails", "phones", "titles"]);
-        assert!(patch["phones"].is_null(), "убранный телефон — null");
-        assert_eq!(patch["titles"]["t1"]["name"], "Директор");
+        assert!(card.phones.is_empty(), "пустой телефон убран");
+        assert_eq!(card.title, "Директор");
+        assert_eq!((card.name.as_str(), card.organization.as_str()), (old.name.as_str(), old.organization.as_str()));
 
         text.emails = "a.petrov@x.ru; petr@".into();
         assert_eq!(text.card("c1"), Err(FormError::BadEmail("petr@".into())));

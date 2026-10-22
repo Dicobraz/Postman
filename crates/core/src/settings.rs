@@ -11,8 +11,9 @@
 //! Автоответ Postman (S5-29): тексты для своих и внешних, «только контактам», «не отвечать повторно» — свой скрипт
 //! `vacation` поверх того, что пишет `VacationResponse/set` (`autoreply.rs`), и событие «Вне офиса» в календаре.
 
+use crate::model::VacationResponse;
 use postman_jmap::{
-    Activate, CALENDARS, Client, QUOTA, Quota, SIEVE, SaveError, SieveScript, VACATION_RESPONSE, VacationResponse,
+    Activate, CALENDARS, Client, QUOTA, Quota, SIEVE, SaveError, SieveScript, VACATION_RESPONSE,
 };
 
 use crate::autoreply::{self, Audience, AutoReply, Stored};
@@ -232,7 +233,7 @@ async fn vacation(client: &Client, sieve: &Sieve) -> Reply {
     if !client.has(VACATION_RESPONSE) {
         return Reply::Unsupported(Area::Vacation);
     }
-    match client.vacation().await {
+    match get_vacation(client).await {
         Ok(v) => Reply::Vacation(with_stored(effective(v, sieve.vacation_in_rules()), sieve.stored().as_ref())),
         Err(e) => Reply::Failed { area: Area::Vacation, error: e.to_string() },
     }
@@ -273,17 +274,17 @@ async fn set_vacation(client: &Client, v: VacationResponse) -> postman_jmap::Res
     match &sieve.ours {
         Some((ours, script)) if ours.is_active && script.has_enabled() => {
             let on = v.is_enabled;
-            client.set_vacation(&VacationResponse { is_enabled: false, ..v }).await?;
+            put_vacation(client, &VacationResponse { is_enabled: false, ..v }).await?;
             let script = Script { rules: script.rules.clone(), vacation: on };
             client
                 .save_sieve(Some(&ours.id), SCRIPT_NAME, &rules::generate(&script), Activate::This)
                 .await
                 .map_err(save_error)?;
         }
-        _ => client.set_vacation(&v).await?,
+        _ => put_vacation(client, &v).await?,
     }
     let sieve = read_sieve(client).await?;
-    let v = effective(client.vacation().await?, sieve.vacation_in_rules());
+    let v = effective(get_vacation(client).await?, sieve.vacation_in_rules());
     Ok((v, sieve))
 }
 
@@ -318,7 +319,7 @@ async fn set_autoreply(
     let id = sieve.vacation.as_ref().map(|(s, _)| s.id.clone());
     client.save_sieve(id.as_deref(), VACATION_SCRIPT, &script, Activate::Keep).await.map_err(save_error)?;
     let sieve = read_sieve(client).await?;
-    let v = with_stored(effective(client.vacation().await?, sieve.vacation_in_rules()), sieve.stored().as_ref());
+    let v = with_stored(effective(get_vacation(client).await?, sieve.vacation_in_rules()), sieve.stored().as_ref());
     let reply = sieve.stored().map(|s| s.reply);
     Ok((v, sieve, reply))
 }
@@ -441,9 +442,18 @@ fn conflict(sieve: &Sieve) -> Option<Reply> {
     sieve.foreign.iter().find(|f| f.active).map(|f| Reply::RulesConflict { name: f.name.clone(), overwrite: false })
 }
 
+/// Автоответ сервера в нейтральной модели (путь JMAP).
+async fn get_vacation(client: &Client) -> postman_jmap::Result<VacationResponse> {
+    client.vacation().await.map(VacationResponse::from)
+}
+
+async fn put_vacation(client: &Client, v: &VacationResponse) -> postman_jmap::Result<()> {
+    client.set_vacation(&v.into()).await
+}
+
 async fn enable_vacation(client: &Client) -> postman_jmap::Result<()> {
-    let v = client.vacation().await?;
-    client.set_vacation(&VacationResponse { is_enabled: true, ..v }).await
+    let v = get_vacation(client).await?;
+    put_vacation(client, &VacationResponse { is_enabled: true, ..v }).await
 }
 
 async fn quota(client: &Client, notify: &impl Fn(Reply)) {

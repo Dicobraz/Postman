@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use postman_cache::{EmailRow, Recipients};
-use postman_jmap::Filter;
+use crate::model::Filter;
 
 /// Фишинг: ключевое слово IANA (RFC 8621 §4.1.1, реестр ключевых слов IMAP/JMAP).
 pub const PHISHING: &str = "$phishing";

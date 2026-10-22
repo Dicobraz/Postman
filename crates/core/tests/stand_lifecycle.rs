@@ -275,7 +275,7 @@ async fn patch_and_newsletters_through_sync() {
     let cache = postman_cache::Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let auth = Auth::Basic { user: env("POSTMAN_STAND_USER1"), password: env("POSTMAN_STAND_PASSWORD1") };
-    let commands = sync::spawn(sync::Account { url: env("POSTMAN_STAND_URL"), auth }, cache.clone(), None, tx, || {});
+    let commands = sync::spawn(sync::Account { url: env("POSTMAN_STAND_URL"), auth: auth.into() }, cache.clone(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| matches!(e, sync::Event::Status(sync::Status::Synced)).then_some(()));
     let row = cache.rows_by_ids(std::slice::from_ref(&letter)).unwrap().pop().expect("письмо в кэше");
     let when = When::at("2026-12-01".parse().unwrap(), Time::new(9, 0, 0, 0).unwrap());

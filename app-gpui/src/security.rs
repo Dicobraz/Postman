@@ -70,7 +70,7 @@ pub(crate) fn effective(p: &Prefs) -> Effective {
 
 /// Минимальная версия TLS — в клиент JMAP (новые подключения).
 pub(crate) fn apply(p: &Prefs) {
-    postman_jmap::set_tls13_only(effective(p).tls13);
+    postman_core::backend::set_tls13_only(effective(p).tls13);
 }
 
 #[cfg(test)]

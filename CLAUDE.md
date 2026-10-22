@@ -47,7 +47,9 @@ Windows. Приложение семейства «Pets»: общий архит
 | L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe` | только здесь gpui, winit, rfd (диалоги) |
 | — | `demo` — синтетический ящик для демо и тестов | без UI; от него зависит только L3 |
 
-Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу.
+Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу. Интерфейс не знает протоколов серверов
+(ADR 0003): типы — из `postman_core::model`, настройки соединения — `postman_core::backend`; протокольный крейт — в
+`PROTOCOL_CRATES` того же теста.
 
 - `worker` — отдельный процесс-песочница для разбора чужих данных (HTML, картинки, .ics, просмотр вложений: PDF, ZIP, макросы Office, подпись S/MIME — `postman-smime`).
   Windows: AppContainer + Job Object + mitigation policies, запуск без консоли (`DETACHED_PROCESS`).

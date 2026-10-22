@@ -287,7 +287,7 @@ fn translit(s: &str) -> String {
 
 /// Справочник для людей: сотрудники, переговорные и ресурсы с адресом (без групп), по имени для людей
 /// (`description`, а без него — `name`: у Stalwart `name` — логин).
-pub fn directory(mut people: Vec<postman_jmap::Principal>) -> Vec<postman_jmap::Principal> {
+pub fn directory(mut people: Vec<crate::model::Principal>) -> Vec<crate::model::Principal> {
     people.retain(|p| p.kind != "group" && p.email.as_deref().is_some_and(|e| e.contains('@')));
     people.sort_by_cached_key(|p| (p.display_name().to_lowercase(), p.email.clone()));
     people
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn directory_has_people_with_addresses() {
-        let p = |name: &str, email: Option<&str>, kind: &str| postman_jmap::Principal {
+        let p = |name: &str, email: Option<&str>, kind: &str| crate::model::Principal {
             id: name.into(),
             name: name.into(),
             description: None,
@@ -386,7 +386,7 @@ mod tests {
             kind: kind.into(),
         };
         // Как у Stalwart: `name` — логин, ФИО — в `description`; порядок — по ФИО.
-        let login = postman_jmap::Principal {
+        let login = crate::model::Principal {
             id: "z".into(),
             name: "z.boris@corp.example".into(),
             description: Some("Борисов Иван".into()),

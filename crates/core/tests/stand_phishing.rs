@@ -107,7 +107,7 @@ async fn row_of(c: &Client, id: &str) -> EmailRow {
 fn sync_user1() -> (sync::UnboundedSender<Command>, std::sync::mpsc::Receiver<Event>) {
     let account = Account {
         url: env("POSTMAN_STAND_URL"),
-        auth: Auth::Basic { user: env("POSTMAN_STAND_USER1"), password: env("POSTMAN_STAND_PASSWORD1") },
+        auth: postman_core::model::Auth::Basic { user: env("POSTMAN_STAND_USER1"), password: env("POSTMAN_STAND_PASSWORD1") },
     };
     let (tx, rx) = std::sync::mpsc::channel();
     let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});

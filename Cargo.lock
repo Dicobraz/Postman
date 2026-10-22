@@ -5946,7 +5946,6 @@ dependencies = [
  "postman-core",
  "postman-demo",
  "postman-ir",
- "postman-jmap",
  "postman-search",
  "postman-smime",
  "postman-worker",
