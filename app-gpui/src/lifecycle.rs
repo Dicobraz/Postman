@@ -293,7 +293,7 @@ fn menu_item(id: ElementId, l: &Look) -> Stateful<Div> {
 
 impl Mailer {
     /// Письмо для действия: открытое в области чтения, иначе выбранное в списке.
-    fn lifecycle_target(&self, cx: &App) -> Option<EmailRow> {
+    pub(crate) fn lifecycle_target(&self, cx: &App) -> Option<EmailRow> {
         self.reading.read(cx).reading.as_ref().map(|r| r.row.clone()).or_else(|| self.list.read(cx).selected_row())
     }
 

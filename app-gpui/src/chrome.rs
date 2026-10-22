@@ -27,6 +27,8 @@ pub(crate) mod glyph {
     pub(crate) const MAIL: char = '\u{E715}';
     pub(crate) const CALENDAR: char = '\u{E787}';
     pub(crate) const CONTACTS: char = '\u{E77B}';
+    /// «Общий ящик» у ветки папок (S5-28): Segoe Fluent Icons People.
+    pub(crate) const PEOPLE: char = '\u{E716}';
     pub(crate) const SETTINGS: char = '\u{E713}';
     /// Сертификат: подробности подписи S/MIME (S5-12).
     pub(crate) const CERTIFICATE: char = '\u{EB95}';

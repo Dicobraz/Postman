@@ -71,6 +71,7 @@ mod notices;
 mod palette;
 mod search;
 mod smime;
+mod shared;
 mod smime_enc;
 mod tasks;
 

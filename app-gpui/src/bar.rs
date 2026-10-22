@@ -57,11 +57,13 @@ pub(crate) struct CommandBar {
     pub(crate) more_open: bool,
     /// Поле поиска в фокусе.
     pub(crate) focused: bool,
+    /// Открыта папка общего ящика (S5-28): кнопка «Взять в работу» и что она сделает с письмом.
+    pub(crate) take: Option<crate::shared::Act>,
 }
 
 impl CommandBar {
     pub(crate) fn new(search: Entity<InputState>) -> Self {
-        Self { search, scope: Scope::default(), more_open: false, focused: false }
+        Self { search, scope: Scope::default(), more_open: false, focused: false, take: None }
     }
 
     fn scope_switch(&self, l: &Look, cx: &mut Context<Self>) -> impl IntoElement {
@@ -121,6 +123,18 @@ impl Render for CommandBar {
             .on_click(|_, window, cx| window.dispatch_action(Box::new(mail::New), cx));
         // Подсказка «Название (клавиша)» и плашка KeyTips (S5-18); клавиш в подписях нет.
         let new = keytips::command(new, "mail.new", Some(tr!("frame-new")), &l, cx);
+        // Общий ящик (S5-28, макет `SharedMailboxes`): тонированная «Взять в работу» после «Новое письмо»; у моего
+        // письма — «Вернуть в очередь».
+        let take = self.take.map(|t| {
+            let hint = tr!(if t == crate::shared::Act::Release { "shared-release-hint" } else { "shared-take-hint" });
+            let b = crate::buttons::secondary("bar-take", &l)
+                .mr(px(8.))
+                .child(chrome::icon(glyph::CONTACTS, 16.))
+                // Как в макете: у письма коллеги — тоже «Взять в работу» (в шапке письма — «Забрать себе»).
+                .child(if t == crate::shared::Act::Release { t.label() } else { crate::shared::Act::Take.label() })
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(mail::Take), cx));
+            keytips::command(b, "mail.take", Some(hint), &l, cx)
+        });
         let buttons = BUTTONS.map(|(g, key, cmd, action)| {
             let b = chrome::quiet_button(key, &l)
                 .child(chrome::icon(g, 16.))
@@ -147,6 +161,7 @@ impl Render for CommandBar {
             .px(px(12.))
             .text_color(l.text())
             .child(new)
+            .children(take)
             .children(buttons)
             .child(div().flex_1())
             .child(keytips::badge(
