@@ -27,6 +27,9 @@ pub struct Meeting {
     pub attendees: Vec<(String, String)>,
     /// Необязательные участники (и переговорные, ресурсы): (имя, адрес).
     pub optional: Vec<(String, String)>,
+    /// Организатор — адрес «От» вкладки встречи (S7-03б): по нему встреча уходит в свою учётную запись профиля, а
+    /// организатором становится этот Identity; `None` — первый Identity основной учётной записи.
+    pub from: Option<String>,
 }
 
 impl Meeting {
@@ -200,7 +203,8 @@ async fn principal(client: &Client, email: &str) -> Result<Option<String>> {
 
 /// Создать встречу и разослать приглашения (сервер); организатор — первая Identity. Возвращает id события.
 pub async fn create(client: &Client, identities: &[Identity], meeting: &Meeting) -> Result<String> {
-    let me = identities.first().ok_or_else(|| Error::Protocol("на сервере нет Identity для организатора".into()))?;
+    let chosen = meeting.from.as_deref().and_then(|f| identities.iter().find(|i| i.email.eq_ignore_ascii_case(f)));
+    let me = chosen.or_else(|| identities.first()).ok_or_else(|| Error::Protocol("на сервере нет Identity для организатора".into()))?;
     let calendars = client.calendars().await?;
     let cal = default_calendar(&calendars).ok_or_else(|| Error::Protocol("у учётной записи нет календаря".into()))?;
     let send = !meeting.attendees.is_empty() || !meeting.optional.is_empty();
@@ -297,6 +301,7 @@ mod tests {
             duration_secs: 1800,
             attendees: vec![("User 3".into(), "user3@itt.test".into())],
             optional: vec![("Переговорная 1".into(), "room1@itt.test".into())],
+            from: None,
         };
         let v = m.to_jmap("cal1", ("User 1", "user1@itt.test"));
         assert_eq!(v["calendarIds"]["cal1"], true);

@@ -597,6 +597,7 @@ async fn calendar_through_sync() {
         duration_secs: 3600,
         attendees: Vec::new(),
         optional: Vec::new(),
+        from: None,
     };
     let identities3 = c.client.identities().await.unwrap();
     let busy_id = schedule::create(&c.client, &identities3, &busy).await.unwrap();
@@ -632,6 +633,7 @@ async fn calendar_through_sync() {
         duration_secs: 1800,
         attendees: vec![("User 3".into(), c.email.clone())],
         optional: Vec::new(),
+        from: None,
     };
     assert!(commands.send(Command::CreateMeeting { meeting: Box::new(meeting), ticket: 1 }).is_ok());
     match wait("MeetingCreated", &|e| matches!(e, SyncEvent::MeetingCreated { .. } | SyncEvent::MeetingFailed { .. })) {
@@ -651,7 +653,7 @@ async fn calendar_through_sync() {
     assert_eq!((mine.span.start, mine.span.len()), (zoned(meeting_start), 1800));
     assert!(mine.participants.iter().any(|p| p.email.eq_ignore_ascii_case(&c.email)));
 
-    assert!(commands.send(Command::Availability { ticket: 2, emails: vec![c.email.clone()], from, to }).is_ok());
+    assert!(commands.send(Command::Availability { ticket: 2, emails: vec![c.email.clone()], from, to, sender: None }).is_ok());
     let SyncEvent::Availability { me, people, error, .. } = wait("Availability", &|e| matches!(e, SyncEvent::Availability { .. }))
     else {
         unreachable!()
@@ -777,6 +779,7 @@ async fn calendar_change_arrives_by_push() {
         duration_secs: 1800,
         attendees: Vec::new(),
         optional: Vec::new(),
+        from: None,
     };
     let identities = u.client.identities().await.unwrap();
     let id = schedule::create(&u.client, &identities, &meeting).await.unwrap();
@@ -814,6 +817,7 @@ async fn stand_calendar_search() {
         duration_secs: 1800,
         attendees: Vec::new(),
         optional: Vec::new(),
+        from: None,
     };
     let identities = a.client.identities().await.unwrap();
     let id = schedule::create(&a.client, &identities, &meeting).await.unwrap();

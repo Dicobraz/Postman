@@ -13,3 +13,5 @@ sync-error-internal = Синхронизация не запустилась
 sync-reauth = Сервер отклонил сохранённый пароль: войдите заново.
 status-items-of = Элементов: { $n } из { $total }
 fatal-bench-account = замер живого ящика: нужны POSTMAN_URL и POSTMAN_USER/POSTMAN_PASSWORD (или POSTMAN_TOKEN)
+# Ошибка дополнительной учётной записи профиля (S7-03б): её логин и текст ошибки.
+sync-account-error = { $account }: { $error }

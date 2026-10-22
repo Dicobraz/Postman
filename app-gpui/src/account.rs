@@ -119,6 +119,81 @@ pub(crate) fn forget(dir: &Path) {
     Settings::remove(dir);
 }
 
+/// Дополнительные учётные записи профиля (S7-03б): несекретная часть, как у основной; пароли — в диспетчере учётных
+/// данных под теми же именами (`Postman:<адрес>:<логин>`).
+const EXTRA_FILE: &str = "accounts.json";
+
+/// Дополнительная учётная запись: префикс её ключей в кэше (`@2`, `@3`…) и адрес с логином.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Extra {
+    pub(crate) profile: String,
+    #[serde(flatten)]
+    pub(crate) settings: Settings,
+}
+
+/// Дополнительные учётные записи по порядку добавления; файла нет или он испорчен — нет и их.
+pub(crate) fn load_extras(dir: &Path) -> Vec<Extra> {
+    std::fs::read_to_string(dir.join(EXTRA_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_extras(dir: &Path, list: &[Extra]) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(EXTRA_FILE), text).map_err(|e| format!("{EXTRA_FILE}: {e}"))
+}
+
+/// Префикс следующей учётной записи: `@2`, затем на единицу больше самого большого (удалённый номер не занимается
+/// снова — его строки в кэше могли остаться у другой копии профиля).
+fn next_profile(list: &[Extra]) -> String {
+    let max = list.iter().filter_map(|e| e.profile.strip_prefix(postman_cache::PROFILE)?.parse::<u32>().ok()).max().unwrap_or(1);
+    format!("{}{}", postman_cache::PROFILE, max + 1)
+}
+
+/// Учётная запись для синхронизации: пароль — из диспетчера. Нет пароля — `None` (её покажут «Настройки →
+/// Аккаунты», синхронизации нет).
+pub(crate) fn extra_account(e: &Extra) -> Option<Account> {
+    match sys::credentials::read(&e.settings.credential_target()) {
+        Ok(Some(password)) => Some(Account { url: e.settings.url.clone(), auth: Auth::Basic { user: e.settings.user.clone(), password } }),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!("credential manager: {err}");
+            None
+        }
+    }
+}
+
+/// Добавить учётную запись к профилю после успешного входа: адрес и логин — в файл, пароль — в диспетчер. Та же
+/// учётная запись ещё раз — прежняя запись (новым паролем).
+pub(crate) fn add_extra(dir: &Path, account: &Account, store: bool) -> Result<Extra, String> {
+    let settings = Settings::of(account);
+    if let Auth::Basic { password, .. } = &account.auth {
+        if store {
+            sys::credentials::write(&settings.credential_target(), &settings.user, password)?;
+        } else {
+            sys::credentials::delete(&settings.credential_target())?;
+        }
+    }
+    let mut list = load_extras(dir);
+    if let Some(e) = list.iter().find(|e| e.settings == settings) {
+        return Ok(e.clone());
+    }
+    let extra = Extra { profile: next_profile(&list), settings };
+    list.push(extra.clone());
+    save_extras(dir, &list)?;
+    Ok(extra)
+}
+
+/// Убрать дополнительную учётную запись: из файла и пароль из диспетчера (её строки в кэше убирает вызывающий).
+pub(crate) fn remove_extra(dir: &Path, profile: &str) -> Result<(), String> {
+    let mut list = load_extras(dir);
+    if let Some(e) = list.iter().find(|e| e.profile == profile)
+        && let Err(err) = sys::credentials::delete(&e.settings.credential_target())
+    {
+        tracing::warn!("credential manager: {err}");
+    }
+    list.retain(|e| e.profile != profile);
+    save_extras(dir, &list)
+}
+
 /// С чем открыть окно.
 pub(crate) enum Start {
     /// Демо-ящик: `--demo`, `--bench`, `--screens` без `--live`.
@@ -181,6 +256,21 @@ mod tests {
         assert_eq!(s.credential_target(), "Postman:http://localhost:18080:user1@itt.test");
         Settings::remove(dir.path());
         assert_eq!(Settings::load(dir.path()), None);
+    }
+
+    #[test]
+    fn extras_get_their_own_prefix() {
+        let s = |u: &str| Settings { url: "http://a".into(), user: u.into() };
+        assert_eq!(next_profile(&[]), "@2");
+        let list = vec![Extra { profile: "@2".into(), settings: s("a") }, Extra { profile: "@5".into(), settings: s("b") }];
+        assert_eq!(next_profile(&list), "@6");
+        let dir = tempfile::Builder::new().prefix("postman-").tempdir().unwrap();
+        save_extras(dir.path(), &list).unwrap();
+        assert_eq!(load_extras(dir.path()), list);
+        let text = std::fs::read_to_string(dir.path().join(EXTRA_FILE)).unwrap();
+        assert!(text.contains("\"profile\": \"@2\"") && text.contains("\"user\": \"a\""), "{text}");
+        std::fs::write(dir.path().join(EXTRA_FILE), "[ broken").unwrap();
+        assert!(load_extras(dir.path()).is_empty());
     }
 
     #[test]

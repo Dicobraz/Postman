@@ -180,6 +180,30 @@ pub(crate) fn period_label(view: View, anchor: Date, days: &[Date]) -> String {
 }
 
 /// События дня `date` (по началу): со временем и на весь день — индексы в `events`.
+/// Ответы учётных записей профиля за период (S7-03б; основная — первой) → события (встреча, которая есть в двух
+/// учётных записях, — один раз, из первой), календари (сначала другие мои учётные записи — у их ответа владелец первым,
+/// `sync::owned_by`, — затем коллеги) и сколько первых календарей — мои.
+pub(crate) fn merge_parts(parts: &[(Option<String>, Vec<Event>, Vec<Owner>)]) -> (Vec<Event>, Vec<Owner>, usize) {
+    let mut events: Vec<Event> = Vec::new();
+    for (_, list, _) in parts {
+        for e in list {
+            if !events.iter().any(|x| x.uid == e.uid && x.span.start == e.span.start) {
+                events.push(e.clone());
+            }
+        }
+    }
+    let mine: Vec<Owner> = parts.iter().filter(|(a, _, _)| a.is_some()).filter_map(|(_, _, o)| o.first().cloned()).collect();
+    let mut owners = mine.clone();
+    for (_, _, list) in parts {
+        for o in list {
+            if !owners.iter().any(|x| x.key() == o.key()) {
+                owners.push(o.clone());
+            }
+        }
+    }
+    (events, owners, mine.len())
+}
+
 pub(crate) fn day_events(events: &[Event], date: Date, tz: &TimeZone) -> (Vec<usize>, Vec<usize>) {
     let (from, to) = (day_start(date, tz), day_start(add_days(date, 1), tz));
     let today = |e: &Event| e.span.start >= from && e.span.start < to;
@@ -291,8 +315,14 @@ pub(crate) struct CalendarView {
     me: Option<String>,
     /// Таблица категорий: цвет событий по их меткам.
     categories: Categories,
-    /// Коллеги, открывшие мне календарь (S5-22).
+    /// Коллеги, открывшие мне календарь (S5-22); первые `mine` — другие мои учётные записи (S7-03б): их календари —
+    /// в «Мои календари», цветом и подписью владельца, как календари коллег.
     colleagues: Vec<Owner>,
+    mine: usize,
+    /// Ответы учётных записей профиля за показанный период (S7-03б): учётная запись, её события и календари коллег.
+    parts: Vec<(Option<String>, Vec<Event>, Vec<Owner>)>,
+    /// Период, который показывают `parts`.
+    parts_range: Option<(i64, i64)>,
     /// Цвета календарей: ключ владельца (`""` — мой) → цвет `palette::CALENDAR`.
     colors: std::collections::BTreeMap<String, String>,
     /// Календарь, у которого открыт выбор цвета (ключ владельца).
@@ -354,7 +384,10 @@ impl CalendarView {
         let mut events = demo::my_events();
         events.extend(demo::other_events());
         events.extend(demo::colleague_events());
+        events.extend(demo::second_events());
         events.sort_by_key(|e| e.span.start);
+        // Вторая учётная запись демо (S7-03б) — первой среди календарей: она в «Моих календарях».
+        let colleagues: Vec<Owner> = std::iter::once(demo::second_calendar()).chain(demo::shared_calendars()).collect();
         Self {
             hours: cal.work_hours(tz.clone()),
             view: cal.view,
@@ -373,8 +406,11 @@ impl CalendarView {
             want: None,
             me: Some(postman_demo::ME.to_string()),
             categories: crate::labels::default_table(),
-            colleagues: demo::shared_calendars(),
-            colors: Self::assigned(&demo::shared_calendars(), &cal.calendar_colors),
+            colors: Self::assigned(&colleagues, &cal.calendar_colors),
+            colleagues,
+            mine: 1,
+            parts: Vec::new(),
+            parts_range: None,
             color_menu: None,
             hidden: cal.hidden_calendars.clone(),
             owner_colors: cal.owner_colors,
@@ -437,6 +473,9 @@ impl CalendarView {
         self.live = true;
         self.events.clear();
         self.colleagues.clear();
+        self.mine = 0;
+        self.parts.clear();
+        self.parts_range = None;
         self.loaded = false;
         self.selected = None;
         self.me = None;
@@ -468,6 +507,12 @@ impl CalendarView {
 
     fn range(&self) -> (i64, i64) {
         model::range(&self.days(), &self.tz)
+    }
+
+    /// Учётная запись выбранного события, если это другая моя учётная запись (S7-03б): «От» новой встречи.
+    pub(crate) fn selected_account(&self) -> Option<String> {
+        let owner = self.selected.and_then(|i| self.events.get(i))?.owner.as_ref()?;
+        self.colleagues[..self.mine.min(self.colleagues.len())].iter().any(|o| o.key() == owner.key()).then(|| owner.email.clone())
     }
 
     /// Перечитать период с сервера (раздел открыт, период сменился, создана встреча).
@@ -545,14 +590,29 @@ impl CalendarView {
 
     pub(crate) fn on_sync(&mut self, ev: &SyncEvent, cx: &mut Context<Self>) {
         match ev {
-            SyncEvent::EventsLoaded { from, to, events, colleagues } if self.pending == Some((*from, *to)) => {
+            SyncEvent::EventsLoaded { from, to, events, colleagues, account }
+                if self.pending == Some((*from, *to)) || self.parts_range == Some((*from, *to)) =>
+            {
                 self.pending = None;
-                self.colleagues = colleagues.clone();
+                // Учётные записи профиля отвечают каждая за себя (S7-03б): период — сумма их ответов.
+                if self.parts_range != Some((*from, *to)) {
+                    self.parts.clear();
+                    self.parts_range = Some((*from, *to));
+                }
+                match self.parts.iter_mut().find(|(a, _, _)| a == account) {
+                    Some(part) => *part = (account.clone(), events.clone(), colleagues.clone()),
+                    None => self.parts.push((account.clone(), events.clone(), colleagues.clone())),
+                }
+                // Основная — первой.
+                self.parts.sort_by_key(|(a, _, _)| a.clone());
+                let (merged, owners, mine) = merge_parts(&self.parts);
+                self.colleagues = owners;
+                self.mine = mine;
                 self.remember_colors(cx);
                 // Тот же период перечитан (push): подробности открытого события остаются, если оно есть; переход из
                 // найденного — открыть искомое.
                 let open = self.want.take().or_else(|| self.selected.and_then(|i| self.events.get(i)).map(|e| (e.uid.clone(), e.span.start)));
-                self.events = events.clone();
+                self.events = merged;
                 self.loaded = true;
                 self.selected = open.and_then(|(uid, start)| {
                     self.events.iter().position(|e| e.uid == uid && e.span.start == start)
@@ -1056,7 +1116,7 @@ impl CalendarView {
             .text_color(l.on_accent())
             .child(icon(g::CHECK, 10.));
         let mine = self.calendar_row("cal-mine", String::new(), tr!("cal-my-calendar"), check, &l, cx);
-        let colleagues: Vec<AnyElement> = self
+        let mut colleagues: Vec<AnyElement> = self
             .colleagues
             .iter()
             .enumerate()
@@ -1081,6 +1141,8 @@ impl CalendarView {
                 self.calendar_row(("cal-colleague", n), key, o.name.clone(), check, &l, cx).into_any_element()
             })
             .collect();
+        // Календари других моих учётных записей (S7-03б) — под «Моим календарём».
+        let my_others: Vec<AnyElement> = colleagues.drain(..self.mine.min(colleagues.len())).collect();
         let cats = self.categories.visible().map(|c| {
             let color = l.cat(c.shown_color());
             div()
@@ -1162,6 +1224,7 @@ impl CalendarView {
             .child(div().h(px(1.)).mx(px(8.)).mt(px(10.)).mb(px(2.)).bg(l.border()))
             .child(title("cal-group-mine"))
             .child(mine)
+            .children(my_others)
             .when(!colleagues.is_empty(), |d| d.child(title("cal-group-colleagues")).children(colleagues))
             .child(title("cal-group-categories"))
             .children(cats)

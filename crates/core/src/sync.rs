@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use std::sync::Arc;
 
-use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, scoped, unscoped};
+use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, in_profile, scoped, unscoped};
 use postman_calendar::{Busy, Invitation, Partstat};
 use postman_compose::{Address, Draft};
 
@@ -109,8 +109,9 @@ pub enum Command {
     Events { from: i64, to: i64 },
     /// Поиск в календаре по тексту в `[from, to)` → `EventsFound` (S5-21).
     SearchEvents { text: String, from: i64, to: i64 },
-    /// Занятость адресов и моя в `[from, to)` → `Availability`.
-    Availability { ticket: u64, emails: Vec<String>, from: i64, to: i64 },
+    /// Занятость адресов и моя в `[from, to)` → `Availability`. `sender` — адрес «От» встречи (S7-03б): занятость
+    /// — путём его учётной записи профиля; `None` — основной.
+    Availability { ticket: u64, emails: Vec<String>, from: i64, to: i64, sender: Option<String> },
     /// Создать встречу и разослать приглашения → `MeetingCreated` или `MeetingFailed`.
     CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
     /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
@@ -174,6 +175,95 @@ impl Command {
                 text: text.clone(),
                 ticket: *ticket,
             },
+            _ => return None,
+        })
+    }
+}
+
+/// Куда идёт команда, когда учётных записей в профиле несколько (S7-03б, `docs/specs/S7.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// В синхронизацию учётной записи профиля: `None` — основной, `@<n>` — дополнительной.
+    Profile(Option<String>),
+    /// Во все: поиск и фильтры «Все папки», неделя календаря, отложенные отправки, «Повторить сейчас».
+    All,
+    /// Туда, чей адрес отправителя (`Send`, `SaveDraft`): учётную запись знает список «От» интерфейса.
+    Sender(String),
+}
+
+/// Учётная запись профиля ключа кэша.
+fn profile_of_key(key: &str) -> Option<String> {
+    postman_cache::profile_of(postman_cache::account_of(key)).map(str::to_owned)
+}
+
+impl Command {
+    /// Куда идёт команда и в каком виде: правки писем разных учётных записей — по команде на учётную запись.
+    pub fn routes(self) -> Vec<(Target, Command)> {
+        let one = |key: &str| Target::Profile(profile_of_key(key));
+        let scope = |mailbox: &Option<String>| mailbox.as_deref().map_or(Target::All, one);
+        let target = match &self {
+            Command::Body(k) | Command::Thread(k) | Command::Destroy(k) => one(k),
+            Command::Keyword { id, .. } | Command::Move { id, .. } => one(id),
+            Command::Blob { blob_id, .. } => one(blob_id),
+            Command::LoadMore { mailbox } => one(mailbox),
+            Command::Unsend { scheduled, .. } => one(&scheduled.submission),
+            Command::Withhold { scheduled, .. } => scheduled.first().map_or(Target::Profile(None), |s| one(&s.submission)),
+            Command::Query { mailbox, .. } | Command::Counts { mailbox, .. } | Command::Search { mailbox, .. } => scope(mailbox),
+            Command::Send { draft, .. } | Command::SaveDraft { draft, .. } => Target::Sender(draft.from.email.clone()),
+            Command::CreateMeeting { meeting, .. } => meeting.from.clone().map_or(Target::Profile(None), Target::Sender),
+            Command::Availability { sender, .. } => sender.clone().map_or(Target::Profile(None), Target::Sender),
+            Command::Events { .. } | Command::Scheduled | Command::Reconnect | Command::Newsletters { .. } => Target::All,
+            Command::SetKeywords { .. } | Command::Patch { .. } | Command::ReportPhishing { .. } => return self.split(),
+            _ => Target::Profile(None),
+        };
+        vec![(target, self)]
+    }
+
+    /// Команда над письмами — по учётным записям их ключей (порядок — первой встречи).
+    fn split(self) -> Vec<(Target, Command)> {
+        fn groups<T>(items: Vec<T>, key: impl Fn(&T) -> &str) -> Vec<(Option<String>, Vec<T>)> {
+            let mut out: Vec<(Option<String>, Vec<T>)> = Vec::new();
+            for item in items {
+                let p = profile_of_key(key(&item));
+                match out.iter_mut().find(|(q, _)| *q == p) {
+                    Some((_, v)) => v.push(item),
+                    None => out.push((p, vec![item])),
+                }
+            }
+            out
+        }
+        match self {
+            Command::SetKeywords { ids, add, remove } => groups(ids, |s| s.as_str())
+                .into_iter()
+                .map(|(p, ids)| (Target::Profile(p), Command::SetKeywords { ids, add: add.clone(), remove: remove.clone() }))
+                .collect(),
+            Command::Patch { patches, archive_name } => groups(patches, |p| p.id.as_str())
+                .into_iter()
+                .map(|(p, patches)| (Target::Profile(p), Command::Patch { patches, archive_name: archive_name.clone() }))
+                .collect(),
+            Command::ReportPhishing { ids, to, subject, text, ticket } => groups(ids, |s| s.as_str())
+                .into_iter()
+                .map(|(p, ids)| {
+                    let c = Command::ReportPhishing { ids, to: to.clone(), subject: subject.clone(), text: text.clone(), ticket };
+                    (Target::Profile(p), c)
+                })
+                .collect(),
+            other => vec![(Target::Profile(None), other)],
+        }
+    }
+
+    /// Копия команды для каждой учётной записи ([`Target::All`]); у прочих — `None`.
+    pub fn for_each_account(&self) -> Option<Command> {
+        Some(match self {
+            Command::Query { filter, mailbox, ticket } => Command::Query { filter: filter.clone(), mailbox: mailbox.clone(), ticket: *ticket },
+            Command::Counts { filters, mailbox, ticket } => {
+                Command::Counts { filters: filters.clone(), mailbox: mailbox.clone(), ticket: *ticket }
+            }
+            Command::Search { query, mailbox, ticket } => Command::Search { query: query.clone(), mailbox: mailbox.clone(), ticket: *ticket },
+            Command::Events { from, to } => Command::Events { from: *from, to: *to },
+            Command::Scheduled => Command::Scheduled,
+            Command::Reconnect => Command::Reconnect,
+            Command::Newsletters { cutoff, archive_name } => Command::Newsletters { cutoff: *cutoff, archive_name: archive_name.clone() },
             _ => return None,
         })
     }
@@ -324,7 +414,15 @@ pub enum Event {
     InviteFailed { uid: String, error: String },
     /// События календаря в `[from, to)` — без отменённых, по времени начала.
     /// События недели: мои и календарей коллег (`Event::owner`, S5-22); коллеги — все, кто открыл мне календарь.
-    EventsLoaded { from: i64, to: i64, events: Vec<postman_calendar::Event>, colleagues: Vec<postman_calendar::Owner> },
+    /// `account` — учётная запись профиля, чьи это события (S7-03б): у дополнительной её события — с владельцем, как
+    /// календарь коллеги; ответы учётных записей за тот же период складываются.
+    EventsLoaded {
+        from: i64,
+        to: i64,
+        events: Vec<postman_calendar::Event>,
+        colleagues: Vec<postman_calendar::Owner>,
+        account: Option<String>,
+    },
     /// Найдено в календаре по тексту `text` (S5-21); `error` — запрос не удался.
     EventsFound { text: String, events: Vec<postman_calendar::Event>, error: Option<String> },
     /// Занятость для помощника: моя и по адресам; `None` — нет данных (календарь не открыт мне, сотрудник
@@ -374,6 +472,21 @@ pub fn spawn(
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
 ) -> UnboundedSender<Command> {
+    spawn_as(account, None, cache, index, events, repaint)
+}
+
+/// Синхронизация учётной записи профиля (S7-03б): `profile` — `None` у основной, `@<n>` у дополнительной. Ключи
+/// кэша дополнительной — с её префиксом (`postman_cache::in_profile`), её общие ящики — тоже. Дополнительная
+/// синхронизирует почту, отправителей и календарь; задачи, контакты, справочник, правила, автоответ и категории — у
+/// основной (`Event::Me` и `Event::Features` — тоже только у неё).
+pub fn spawn_as(
+    account: Account,
+    profile: Option<String>,
+    cache: Cache,
+    index: Index,
+    events: mpsc::Sender<Event>,
+    repaint: impl Fn() + Send + 'static,
+) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     let failed = events.clone();
     let started = std::thread::Builder::new()
@@ -393,7 +506,7 @@ pub fn spawn(
                 // Сервер не ответил при входе или первой загрузке — без связи: повтор с паузой (S5-08). Отказ во входе
                 // и прочие ошибки останавливают синхронизацию, как раньше.
                 loop {
-                    match run(account.clone(), cache.clone(), index.clone(), &mut rx, &mut link, &notify).await {
+                    match run(account.clone(), profile.clone(), cache.clone(), index.clone(), &mut rx, &mut link, &notify).await {
                         Ok(()) => return,
                         Err(e) if e.kind == ErrorKind::Network => {
                             notify(Event::Error(e));
@@ -601,6 +714,10 @@ impl MailAccount {
 struct Accounts {
     own: MailAccount,
     shared: Vec<MailAccount>,
+    /// Учётная запись профиля (S7-03б): `None` — основная, `@<n>` — дополнительная.
+    profile: Option<String>,
+    /// Владелец событий дополнительной учётной записи в общем календаре (как у календарей коллег, S5-22).
+    me: Option<postman_calendar::Owner>,
 }
 
 impl Accounts {
@@ -629,14 +746,36 @@ struct SendAs {
 /// Отправители по порядку: свои Identity, затем общих ящиков. Адрес, который есть и у своего аккаунта, и у общего
 /// ящика (Stalwart заводит члену группы Identity с адресом группы), — из общего: копия ляжет в его «Отправленные»,
 /// где её видят все, кто работает с ящиком.
-fn senders(own: &[Identity], shared: &[(String, Vec<Identity>)]) -> Vec<SendAs> {
+/// `profile` — учётная запись профиля (S7-03б): аккаунт отправителя — с её префиксом.
+fn senders(own: &[Identity], shared: &[(String, Vec<Identity>)], profile: Option<&str>) -> Vec<SendAs> {
     let theirs = |email: &str| shared.iter().any(|(_, l)| l.iter().any(|i| i.email.eq_ignore_ascii_case(email)));
-    let mut out: Vec<SendAs> =
-        own.iter().filter(|i| !theirs(&i.email)).map(|i| SendAs { scope: None, identity: i.clone() }).collect();
+    let mut out: Vec<SendAs> = own
+        .iter()
+        .filter(|i| !theirs(&i.email))
+        .map(|i| SendAs { scope: in_profile(profile, None), identity: i.clone() })
+        .collect();
     for (account, list) in shared {
-        out.extend(list.iter().map(|i| SendAs { scope: Some(account.clone()), identity: i.clone() }));
+        out.extend(list.iter().map(|i| SendAs { scope: in_profile(profile, Some(account)), identity: i.clone() }));
     }
     out
+}
+
+/// События дополнительной учётной записи (S7-03б) — с владельцем: в общем календаре они рисуются цветом и подписью
+/// владельца, как календари коллег (S5-22). Основная (`me: None`) — как есть.
+fn owned_by(
+    me: &Option<postman_calendar::Owner>,
+    mut events: Vec<postman_calendar::Event>,
+    mut colleagues: Vec<postman_calendar::Owner>,
+) -> (Vec<postman_calendar::Event>, Vec<postman_calendar::Owner>) {
+    if let Some(me) = me {
+        for e in events.iter_mut().filter(|e| e.owner.is_none()) {
+            e.owner = Some(me.clone());
+        }
+        if !colleagues.iter().any(|c| c.key() == me.key()) {
+            colleagues.insert(0, me.clone());
+        }
+    }
+    (events, colleagues)
 }
 
 fn account_row(a: &SharedAccount) -> AccountRow {
@@ -645,6 +784,7 @@ fn account_row(a: &SharedAccount) -> AccountRow {
 
 async fn run(
     account: Account,
+    profile: Option<String>,
     mut cache: Cache,
     index: Index,
     rx: &mut UnboundedReceiver<Command>,
@@ -654,18 +794,32 @@ async fn run(
     notify(Event::Status(Status::Connecting { url: account.url.clone() }));
     let client = Client::connect(&account.url, (&account.auth).into()).await.map_err(|e| SyncError::new(Stage::Connect, &e))?;
     notify(Event::Status(Status::SignedIn { user: client.session().username.clone() }));
-    notify(Event::Features(crate::backend::jmap::features(&client)));
+    // Что видно на экране — по основной учётной записи (S7-03б).
+    if profile.is_none() {
+        notify(Event::Features(crate::backend::jmap::features(&client)));
+    }
     let own_id = client.mail_account().map_err(|e| SyncError::new(Stage::Connect, &e))?.to_string();
 
     // Общие и делегированные ящики (S4-06) — аккаунты сессии, кроме своего.
     let shared = client.session().shared_accounts();
-    cache
-        .replace_accounts(&shared.iter().map(account_row).collect::<Vec<_>>())
-        .map_err(|e| SyncError::new(Stage::Load, &db_err(e)))?;
+    let main = profile.is_none();
+    let p = profile.as_deref();
+    // Дополнительная учётная запись — группой в дереве папок, как общий ящик (S7-03б): строка её самой и её общих.
+    let mut rows: Vec<AccountRow> = Vec::new();
+    if let Some(p) = p {
+        let name = client.session().username.clone();
+        rows.push(AccountRow { id: p.to_owned(), name, is_personal: true, read_only: false });
+    }
+    rows.extend(shared.iter().map(|a| AccountRow { id: in_profile(p, Some(&a.id)).unwrap_or_default(), ..account_row(a) }));
+    cache.replace_accounts_of(p, &rows).map_err(|e| SyncError::new(Stage::Load, &db_err(e)))?;
     let identities = client.identities().await.unwrap_or_default();
-    if let Some(i) = identities.first() {
+    if let Some(i) = identities.first().filter(|_| main) {
         notify(Event::Me { address: Address::new(&i.name, &i.email), signature: i.text_signature.clone() });
     }
+    let me = identities.first().map(|i| postman_calendar::Owner {
+        email: i.email.clone(),
+        name: if i.name.trim().is_empty() { i.email.clone() } else { i.name.clone() },
+    });
     let mut theirs = Vec::new();
     for a in shared.iter().filter(|a| a.can_submit && !a.is_read_only) {
         // Ящик открыт, но не мой (Stalwart: `forbidden`, «not an owner») — отправлять от него нельзя, это не ошибка.
@@ -673,7 +827,7 @@ async fn run(
             theirs.push((a.id.clone(), list));
         }
     }
-    let send_as = senders(&identities, &theirs);
+    let send_as = senders(&identities, &theirs, p);
     notify(Event::Senders(
         send_as
             .iter()
@@ -684,21 +838,26 @@ async fn run(
             })
             .collect(),
     ));
-    // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
-    load_people(&client, notify).await;
-    settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
-    // Таблицы категорий (свои и общих ящиков) — до писем: полосы и метки списка — сразу с ними.
-    let shared_ids: Vec<String> = shared.iter().map(|a| a.id.clone()).collect();
-    categories::load_all(&client, &own_id, &shared_ids, &|r| notify(Event::Categories(r))).await;
-    // Задачи — из кэша сразу, с сервера — дельта; сбой не мешает почте (повтор — по push календаря).
-    if let Err(e) = tasks::handle(&tasks::JmapStore::new(&client), &cache, tasks::Request::Load, &|r| notify(Event::Tasks(r))).await {
-        tracing::warn!("tasks load failed: {e}");
+    // Контакты, справочник, правила, автоответ, категории и задачи — у основной учётной записи (S7-03б).
+    if main {
+        // Контакты и справочник — до писем: один-два запроса, нужны подсказкам адресов с первого окна письма.
+        load_people(&client, notify).await;
+        settings::handle(&client, settings::Request::Load, &|r| notify(Event::Settings(r))).await;
+        // Таблицы категорий (свои и общих ящиков) — до писем: полосы и метки списка — сразу с ними.
+        let shared_ids: Vec<String> = shared.iter().map(|a| a.id.clone()).collect();
+        categories::load_all(&client, &own_id, &shared_ids, &|r| notify(Event::Categories(r))).await;
+        // Задачи — из кэша сразу, с сервера — дельта; сбой не мешает почте (повтор — по push календаря).
+        if let Err(e) = tasks::handle(&tasks::JmapStore::new(&client), &cache, tasks::Request::Load, &|r| notify(Event::Tasks(r))).await {
+            tracing::warn!("tasks load failed: {e}");
+        }
     }
 
     let mail = |id: &str, scope: Option<String>, client: Client| MailAccount { id: id.into(), scope, client, state: None };
     let mut accounts = Accounts {
-        own: mail(&own_id, None, client.clone()),
-        shared: shared.iter().map(|a| mail(&a.id, Some(a.id.clone()), client.in_account(&a.id))).collect(),
+        own: mail(&own_id, in_profile(p, None), client.clone()),
+        shared: shared.iter().map(|a| mail(&a.id, in_profile(p, Some(&a.id)), client.in_account(&a.id))).collect(),
+        profile: profile.clone(),
+        me: me.filter(|_| !main),
     };
     accounts.own.state =
         Some(start_state(&accounts.own, &mut cache, &index, notify).await.map_err(|e| SyncError::new(Stage::Load, &e))?);
@@ -814,7 +973,7 @@ async fn run(
                     calendar.poke(tokio::time::Instant::now(), CALENDAR_DEBOUNCE);
                 }
                 // Таблицу категорий поправил другой клиент (или эта же запись вернулась push) — перечитать.
-                let files = std::iter::once(&accounts.own).chain(&accounts.shared);
+                let files = std::iter::once(&accounts.own).chain(&accounts.shared).filter(|_| accounts.profile.is_none());
                 for acc in files.filter(|a| changed.files.touches(&a.id)) {
                     let request = categories::Request::Load { account: acc.scope.clone() };
                     categories::handle(&client, &own_id, None, request, &|r| notify(Event::Categories(r))).await;
@@ -834,9 +993,11 @@ async fn run(
             }
             () = calendar.wait() => {
                 if calendar.fire(tokio::time::Instant::now()) {
-                    // Задачи — те же записи календаря (`CalendarEvent`): сверить и их.
+                    // Задачи — те же записи календаря (`CalendarEvent`): сверить и их (задачи — у основной учётной записи).
                     let store = tasks::JmapStore::new(&accounts.own.client);
-                    if let Err(e) = tasks::handle(&store, &cache, tasks::Request::Refresh, &|r| notify(Event::Tasks(r))).await {
+                    if accounts.profile.is_none()
+                        && let Err(e) = tasks::handle(&store, &cache, tasks::Request::Refresh, &|r| notify(Event::Tasks(r))).await
+                    {
                         tracing::warn!("tasks refresh failed: {e}");
                     }
                     notify(Event::CalendarChanged);
@@ -956,7 +1117,9 @@ async fn after_refresh(
         Refreshed::Done => {
             // Почта сверена: задачи со ссылкой на письмо — по письмам (срок снят — выполнена, S6-03).
             let store = tasks::JmapStore::new(&accounts.own.client);
-            if let Err(e) = tasks::handle(&store, cache, tasks::Request::Reconcile, &|r| notify(Event::Tasks(r))).await {
+            if accounts.profile.is_none()
+                && let Err(e) = tasks::handle(&store, cache, tasks::Request::Reconcile, &|r| notify(Event::Tasks(r))).await
+            {
                 tracing::warn!("mail tasks reconcile failed: {e}");
             }
             let Some(queued) = link.ok() else { return Next::Keep };
@@ -1360,7 +1523,10 @@ async fn handle(
         }
         Command::Events { from, to } => {
             notify(match schedule::week_with_colleagues(client, from, to).await {
-                Ok((events, colleagues)) => Event::EventsLoaded { from, to, events, colleagues },
+                Ok((events, colleagues)) => {
+                    let (events, colleagues) = owned_by(&accounts.me, events, colleagues);
+                    Event::EventsLoaded { from, to, events, colleagues, account: accounts.profile.clone() }
+                }
                 Err(e) => Event::CalendarFailed(e.to_string()),
             });
         }
@@ -1370,7 +1536,7 @@ async fn handle(
                 Err(e) => Event::EventsFound { text, events: Vec::new(), error: Some(e.to_string()) },
             });
         }
-        Command::Availability { ticket, emails, from, to } => {
+        Command::Availability { ticket, emails, from, to, .. } => {
             notify(match schedule::availability(client, &emails, from, to).await {
                 Ok((me, people)) => Event::Availability { ticket, me, people, error: None },
                 Err(e) => Event::Availability {
@@ -2227,14 +2393,62 @@ mod tests {
     fn shared_identity_wins_over_own_copy() {
         let own = [identity("b", "user3@itt.test"), identity("c", "Shared-Sales@itt.test")];
         let shared = [("i".to_string(), vec![identity("b", "shared-sales@itt.test")])];
-        let all = senders(&own, &shared);
+        let all = senders(&own, &shared, None);
         let got: Vec<(Option<&str>, &str)> = all.iter().map(|f| (f.scope.as_deref(), f.identity.email.as_str())).collect();
         assert_eq!(got, [(None, "user3@itt.test"), (Some("i"), "shared-sales@itt.test")]);
+        // Дополнительная учётная запись профиля (S7-03б): аккаунты — с её префиксом.
+        let second = senders(&own, &shared, Some("@2"));
+        let got: Vec<Option<&str>> = second.iter().map(|f| f.scope.as_deref()).collect();
+        assert_eq!(got, [Some("@2"), Some("@2.i")]);
         let draft = |from: &str| Draft { from: Address::new("", from), ..Default::default() };
         assert_eq!(sender_of(&all, &draft("SHARED-sales@itt.test")).unwrap().scope.as_deref(), Some("i"));
         // Адреса нет среди Identity — своя.
         assert_eq!(sender_of(&all, &draft("x@itt.test")).unwrap().identity.id, "b");
         assert!(sender_of(&[], &draft("x@itt.test")).is_err());
+    }
+
+    /// Несколько учётных записей (S7-03б): команда идёт в синхронизацию учётной записи своих ключей, правки писем
+    /// разных учётных записей делятся, поиск «Все папки» и неделя календаря — во все.
+    #[test]
+    fn commands_route_by_profile() {
+        let target = |c: Command| c.routes().into_iter().map(|(t, _)| t).collect::<Vec<_>>();
+        let p = |s: Option<&str>| Target::Profile(s.map(str::to_owned));
+        assert_eq!(target(Command::Body("e1".into())), [p(None)]);
+        assert_eq!(target(Command::Body("shared/e1".into())), [p(None)]);
+        assert_eq!(target(Command::Body("@2/e1".into())), [p(Some("@2"))]);
+        assert_eq!(target(Command::Body("@2.shared/e1".into())), [p(Some("@2"))]);
+        assert_eq!(target(Command::Move { id: "@3/e".into(), from: "@3/a".into(), to: "@3/b".into() }), [p(Some("@3"))]);
+        assert_eq!(target(Command::Search { query: "q".into(), mailbox: None, ticket: 1 }), [Target::All]);
+        assert_eq!(target(Command::Search { query: "q".into(), mailbox: Some("@2/inbox".into()), ticket: 1 }), [p(Some("@2"))]);
+        assert_eq!(target(Command::Events { from: 0, to: 1 }), [Target::All]);
+        assert_eq!(target(Command::Contacts), [p(None)]);
+        let draft = Draft { from: Address::new("", "me@b.test"), ..Default::default() };
+        let send = Command::Send { draft: Box::new(draft), replace: None, ticket: 1, release: Release::Now };
+        assert_eq!(target(send), [Target::Sender("me@b.test".into())]);
+        let split = Command::SetKeywords { ids: vec!["a".into(), "@2/b".into(), "s/c".into()], add: vec!["k".into()], remove: vec![] }.routes();
+        let got: Vec<(Target, Vec<String>)> = split
+            .into_iter()
+            .map(|(t, c)| match c {
+                Command::SetKeywords { ids, .. } => (t, ids),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(got, [(p(None), vec!["a".to_string(), "s/c".to_string()]), (p(Some("@2")), vec!["@2/b".to_string()])]);
+        assert!(Command::Events { from: 0, to: 1 }.for_each_account().is_some());
+        assert!(Command::Contacts.for_each_account().is_none());
+    }
+
+    /// События дополнительной учётной записи — с её владельцем, как календарь коллеги; основной — как есть.
+    #[test]
+    fn second_account_events_have_an_owner() {
+        let me = postman_calendar::Owner { email: "me@b.test".into(), name: "Я".into() };
+        let raw = serde_json::json!({ "id": "e", "uid": "u", "title": "t", "start": "2026-10-23T10:00:00", "duration": "PT1H" });
+        let ev = postman_calendar::Event::from_jmap(&raw, &jiff::tz::TimeZone::UTC).unwrap();
+        let (events, colleagues) = owned_by(&Some(me.clone()), vec![ev.clone()], Vec::new());
+        assert_eq!(events[0].owner.as_ref().map(|o| o.email.as_str()), Some("me@b.test"));
+        assert_eq!(colleagues.len(), 1);
+        let (events, colleagues) = owned_by(&None, vec![ev], Vec::new());
+        assert!(events[0].owner.is_none() && colleagues.is_empty());
     }
 
     /// Ключи кэша общего ящика: письмо, папки, цепочка и вложения — с префиксом аккаунта.

@@ -38,7 +38,7 @@ pub(crate) struct ServerSettings {
     pub(crate) vacation_panel: Option<Entity<VacationPanel>>,
     pub(crate) rules_panel: Option<Entity<RulesPanel>>,
     /// Карточка «Добавить аккаунт» в разделе «Аккаунты».
-    add: Option<Entity<SignIn>>,
+    pub(crate) add: Option<Entity<SignIn>>,
     /// Полоса «Автоответ включён» — пока он включён.
     pub(crate) bar: Option<Entity<VacationBar>>,
     _subscriptions: Vec<Subscription>,
@@ -114,11 +114,30 @@ impl Mailer {
         {
             identities.push(me);
         }
+        let of = |p: Option<&str>| {
+            folders
+                .accounts
+                .iter()
+                .filter(move |a| postman_cache::profile_of(Some(&a.id)) == p && Some(a.id.as_str()) != p)
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+        };
         Info {
             live: self.backend.is_live(),
             account: self.live_account().cloned(),
             status: self.live.status.clone(),
-            shared: folders.accounts.iter().map(|a| a.name.clone()).collect(),
+            shared: of(None),
+            extra: if self.backend.is_live() {
+                self.live.profile.names.iter().map(|(p, s)| (p.clone(), s.clone(), of(Some(p)))).collect()
+            } else {
+                // Демо (S7-03б): вторая учётная запись — из дерева папок.
+                folders
+                    .accounts
+                    .iter()
+                    .filter(|a| postman_cache::profile_of(Some(&a.id)) == Some(a.id.as_str()))
+                    .map(|a| (a.id.clone(), crate::account::Settings { url: String::new(), user: a.name.clone() }, of(Some(&a.id))))
+                    .collect()
+            },
             folders: folders.of(None).map(|m| (m.id.clone(), m.name.clone())).collect(),
             identities,
             cache: self.account_cache(),
@@ -197,6 +216,7 @@ impl Mailer {
                 self.close_settings(window, cx);
                 self.remove_account(window, cx);
             }
+            SettingsEvent::RemoveExtra(profile) => self.remove_extra(profile.clone(), cx),
         }
     }
 
@@ -292,6 +312,14 @@ impl Mailer {
                 v.add = None;
                 v.set_info(info, cx);
             });
+        }
+    }
+
+    /// Учётные записи изменились (S7-03б: добавлена или удалена дополнительная): вкладке — новые сведения.
+    pub(crate) fn refresh_settings_info(&mut self, cx: &mut Context<Self>) {
+        let info = self.settings_info(cx);
+        if let Some(v) = &self.settings.view {
+            v.update(cx, |v, cx| v.set_info(info, cx));
         }
     }
 

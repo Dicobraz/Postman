@@ -97,6 +97,8 @@ pub(crate) struct MeetingModel {
     /// Необязательные участники и переговорные.
     pub(crate) optional: String,
     pub(crate) description: String,
+    /// «От» (S7-03б): адрес организатора — учётная запись профиля, куда уходит встреча; `None` — основная.
+    pub(crate) from: Option<String>,
     pub(crate) status: Status,
     /// Тикет отправки, итог которой ждём.
     sending: Option<u64>,
@@ -236,6 +238,7 @@ impl MeetingModel {
             attendees: String::new(),
             optional: String::new(),
             description: String::new(),
+            from: None,
             status: Status::None,
             sending: None,
         }
@@ -330,6 +333,7 @@ impl MeetingModel {
             duration_secs: self.duration,
             attendees: required,
             optional,
+            from: self.from.clone(),
         })
     }
 
@@ -472,6 +476,8 @@ impl Mailer {
                 live: self.backend.is_live(),
                 rooms: self.contacts.read(cx).rooms(),
                 me,
+                senders: self.compose.own_senders(self.backend.is_live()),
+                from: self.cal.read(cx).selected_account(),
             };
             let view = cx.new(|cx| MeetingView::new(model, open, window, cx));
             let tab = self.tabs.open(crate::tabs::TabKind::Meeting);
@@ -550,6 +556,10 @@ struct Open {
     /// Переговорные и ресурсы справочника: (имя, адрес).
     rooms: Vec<(String, String)>,
     me: Option<String>,
+    /// Адреса «От» моих учётных записей (S7-03б): (адрес, как показывать); одна — строки «От» нет.
+    senders: Vec<(String, String)>,
+    /// «От» по умолчанию: учётная запись календаря, выбранного слева (событие другой моей учётной записи).
+    from: Option<String>,
 }
 
 /// Занятость для помощника: неделя и адреса запроса, ответ.
@@ -640,6 +650,9 @@ pub(crate) struct MeetingView {
     live: bool,
     rooms: Vec<(String, String)>,
     me: Option<String>,
+    /// «От» (S7-03б): адреса моих учётных записей и открыто ли меню.
+    senders: Vec<(String, String)>,
+    from_menu: bool,
     busy: Availability,
     /// Поля модели поменялись не от ввода (выбрано окно, день) — переписать поля при отрисовке.
     sync_inputs: bool,
@@ -709,6 +722,10 @@ impl MeetingView {
         }));
         let tz = cal.zone();
         let desc_open = !model.description.trim().is_empty();
+        let mut model = model;
+        if model.from.is_none() {
+            model.from = open.from.clone();
+        }
         let mut w = Self {
             model,
             title,
@@ -729,6 +746,8 @@ impl MeetingView {
             live: open.live,
             rooms: open.rooms,
             me: open.me,
+            senders: open.senders,
+            from_menu: false,
             busy: Availability::default(),
             sync_inputs: false,
             only_free: true,
@@ -967,7 +986,7 @@ impl MeetingView {
         let (from, to) = (day_start(monday, &self.tz), day_start(add_days(monday, 7), &self.tz));
         let sent = self
             .mailer
-            .update(cx, |m, _| m.backend.send(Command::Availability { ticket, emails, from, to }))
+            .update(cx, |m, _| m.backend.send(Command::Availability { ticket, emails, from, to, sender: self.model.from.clone() }))
             .unwrap_or(false);
         self.busy.ticket = sent.then_some(ticket);
         cx.notify();
@@ -1191,6 +1210,59 @@ impl MeetingView {
     fn label(text: String) -> Div {
         let l = crate::roles::now();
         div().w(px(LABEL_W)).flex_none().text_color(l.pm(Pm::LabelAccent)).child(text)
+    }
+
+    /// «От» (S7-03б, решение владельца 2026-10-23): то же поле, что в письме, — адрес и меню адресов моих учётных
+    /// записей; учётная запись одна — строки нет.
+    fn sender_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.senders.len() < 2 {
+            return None;
+        }
+        let l = crate::roles::look(cx);
+        let current = self.model.from.clone().or_else(|| self.senders.first().map(|(e, _)| e.clone())).unwrap_or_default();
+        let shown = self.senders.iter().find(|(e, _)| e.eq_ignore_ascii_case(&current)).map_or(current.clone(), |(_, d)| d.clone());
+        let button = crate::composer::quiet_plain("meeting-from", &l)
+            .px(px(0.))
+            .child(shown)
+            .child(icon(crate::chrome::glyph::CHEVRON, 10.).text_color(l.text2()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.from_menu = !this.from_menu;
+                cx.notify();
+            }));
+        let menu = self.from_menu.then(|| {
+            let items = self.senders.iter().enumerate().map(|(i, (email, display))| {
+                let pick = email.clone();
+                crate::composer::menu_item(ElementId::NamedInteger("meeting-from-item".into(), i as u64), &l, email.eq_ignore_ascii_case(&current))
+                    .child(display.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_from(pick.clone(), cx)))
+            });
+            deferred(
+                crate::composer::menu_box("meeting-from-menu", &l).left(px(LABEL_W + 8.)).children(items).on_mouse_down_out(cx.listener(
+                    |this, _, _, cx| {
+                        this.from_menu = false;
+                        cx.notify();
+                    },
+                )),
+            )
+            .with_priority(1)
+        });
+        Some(
+            Self::field_row(&l)
+                .relative()
+                .child(Self::label(tr!("shared-compose-from")))
+                .child(div().child(button))
+                .children(menu),
+        )
+    }
+
+    /// Выбран адрес «От»: занятость — заново, путём его учётной записи.
+    fn set_from(&mut self, email: String, cx: &mut Context<Self>) {
+        self.from_menu = false;
+        let main = self.senders.first().is_some_and(|(e, _)| e.eq_ignore_ascii_case(&email));
+        self.model.from = (!main).then_some(email);
+        self.busy.asked = None;
+        self.query(cx);
+        cx.notify();
     }
 
     fn field_row(l: &Look) -> Div {
@@ -2056,6 +2128,7 @@ impl Render for MeetingView {
             .flex()
             .flex_col()
             .px(px(24.))
+            .children(self.sender_row(cx))
             .child(
                 Self::field_row(&l)
                     .child(Self::label(tr!("meeting-subject")))

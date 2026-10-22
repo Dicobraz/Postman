@@ -133,8 +133,10 @@ pub(crate) struct Info {
     pub(crate) account: Option<crate::account::Settings>,
     /// «Синхронизировано», «Подключение…».
     pub(crate) status: String,
-    /// Общие ящики (имена).
+    /// Общие ящики основной учётной записи (имена).
     pub(crate) shared: Vec<String>,
+    /// Дополнительные учётные записи профиля (S7-03б): префикс, адрес и логин, их общие ящики.
+    pub(crate) extra: Vec<(String, crate::account::Settings, Vec<String>)>,
     /// Свои папки: id и имя.
     pub(crate) folders: Vec<(String, String)>,
     /// Адреса отправителя (Identity).
@@ -157,6 +159,8 @@ pub(crate) enum SettingsEvent {
     AddAccount,
     /// «Удалить аккаунт» подтверждено.
     RemoveAccount,
+    /// «Удалить» у дополнительной учётной записи (`@<n>`) подтверждено.
+    RemoveExtra(String),
     /// Подписи и шаблоны учётной записи изменены: письму — новые подписи по умолчанию.
     AccountPrefs(postman_core::prefs::AccountPrefs),
 }
@@ -175,6 +179,8 @@ pub(crate) struct SettingsView {
     /// Карточка добавления аккаунта (её события слушает экран почты).
     pub(crate) add: Option<AnyView>,
     pub(crate) remove_confirm: bool,
+    /// Подтверждение удаления дополнительной учётной записи (`@<n>`).
+    pub(crate) remove_extra: Option<String>,
     /// Пароль в диспетчере учётных данных (`None` — ещё не проверено).
     pub(crate) stored: Option<bool>,
     pub(crate) rules: Option<AnyView>,
@@ -246,6 +252,7 @@ impl SettingsView {
             sign,
             add: None,
             remove_confirm: false,
+            remove_extra: None,
             stored: None,
             rules: None,
             vacation: None,

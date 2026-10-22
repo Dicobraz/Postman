@@ -13,3 +13,5 @@ sync-error-internal = Sync did not start
 sync-reauth = The server rejected the saved password: sign in again.
 status-items-of = Items: { $n } of { $total }
 fatal-bench-account = live mailbox benchmark: POSTMAN_URL and POSTMAN_USER/POSTMAN_PASSWORD (or POSTMAN_TOKEN) are required
+# Error of an additional profile account (S7-03б): its login and the error text.
+sync-account-error = { $account }: { $error }

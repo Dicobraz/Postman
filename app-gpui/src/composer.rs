@@ -852,7 +852,7 @@ fn quiet(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
 
 /// Тихая кнопка без подложки при наведении (поле «От»). Стиль наведения у элемента задаётся один раз: второй
 /// `.hover` поверх `quiet` в отладочной сборке gpui — паника «hover style already set».
-fn quiet_plain(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
+pub(crate) fn quiet_plain(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(30.))
@@ -866,7 +866,7 @@ fn quiet_plain(id: impl Into<ElementId>, l: &Look) -> Stateful<Div> {
         .active(|d| d.bg(l.pressed()))
 }
 
-fn menu_box(id: &'static str, l: &Look) -> Stateful<Div> {
+pub(crate) fn menu_box(id: &'static str, l: &Look) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
@@ -886,7 +886,7 @@ fn menu_box(id: &'static str, l: &Look) -> Stateful<Div> {
         .shadow_lg()
 }
 
-fn menu_item(id: ElementId, l: &Look, on: bool) -> Stateful<Div> {
+pub(crate) fn menu_item(id: ElementId, l: &Look, on: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(l.px(Metric::HMenuItem))
@@ -983,9 +983,12 @@ impl Composer {
         let menu = (self.menu == Menu::From).then(|| {
             let items = self.senders.iter().enumerate().map(|(i, s)| {
                 let address = s.address.clone();
+                // Другая моя учётная запись (S7-03б) — просто адрес; общий ящик — с пометкой.
                 let text = match &s.account {
-                    Some(_) => tr!("shared-compose-from-shared", address = s.address.display()),
-                    None => s.address.display(),
+                    Some(a) if postman_cache::profile_of(Some(a)) != Some(a.as_str()) => {
+                        tr!("shared-compose-from-shared", address = s.address.display())
+                    }
+                    _ => s.address.display(),
                 };
                 // Ответ на письмо общего ящика (S5-28, макет): под адресом — куда уйдёт копия и кого увидит клиент.
                 let hint = self.shared.as_ref().map(|r| {

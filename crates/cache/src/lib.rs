@@ -60,6 +60,28 @@ pub fn scoped(account: Option<&str>, id: &str) -> String {
     }
 }
 
+/// Начало префикса дополнительной учётной записи профиля (S7-03б): `@2`, `@3`… Ключи её писем — `@2/<id>`, её общих
+/// ящиков — `@2.<аккаунт>/<id>`. В id JMAP (`A-Za-z0-9-_`) ни `@`, ни `.` не бывает.
+pub const PROFILE: char = '@';
+const PROFILE_SHARED: char = '.';
+
+/// Учётная запись профиля, к которой относится аккаунт ключа: основная — `None`, дополнительная — `@<n>`.
+pub fn profile_of(account: Option<&str>) -> Option<&str> {
+    match account {
+        Some(a) if a.starts_with(PROFILE) => Some(a.split_once(PROFILE_SHARED).map_or(a, |(p, _)| p)),
+        _ => None,
+    }
+}
+
+/// Аккаунт для ключей: аккаунт сервера `account` (`None` — свой) в учётной записи профиля `profile`.
+pub fn in_profile(profile: Option<&str>, account: Option<&str>) -> Option<String> {
+    match (profile, account) {
+        (None, a) => a.map(str::to_owned),
+        (Some(p), None) => Some(p.to_owned()),
+        (Some(p), Some(a)) => Some(format!("{p}{PROFILE_SHARED}{a}")),
+    }
+}
+
 /// Ключ кэша → (аккаунт, id сервера); основной аккаунт — `None`.
 pub fn unscoped(key: &str) -> (Option<&str>, &str) {
     match key.split_once(SCOPE) {
@@ -471,24 +493,42 @@ impl Cache {
         Ok(())
     }
 
-    /// Общие ящики из сессии. Аккаунты, которых в сессии больше нет (доступ отозван), — вместе с их папками,
-    /// письмами и состояниями.
+    /// Общие ящики из сессии основной учётной записи. Аккаунты, которых в сессии больше нет (доступ отозван), —
+    /// вместе с их папками, письмами и состояниями.
     pub fn replace_accounts(&self, rows: &[AccountRow]) -> Result<()> {
-        let gone: Vec<String> =
-            self.accounts()?.into_iter().map(|a| a.id).filter(|id| !rows.iter().any(|r| &r.id == id)).collect();
+        self.replace_accounts_of(None, rows)
+    }
+
+    /// Аккаунты учётной записи профиля `profile` (S7-03б): у дополнительной — строка её самой (`@<n>`) и её общие
+    /// ящики. Аккаунты других учётных записей не трогаются.
+    pub fn replace_accounts_of(&self, profile: Option<&str>, rows: &[AccountRow]) -> Result<()> {
+        let ours = |id: &str| profile_of(Some(id)) == profile;
+        let gone: Vec<String> = self
+            .accounts()?
+            .into_iter()
+            .map(|a| a.id)
+            .filter(|id| ours(id) && !rows.iter().any(|r| &r.id == id))
+            .collect();
         for acc in &gone {
             self.forget_account(acc)?;
         }
         let tx = self.db.begin_write()?;
         {
             let mut t = tx.open_table(ACCOUNT)?;
-            t.retain(|_, _| false)?;
-            for a in rows {
+            t.retain(|k, _| !ours(k))?;
+            for a in rows.iter().filter(|a| ours(&a.id)) {
                 t.insert(a.id.as_str(), enc(a)?.as_slice())?;
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Убрать из кэша всё дополнительной учётной записи `profile` («Настройки → Аккаунты → Удалить», S7-03б).
+    pub fn forget_profile(&self, profile: &str) -> Result<()> {
+        self.replace_accounts_of(Some(profile), &[])?;
+        // Её собственные письма и папки — под ключом `@<n>`, даже если строки аккаунта ещё не было.
+        self.forget_account(profile)
     }
 
     /// Общие ящики по имени.
@@ -1576,6 +1616,30 @@ mod tests {
         assert!(c.tasks().unwrap().is_empty());
         c.put_tasks(&[task("u1", Some("a"), false)]).unwrap();
         assert_eq!(c.tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn profile_accounts_live_side_by_side() {
+        assert_eq!(profile_of(None), None);
+        assert_eq!(profile_of(Some("shared1")), None);
+        assert_eq!(profile_of(Some("@2")), Some("@2"));
+        assert_eq!(profile_of(Some("@2.shared1")), Some("@2"));
+        assert_eq!(in_profile(None, Some("s")).as_deref(), Some("s"));
+        assert_eq!(in_profile(Some("@2"), None).as_deref(), Some("@2"));
+        assert_eq!(in_profile(Some("@2"), Some("s")).as_deref(), Some("@2.s"));
+
+        let c = Cache::open_in_memory().unwrap();
+        let row = |id: &str| AccountRow { id: id.into(), name: id.into(), is_personal: false, read_only: false };
+        c.replace_accounts(&[row("s1")]).unwrap();
+        c.replace_accounts_of(Some("@2"), &[row("@2"), row("@2.s9")]).unwrap();
+        c.set_state(&scoped(Some("@2"), "Email"), "x").unwrap();
+        // Основная учётная запись обновляет свои — дополнительной не касается, и наоборот.
+        c.replace_accounts(&[row("s2")]).unwrap();
+        let ids = |c: &Cache| c.accounts().unwrap().into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(&c), ["@2", "@2.s9", "s2"]);
+        c.forget_profile("@2").unwrap();
+        assert_eq!(ids(&c), ["s2"]);
+        assert_eq!(c.state("@2/Email").unwrap(), None);
     }
 
     #[test]
