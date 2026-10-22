@@ -14,6 +14,8 @@
 //! Обнаружение СКЗИ — за трейтом [`GostProvider`], тесты подменяют оба режима.
 
 #[cfg(windows)]
+mod seal_win;
+#[cfg(windows)]
 mod sign_win;
 #[cfg(windows)]
 mod cng;
@@ -321,6 +323,118 @@ pub fn can_sign(from: &str, now: i64) -> bool {
     }
 }
 
+/// Зашифровать своё письмо `raw` (S5-12 Ф4) для подготовленных получателей `to` (себя добавляет вызывающий):
+/// RSA/EC — здесь (случайные числа и ECDH — CNG), все получатели ГОСТ — СКЗИ. Смесь ГОСТ и RSA/EC не шифруется:
+/// такое письмо делит на два интерфейс (решение владельца 2026-10-22).
+pub fn seal_outgoing(raw: &[u8], to: &[postman_smime::seal::To]) -> Result<Vec<u8>, postman_smime::seal::SealError> {
+    use postman_smime::seal::SealError;
+    let gost = to.iter().filter(|t| t.prepared.key.is_gost()).count();
+    if gost > 0 && gost < to.len() {
+        return Err(SealError::Failed("GOST and RSA/EC recipients in one message".into()));
+    }
+    #[cfg(windows)]
+    {
+        if gost > 0 {
+            if SystemGost.provider().is_none() {
+                return Err(SealError::Gost);
+            }
+            return seal_win::seal_gost(raw, to);
+        }
+        postman_smime::seal::seal_message(raw, to, &seal_win::WindowsOps)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = raw;
+        Err(SealError::Failed("encryption needs Windows".into()))
+    }
+}
+
+/// Письмо «Конфиденциально» по семействам ключей (решение владельца 2026-10-22): есть и ГОСТ, и RSA/EC — два письма
+/// (сначала получателям ГОСТ, затем остальным), в каждом — только свои получатели (Кому, Копия, Скрытая) и свой
+/// сертификат «себе» того же семейства. Получатель с обоими сертификатами — в письмо RSA/EC. Ошибка — код
+/// `smime-seal:<код>[:адрес]`: нет сертификата адресата или своего нужного семейства.
+pub fn split_for_encryption(draft: &postman_compose::Draft) -> Result<Vec<postman_compose::Draft>, String> {
+    use postman_smime::seal::To;
+    if draft.encrypt_to.is_empty() {
+        return Ok(vec![draft.clone()]);
+    }
+    let of = |addr: &str, gost: Option<bool>| -> Option<&To> {
+        let addr = addr.trim().to_lowercase();
+        draft.encrypt_to.iter().filter(|t| t.prepared.emails.contains(&addr)).find(|t| gost.is_none_or(|g| t.prepared.key.is_gost() == g))
+    };
+    // Семейство адресата: RSA/EC, если есть; иначе ГОСТ; иначе — нет сертификата.
+    let family = |addr: &str| -> Result<bool, String> {
+        if of(addr, Some(false)).is_some() {
+            Ok(false)
+        } else if of(addr, Some(true)).is_some() {
+            Ok(true)
+        } else {
+            Err(format!("smime-seal:no-cert:{addr}"))
+        }
+    };
+    let mut groups: Vec<bool> = Vec::new();
+    for a in draft.recipients() {
+        let g = family(&a.email)?;
+        if !groups.contains(&g) {
+            groups.push(g);
+        }
+    }
+    if groups.is_empty() {
+        // Черновик без адресатов — себе.
+        groups.push(of(&draft.from.email, Some(false)).is_none() && of(&draft.from.email, Some(true)).is_some());
+    }
+    groups.sort_by_key(|g| !g); // ГОСТ — первым
+    let mut out = Vec::new();
+    for gost in groups {
+        let keep = |list: &[postman_compose::Address]| -> Vec<postman_compose::Address> {
+            list.iter().filter(|a| family(&a.email).is_ok_and(|g| g == gost)).cloned().collect()
+        };
+        let mut d = draft.clone();
+        d.to = keep(&draft.to);
+        d.cc = keep(&draft.cc);
+        d.bcc = keep(&draft.bcc);
+        let me = of(&draft.from.email, Some(gost)).ok_or_else(|| format!("smime-seal:no-own-cert:{}", if gost { "gost" } else { "rsa" }))?;
+        let mut tos: Vec<To> = Vec::new();
+        for t in d.recipients().filter_map(|a| of(&a.email, Some(gost))).chain(std::iter::once(me)) {
+            if !tos.iter().any(|x| x.prepared.fingerprint == t.prepared.fingerprint) {
+                tos.push(t.clone());
+            }
+        }
+        d.encrypt_to = tos;
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// Кандидаты в сертификаты адресатов (DER): из подписанных писем (кэш) и «Других пользователей» Windows; проверяет и
+/// разбирает их воркер (`SmimePrepare`). `own` — свой адрес: ещё свои сертификаты из `My` (себе — всегда).
+pub fn recipient_candidates(cache: &Cache, addresses: &[String], own: &str) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for a in addresses {
+        for c in known_certs(cache, a) {
+            if !out.contains(&c.der) {
+                out.push(c.der);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        for der in seal_win::address_book().into_iter().chain(seal_win::own_certs(own)) {
+            if !out.contains(&der) {
+                out.push(der);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = own;
+    out
+}
+
+/// Объявил ли адресат AES-GCM (по `SMIMECapabilities` его подписанных писем).
+pub fn declares_gcm(cache: &Cache, address: &str) -> bool {
+    known_certs(cache, address).iter().any(|c| postman_smime::seal::declares_gcm(&c.capabilities))
+}
+
 /// Подписать своё письмо `raw` сертификатом адреса `from` (S5-12 Ф3): RSA и ECDSA — CNG, ГОСТ — только СКЗИ
 /// (решение владельца 2026-10-22). `hwnd` — окно для PIN ОС (`None` — молча: нужен PIN — ошибка `NeedPin`).
 pub fn sign_outgoing(raw: &[u8], from: &str, hwnd: Option<isize>, now: i64) -> Result<Vec<u8>, postman_smime::sign::SignError> {
@@ -424,5 +538,44 @@ mod tests {
         assert_eq!(v.revocation, Revocation::NotChecked, "переданные якоря — Windows не спрашиваем");
         let rsa = Pki::rsa("Root", "User", "user1@itt.test");
         assert_eq!(finish(&cache, "r", letter_report(&rsa), &with, NOW as i64).gost, None);
+    }
+
+    /// Деление письма «Конфиденциально»: ГОСТ и RSA — два письма, у каждого свои адресаты и «себе» своего семейства;
+    /// без сертификата — код с адресом.
+    #[test]
+    fn split_by_key_family() {
+        use postman_compose::{Address, Draft};
+        use postman_smime::seal::To;
+        let rsa = Pki::rsa("Root", "Петров", "p@itt.test");
+        let me_rsa = Pki::rsa("Root", "Я", "me@itt.test");
+        let set = postman_smime::oid::TC26_256_A;
+        let gost = Pki::build(testkit::Key::gost("r", set), testkit::Key::gost("u", set), "ГОСТ УЦ", "Сидоров", "s@itt.test");
+        let me_gost = Pki::build(testkit::Key::gost("r", set), testkit::Key::gost("me", set), "ГОСТ УЦ", "Я", "me@itt.test");
+        let to = |p: &Pki| To { prepared: postman_smime::prepare::prepare(&p.user.der, &[], &p.trust(), NOW).unwrap(), gcm: false };
+        let draft = Draft {
+            from: Address::new("Я", "me@itt.test"),
+            to: vec![Address::new("Петров", "p@itt.test"), Address::new("Сидоров", "S@itt.test")],
+            bcc: vec![Address::new("", "p@itt.test")],
+            encrypt_to: vec![to(&rsa), to(&gost), to(&me_rsa), to(&me_gost)],
+            ..Default::default()
+        };
+        let parts = split_for_encryption(&draft).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].to.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(), ["S@itt.test"], "ГОСТ — первым");
+        assert!(parts[0].bcc.is_empty() && parts[0].encrypt_to.iter().all(|t| t.prepared.key.is_gost()) && parts[0].encrypt_to.len() == 2);
+        assert_eq!(parts[1].to.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(), ["p@itt.test"]);
+        assert_eq!(parts[1].bcc.len(), 1);
+        assert!(parts[1].encrypt_to.iter().all(|t| !t.prepared.key.is_gost()) && parts[1].encrypt_to.len() == 2, "себе — тоже");
+        // Только RSA — одно письмо; себе ГОСТ не нужен.
+        let only = Draft { to: vec![Address::new("", "p@itt.test")], ..draft.clone() };
+        assert_eq!(split_for_encryption(&only).unwrap().len(), 1);
+        // Нет сертификата адресата; нет своего ГОСТ.
+        let missing = Draft { to: vec![Address::new("", "x@itt.test")], ..draft.clone() };
+        assert_eq!(split_for_encryption(&missing).unwrap_err(), "smime-seal:no-cert:x@itt.test");
+        let no_own = Draft { encrypt_to: vec![to(&rsa), to(&gost), to(&me_rsa)], ..draft.clone() };
+        assert_eq!(split_for_encryption(&no_own).unwrap_err(), "smime-seal:no-own-cert:gost");
+        // Открытое письмо — как есть.
+        let plain = Draft { encrypt_to: vec![], ..draft };
+        assert_eq!(split_for_encryption(&plain).unwrap().len(), 1);
     }
 }

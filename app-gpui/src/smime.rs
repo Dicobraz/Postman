@@ -70,6 +70,11 @@ pub(crate) fn hidden(a: &AttachmentRow, opaque_shown: bool) -> bool {
     signature || (opaque_shown && p7m)
 }
 
+/// Окружение демо-ящика (для поиска сертификатов адресатов, Ф4).
+pub(crate) fn demo_context() -> Env {
+    demo_env()
+}
+
 /// Якоря демо-ящика (корни демо-УЦ): без Windows и без СКЗИ.
 fn demo_env() -> Env {
     static ENV: OnceLock<Env> = OnceLock::new();

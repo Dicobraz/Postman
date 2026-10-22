@@ -5883,6 +5883,7 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "postman-ir",
+ "postman-smime",
  "pulldown-cmark",
 ]
 

@@ -154,7 +154,7 @@ pub fn detached(content: &[u8], signer: &dyn Signer, signing_time: i64) -> Resul
 }
 
 /// Base64 со строками по 76 знаков и CRLF.
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len() * 4 / 3 + data.len() / 38 + 4);
     for (i, c) in data.chunks(3).enumerate() {
@@ -168,6 +168,30 @@ fn base64(data: &[u8]) -> String {
         out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
     }
     out
+}
+
+/// Своё письмо → (заголовки письма без `MIME-Version`, MIME-сущность: заголовки `Content-*` и тело), концы строк —
+/// CRLF. Общее для подписи и шифрования (Ф3, Ф4).
+pub(crate) fn split_entity(raw: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let canonical = crate::mime::canonical(raw).into_owned();
+    let split = canonical.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let (head, body) = (&canonical[..split + 2], &canonical[split + 4..]);
+    let mut outer = Vec::new();
+    let mut entity = Vec::new();
+    for h in header_blocks(head) {
+        let name = h.iter().position(|&b| b == b':').map(|p| &h[..p]).unwrap_or_default();
+        if name.len() >= 8 && name[..8].eq_ignore_ascii_case(b"content-") {
+            entity.extend_from_slice(h);
+        } else if !name.eq_ignore_ascii_case(b"mime-version") {
+            outer.extend_from_slice(h);
+        }
+    }
+    if entity.is_empty() {
+        entity.extend_from_slice(b"Content-Type: text/plain; charset=us-ascii\r\n");
+    }
+    entity.extend_from_slice(b"\r\n");
+    entity.extend_from_slice(body);
+    Some((outer, entity))
 }
 
 /// Заголовок письма (со строками продолжения) — `Content-*` (уходит в подписанную часть) или остальное.
@@ -193,24 +217,7 @@ fn header_blocks(head: &[u8]) -> Vec<&[u8]> {
 /// Подписать письмо `raw` (своё, RFC 5322): заголовки письма — снаружи, `Content-*` и тело — подписанная часть
 /// `multipart/signed`. Подписанная часть — только 7 бит.
 pub fn sign_message(raw: &[u8], signer: &dyn Signer, now: i64) -> Result<Vec<u8>, SignError> {
-    let canonical = crate::mime::canonical(raw).into_owned();
-    let split = canonical.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| failed("no body"))?;
-    let (head, body) = (&canonical[..split + 2], &canonical[split + 4..]);
-    let mut outer = Vec::new();
-    let mut entity = Vec::new();
-    for h in header_blocks(head) {
-        let name = h.iter().position(|&b| b == b':').map(|p| &h[..p]).unwrap_or_default();
-        if name.len() >= 8 && name[..8].eq_ignore_ascii_case(b"content-") {
-            entity.extend_from_slice(h);
-        } else if !name.eq_ignore_ascii_case(b"mime-version") {
-            outer.extend_from_slice(h);
-        }
-    }
-    if entity.is_empty() {
-        entity.extend_from_slice(b"Content-Type: text/plain; charset=us-ascii\r\n");
-    }
-    entity.extend_from_slice(b"\r\n");
-    entity.extend_from_slice(body);
+    let (outer, entity) = split_entity(raw).ok_or_else(|| failed("no body"))?;
     if entity.iter().any(|&b| b >= 0x80) {
         return Err(SignError::EightBit);
     }

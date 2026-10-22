@@ -736,6 +736,13 @@ pub fn part(message: &[u8], cek: &[u8], index: u32) -> Result<Zeroizing<Vec<u8>>
 
 // --- общее для ядра и тестов: без разбора чужого DER ---
 
+/// OID строкой из DER (OID или `SEQUENCE { OID … }`) — набор параметров в своём блобе СКЗИ.
+pub fn oid_text_of(der: &[u8]) -> Option<String> {
+    let (t, _) = ber::read(der)?;
+    let t = if t.tag == 0x30 { t.children()?.into_iter().next()? } else { t };
+    oid_of(&t).map(|o| o.to_string())
+}
+
 /// DER OID из строки (блобы СКЗИ собирает ядро из значений, которые разобрал воркер).
 pub fn oid_der(text: &str) -> Option<Vec<u8>> {
     Oid::new(text).ok()?.to_der().ok()
@@ -790,6 +797,41 @@ pub fn ecdh_kek(z: &[u8], kdf: Hash, wrap_bits: u16, ukm: Option<&[u8]>) -> Opti
 }
 
 const KW_IV: [u8; 8] = [0xA6; 8];
+
+/// AES Key Wrap (RFC 3394): обёртка ключа `key` ключом `kek` (Ф4, ECDH-получатели).
+pub fn wrap_key(kek: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    use aes::cipher::BlockEncrypt;
+    fn run<C: BlockEncrypt + KeyInit + aes::cipher::BlockSizeUser<BlockSize = aes::cipher::consts::U16>>(kek: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+        let cipher = C::new_from_slice(kek).ok()?;
+        let n = key.len() / 8;
+        let mut a = KW_IV;
+        let mut r = key.to_vec();
+        for j in 0..6 {
+            for i in 1..=n {
+                let mut block = aes::cipher::Block::<C>::default();
+                block[..8].copy_from_slice(&a);
+                block[8..].copy_from_slice(&r[(i - 1) * 8..i * 8]);
+                cipher.encrypt_block(&mut block);
+                let t = ((n * j) + i) as u64;
+                a.copy_from_slice(&block[..8]);
+                for (k, b) in t.to_be_bytes().iter().enumerate() {
+                    a[k] ^= b;
+                }
+                r[(i - 1) * 8..i * 8].copy_from_slice(&block[8..]);
+            }
+        }
+        Some([a.to_vec(), r].concat())
+    }
+    if key.len() < 16 || !key.len().is_multiple_of(8) {
+        return None;
+    }
+    match kek.len() {
+        16 => run::<aes::Aes128>(kek, key),
+        24 => run::<aes::Aes192>(kek, key),
+        32 => run::<aes::Aes256>(kek, key),
+        _ => None,
+    }
+}
 
 /// AES Key Unwrap (RFC 3394); неверная проверка целостности — `None`.
 pub fn unwrap_key(kek: &[u8], wrapped: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
