@@ -11,6 +11,9 @@
 //!   «Входящих», в срок оно возвращается непрочитанным. Общее слово без даты остаётся, пока письмо не прочитано, —
 //!   «напомнило»: письмо наверху списка.
 //! - `pm.expire` + `pm.expire.<ГГГГ-ММ-ДД>[t<ЧЧММ>]` — исчезнет: в срок уйдёт в «Архив» или «Удалённые».
+//! - `pm.taken` + `pm.taken.<ГГГГ-ММ-ДД>t<ЧЧММ>z.<адрес>` — «Взять в работу» в общем ящике (S5-28): кто взял и
+//!   когда (время — UTC, `z`: письмо видят коллеги в других поясах). Слова — на письме в ящике, их видят все с правом
+//!   чтения; «Забрать себе» снимает прежние слова и ставит своё. Двое взяли разом — в работе у взявшего позже.
 //!
 //! Дата и время — местные (часовой пояс компьютера). `t` — строчная: заглавных в ключевых словах JMAP нет; время
 //! без двоеточия. Общее слово нужно серверу: `hasKeyword` ищет слово целиком, по нему находит письма «Все папки»
@@ -188,6 +191,83 @@ pub fn is_compose_mark(keyword: &str) -> bool {
     keyword.eq_ignore_ascii_case(CONFIDENTIAL) || Kind::Wait.owns(keyword)
 }
 
+/// Общее слово «Взято в работу» (S5-28): по нему сервер находит взятые письма.
+pub const TAKEN: &str = "pm.taken";
+const TAKEN_PREFIX: &str = "pm.taken.";
+
+/// Кто взял письмо общего ящика в работу и когда.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    /// Адрес взявшего (нижний регистр).
+    pub who: String,
+    pub at: jiff::Timestamp,
+}
+
+impl Taken {
+    /// Взял `me` (адрес сравнивается без регистра).
+    pub fn by(&self, me: &str) -> bool {
+        self.who.eq_ignore_ascii_case(me.trim())
+    }
+}
+
+/// Слово «взял `who` в `at`»: `pm.taken.2026-10-22t1042z.p.koval@corp.example`. Адрес, который не годится в ключевое
+/// слово JMAP (пробел, кавычка, скобка…), — `None`.
+pub fn taken_keyword(who: &str, at: jiff::Timestamp) -> Option<String> {
+    let who = who.trim().to_ascii_lowercase();
+    let k = format!("{TAKEN_PREFIX}{}z.{who}", at.strftime("%Y-%m-%dt%H%M"));
+    (!who.is_empty() && crate::labels::valid_keyword(&k)).then_some(k)
+}
+
+fn parse_taken(keyword: &str) -> Option<Taken> {
+    let head = keyword.get(..TAKEN_PREFIX.len())?;
+    if !head.eq_ignore_ascii_case(TAKEN_PREFIX) {
+        return None;
+    }
+    let rest = &keyword[TAKEN_PREFIX.len()..];
+    // `ГГГГ-ММ-ДДtЧЧММz.` — 17 знаков, дальше адрес.
+    let (stamp, who) = (rest.get(..15)?, rest.get(17..)?);
+    if !rest.get(15..17)?.eq_ignore_ascii_case("z.") || who.is_empty() || !who.contains('@') {
+        return None;
+    }
+    let date: Date = stamp.get(..10)?.parse().ok()?;
+    let clock = stamp.get(10..)?;
+    if !clock.starts_with(['t', 'T']) || !clock[1..].bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let time = Time::new(clock[1..3].parse().ok()?, clock[3..5].parse().ok()?, 0, 0).ok()?;
+    let at = date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok()?.timestamp();
+    Some(Taken { who: who.to_ascii_lowercase(), at })
+}
+
+/// Кто держит письмо: из слов «взял» — позднее (при равном времени — меньший адрес, одинаково у всех). Нет слова —
+/// никто, даже если общее слово осталось (другой клиент снял не всё).
+pub fn taken(keywords: &[String]) -> Option<Taken> {
+    keywords.iter().filter_map(|k| parse_taken(k)).max_by(|a, b| a.at.cmp(&b.at).then_with(|| b.who.cmp(&a.who)))
+}
+
+/// Слово относится к «Взять в работу»: общее или со временем и адресом (в том числе неразобранное).
+pub fn is_taken_word(keyword: &str) -> bool {
+    keyword.get(..TAKEN.len()).is_some_and(|h| h.eq_ignore_ascii_case(TAKEN))
+        && (keyword.len() == TAKEN.len() || keyword.as_bytes().get(TAKEN.len()) == Some(&b'.'))
+}
+
+/// «Взять в работу» и «Забрать себе»: (поставить, снять) — общее слово и своё, прежние слова «взял» снять. Адрес не
+/// годится в ключевое слово — `None`.
+pub fn taking(keywords: &[String], me: &str, at: jiff::Timestamp) -> Option<(Vec<String>, Vec<String>)> {
+    let new = taken_keyword(me, at)?;
+    let remove = keywords.iter().filter(|k| is_taken_word(k) && !k.eq_ignore_ascii_case(TAKEN) && **k != new).cloned().collect();
+    Some((vec![TAKEN.to_owned(), new], remove))
+}
+
+/// «Вернуть в очередь»: что снять — общее слово и все слова «взял».
+pub fn releasing(keywords: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = keywords.iter().filter(|k| is_taken_word(k)).cloned().collect();
+    if !out.iter().any(|k| k.eq_ignore_ascii_case(TAKEN)) {
+        out.push(TAKEN.to_owned());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +381,51 @@ mod tests {
         assert_eq!(clearing(&row, Kind::Due), ["pm.due", "pm.due.2026-10-30", "pm.due.2026-10-29t1500"]);
         assert_eq!(clearing(&row, Kind::Wait), ["PM.WAIT.2026-11-01", "pm.wait"]);
         assert_eq!(clearing(&[], Kind::Remind), ["pm.remind"]);
+    }
+
+    /// «Взять в работу» (S5-28): формат слова, туда и обратно; позднее — главнее; забрать и вернуть.
+    #[test]
+    fn taken_words_round_trip() {
+        let at: jiff::Timestamp = "2026-10-22T10:42:00Z".parse().unwrap();
+        let k = taken_keyword("P.Koval@Corp.Example", at).unwrap();
+        assert_eq!(k, "pm.taken.2026-10-22t1042z.p.koval@corp.example");
+        assert!(valid_keyword(&k) && valid_keyword(TAKEN));
+        let t = taken(&kws(&["pm.taken", &k])).unwrap();
+        assert_eq!((t.who.as_str(), t.at), ("p.koval@corp.example", at));
+        assert!(t.by("p.koval@corp.example ") && t.by("P.KOVAL@corp.example") && !t.by("me@corp.example"));
+        // Регистр IMAP-клиентов; неверные слова — не «взял».
+        assert_eq!(taken(&kws(&["PM.Taken.2026-10-22T1042Z.p.koval@corp.example"])).map(|t| t.at), Some(at));
+        for bad in [
+            "pm.taken",
+            "pm.taken.",
+            "pm.taken.2026-10-22t1042z.",
+            "pm.taken.2026-10-22t1042z.koval",
+            "pm.taken.2026-10-22t1042.p@corp.example",
+            "pm.taken.2026-10-22t2542z.p@corp.example",
+            "pm.taken.2026-10-22z.p@corp.example",
+            "pm.takenx.2026-10-22t1042z.p@corp.example",
+        ] {
+            assert_eq!(taken(&kws(&[bad])), None, "{bad}");
+        }
+        assert_eq!(taken_keyword("a b@corp.example", at), None, "пробел в слове JMAP нельзя");
+        assert_eq!(taken_keyword(" ", at), None);
+        // Двое разом: позднее, при равном времени — меньший адрес.
+        let later: jiff::Timestamp = "2026-10-22T10:45:00Z".parse().unwrap();
+        let both = kws(&["pm.taken", &k, &taken_keyword("a.kotova@corp.example", later).unwrap()]);
+        assert_eq!(taken(&both).map(|t| t.who), Some("a.kotova@corp.example".into()));
+        let tie = kws(&[&k, &taken_keyword("a.kotova@corp.example", at).unwrap()]);
+        assert_eq!(taken(&tie).map(|t| t.who), Some("a.kotova@corp.example".into()));
+        // Забрать себе: общее и своё — поставить, чужие — снять; своё прежнее с тем же временем — не снимать.
+        let now: jiff::Timestamp = "2026-10-22T14:05:00Z".parse().unwrap();
+        let (add, remove) = taking(&both, "me@corp.example", now).unwrap();
+        assert_eq!(add, ["pm.taken", "pm.taken.2026-10-22t1405z.me@corp.example"]);
+        assert_eq!(remove, both[1..].to_vec());
+        assert_eq!(releasing(&both), both);
+        assert_eq!(releasing(&kws(&["pm.cat.team", &k])), [k.clone(), TAKEN.to_owned()]);
+        assert!(is_taken_word("pm.taken") && is_taken_word(&k) && !is_taken_word("pm.takens") && !is_taken_word("pm.due"));
+        // Демо-ящик пишет те же слова.
+        let demo = postman_demo::taken_keywords(1, 1_792_240_200);
+        assert_eq!(taken(&demo).map(|t| t.who), Some("a.petrov@corp.example".into()));
+        assert!(demo.iter().all(|k| valid_keyword(k)));
     }
 }

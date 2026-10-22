@@ -1255,6 +1255,7 @@ impl Render for MailList {
                             let mut labels = crate::labels::row_labels(&this.labels, &r);
                             // Сроки (S5-04) — после категорий.
                             labels.marks = crate::lifecycle::row_badges(&r, &now);
+                            labels.assigned = crate::shared::assigned(&r, cx);
                             // Ждёт отправки — первой меткой, нейтральной (DESIGN.md: служебные — серые).
                             let now = jiff::Timestamp::now().as_second();
                             if let Some(&at) = this.scheduled.get(&r.id).filter(|&&at| at > now) {
@@ -1526,10 +1527,15 @@ pub(crate) fn list_row(
         .when(r.flagged, |d| d.child(crate::chrome::icon(crate::chrome::glyph::FLAG, 13.).text_color(l.pm(Pm::Flag))))
         .child(div().flex_none().text_size(l.px(Metric::TypeCaption)).text_color(l.text2()).child(format_date(r.received_at)));
     let subject = div()
+        .flex_1()
+        .min_w_0()
         .truncate()
         .when(!r.seen, |d| d.text_color(l.accent_text()).font_weight(FontWeight::SEMIBOLD))
         .when(r.seen, |d| d.text_color(l.text()))
         .child(crate::search::marked(&r.subject, marks, l));
+    // «Назначено: …» — справа в строке темы, нейтральной меткой (S5-28, макет `SharedMailboxes`).
+    let assigned = labels.assigned.clone().map(|t| crate::labels::chip(t, postman_core::palette::NEUTRAL, l).max_w(px(160.)));
+    let subject = div().flex().items_center().gap(px(8.)).min_w_0().child(subject).children(assigned);
     let preview = (roomy && previews).then(|| {
         let p = div().truncate().text_size(l.px(Metric::TypeCaption)).text_color(l.text2());
         if encrypted { p.child(tr!("smime-list-preview")) } else { p.child(crate::search::marked(&r.preview, marks, l)) }

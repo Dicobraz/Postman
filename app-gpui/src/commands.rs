@@ -13,7 +13,7 @@ pub mod mail {
         [
             Next, Prev, First, Last, PageDown, PageUp, MarkRead, MarkUnread, ToggleFlag, New, Reply, ReplyAll, Forward, Delete,
             Due, Remind, Wait, Expire, SelectAll, ClearSelection, SelectDown, SelectUp, ContextMenu, Move, Archive,
-            ReportPhishing, Signature
+            ReportPhishing, Signature, Take
         ]
     );
 
@@ -191,6 +191,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("mail.report_phishing", &[], MAIL),
     // Подпись S/MIME (S5-12): подробности — карточкой под шапкой; в Outlook — кнопка значка подписи, без клавиши.
     cmd("mail.signature", &[], MAIL),
+    // Общие ящики (S5-28, DESIGN «Хоткеи»): «Взять в работу» — Ctrl+J (держали за ней с S5-16); та же команда
+    // забирает письмо у коллеги и возвращает своё в очередь. В Outlook такой команды нет.
+    cmd("mail.take", &["ctrl-j"], MAIL),
     // Не Outlook (DESIGN, «Беседы»): лента беседы и цитаты — кнопками; по письмам беседы — Ctrl+→ / Ctrl+←
     // (в поле поиска эти клавиши — по словам).
     cmd("thread.toggle", &[], MAIL),
@@ -430,9 +433,9 @@ pub(crate) mod rule {
         "backspace", "menu", "space", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ];
 
-    /// Сочетания, которые держит дизайн за будущими командами: привязать их раньше — нельзя (тест правила).
-    /// Ctrl+J — «Взять в работу» в общих ящиках (S5-28).
-    pub(crate) const RESERVED: &[&str] = &["ctrl-j"];
+    /// Сочетания, которые держит дизайн за будущими командами: привязать их раньше — нельзя (тест правила). Ctrl+J
+    /// держали за «Взять в работу» (S5-28) — теперь это `mail.take`.
+    pub(crate) const RESERVED: &[&str] = &[];
 
     /// Сочетание по правилу одного модификатора: `Err` — чем нарушает. Клавиши — в записи gpui, одно нажатие.
     pub(crate) fn rule_check(keys: &str) -> Result<(), String> {

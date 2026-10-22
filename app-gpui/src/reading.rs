@@ -784,6 +784,7 @@ impl Render for ReadingPane {
                 .gap(px(12.))
                 .pb(px(8.))
                 .child(title)
+                .children(crate::shared::strip(&r.row, &l, cx))
                 .child(crate::lifecycle::header_row(&r.row, &l, cx))
                 .children(self.stack_info(cx));
             return div()
@@ -877,6 +878,8 @@ impl Render for ReadingPane {
                 .children(lock)
                 .children(seal),
             )
+            // Общий ящик (S5-28): кто взял письмо в работу и «Взять» / «Забрать себе» / «Вернуть в очередь».
+            .children(crate::shared::strip(&r.row, &l, cx))
             // Сроки письма и действия «Срок», «Напомнить», «Ждать ответа», «Исчезнет» (S5-04).
             .child(crate::lifecycle::header_row(&r.row, &l, cx));
         // Вид «как Outlook» — строка «Беседа: N писем · ← · →» (S5-05б), лента — переключатель «Беседа (N)».

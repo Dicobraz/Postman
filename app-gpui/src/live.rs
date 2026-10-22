@@ -297,6 +297,7 @@ impl Mailer {
             r.live = true;
             r.me = None;
         });
+        crate::shared::set_me(None, cx);
         // Календарь — с сервера (S3-05); раздел уже открыт — неделя сразу.
         let calendar_open = self.section == crate::Section::Calendar;
         self.cal.update(cx, |c, cx| {

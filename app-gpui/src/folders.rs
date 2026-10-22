@@ -122,6 +122,7 @@ impl Folders {
         let open = !self.collapsed.contains(&a.id);
         let total: u32 = if open { 0 } else { self.of(Some(&a.id)).map(|m| m.unread).sum() };
         let id = a.id.clone();
+        let hint = crate::shared::rights_hint(self.read_only(a), self.of(Some(&a.id)).map(|m| &m.rights));
         div()
             .id(SharedString::from(format!("acc-{}", a.id)))
             .mt(px(10.))
@@ -137,9 +138,12 @@ impl Folders {
             .text_size(l.px(Metric::TypeCaption))
             .text_color(l.text2())
             .child(div().w(px(12.)).child(if open { "▾" } else { "▸" }))
+            // Значок «общий» и права в подсказке (S5-28, макет `SharedMailboxes`).
+            .child(crate::chrome::icon(crate::chrome::glyph::PEOPLE, 14.))
             .child(div().flex_1().min_w_0().truncate().child(a.name.clone()))
             .when(self.read_only(a), |d| d.child(div().flex_none().text_size(px(11.)).child(tr!("shared-read-only"))))
             .when(total > 0, |d| unread(d, total, l))
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
             .into_any_element()
     }

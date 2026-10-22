@@ -347,13 +347,29 @@ fn shared(cache: &Cache, now: i64) -> postman_cache::Result<()> {
                     flagged: false,
                     has_attachment: i % 4 == 0,
                     size: 8192,
-                    keywords: Vec::new(),
+                    keywords: taken_demo(n, i, now),
                 }
             })
             .collect();
         cache.upsert_emails(&rows)?;
     }
     Ok(())
+}
+
+/// «Взять в работу» в ящике отдела демо (S5-28): кто взял письмо `i` и через сколько минут после прихода.
+const TAKEN: &[(usize, &str, i64)] = &[(1, "a.petrov@corp.example", 11), (2, ME, 25), (4, "m.ivanova@corp.example", 40)];
+
+/// Слова «взял» (формат — `postman_core::marks`, тест там же): только ящик отдела (`n == 0`).
+fn taken_demo(n: usize, i: usize, now: i64) -> Vec<String> {
+    let Some(&(_, who, after)) = TAKEN.iter().find(|t| n == 0 && t.0 == i) else { return Vec::new() };
+    let at = now - (i as i64 + 1) * 5400 + after * 60;
+    let Ok(at) = jiff::Timestamp::from_second(at) else { return Vec::new() };
+    vec!["pm.taken".into(), format!("pm.taken.{}z.{who}", at.strftime("%Y-%m-%dt%H%M"))]
+}
+
+/// Слова «взял» письма `i` ящика отдела демо (тест формата в `postman_core::marks`).
+pub fn taken_keywords(i: usize, now: i64) -> Vec<String> {
+    taken_demo(0, i, now)
 }
 
 /// Темы писем общих ящиков демо.
