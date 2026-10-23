@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="1" MajorBuildNumber="2507" MinorBuildNumber="6" Version="V2017_07_11" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <m:SyncFolderItemsResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:SyncFolderItemsResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>H4sIAAAAAAAEAGNgYGcAAkY2BgYGJgYAAA==</m:SyncState>
+          <m:IncludesLastItemInRange>false</m:IncludesLastItemInRange>
+          <m:Changes>
+            <t:Create>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADnew1" ChangeKey="DwAAABYAAAA1"/>
+              </t:CalendarItem>
+            </t:Create>
+            <t:Create>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADnew2" ChangeKey="DwAAABYAAAA2"/>
+              </t:CalendarItem>
+            </t:Create>
+            <t:Update>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADupd1" ChangeKey="DwAAABYAAAA3"/>
+              </t:CalendarItem>
+            </t:Update>
+            <t:Delete>
+              <t:ItemId Id="AAMkADdel1" ChangeKey="DwAAABYAAAA4"/>
+            </t:Delete>
+            <t:ReadFlagChange>
+              <t:ItemId Id="AAMkADread" ChangeKey="DwAAABYAAAA5"/>
+              <t:IsRead>true</t:IsRead>
+            </t:ReadFlagChange>
+          </m:Changes>
+        </m:SyncFolderItemsResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderItemsResponse>
+  </s:Body>
+</s:Envelope>

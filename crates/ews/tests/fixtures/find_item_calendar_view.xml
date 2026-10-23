@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="1" MajorBuildNumber="2507" MinorBuildNumber="6" Version="V2017_07_11" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:FindItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:RootFolder TotalItemsInView="3" IncludesLastItemInRange="true">
+            <t:Items>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADocc1" ChangeKey="DwAAABYAAAA8"/>
+                <t:Start>2026-10-12T06:00:00Z</t:Start>
+                <t:End>2026-10-12T06:15:00Z</t:End>
+                <t:CalendarItemType>Occurrence</t:CalendarItemType>
+              </t:CalendarItem>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADexc1" ChangeKey="DwAAABYAAAA9"/>
+                <t:Start>2026-10-14T09:00:00Z</t:Start>
+                <t:End>2026-10-14T09:15:00Z</t:End>
+                <t:CalendarItemType>Exception</t:CalendarItemType>
+              </t:CalendarItem>
+              <t:CalendarItem>
+                <t:ItemId Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7"/>
+                <t:Start>2026-10-20T07:00:00Z</t:Start>
+                <t:End>2026-10-20T08:00:00Z</t:End>
+                <t:CalendarItemType>Single</t:CalendarItemType>
+              </t:CalendarItem>
+            </t:Items>
+          </m:RootFolder>
+        </m:FindItemResponseMessage>
+      </m:ResponseMessages>
+    </m:FindItemResponse>
+  </s:Body>
+</s:Envelope>
