@@ -23,6 +23,11 @@ use postman_core::sync::{Command, Event, Status, UnboundedSender};
 use postman_core::tasks::{Reply, Request};
 
 const WAIT: Duration = Duration::from_secs(40);
+/// Сколько ждать, пока правка задачи у одного клиента дойдёт до другого (опрос `Refresh`): сервер отдаёт дельту
+/// `sync-collection` не сразу.
+const PROPAGATE: Duration = Duration::from_secs(90);
+/// Пауза между опросами `Refresh`: ответы предыдущего опроса за это время дочитываются все.
+const POLL_EVERY: Duration = Duration::from_secs(2);
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} не задан: стенд — docs/STALWART.md"))
@@ -117,6 +122,37 @@ impl Live {
             }
             assert!(start.elapsed() < WAIT, "{what}: не дождались");
             std::thread::sleep(Duration::from_millis(700));
+        }
+    }
+
+    /// Задача `uid` у этого клиента — по ответам задач: `Some(задача)` — есть, `None` — нет. Опрос `Refresh` с
+    /// паузой [`POLL_EVERY`], пока `done` по последнему известному состоянию не истинно или не вышел срок
+    /// [`PROPAGATE`]. Ответы читаются все, а не по одному на опрос: дельта приходит любым из них.
+    fn poll_task(&self, uid: &str, what: &str, done: impl Fn(Option<&Task>) -> bool) {
+        let start = Instant::now();
+        let mut known: Option<Option<Task>> = None;
+        loop {
+            self.send(Command::Tasks(Request::Refresh));
+            let round = Instant::now();
+            while let Some(left) = POLL_EVERY.checked_sub(round.elapsed()) {
+                match self.events.recv_timeout(left) {
+                    Ok(Event::Error(e)) => panic!("синхронизация: {e}"),
+                    Ok(Event::Tasks(Reply::Failed { error, .. })) => panic!("задачи: {error}"),
+                    Ok(Event::Tasks(Reply::Loaded(v))) => known = Some(v.into_iter().find(|t| t.uid == uid)),
+                    Ok(Event::Tasks(Reply::Changed(v))) => {
+                        if let Some(t) = v.into_iter().find(|t| t.uid == uid) {
+                            known = Some(Some(t));
+                        }
+                    }
+                    Ok(Event::Tasks(Reply::Removed(v))) if v.iter().any(|u| u == uid) => known = Some(None),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                if known.as_ref().is_some_and(|k| done(k.as_ref())) {
+                    return;
+                }
+            }
+            assert!(start.elapsed() < PROPAGATE, "не дошло до второго клиента за {PROPAGATE:?}: {what}");
         }
     }
 
@@ -347,17 +383,7 @@ fn caldav_task_round_trip() {
     b.send(Command::Tasks(Request::Save(Box::new(theirs))));
     b.wait("выполнена на сервере", |e| matches!(e, Event::Tasks(Reply::Changed(v)) if v.iter().any(|x| x.uid == uid && x.progress.is_closed() && !x.id.is_empty())));
 
-    let start = Instant::now();
-    loop {
-        a.send(Command::Tasks(Request::Refresh));
-        let got = a.events.recv_timeout(Duration::from_secs(5));
-        if let Ok(Event::Tasks(Reply::Changed(v) | Reply::Loaded(v))) = &got
-            && v.iter().any(|x| x.uid == uid && x.progress.is_closed())
-        {
-            break;
-        }
-        assert!(start.elapsed() < WAIT, "выполнение не дошло до первого клиента");
-    }
+    a.poll_task(&uid, "выполнение — у первого клиента", |t| t.is_some_and(|t| t.progress.is_closed()));
 
     // Исполнителю сервер ничего не прислал: письма поручения шлёт Postman (`SCHEDULE-AGENT=CLIENT`).
     let leaked = rt().block_on(async {
@@ -372,16 +398,7 @@ fn caldav_task_round_trip() {
 
     a.send(Command::Tasks(Request::Delete(uid.clone())));
     a.wait("Removed", |e| matches!(e, Event::Tasks(Reply::Removed(v)) if v.contains(&uid)));
-    let start = Instant::now();
-    loop {
-        b.send(Command::Tasks(Request::Refresh));
-        match b.events.recv_timeout(Duration::from_secs(5)) {
-            Ok(Event::Tasks(Reply::Removed(v))) if v.contains(&uid) => break,
-            Ok(Event::Tasks(Reply::Loaded(v))) if !v.iter().any(|x| x.uid == uid) => break,
-            _ => {}
-        }
-        assert!(start.elapsed() < WAIT, "удаление не дошло до второго клиента");
-    }
+    b.poll_task(&uid, "удаление — у второго клиента", |t| t.is_none());
     clean_calendar(1, &uid);
     clean_calendar(2, &uid);
     assert_eq!(leaked, 0, "сервер разослал задачу с SCHEDULE-AGENT=CLIENT");
