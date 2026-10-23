@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="1" MajorBuildNumber="2507" MinorBuildNumber="6" Version="V2017_07_11" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <m:FindFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:FindFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:RootFolder TotalItemsInView="3" IncludesLastItemInRange="true">
+            <t:Folders>
+              <t:CalendarFolder>
+                <t:FolderId Id="AAMkADsub1" ChangeKey="AgAAABYAAAA2"/>
+                <t:FolderClass>IPF.Appointment</t:FolderClass>
+                <t:DisplayName>Проекты</t:DisplayName>
+                <t:TotalCount>4</t:TotalCount>
+                <t:ChildFolderCount>0</t:ChildFolderCount>
+              </t:CalendarFolder>
+              <t:Folder>
+                <t:FolderId Id="AAMkADnotes" ChangeKey="AQAAABYAAAA3"/>
+                <t:FolderClass>IPF.StickyNote</t:FolderClass>
+                <t:DisplayName>Заметки</t:DisplayName>
+                <t:TotalCount>1</t:TotalCount>
+                <t:ChildFolderCount>0</t:ChildFolderCount>
+                <t:UnreadCount>0</t:UnreadCount>
+              </t:Folder>
+              <t:CalendarFolder>
+                <t:FolderId Id="AAMkADsub2" ChangeKey="AgAAABYAAAA4"/>
+                <t:FolderClass>IPF.Appointment</t:FolderClass>
+                <t:DisplayName>Отпуска</t:DisplayName>
+                <t:TotalCount>0</t:TotalCount>
+                <t:ChildFolderCount>0</t:ChildFolderCount>
+              </t:CalendarFolder>
+            </t:Folders>
+          </m:RootFolder>
+        </m:FindFolderResponseMessage>
+      </m:ResponseMessages>
+    </m:FindFolderResponse>
+  </s:Body>
+</s:Envelope>
