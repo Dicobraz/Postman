@@ -6043,6 +6043,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-ews"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jiff",
+ "postman-calendar",
+ "quick-xml",
+ "rustls-platform-verifier",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+ "windows 0.61.3",
+ "zeroize",
+]
+
+[[package]]
 name = "postman-gpui"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="1" MajorBuildNumber="2507" MinorBuildNumber="6" Version="V2017_07_11" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:CalendarItem>
+              <t:ItemId Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7"/>
+              <t:ParentFolderId Id="AAMkADcal" ChangeKey="AQAAAA=="/>
+              <t:Subject>Планёрка &amp; отчёт</t:Subject>
+              <t:Body BodyType="Text">Повестка:&#13;
+1. Итоги недели&#13;
+</t:Body>
+              <t:Categories><t:String>Проект Альфа</t:String></t:Categories>
+              <t:UID>040000008200E00074C5B7101A82E00800000000A1B2C3D4</t:UID>
+              <t:Start>2026-10-20T07:00:00Z</t:Start>
+              <t:End>2026-10-20T08:00:00Z</t:End>
+              <t:IsAllDayEvent>false</t:IsAllDayEvent>
+              <t:LegacyFreeBusyStatus>Tentative</t:LegacyFreeBusyStatus>
+              <t:Location>Переговорная 3</t:Location>
+              <t:IsMeeting>true</t:IsMeeting>
+              <t:IsCancelled>false</t:IsCancelled>
+              <t:CalendarItemType>Single</t:CalendarItemType>
+              <t:MyResponseType>Tentative</t:MyResponseType>
+              <t:Organizer><t:Mailbox><t:Name>Анна Петрова</t:Name><t:EmailAddress>anna@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType><t:MailboxType>Mailbox</t:MailboxType></t:Mailbox></t:Organizer>
+              <t:RequiredAttendees>
+                <t:Attendee><t:Mailbox><t:Name>Анна Петрова</t:Name><t:EmailAddress>anna@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType><t:MailboxType>Mailbox</t:MailboxType></t:Mailbox><t:ResponseType>Organizer</t:ResponseType></t:Attendee>
+                <t:Attendee><t:Mailbox><t:Name>Тестовый Пользователь 1</t:Name><t:EmailAddress>user1@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType><t:MailboxType>Mailbox</t:MailboxType></t:Mailbox><t:ResponseType>Tentative</t:ResponseType><t:LastResponseTime>2026-10-19T12:00:00Z</t:LastResponseTime></t:Attendee>
+                <t:Attendee><t:Mailbox><t:Name>Борис Иванов</t:Name><t:EmailAddress>boris@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType><t:MailboxType>Mailbox</t:MailboxType></t:Mailbox><t:ResponseType>Accept</t:ResponseType><t:LastResponseTime>2026-10-19T12:30:00Z</t:LastResponseTime></t:Attendee>
+              </t:RequiredAttendees>
+              <t:OptionalAttendees>
+                <t:Attendee><t:Mailbox><t:Name>Вера Смирнова</t:Name><t:EmailAddress>vera@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType><t:MailboxType>Mailbox</t:MailboxType></t:Mailbox><t:ResponseType>NoResponseReceived</t:ResponseType></t:Attendee>
+              </t:OptionalAttendees>
+              <t:AppointmentSequenceNumber>2</t:AppointmentSequenceNumber>
+            </t:CalendarItem>
+          </m:Items>
+        </m:GetItemResponseMessage>
+        <m:GetItemResponseMessage ResponseClass="Error">
+          <m:MessageText>The specified object was not found in the store.</m:MessageText>
+          <m:ResponseCode>ErrorItemNotFound</m:ResponseCode>
+          <m:DescriptiveLinkKey>0</m:DescriptiveLinkKey>
+          <m:Items/>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>
