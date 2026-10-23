@@ -421,13 +421,16 @@ fn ews_mail_folders() {
                 // Боевой Exchange 2013 CU23 отвечает на SyncFolderHierarchy ErrorInternalServerError (баг сервера,
                 // docs/EXCHANGE.md); роли из GetFolder при этом работают.
                 Err(e) if e.code() == Some("ErrorInternalServerError") => {
-                    eprintln!("SyncFolderHierarchy не поддержан этим сервером (docs/EXCHANGE.md); роли есть: {}", roles.len());
-                    return;
+                    // Запасной путь — FindFolder (Deep).
+                    all = c.find_folders(&roles).await.unwrap();
+                    break;
                 }
                 Err(e) => panic!("sync_folders: {}", e.code().unwrap_or("ошибка")),
             }
         }
         assert!(all.iter().any(|f| f.role == Some(MailRole::Inbox)), "«Входящие» в дереве");
+        let (page, _) = c.mail_page(&FolderRef::WellKnown(WellKnown::Inbox), 0, 5).await.unwrap();
+        assert!(page.len() <= 5);
         println!("папок: {}; ролей: {}", all.len(), roles.len());
     });
 }

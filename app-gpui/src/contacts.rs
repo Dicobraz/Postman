@@ -334,6 +334,8 @@ pub(crate) enum ContactsAction {
         from: i64,
         to: i64,
     },
+    /// Поиск в справочнике по строке (`Command::FindPeople`, S7-08): у Exchange справочник — только поиском.
+    FindPeople(String),
     /// Новое письмо с адресом.
     Write(Address),
     /// Вкладка встречи с этим участником.
@@ -398,6 +400,9 @@ impl ContactsView {
         let on_search = cx.subscribe(&search, |this: &mut Self, state, ev: &InputEvent, cx| {
             if let InputEvent::Change = ev {
                 this.query = state.read(cx).value().to_string();
+                if this.live {
+                    cx.emit(ContactsAction::FindPeople(this.query.clone()));
+                }
                 this.refilter(cx);
             }
         });
@@ -846,6 +851,15 @@ impl ContactsView {
             }
             SyncEvent::DirectoryLoaded(people) if self.live => {
                 self.directory = people.iter().cloned().map(Entry::from_principal).collect();
+                sort(&mut self.directory);
+            }
+            // Найденное поиском в справочнике (Exchange) — к уже показанному, без повторов.
+            SyncEvent::PeopleFound { people, .. } if self.live && !people.is_empty() => {
+                for p in people {
+                    if !self.directory.iter().any(|e| e.card.id == p.id) {
+                        self.directory.push(Entry::from_principal(p.clone()));
+                    }
+                }
                 sort(&mut self.directory);
             }
             SyncEvent::Me { address, .. } => {
@@ -1710,6 +1724,10 @@ impl crate::Mailer {
             }
             ContactsAction::Toast(level, text) => {
                 self.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx));
+                return;
+            }
+            ContactsAction::FindPeople(text) => {
+                self.find_people(text, cx);
                 return;
             }
         };

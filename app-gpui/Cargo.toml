@@ -32,6 +32,7 @@ postman-core.workspace = true
 postman-backend-jmap.workspace = true
 postman-backend-imap.workspace = true
 postman-backend-dav.workspace = true
+postman-backend-ews.workspace = true
 postman-search.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -873,7 +873,7 @@ impl Composers {
                 self.book.borrow_mut().add_contacts(list.iter().map(|(n, e)| (n.as_str(), e.as_str())));
             }
             // Сотрудники, переговорные и ресурсы (S4-02).
-            Event::DirectoryLoaded(people) => {
+            Event::DirectoryLoaded(people) | Event::PeopleFound { people, .. } => {
                 let items = people.iter().filter_map(|p| Some((p.display_name(), p.email.as_deref()?)));
                 self.book.borrow_mut().add_directory(items);
             }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <m:FindFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:FindFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:RootFolder TotalItemsInView="5" IncludesLastItemInRange="true">
+            <t:Folders>
+            <t:Folder><t:FolderId Id="AAMkADinbox" ChangeKey="CK"/><t:ParentFolderId Id="AAMkADroot" ChangeKey="PK"/><t:FolderClass>IPF.Note</t:FolderClass><t:DisplayName>Inbox</t:DisplayName><t:TotalCount>42</t:TotalCount><t:ChildFolderCount>0</t:ChildFolderCount><t:UnreadCount>3</t:UnreadCount></t:Folder>
+            <t:CalendarFolder><t:FolderId Id="AAMkADcal" ChangeKey="CK"/><t:ParentFolderId Id="AAMkADroot" ChangeKey="PK"/><t:FolderClass>IPF.Appointment</t:FolderClass><t:DisplayName>Calendar</t:DisplayName><t:TotalCount>1</t:TotalCount><t:ChildFolderCount>0</t:ChildFolderCount><t:UnreadCount>0</t:UnreadCount></t:CalendarFolder>
+            <t:Folder><t:FolderId Id="AAMkADsent" ChangeKey="CK"/><t:ParentFolderId Id="AAMkADroot" ChangeKey="PK"/><t:DisplayName>Sent Items</t:DisplayName><t:TotalCount>10</t:TotalCount><t:ChildFolderCount>0</t:ChildFolderCount><t:UnreadCount>0</t:UnreadCount></t:Folder>
+            <t:ContactsFolder><t:FolderId Id="AAMkADcontacts" ChangeKey="CK"/><t:ParentFolderId Id="AAMkADroot" ChangeKey="PK"/><t:FolderClass>IPF.Contact</t:FolderClass><t:DisplayName>Contacts</t:DisplayName><t:TotalCount>0</t:TotalCount><t:ChildFolderCount>0</t:ChildFolderCount><t:UnreadCount>0</t:UnreadCount></t:ContactsFolder>
+            <t:Folder><t:FolderId Id="AAMkADproj" ChangeKey="CK"/><t:ParentFolderId Id="AAMkADinbox" ChangeKey="PK"/><t:FolderClass>IPF.Note</t:FolderClass><t:DisplayName>Проект</t:DisplayName><t:TotalCount>5</t:TotalCount><t:ChildFolderCount>0</t:ChildFolderCount><t:UnreadCount>0</t:UnreadCount></t:Folder>
+            </t:Folders>
+          </m:RootFolder>
+        </m:FindFolderResponseMessage>
+      </m:ResponseMessages>
+    </m:FindFolderResponse>
+  </s:Body>
+</s:Envelope>

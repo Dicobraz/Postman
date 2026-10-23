@@ -337,6 +337,9 @@ impl Composer {
                 };
                 self.model.set(f, compose_field(&closed, &open));
                 self.refresh_suggestions();
+                // Справочник, который сервер отдаёт только поиском (Exchange, S7-08).
+                let token = current_token(&open).to_owned();
+                let _ = self.mailer.update(cx, |m, cx| m.find_people(&token, cx));
                 self.schedule_autosave(cx);
             }
             InputEvent::Focus => {
@@ -497,6 +500,8 @@ impl Composer {
             Event::ComposeFailed { ticket, error } => {
                 self.model.on_failed(*ticket, error.clone());
             }
+            // Справочник нашёл людей (они уже в книге адресов) — подсказки по набранному заново.
+            Event::PeopleFound { .. } if self.suggest.field.is_some() => self.refresh_suggestions(),
             Event::Me { address, signature } => {
                 // Нетронутое письмо получило подпись Identity — своя по умолчанию (настройки) сильнее.
                 if self.model.set_identity(address.clone(), signature) {

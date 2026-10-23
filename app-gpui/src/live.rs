@@ -24,6 +24,11 @@ use crate::backend::Backend;
 use crate::list::Flagged;
 use crate::signin::{SignIn, Submit};
 
+/// Сколько последних строк поиска в справочнике помнить.
+const PEOPLE_ASKED: usize = 64;
+/// Поиск в справочнике — со скольки символов.
+const PEOPLE_FROM: usize = 3;
+
 /// Найти не больше — как у сервера (`SEARCH_LIMIT` синхронизации).
 const SEARCH_LIMIT: usize = 1000;
 
@@ -42,6 +47,8 @@ pub(crate) struct Live {
     pub(crate) signin: Option<Entity<SignIn>>,
     /// Вход со строки входа: запомнить после первого ответа сервера, при ошибке — вернуть строку входа.
     pending: Option<Account>,
+    /// Строки, по которым уже искали в справочнике (`FindPeople`, S7-08): тот же запрос — не повторять.
+    people_asked: Vec<String>,
     /// Пароль входа со строки входа — в диспетчер учётных данных (`false` — «Не хранить»).
     pending_store: bool,
     index: Index,
@@ -124,6 +131,7 @@ impl Profile {
                 | Event::Settings(_)
                 | Event::ContactsLoaded(_)
                 | Event::DirectoryLoaded(_)
+                | Event::PeopleFound { .. }
                 | Event::ContactSaved { .. }
                 | Event::ContactDeleted { .. }
                 | Event::ContactFailed { .. }
@@ -1053,6 +1061,25 @@ impl Mailer {
             self.live.signin = Some(panel.clone());
         }
         self.sign_in(account, store, window, cx);
+    }
+
+    /// Поиск в справочнике по набранной строке (S7-08): JMAP — `Principal/query`, Exchange — `ResolveNames`; найденное
+    /// придёт `PeopleFound` и ляжет в подсказки адресов и «Контакты» (к уже загруженному справочнику).
+    pub(crate) fn find_people(&mut self, text: &str, cx: &App) {
+        let text = text.trim();
+        if text.chars().count() < PEOPLE_FROM
+            || text.contains('<')
+            || !self.backend.is_live()
+            || !crate::features::get(cx).has(postman_core::model::Feature::Directory)
+            || self.live.people_asked.iter().any(|t| t.eq_ignore_ascii_case(text))
+        {
+            return;
+        }
+        if self.live.people_asked.len() >= PEOPLE_ASKED {
+            self.live.people_asked.remove(0);
+        }
+        self.live.people_asked.push(text.to_owned());
+        let _ = self.backend.send(Command::FindPeople { text: text.to_owned() });
     }
 
     /// Адрес и логин учётной записи, с которой идёт синхронизация (для «Настройки → Аккаунты»).

@@ -16,7 +16,7 @@ signin-step-server = Server
 signin-step-login = Login
 signin-step-password = Password
 signin-url = Server address
-signin-url-hint = For example, mail.example.com — Postman finds the JMAP settings itself (/.well-known/jmap). Mail over IMAP: imaps://imap.example.com (SMTP is the same host or ?smtp=smtp.example.com; calendar and contacts — CalDAV and CardDAV of the same host, if it has them, or &dav=https://dav.example.com).
+signin-url-hint = For example, mail.example.com — Postman finds the JMAP settings itself (/.well-known/jmap). Mail over IMAP: imaps://imap.example.com (SMTP is the same host or ?smtp=smtp.example.com; calendar and contacts — CalDAV and CardDAV of the same host, if it has them, or &dav=https://dav.example.com). Exchange: the mail domain or the EWS address and the login as an e-mail address — Postman finds EWS itself.
 signin-user = Login
 signin-user-hint = Usually your email address.
 signin-password = Password
