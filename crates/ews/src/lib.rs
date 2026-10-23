@@ -6,7 +6,7 @@
 //!
 //! Транспорт — HTTP/1.1 одним соединением TLS на сессию (hyper, тот же, что под reqwest): вход Negotiate (Kerberos
 //! от учётной записи Windows) или NTLM с паролем через SSPI Windows (`sys`), с привязкой к каналу TLS. Basic и
-//! OAuth нет. Сертификат сервера проверяется хранилищем Windows (`rustls-platform-verifier`, как у JMAP и IMAP).
+//! OAuth нет. TLS — SChannel Windows (`native-tls`): шифры и проверка сертификата — как у Outlook (`http.rs`).
 //!
 //! Ответы сервера разбираются здесь (`xml`): без DTD и сущностей, с пределами размера и глубины. Модель Postman —
 //! типы `postman-calendar` (`Event`, `Participant`, `Busy`); перевод в кэш и интерфейс — в `postman_core` (S7-06б).
@@ -107,6 +107,29 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Только TLS 1.3 для новых соединений («Настройки → Безопасность»), как у JMAP и DAV.
+pub fn set_tls13_only(on: bool) {
+    http::set_tls13_only(on);
+}
+
+/// Похоже ли `url` на EWS Exchange — без входа: POST пустого конверта, ответ 401 с Negotiate или NTLM. Так вид
+/// сервера определяется по адресу до входа (S7-06б); адрес EWS по почте — [`discover`] (со входом).
+pub async fn probe(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else { return false };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let mut http = http::Http::new(Auth::Windows);
+    http.timeout = Duration::from_secs(5);
+    match http.post_anonymous(&parsed, soap::envelope("").into_bytes()).await {
+        Ok(reply) => http::Http::offers_sspi(&reply),
+        Err(e) => {
+            tracing::debug!(error = %e, "ews probe");
+            false
+        }
+    }
+}
+
 /// Вход. Только SSPI: Basic и OAuth не поддерживаются (решение владельца, ADR 0003).
 #[derive(Clone)]
 pub enum Auth {
@@ -160,7 +183,9 @@ impl Client {
     /// при первом запросе.
     pub fn new(url: &str, auth: Auth) -> Result<Client> {
         let url = url::Url::parse(url)?;
-        if url.scheme() != "https" || url.host_str().is_none() {
+        // http:// — только подменный сервер тестов (`testkit`); у рабочей сборки — только https.
+        let plain_ok = cfg!(feature = "testkit") && url.scheme() == "http";
+        if (url.scheme() != "https" && !plain_ok) || url.host_str().is_none() {
             return Err(Error::Http("EWS needs an https:// URL".into()));
         }
         Ok(Client { http: http::Http::new(auth), url, version: None })
@@ -169,6 +194,11 @@ impl Client {
     /// Версия сервера — после первого ответа.
     pub fn server_version(&self) -> Option<ServerVersion> {
         self.version
+    }
+
+    /// Схема входа на этом соединении (`Negotiate` или `NTLM`) — после первого ответа, если сервер просил вход.
+    pub fn signed_in_with(&self) -> Option<&'static str> {
+        self.http.signed_in
     }
 
     /// Интервал между запросами (по умолчанию [`MIN_INTERVAL`]).

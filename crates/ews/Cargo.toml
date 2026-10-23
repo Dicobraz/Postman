@@ -5,6 +5,10 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# Подменный сервер EWS в тестах `postman-core`: адрес http:// без TLS. В рабочей сборке выключен.
+testkit = []
+
 [dependencies]
 postman-calendar.workspace = true
 # HTTP/1.1 — тот же hyper, что под reqwest, но одним соединением на сессию: NTLM привязан к TCP, пул reqwest не
@@ -13,8 +17,10 @@ hyper = { version = "1", default-features = false, features = ["client", "http1"
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["net", "time", "rt"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rustls-platform-verifier = "0.7"
+# TLS — SChannel Windows (шифры Exchange на старых Windows Server rustls не умеет, `http.rs`); сертификат — хранилище
+# Windows, привязка к каналу — из сертификата сервера.
+native-tls = "0.2"
+tokio-native-tls = "0.3"
 # Ответы SOAP и Autodiscover: без DTD и сущностей (ADR 0003); та же версия, что уже в сборке.
 quick-xml = { version = "0.41", default-features = false }
 base64 = "0.22"
@@ -34,6 +40,10 @@ features = ["Win32_Foundation", "Win32_Security_Authentication_Identity", "Win32
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "net"] }
 futures = "0.3"
+# Разведка боевого Exchange (`tests/probe.rs`): IMAP4 и вход SMTP submission — без отправки писем.
+postman-imap.workspace = true
+mail-send = { version = "0.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 
 [lints]
 workspace = true
