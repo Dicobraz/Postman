@@ -166,3 +166,87 @@ fn imap_draft_replace() {
     assert_eq!(same.len(), 1, "прежняя версия черновика осталась");
     live.commands.send(Command::Destroy(second)).unwrap();
 }
+
+/// «Отменить» (S7-04в): письмо держит синхронизация; отмена в окне — письмо не уходит; без отмены — уходит по сроку.
+#[test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+fn imap_undo_send() {
+    let live = Live::start();
+    let letter = |subject: &str| Draft {
+        from: Address::new("", &live.me),
+        to: vec![Address::new("", &live.me)],
+        subject: subject.to_owned(),
+        markdown: "Окно «Отменить».".into(),
+        ..Default::default()
+    };
+    let kept = format!("postman imap undo kept {}", stamp());
+    live.commands.send(Command::Send { draft: Box::new(letter(&kept)), replace: None, ticket: 11, release: Release::After(3) }).unwrap();
+    let Event::Sent { scheduled: Some(s), .. } = live.wait("Sent 11", |e| matches!(e, Event::Sent { ticket: 11, .. })) else {
+        panic!("письмо ушло сразу, без окна «Отменить»")
+    };
+    live.commands.send(Command::Unsend { scheduled: s, ticket: 12 }).unwrap();
+    live.wait("Unsent", |e| matches!(e, Event::Unsent { ticket: 12, .. }));
+    let gone = format!("postman imap undo sent {}", stamp());
+    live.commands.send(Command::Send { draft: Box::new(letter(&gone)), replace: None, ticket: 13, release: Release::After(1) }).unwrap();
+    let arrived = live.letter("inbox", &gone);
+    std::thread::sleep(Duration::from_secs(3));
+    live.commands.send(Command::Search { query: kept.clone(), mailbox: None, ticket: 14 }).unwrap();
+    let Event::SearchResults { ids, .. } = live.wait("SearchResults", |e| matches!(e, Event::SearchResults { ticket: 14, .. })) else { unreachable!() };
+    assert!(ids.is_empty(), "отменённое письмо ушло");
+    let sent = live.letter("sent", &gone);
+    live.commands.send(Command::Destroy(arrived.id)).unwrap();
+    live.commands.send(Command::Destroy(sent.id)).unwrap();
+}
+
+/// Беседа по `References` и фильтры «Все папки» на сервере (S7-04в): ответ — в цепочке письма, `Thread` — оба,
+/// `Query` по теме — оба, `Counts` — число.
+#[test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+fn imap_thread_and_filters() {
+    use postman_core::model::Filter;
+    let live = Live::start();
+    let subject = format!("postman imap thread {}", stamp());
+    let draft = Draft {
+        from: Address::new("", &live.me),
+        to: vec![Address::new("", &live.me)],
+        subject: subject.clone(),
+        markdown: "Начало беседы.".into(),
+        ..Default::default()
+    };
+    live.commands.send(Command::Send { draft: Box::new(draft.clone()), replace: None, ticket: 21, release: Release::Now }).unwrap();
+    let first = live.letter("inbox", &subject);
+    live.commands.send(Command::Body(first.id.clone())).unwrap();
+    live.wait("BodyReady", |e| matches!(e, Event::BodyReady(k) if *k == first.id));
+    let id = live.cache.body(&first.id).unwrap().unwrap().message_id.expect("Message-ID");
+    let re = format!("Re: {subject}");
+    let reply = Draft { subject: re.clone(), in_reply_to: Some(id.clone()), references: vec![id], markdown: "Ответ.".into(), ..draft };
+    live.commands.send(Command::Send { draft: Box::new(reply), replace: None, ticket: 22, release: Release::Now }).unwrap();
+    let second = live.letter("inbox", &re);
+    assert_eq!(second.thread_id, first.thread_id, "ответ — не в цепочке письма");
+    live.commands.send(Command::Thread(first.thread_id.clone())).unwrap();
+    let Event::ThreadReady { ids, .. } = live.wait("ThreadReady", |e| matches!(e, Event::ThreadReady { .. })) else { unreachable!() };
+    assert!(ids.contains(&first.id) && ids.contains(&second.id), "{ids:?}");
+
+    let filter = Filter::Subject(subject.clone());
+    live.commands.send(Command::Query { filter: filter.clone(), mailbox: Some(live.folder("inbox")), ticket: 23 }).unwrap();
+    let Event::SearchResults { ids, .. } = live.wait("SearchResults", |e| matches!(e, Event::SearchResults { ticket: 23, .. })) else { unreachable!() };
+    assert!(ids.contains(&first.id) && ids.contains(&second.id), "{ids:?}");
+    live.commands.send(Command::Counts { filters: vec![filter, Filter::Subject(format!("{subject} нет такого"))], mailbox: Some(live.folder("inbox")), ticket: 24 }).unwrap();
+    let Event::Counts { counts, .. } = live.wait("Counts", |e| matches!(e, Event::Counts { ticket: 24, .. })) else { unreachable!() };
+    assert_eq!(counts, Some(vec![2, 0]));
+
+    let sent: Vec<EmailRow> = [subject.as_str(), re.as_str()].iter().map(|s| live.letter("sent", s)).collect();
+    for k in [first.id, second.id].into_iter().chain(sent.into_iter().map(|r| r.id)) {
+        live.commands.send(Command::Destroy(k)).unwrap();
+    }
+}
+
+/// Вид сервера по адресу (S7-04в): у стенда есть JMAP — адрес остаётся адресом JMAP; адрес IMAP — как есть.
+#[test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+fn server_kind_by_address() {
+    let jmap = env("POSTMAN_STAND_URL");
+    assert_eq!(postman_core::backend::detect_blocking(&jmap), jmap);
+    let imap = format!("imaps://{}", env("POSTMAN_STAND_IMAP"));
+    assert_eq!(postman_core::backend::detect_blocking(&imap), imap);
+}

@@ -78,7 +78,7 @@ impl Session {
 
     /// URL сессии — на тот же адрес, по которому получена сессия: относительные дополняем, у абсолютных
     /// заменяем начало (схема, хост, порт). Сервер за прокси или туннелем объявляет свой внутренний адрес
-    /// (Stalwart: `http://10.70.2.40:8080/jmap/`), а пароль и токен не должны уходить на другой хост.
+    /// (Stalwart: `http://192.0.2.10:8080/jmap/`), а пароль и токен не должны уходить на другой хост.
     /// Шаблоны (`{accountId}` и т.п.) не трогаем: склеиваем строкой.
     pub(crate) fn resolve_urls(&mut self, base: &url::Url) -> Result<(), url::ParseError> {
         let origin = base.origin().ascii_serialization();
@@ -139,9 +139,9 @@ mod tests {
     fn urls_follow_the_connection_origin() {
         let o = "http://localhost:18080";
         assert_eq!(rebase("/jmap/", o), "http://localhost:18080/jmap/");
-        assert_eq!(rebase("http://10.70.2.40:8080/jmap/", o), "http://localhost:18080/jmap/");
+        assert_eq!(rebase("http://192.0.2.10:8080/jmap/", o), "http://localhost:18080/jmap/");
         assert_eq!(
-            rebase("http://10.70.2.40:8080/jmap/download/{accountId}/{blobId}/{name}?accept={type}", o),
+            rebase("http://192.0.2.10:8080/jmap/download/{accountId}/{blobId}/{name}?accept={type}", o),
             "http://localhost:18080/jmap/download/{accountId}/{blobId}/{name}?accept={type}"
         );
         assert_eq!(rebase("https://mail.example", o), "http://localhost:18080/");

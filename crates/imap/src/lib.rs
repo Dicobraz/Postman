@@ -116,6 +116,8 @@ pub struct Header {
     pub from_addr: String,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
+    /// `References` (RFC 5322 §3.6.4): первый — начало цепочки.
+    pub references: Vec<String>,
     /// В структуре письма есть вложение (часть `attachment` или не текст верхнего уровня).
     pub has_attachment: bool,
     pub modseq: Option<u64>,
@@ -334,9 +336,9 @@ impl Session {
     /// Заголовки писем выбранной папки по набору UID (`1:*`, `5,7,9`, `100:*`).
     pub async fn headers(&mut self, uids: &str) -> Result<Vec<Header>> {
         let query = if self.condstore() {
-            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE MODSEQ)"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE MODSEQ BODY.PEEK[HEADER.FIELDS (REFERENCES)])"
         } else {
-            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE)"
+            "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (REFERENCES)])"
         };
         let fetched: Vec<async_imap::types::Fetch> =
             timed(async { Ok(self.inner.uid_fetch(uids, query).await?.try_collect().await?) }).await?;
@@ -495,6 +497,21 @@ fn text(b: &Option<std::borrow::Cow<'_, [u8]>>) -> String {
     b.as_deref().map(|b| names::decode_header(&String::from_utf8_lossy(b))).unwrap_or_default()
 }
 
+/// Идентификаторы из заголовка `References` (с переносами строк): `<a@b> <c@d>` → `["<a@b>", "<c@d>"]`.
+pub fn references(header: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(header);
+    let value = text.split_once(':').map_or("", |(_, v)| v);
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start..].find('>') else { break };
+        let id: String = rest[start..=start + len].chars().filter(|c| !c.is_whitespace()).collect();
+        out.push(id);
+        rest = &rest[start + len + 1..];
+    }
+    out
+}
+
 fn header(f: &async_imap::types::Fetch) -> Option<Header> {
     let uid = f.uid?;
     let env = f.envelope();
@@ -516,6 +533,7 @@ fn header(f: &async_imap::types::Fetch) -> Option<Header> {
         from_addr: addr,
         message_id: env.and_then(|e| e.message_id.as_deref()).map(|b| String::from_utf8_lossy(b).into_owned()),
         in_reply_to: env.and_then(|e| e.in_reply_to.as_deref()).map(|b| String::from_utf8_lossy(b).into_owned()),
+        references: f.header().map(references).unwrap_or_default(),
         has_attachment: f.bodystructure().is_some_and(names::has_attachment),
         modseq: f.modseq,
     })
@@ -536,6 +554,13 @@ mod tests {
     fn quoted_strings_escape() {
         assert_eq!(quote(r#"отчёт "Q3" \ итог"#), r#""отчёт \"Q3\" \\ итог""#);
         assert_eq!(quote("a\r\nb"), "\"a  b\"");
+    }
+
+    #[test]
+    fn references_header() {
+        let h = b"References: <a@x.test>\r\n <b@x.test>  <c@\r\n x.test>\r\n\r\n";
+        assert_eq!(super::references(h), ["<a@x.test>", "<b@x.test>", "<c@x.test>"]);
+        assert!(super::references(b"\r\n").is_empty());
     }
 
     #[test]
