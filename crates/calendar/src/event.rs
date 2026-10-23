@@ -112,7 +112,10 @@ struct Raw {
     participants: HashMap<String, Value>,
     #[serde(default)]
     locations: HashMap<String, Value>,
+    /// RFC 8984 (JMAP): массив правил.
     recurrence_rules: Option<Value>,
+    /// JSCalendar 2.0 (воркер, `calcard`, — приглашения из писем): одно правило.
+    recurrence_rule: Option<Value>,
     recurrence_id: Option<String>,
     #[serde(default)]
     keywords: HashMap<String, bool>,
@@ -167,7 +170,7 @@ impl Event {
                 _ => FreeBusy::Busy,
             },
             participants,
-            recurring: raw.recurrence_rules.is_some_and(|r| !r.is_null()) || raw.recurrence_id.is_some(),
+            recurring: [raw.recurrence_rules, raw.recurrence_rule].into_iter().flatten().any(|r| !r.is_null()) || raw.recurrence_id.is_some(),
             keywords: {
                 let mut k: Vec<String> =
                     raw.keywords.into_iter().chain(raw.categories).filter(|(_, on)| *on).map(|(k, _)| k).collect();
@@ -287,6 +290,23 @@ mod tests {
         assert_eq!(maria.status, Partstat::Tentative);
         assert!(e.keywords.is_empty());
         assert_eq!(e.sequence, 0);
+    }
+
+    /// Повтор — и массивом RFC 8984 (`recurrenceRules`, JMAP), и одним правилом JSCalendar 2.0 (`recurrenceRule`,
+    /// воркер — приглашения из писем); экземпляр (`recurrenceId`) — тоже повтор.
+    #[test]
+    fn recurrence_in_both_forms() {
+        let base = || json!({ "start": "2026-10-20T10:00:00", "duration": "PT1H" });
+        let with = |k: &str, v: serde_json::Value| {
+            let mut e = base();
+            e[k] = v;
+            Event::from_jmap(&e, &TimeZone::UTC).unwrap().recurring
+        };
+        assert!(!Event::from_jmap(&base(), &TimeZone::UTC).unwrap().recurring);
+        assert!(with("recurrenceRules", json!([{ "frequency": "weekly" }])));
+        assert!(with("recurrenceRule", json!({ "frequency": "daily", "interval": 7, "count": 2 })));
+        assert!(with("recurrenceId", json!("2026-10-27T10:00:00")));
+        assert!(!with("recurrenceRule", serde_json::Value::Null));
     }
 
     /// Метки события — `keywords` и `categories` вместе (выключенные — нет), версия — `sequence`.

@@ -988,6 +988,25 @@ impl Client {
         Ok(out)
     }
 
+    /// Серия экземпляра или исключения (`RecurringMasterItemId`): ответ на приглашение серии и правка серии — по ней.
+    /// Не серия или удалена — `None`.
+    pub async fn master_of(&mut self, occurrence: &ItemId) -> Result<Option<CalendarItem>> {
+        let id = match occurrence.change_key.as_deref() {
+            Some(ck) => format!(r#"<t:RecurringMasterItemId OccurrenceId="{}" ChangeKey="{}"/>"#, esc(&occurrence.id), esc(ck)),
+            None => format!(r#"<t:RecurringMasterItemId OccurrenceId="{}"/>"#, esc(&occurrence.id)),
+        };
+        let body = format!(
+            r#"<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties>{}</t:AdditionalProperties></m:ItemShape><m:ItemIds>{id}</m:ItemIds></m:GetItem>"#,
+            field_uris(PROPS)
+        );
+        match parse::get_items(&self.call("GetItem", &body).await?) {
+            Ok(items) => Ok(items.into_iter().find(|i| i.kind == ItemKind::RecurringMaster)),
+            // Не экземпляр серии — у объекта нет серии.
+            Err(e) if matches!(e.code(), Some("ErrorItemCorrupt" | "ErrorInvalidOperation" | "ErrorCalendarOccurrenceIsDeletedFromRecurrence")) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Создать встречу (в `folder` или основном календаре); участникам — приглашения по `notify`.
     pub async fn create(&mut self, folder: Option<&FolderRef>, item: &NewItem, notify: Notify) -> Result<ItemId> {
         let folder = folder.map(|f| format!("<m:SavedItemFolderId>{}</m:SavedItemFolderId>", f.xml())).unwrap_or_default();

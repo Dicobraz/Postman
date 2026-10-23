@@ -270,7 +270,9 @@ fn ews_recurring_series() {
             let id = c.create(None, &item, Notify::None).await.unwrap();
             let master = c.get_items(std::slice::from_ref(&id)).await.unwrap().pop().unwrap();
             assert_eq!(master.kind, ItemKind::RecurringMaster);
-            assert_eq!(master.recurrence.as_ref().map(|r| r.rrule()), Some("FREQ=WEEKLY;INTERVAL=1;BYDAY=MO;COUNT=3".into()));
+            // Первый день недели сервер ставит сам (боевой 2013 — воскресенье, `WKST=SU`).
+            let rule = master.recurrence.as_ref().map(|r| r.rrule()).unwrap_or_default();
+            assert!(rule.starts_with("FREQ=WEEKLY;INTERVAL=1;BYDAY=MO") && rule.ends_with(";COUNT=3"), "{rule}");
             let window = Span::new(start - 60, start + 21 * 86_400);
             let (view, _) = c.calendar_view(&FolderRef::WellKnown(WellKnown::Calendar), window, 20).await.unwrap();
             let occ: Vec<_> = view.iter().filter(|v| v.kind == ItemKind::Occurrence).collect();
@@ -378,6 +380,29 @@ fn ews_resolve_names() {
         assert!(people.iter().any(|p| p.email.eq_ignore_ascii_case(&a.email)), "своя учётка в GAL");
         assert!(people.len() <= 10);
         println!("справочник: найдено {}", people.len());
+    });
+}
+
+/// Справочник по `FindPeople` (GAL, Exchange 2013+; только чтение, до 10): своя учётка по началу адреса; печать —
+/// только счётчики, у кого есть должность, отдел, телефон.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn ews_find_people() {
+    rt().block_on(async {
+        let a = first();
+        let start: String = a.email.split('@').next().unwrap_or("").chars().take(6).collect();
+        let people = client(&a).await.find_people(&start, 10).await.unwrap_or_else(|e| panic!("FindPeople: {}", e.code().unwrap_or("ошибка")));
+        let count = |f: fn(&postman_ews::Person) -> bool| people.iter().filter(|p| f(p)).count();
+        println!(
+            "FindPeople: найдено {}, своя учётка {}, с должностью {}, с отделом {}, с телефоном {}",
+            people.len(),
+            people.iter().any(|p| p.email.eq_ignore_ascii_case(&a.email)),
+            count(|p| !p.title.is_empty()),
+            count(|p| !p.department.is_empty()),
+            count(|p| !p.phone.is_empty())
+        );
+        assert!(people.iter().any(|p| p.email.eq_ignore_ascii_case(&a.email)), "своя учётка в GAL");
+        assert!(people.len() <= 10);
     });
 }
 

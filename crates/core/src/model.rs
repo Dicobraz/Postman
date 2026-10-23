@@ -121,7 +121,11 @@ impl ContactCard {
 }
 
 /// Запись справочника: человек, группа, ресурс.
-#[derive(Debug, Clone)]
+///
+/// Должность, отдел и телефон (S7-08) — функция ядра «карточка справочника», а не деталь протокола: их дают те пути,
+/// у кого они есть (EWS — `FindPeople`/`ResolveNames` из GAL); у JMAP (`Principal`, RFC 9670) таких свойств нет — пусто,
+/// у CardDAV справочника нет (личные карточки — [`ContactCard`] со своими должностью, организацией и телефонами).
+#[derive(Debug, Clone, Default)]
 pub struct Principal {
     pub id: String,
     /// У Stalwart — логин (адрес), а не ФИО (`docs/STALWART.md` п. 9); показывать — [`Principal::display_name`].
@@ -131,6 +135,12 @@ pub struct Principal {
     pub email: Option<String>,
     /// individual, group, resource, location…
     pub kind: String,
+    /// Должность; нет — пусто.
+    pub title: String,
+    /// Отдел (подразделение); нет — пусто.
+    pub department: String,
+    /// Рабочий телефон, иначе мобильный; нет — пусто.
+    pub phone: String,
 }
 
 impl Principal {

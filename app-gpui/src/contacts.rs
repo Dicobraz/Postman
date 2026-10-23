@@ -108,10 +108,18 @@ impl Entry {
         Self { card, kind, keys, digits }
     }
 
-    /// Имя — ФИО из `description`, без него — `name` (у Stalwart это логин).
+    /// Имя — ФИО из `description`, без него — `name` (у Stalwart это логин). Должность, отдел и телефон (S7-08) — в
+    /// поля карточки: отдел — строкой «Организация» (подразделение там и у личных карточек: «Организация, отдел»).
     fn from_principal(p: Principal) -> Self {
         let name = p.display_name().to_owned();
-        let card = ContactCard { id: p.id, name, emails: p.email.into_iter().collect(), ..Default::default() };
+        let card = ContactCard {
+            id: p.id,
+            name,
+            emails: p.email.into_iter().collect(),
+            phones: Some(p.phone.trim().to_owned()).filter(|t| !t.is_empty()).into_iter().collect(),
+            organization: p.department.trim().to_owned(),
+            title: p.title.trim().to_owned(),
+        };
         Self::new(card, Kind::of_principal(&p.kind))
     }
 
@@ -1762,13 +1770,16 @@ fn demo_directory() -> Vec<Entry> {
     let mut v: Vec<Entry> = postman_demo::contacts::directory()
         .iter()
         .enumerate()
-        .map(|(i, &(name, email, kind))| {
+        .map(|(i, p)| {
             Entry::from_principal(Principal {
                 id: format!("demo-principal-{i}"),
-                name: name.into(),
+                name: p.name.into(),
                 description: None,
-                email: Some(email.into()),
-                kind: kind.into(),
+                email: Some(p.email.into()),
+                kind: p.kind.into(),
+                title: p.title.into(),
+                department: p.department.into(),
+                phone: p.phone.into(),
             })
         })
         .collect();
@@ -1780,7 +1791,7 @@ fn demo_directory() -> Vec<Entry> {
 pub(crate) fn add_demo(book: &mut AddressBook) {
     let mine = postman_demo::contacts::mine();
     book.add_contacts(mine.iter().flat_map(|c| c.emails.iter().map(|e| (c.name, *e))));
-    book.add_directory(postman_demo::contacts::directory().iter().map(|&(n, e, _)| (n, e)));
+    book.add_directory(postman_demo::contacts::directory().iter().map(|p| (p.name, p.email)));
 }
 
 #[cfg(test)]

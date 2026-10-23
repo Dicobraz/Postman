@@ -33,11 +33,13 @@ IMAP4 и приём SMTP от клиентов выключены. Плагин 
 | Перенос, удаление | `MoveItem`, `DeleteItem` | у перенесённого письма — новый id |
 | Отправка, черновик | `CreateItem` из MIME: `SendAndSaveCopy`, `SaveOnly` | копию в «Отправленные» кладёт сервер; «Отменить» держит синхронизация; «Отправить позже» нет |
 | Поиск, фильтры | `FindItem` с `QueryString` (AQS) | по папкам; даты и размер в AQS — [проверить] |
-| Неделя календаря | `FindItem` + `CalendarView`, `GetItem` | повторы разворачивает сервер |
-| Новая встреча | `CreateItem`, `SendToAllAndSaveCopy` | пояс — Windows id (`postman_ews::tz`) |
-| Ответ на приглашение | `AcceptItem` / `TentativelyAcceptItem` / `DeclineItem` | по встрече с UID приглашения; нет её — письмом iMIP |
+| Неделя календаря | `FindItem` + `CalendarView`, `GetItem` | повторы разворачивает сервер: экземпляры и изменённые — своими событиями с общим UID, удалённых нет; та же версия (`ChangeKey`) — без `GetItem`; отменённые не показываются |
+| Новая встреча | `CreateItem`, `SendToAllAndSaveCopy` | пояс — Windows id (`postman_ews::tz`, CLDR `windowsZones` целиком; сервер пояс не знает — UTC); UID задаёт сервер |
+| Перенос, отмена | `UpdateItem`, `DeleteItem` с рассылкой (`SendToAllAndSaveCopy`) | у плагина (`EwsAreas::reschedule`, `cancel`); в интерфейсе — нет: в макете нет правки и отмены встречи (S7-07, вопрос владельцу) |
+| Ответ на приглашение | `AcceptItem` / `TentativelyAcceptItem` / `DeclineItem` | из карточки письма и из календаря — по встрече с UID приглашения (серия — по серии, `RecurringMasterItemId`; приглашение на один экземпляр — ему); нет её — письмом iMIP |
+| Письма встреч | `MeetingRequest`, `MeetingResponse`, `MeetingCancellation` — как письма | в списке, MIME с `text/calendar` — карточка приглашения |
 | «Помощник планирования» | `GetUserAvailability` | ошибка по адресу — «нет данных», не «свободен» |
-| Справочник | `ResolveNames` (GAL) | `Command::FindPeople` → `PeopleFound`; GAL целиком EWS не отдаёт |
+| Справочник | `FindPeople` по GAL (папка `directory`), отказал — `ResolveNames` | `Command::FindPeople` → `PeopleFound`: имя, адрес, должность, отдел (телефон — только у `ResolveNames`); GAL целиком EWS не отдаёт |
 
 Ограничения сервера: не чаще 5 запросов в секунду; `ErrorServerBusy` — пауза `BackOffMilliseconds` и до 2 повторов.
 
@@ -53,6 +55,11 @@ IMAP4 и приём SMTP от клиентов выключены. Плагин 
 | Разведка (только чтение) | `crates/ews/tests/probe.rs` | `cargo test -p postman-ews --test probe -- --ignored --nocapture` |
 | Крейт против боевого (`#[ignore]`) | `crates/ews/tests/stand.rs` | `cargo test -p postman-ews --test stand -- --ignored --test-threads=1` |
 | Учётка через плагин (`#[ignore]`) | `crates/backend-ews/tests/stand_exchange.rs` | `cargo test -p postman-backend-ews --test stand_exchange -- --ignored --test-threads=1` |
+
+Последний прогон на боевом (2026-10-23, S7-07, S7-08): `postman-backend-ews` `stand_exchange` 7 из 7 (`sign_in`, `exchange_mail_round_trip`,
+`exchange_calendar_and_people`, `exchange_meeting_cycle`, `exchange_series_invite`, `exchange_recurring_in_week`,
+`exchange_directory_fields`); `postman-ews` `stand`: `sign_in`, `ews_event_round_trip`, `ews_recurring_series`, `ews_meeting_cycle`,
+`ews_availability`, `ews_resolve_names`, `ews_find_people`.
 | Руками | `docs/manual-tests/S7-06.md` | владелец |
 
 Окружение — `docs/specs/S7.md` «Проверка на боевом Exchange» (`POSTMAN_EWS_*`); значения — только у владельца, вне
@@ -72,5 +79,9 @@ IMAP4 и приём SMTP от клиентов выключены. Плагин 
 | 8 | `SyncFolderHierarchy` | `ErrorInternalServerError` (и под `msgfolderroot`) → дерево `FindFolder` (Deep) |
 | 9 | `DateTimeReceived` | сразу после отправки себе бывает пуст → дата из `DateTimeSent`/`DateTimeCreated` |
 | 10 | `GetUserAvailability` с одинаковыми `StandardTime`/`DaylightTime` | падает внутри (`-2146233088`) → переходы UTC — в разные месяцы |
-| 11 | UID встречи EWS = UID iCalendar приглашения из письма (ответ из карточки письма) | [проверить] руками, `docs/manual-tests/S7-06.md` п. 4 |
-| 12 | Адреса участников — SMTP или `EX`; у участника после отмены — `IsCancelled` | [проверить] (`ews_meeting_cycle` крейта) |
+| 11 | UID встречи EWS = UID iCalendar приглашения из письма (ответ из карточки письма) | да: UID `text/calendar` письма = UID встречи у участника и у организатора (`exchange_meeting_cycle`, 2026-10-23) |
+| 12 | Адреса участников — SMTP или `EX`; у участника после отмены — `IsCancelled` | SMTP (у тестовых учёток); после отмены у участника — `IsCancelled`, Postman её не показывает (`ews_meeting_cycle`, `exchange_meeting_cycle`, 2026-10-23) |
+| 13 | Письма встреч в `GetItem` — элементы `MeetingRequest`, `MeetingCancellation`…, не `Message` | до S7-07 их не было в списке писем (приглашение не доходило до карточки) → разбор берёт все письма встреч; «прочитано» — тем же `UpdateItem` с `<t:Message>` (проходит) |
+| 14 | `FindPeople` по GAL (2013 CU23) | работает; свойства `Title`, `Departments`, `CompanyName`, `OfficeLocations`, `PersonaType` — да; `Department`, `Titles`, `BusinessPhoneNumbers`, `MobilePhones`, `PhoneNumber` — `ErrorInvalidArgument` на весь запрос, `PhoneNumbers` — `ErrorInternalServerError` → телефона из `FindPeople` нет. Должность и отдел у коллег — [проверить] руками (у тестовых учёток пусто) |
+| 15 | Серия без `FirstDayOfWeek` | сервер ставит воскресенье (`WKST=SU` в правиле) |
+| 16 | Ответ на приглашение серии по экземпляру | отвечает только экземпляру → ответ — по серии (`RecurringMasterItemId`), `exchange_series_invite` |

@@ -983,7 +983,7 @@ impl Ews {
     async fn respond_invite(&mut self, inv: postman_calendar::Invitation, status: postman_calendar::Partstat, in_reply_to: Option<String>, notify: &impl Fn(Event)) {
         let uid = inv.event.uid.clone();
         if let Some(a) = self.areas.as_mut() {
-            match a.answer(&uid, inv.event.span, status).await {
+            match a.answer(&inv, status).await {
                 Ok(true) => {
                     notify(Event::InviteAnswered { uid, status, delivery: postman_core::invite::Delivery::Server });
                     notify(Event::CalendarChanged);
