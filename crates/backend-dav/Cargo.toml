@@ -1,0 +1,22 @@
+[package]
+name = "postman-backend-dav"
+description = "Путь CalDAV и CardDAV — плагин областей ядра (ADR 0004): календарь, задачи, занятость, контакты рядом с IMAP"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-core.workspace = true
+postman-dav.workspace = true
+postman-cache.workspace = true
+postman-calendar.workspace = true
+postman-compose.workspace = true
+postman-worker.workspace = true
+serde_json.workspace = true
+jiff = "0.2"
+percent-encoding = "2"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
+
+[lints]
+workspace = true

@@ -20,7 +20,7 @@ Windows. Приложение семейства «Pets»: общий архит
 
 - Сначала исследуем, потом планируем, потом делаем. Новое — концепт в чате, файлы — после согласования.
 - Вопросы владельцу — пакетом «Решения для владельца» (№, вопрос, рекомендация).
-- Сервер — стенд Stalwart (`docs/STALWART.md`): новое поведение сервера сначала тестом в `crates/core/tests/stand.rs`,
+- Сервер — стенд Stalwart (`docs/STALWART.md`): новое поведение сервера сначала тестом в `crates/backend-jmap/tests/stand.rs`,
   находки — туда же в документ; чего сервер не умеет или делает неверно — ещё и строкой в `docs/STALWART-GAPS.md`
   (список для отчётов и настройки). Непроверенное на стенде — пометка [проверить].
 - Stalwart принимает отчёты только через портал support.stalw.art (не GitHub); его CONTRIBUTING запрещает код от ИИ —
@@ -42,14 +42,16 @@ Windows. Приложение семейства «Pets»: общий архит
 | Слой | Крейты | Правило |
 |---|---|---|
 | L0 | `ir` | HTML → безопасный IR, без I/O |
-| L1 | `jmap`, `cache` (redb), `compose`, `calendar`, `search` (tantivy), `worker`, `smime` (CMS и проверка подписи S/MIME, без I/O) | без UI-зависимостей |
-| L2 | `core` (синхронизация, рендер через воркер, адресная книга, приглашения, замеры) | без UI-зависимостей |
-| L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe` | только здесь gpui, winit, rfd (диалоги) |
+| L1 | `jmap`, `imap`, `dav`, `ews` (протоколы), `cache` (redb), `compose`, `calendar`, `search` (tantivy), `worker`, `smime` (CMS и проверка подписи S/MIME, без I/O) | без UI-зависимостей |
+| L2 | `core` (модель, договор путей к серверам и общий цикл синхронизации, рендер через воркер, адресная книга, приглашения, замеры) | без UI-зависимостей; **без протоколов** (ADR 0004) |
+| L2b | плагины путей: `backend-jmap`, `backend-imap`, `backend-dav` (ADR 0004) | `core` и только свой протокол L1; друг от друга не зависят |
+| L3 | `app-gpui` — интерфейс, исполняемый файл `postman.exe`; реестр плагинов — `app-gpui/src/plugins.rs` | только здесь gpui, winit, rfd (диалоги); протоколы — только через плагины |
 | — | `demo` — синтетический ящик для демо и тестов | без UI; от него зависит только L3 |
 
-Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу. Интерфейс не знает протоколов серверов
-(ADR 0003): типы — из `postman_core::model`, настройки соединения — `postman_core::backend`; протокольный крейт — в
-`PROTOCOL_CRATES` того же теста.
+Слои проверяет тест `crates/core/tests/layers.rs`; новый крейт — сначала в его таблицу. Ядро функционально, протоколы —
+плагины (ADR 0004): договор — `postman_core::backend` (`MailPlugin`, `AreaPlugin`, `Registry`), типы — `postman_core::model`;
+новый протокол — крейт L1 в `PROTOCOL_CRATES`, плагин `backend-<протокол>` в `PLUGINS` того же теста и строка в
+`app-gpui/src/plugins.rs`; `core` не меняется.
 
 - `worker` — отдельный процесс-песочница для разбора чужих данных (HTML, картинки, .ics, просмотр вложений: PDF, ZIP, макросы Office, подпись S/MIME — `postman-smime`).
   Windows: AppContainer + Job Object + mitigation policies, запуск без консоли (`DETACHED_PROCESS`).
@@ -104,7 +106,7 @@ stderr и код 1. Только Windows.
 Диск (H-01): каталог сборки и скрипты — без зашитого `target/`; тесты — только `tempfile` с префиксом `postman-`;
 данные бенча — `%LOCALAPPDATA%\Pets\testdata\postman` (рабочая копия удаляется, `--keep` — оставить); чистка —
 `pets/scripts/stand/clean.ps1 -Repos . -Testdata` (без `-Apply` только показывает).
-Стенд Stalwart: `cargo test -p postman-core --test stand -- --ignored` с `POSTMAN_STAND_URL` (напрямую по HTTPS — ещё
+Стенд Stalwart: `cargo test -p postman-backend-jmap --test stand -- --ignored` с `POSTMAN_STAND_URL` (напрямую по HTTPS — ещё
 `POSTMAN_INSECURE_TLS=1`, самоподписанный сертификат стенда), `POSTMAN_STAND_USER1..3`,
 `POSTMAN_STAND_PASSWORD1..3` в окружении (туннель и пароли — у владельца, `docs/STALWART.md`).
 Диагностика песочницы (только отладочная сборка):

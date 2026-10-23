@@ -7,7 +7,7 @@
 //! задевается, `docs/STALWART.md` п. 16) и в конце удаляется. Без стенда тесты пропускаются (`#[ignore]`).
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER3`, `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую),
-//! `cargo test -p postman-core --test stand_labels -- --ignored`.
+//! `cargo test -p postman-backend-jmap --test stand_labels -- --ignored`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use postman_cache::Cache;
 use postman_core::labels::{self, Keyword};
-use postman_core::sync::{self, Account, Command, Event, Status};
+use postman_core::sync::{Account, Command, Event, Status};
 use postman_jmap::{Auth, CORE, Client, Filter, Invocation, MAIL};
 use serde_json::{Value, json};
 
@@ -164,7 +164,7 @@ async fn categories_through_sync() {
 
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache.clone(), None, tx, || {});
+    let commands = postman_backend_jmap::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: postman_backend_jmap::convert::FromJmap::from_jmap(auth()) }, cache.clone(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| {
         matches!(e, Event::Status(Status::Synced)).then_some(())
     });

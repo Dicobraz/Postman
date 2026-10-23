@@ -307,10 +307,10 @@ impl Query {
             and.push(Filter::HasKeyword(FLAGGED.into()));
         }
         if let Some(t) = env.after {
-            and.push(Filter::After(postman_jmap::unix_to_utc(t)));
+            and.push(Filter::After(crate::schedule::utc(t)));
         }
         if let Some(t) = env.before {
-            and.push(Filter::Before(postman_jmap::unix_to_utc(t)));
+            and.push(Filter::Before(crate::schedule::utc(t)));
         }
         and.extend(env.categories.iter().map(|k| Filter::HasKeyword(k.clone())));
         if let Some(n) = self.larger {
@@ -690,8 +690,8 @@ mod tests {
         assert!(q.has_conditions());
         assert_eq!(Query::parse("больше:2мб").larger, Some(2 * MB));
         let env = q.env(&now(), |_| None, &[]);
-        let json = postman_jmap::Filter::from(&q.server_filter(&env).unwrap()).to_json();
-        assert!(json["conditions"].as_array().unwrap().iter().any(|c| c["minSize"] == 5 * MB), "{json}");
+        let f = q.server_filter(&env).unwrap();
+        assert!(matches!(&f, Filter::And(v) if v.contains(&Filter::MinSize(5 * MB))), "{f:?}");
         let mut big = row("Анна", "Отчёт");
         big.has_attachment = true;
         big.size = 6 * MB;

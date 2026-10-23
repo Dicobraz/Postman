@@ -7,7 +7,7 @@
 //! Письма создаются прямо во «Входящих» user1 (`Email/set create`, без SMTP) и в конце удаляются.
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1`, `POSTMAN_STAND_PASSWORD1` (и `POSTMAN_INSECURE_TLS=1`
-//! напрямую), `cargo test -p postman-core --test stand_phishing -- --ignored --nocapture --test-threads=1`.
+//! напрямую), `cargo test -p postman-backend-jmap --test stand_phishing -- --ignored --nocapture --test-threads=1`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -110,7 +110,7 @@ fn sync_user1() -> (sync::UnboundedSender<Command>, std::sync::mpsc::Receiver<Ev
         auth: postman_core::model::Auth::Basic { user: env("POSTMAN_STAND_USER1"), password: env("POSTMAN_STAND_PASSWORD1") },
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
+    let commands = postman_backend_jmap::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| matches!(e, Event::Status(sync::Status::Synced)).then_some(()));
     (commands, rx)
 }

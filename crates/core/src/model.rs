@@ -1,8 +1,10 @@
-//! Нейтральная модель (ADR 0003, S7-02): типы, которые видят `core` и интерфейс, — без привязки к протоколу
-//! сервера. Пути к серверам переводят в них свои типы (`backend`); интерфейс протокольных крейтов не знает
-//! (тест `layers.rs`). Поля — те же, что были у типов JMAP, поведение не меняется.
+//! Нейтральная модель (ADR 0003, S7-02; ADR 0004): типы, которые видят `core`, плагины путей к серверам и
+//! интерфейс, — без привязки к протоколу сервера. Плагины (`postman-backend-*`) переводят в них свои типы; ни
+//! `core`, ни интерфейс протокольных крейтов не знают (тест `layers.rs`). Поля — те же, что были у типов JMAP,
+//! поведение не меняется.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Вход на сервер.
 #[derive(Clone)]
@@ -63,6 +65,61 @@ pub struct ContactCard {
     pub title: String,
 }
 
+impl ContactCard {
+    /// Карточка из объекта JSContact (RFC 9553): ответа сервера или карточки vCard, разобранной воркером (CardDAV,
+    /// S7-05б). `id` — из объекта (у CardDAV его ставит плагин — путь ресурса). Разбор — тот же, что у
+    /// `postman_jmap::ContactCard::from_jscontact`: JSContact — формат модели, а не протокола (ADR 0004).
+    pub fn from_jscontact(v: &Value) -> ContactCard {
+        // Значения записей (`emails`, `phones`…) по предпочтению (`pref`: 1 — первое), затем по ключу.
+        let entries = |field: &str| -> Vec<&Value> {
+            let mut list: Vec<(&String, &Value)> = v[field].as_object().into_iter().flatten().collect();
+            list.sort_by_key(|(k, e)| (e["pref"].as_u64().unwrap_or(u64::MAX), k.as_str()));
+            list.into_iter().map(|(_, e)| e).collect()
+        };
+        let name = &v["name"];
+        let full = name["full"].as_str().map(str::to_string).unwrap_or_else(|| {
+            // Нет `full` — собираем из компонентов: фамилия, имя, отчество.
+            let part = |kind: &str| -> Vec<&str> {
+                name["components"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c["kind"] == kind)
+                    .filter_map(|c| c["value"].as_str())
+                    .collect()
+            };
+            [part("surname"), part("given"), part("given2")].concat().join(" ")
+        });
+        let strings = |field: &str, key: &str| -> Vec<String> {
+            entries(field).into_iter().filter_map(|e| e[key].as_str()).map(str::to_string).collect()
+        };
+        let organization = entries("organizations")
+            .into_iter()
+            .find_map(|o| {
+                let units = o["units"].as_array().into_iter().flatten().filter_map(|u| u["name"].as_str());
+                let parts: Vec<&str> = o["name"].as_str().into_iter().chain(units).filter(|s| !s.is_empty()).collect();
+                (!parts.is_empty()).then(|| parts.join(", "))
+            })
+            .unwrap_or_default();
+        let titles = entries("titles");
+        let title = titles
+            .iter()
+            .find(|t| t["kind"].as_str().unwrap_or("title") == "title")
+            .or(titles.first())
+            .and_then(|t| t["name"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        ContactCard {
+            id: v["id"].as_str().unwrap_or_default().to_string(),
+            name: full,
+            emails: strings("emails", "address"),
+            phones: strings("phones", "number"),
+            organization,
+            title,
+        }
+    }
+}
+
 /// Запись справочника: человек, группа, ресурс.
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -97,6 +154,87 @@ pub struct VacationResponse {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+}
+
+/// Род ошибки: от него зависят текст и поведение интерфейса (`Auth` — снова строка входа).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    /// Сервер отклонил вход (HTTP 401): пароль сменён или сессия отозвана. Синхронизация останавливается.
+    Auth,
+    /// Сервер недоступен: соединение, DNS, TLS, тайм-аут.
+    Network,
+    /// Сервер ответил ошибкой (HTTP 4xx/5xx, ошибка метода JMAP).
+    Server,
+    /// Ответ не тот, что ждали (разбор, нет capability, неверный адрес).
+    Protocol,
+    /// Локальная копия (кэш) не прочиталась или не записалась.
+    Storage,
+    /// Синхронизация не запустилась (поток, рантайм).
+    Internal,
+}
+
+/// Ошибка пути к серверу для общего кода `core` (задачи, договор плагинов — ADR 0004). Плагин переводит в неё
+/// ошибки своего протокола, сохраняя род ([`ErrorKind`]) и текст.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    /// Сервер отказал методу с кодом (у JMAP — `type` ошибки: `cannotCalculateChanges`, `notFound`,
+    /// `stateMismatch`, `forbidden`…; другие пути переводят свои отказы в те же коды). Род — [`ErrorKind::Server`].
+    #[error("{method}: {kind} {description}")]
+    Method { method: String, kind: String, description: String },
+    /// Ответ не тот, что ждали.
+    #[error("неожиданный ответ: {0}")]
+    Protocol(String),
+    /// Локальная копия (кэш).
+    #[error("cache: {0}")]
+    Storage(String),
+    /// Прочее — род и текст, как их дал плагин.
+    #[error("{detail}")]
+    Other { kind: ErrorKind, detail: String },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Error::Method { .. } => ErrorKind::Server,
+            Error::Protocol(_) => ErrorKind::Protocol,
+            Error::Storage(_) => ErrorKind::Storage,
+            Error::Other { kind, .. } => *kind,
+        }
+    }
+
+    /// Код отказа сервера ([`Error::Method`]).
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Error::Method { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
+    pub fn other(kind: ErrorKind, detail: impl std::fmt::Display) -> Error {
+        Error::Other { kind, detail: detail.to_string() }
+    }
+
+    /// Сеть: соединение, DNS, TLS, тайм-аут.
+    pub fn network(detail: impl std::fmt::Display) -> Error {
+        Error::other(ErrorKind::Network, detail)
+    }
+
+    pub fn storage(e: impl std::fmt::Display) -> Error {
+        Error::Storage(e.to_string())
+    }
+
+    /// Неразборчивый JSON (как `JSON: …` у JMAP).
+    pub fn json(e: serde_json::Error) -> Error {
+        Error::other(ErrorKind::Protocol, format!("JSON: {e}"))
+    }
+}
+
+impl From<postman_cache::Error> for Error {
+    fn from(e: postman_cache::Error) -> Self {
+        Error::storage(e)
+    }
 }
 
 /// Область или функция, которой у сервера учётной записи может не быть (S7, «Нет у сервера — нет на экране»).
@@ -162,6 +300,12 @@ impl Features {
     pub fn with(self, f: Feature, on: bool) -> Features {
         if on { Features(self.0 | f.bit()) } else { Features(self.0 & !f.bit()) }
     }
+
+    /// Есть хоть у одного: области учётной записи от нескольких плагинов (почта IMAP, календарь CalDAV; ADR 0004).
+    #[must_use]
+    pub fn union(self, o: Features) -> Features {
+        Features(self.0 | o.0)
+    }
 }
 
 impl Default for Features {
@@ -181,5 +325,35 @@ mod tests {
         assert!(!f.has(Feature::Calendar) && !f.has(Feature::Rules) && f.has(Feature::Tasks));
         assert_eq!(f.with(Feature::Calendar, true).with(Feature::Rules, true), Features::ALL);
         assert_eq!(Features::default(), Features::ALL);
+        let cal = Features::NONE.with(Feature::Calendar, true);
+        assert_eq!(cal.union(Features::NONE.with(Feature::Rules, true)), cal.with(Feature::Rules, true));
+    }
+
+    #[test]
+    fn errors_keep_kind_and_code() {
+        let m = Error::Method { method: "JMAP Email/get".into(), kind: "serverFail".into(), description: String::new() };
+        assert_eq!((m.kind(), m.code()), (ErrorKind::Server, Some("serverFail")));
+        assert_eq!(m.to_string(), "JMAP Email/get: serverFail ");
+        assert_eq!(Error::Protocol("x".into()).kind(), ErrorKind::Protocol);
+        assert_eq!(Error::storage("table").kind(), ErrorKind::Storage);
+        assert_eq!(Error::network("HTTP: refused").to_string(), "HTTP: refused");
+        assert_eq!(Error::network("x").kind(), ErrorKind::Network);
+    }
+
+    #[test]
+    fn jscontact_card() {
+        let v = serde_json::json!({
+            "id": "c1",
+            "name": { "components": [{ "kind": "surname", "value": "Иванова" }, { "kind": "given", "value": "Анна" }] },
+            "emails": { "e2": { "address": "b@example.test" }, "e1": { "address": "a@example.test", "pref": 1 } },
+            "phones": { "p1": { "number": "+7 900" } },
+            "organizations": { "o1": { "name": "ИТТ", "units": [{ "name": "ИТ" }] } },
+            "titles": { "t1": { "name": "инженер" } }
+        });
+        let c = ContactCard::from_jscontact(&v);
+        assert_eq!((c.id.as_str(), c.name.as_str()), ("c1", "Иванова Анна"));
+        assert_eq!((c.organization.as_str(), c.title.as_str()), ("ИТТ, ИТ", "инженер"));
+        assert_eq!(c.emails, ["a@example.test", "b@example.test"]);
+        assert_eq!(c.phones, ["+7 900"]);
     }
 }

@@ -1,12 +1,13 @@
-//! Календарь, задачи и контакты учётной записи «стандарты» (ADR 0003, S7-05б): CalDAV и CardDAV (`postman_dav`)
-//! рядом с IMAP — в той же синхронизации (`imap`), с тем же договором команд и событий, что у JMAP. Интерфейс видит
-//! те же экраны календаря, задач и контактов: что есть у сервера — по `Features` (S7-03а).
+//! Путь CalDAV и CardDAV — плагин областей ядра (ADR 0004, S7-02б): календарь, задачи и контакты учётной записи
+//! «стандарты» (ADR 0003, S7-05б) рядом с IMAP — в её синхронизации (`postman-backend-imap` подключает области по
+//! адресу `?dav=https://…`, `postman_core::backend::Areas`), с тем же договором команд и событий, что у JMAP.
+//! Интерфейс видит те же экраны календаря, задач и контактов: что есть у сервера — по `Features` (S7-03а).
 //!
 //! - **Неделя** — `calendar-query` с `expand` (повторы разворачивает сервер, как у JMAP), .ics — в воркере
 //!   (`postman_worker::parse_calendar`, JSCalendar) → `postman_calendar::Event`.
 //! - **Встреча** — VEVENT с ORGANIZER и ATTENDEE (`SCHEDULE-AGENT=SERVER`, `postman_calendar::ics`): приглашения,
 //!   ответы и отмены рассылает сервер. **Ответ на приглашение** — PARTSTAT своей копии с `If-Schedule-Tag-Match`;
-//!   копии нет — письмом iMIP (это делает `imap`).
+//!   копии нет — письмом iMIP (это делает почтовый путь).
 //! - **Занятость** — POST VFREEBUSY в outbox; моя — из моих событий. Пустая занятость коллеги — «нет данных», как у
 //!   JMAP (`docs/STALWART.md` п. 46). **Открыть занятость** — ACL `read-free-busy` календарей.
 //! - **Задачи** — VTODO тех же календарей ([`DavTasks`] — `tasks::TaskStore`): записи с `SCHEDULE-AGENT=CLIENT`
@@ -20,14 +21,20 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use postman_core::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, Login};
+use postman_core::model::ErrorKind;
+use postman_core::sync::{Command, Event as SyncEvent, owned_by};
+
+type CoreResult<T> = postman_core::model::Result<T>;
+
 use jiff::tz::TimeZone;
 use postman_calendar::{Busy, Event, Partstat, Span, Task};
 use postman_dav::{Client, Collection, Config, Content, Discovery, Error, Item, Precondition, Privilege, Tokens, child_href, diff, same_href};
 use serde_json::{Map, Value};
 
-use crate::model::{ContactCard, Feature, Features};
-use crate::schedule::{Meeting, SEARCH_LIMIT, busy_from_events, parse_events};
-use crate::tasks::{Delta, TaskStore};
+use postman_core::model::{ContactCard, Feature, Features};
+use postman_core::schedule::{Meeting, SEARCH_LIMIT, busy_from_events, parse_events};
+use postman_core::tasks::{Delta, TaskStore};
 
 /// Сколько ждать воркер на разборе .ics и .vcf.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -67,20 +74,41 @@ impl std::fmt::Debug for Dav {
     }
 }
 
-/// Ошибка DAV → ошибка вида JMAP (её понимают `tasks` и `sync::ErrorKind`): сеть — `Http`, остальное — отказ сервера.
-pub fn jmap_error(e: Error) -> postman_jmap::Error {
-    use postman_jmap::Error as J;
-    let method = |kind: &str| J::Method { method: "CalDAV".into(), kind: kind.into(), description: String::new() };
+/// Род ошибки DAV — как у JMAP: HTTP — по ответу (401 — вход), отказ сервера — `Server`, прочее — `Protocol`.
+fn kind(e: &Error) -> ErrorKind {
     match e {
-        Error::Http(h) => J::Http(h),
-        Error::Url(u) => J::Url(u),
+        Error::Http(h) => match h.status().map(|s| s.as_u16()) {
+            Some(401) => ErrorKind::Auth,
+            Some(_) => ErrorKind::Server,
+            None if h.is_decode() => ErrorKind::Protocol,
+            None => ErrorKind::Network,
+        },
+        Error::SyncToken | Error::NotFound | Error::Precondition | Error::Auth | Error::Forbidden => ErrorKind::Server,
+        _ => ErrorKind::Protocol,
+    }
+}
+
+/// Ошибка DAV → нейтральная (её понимают `postman_core::tasks` и `sync::ErrorKind`): отказы сервера — с кодами
+/// JMAP (`cannotCalculateChanges`, `notFound`, `stateMismatch`…), текст HTTP и адреса — как у JMAP.
+pub fn core_error(e: Error) -> postman_core::model::Error {
+    use postman_core::model::Error as C;
+    let method = |code: &str| C::Method { method: "CalDAV".into(), kind: code.into(), description: String::new() };
+    let k = kind(&e);
+    match e {
+        Error::Http(h) => C::other(k, format!("HTTP: {h}")),
+        Error::Url(u) => C::other(k, format!("URL: {u}")),
         Error::SyncToken => method("cannotCalculateChanges"),
         Error::NotFound => method("notFound"),
         Error::Precondition => method("stateMismatch"),
         Error::Auth => method("unauthorized"),
         Error::Forbidden => method("forbidden"),
-        other => J::Protocol(other.to_string()),
+        other => C::Protocol(other.to_string()),
     }
+}
+
+/// Ошибка DAV для договора областей: род — [`kind`], текст — как у DAV (его показывает интерфейс).
+fn shown(e: Error) -> postman_core::model::Error {
+    postman_core::model::Error::other(kind(&e), e)
 }
 
 fn now() -> i64 {
@@ -90,7 +118,7 @@ fn now() -> i64 {
 /// Новый UID: время и счётчик (как у задач, `tasks::new_uid`).
 fn new_uid() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    crate::tasks::new_uid(nanos)
+    postman_core::tasks::new_uid(nanos)
 }
 
 /// Записи JSCalendar ответа воркера (`{ method, data }`): группа или одна запись.
@@ -383,7 +411,7 @@ impl Dav {
         for ((href, etag, data), r) in pairs.into_iter().zip(parsed) {
             match r.as_deref().map(|cards| cards.first()) {
                 Ok(Some(js)) => {
-                    let mut card: ContactCard = postman_jmap::ContactCard::from_jscontact(js).into();
+                    let mut card = ContactCard::from_jscontact(js);
                     card.id = href.clone();
                     state.cards.insert(href, Stored { etag, data, card });
                 }
@@ -479,22 +507,22 @@ impl DavTasks<'_> {
 }
 
 /// «Посчитать изменения нельзя» — `tasks::refresh` загрузит всё заново.
-fn cannot_calculate() -> postman_jmap::Error {
-    jmap_error(Error::SyncToken)
+fn cannot_calculate() -> postman_core::model::Error {
+    core_error(Error::SyncToken)
 }
 
 impl TaskStore for DavTasks<'_> {
-    async fn load(&self) -> postman_jmap::Result<(Vec<Value>, String)> {
-        let state = self.state().await.map_err(jmap_error)?;
+    async fn load(&self) -> CoreResult<(Vec<Value>, String)> {
+        let state = self.state().await.map_err(core_error)?;
         let mut resources = Vec::new();
         for c in self.task_calendars() {
-            resources.extend(self.dav.client.calendar_query(&c.href, "VTODO", None).await.map_err(jmap_error)?);
+            resources.extend(self.dav.client.calendar_query(&c.href, "VTODO", None).await.map_err(core_error)?);
         }
-        let tasks = self.dav.parse_ics(resources).await.map_err(jmap_error)?.into_iter().filter(Task::is_task).collect();
+        let tasks = self.dav.parse_ics(resources).await.map_err(core_error)?.into_iter().filter(Task::is_task).collect();
         Ok((tasks, state))
     }
 
-    async fn changes(&self, since: &str) -> postman_jmap::Result<Delta> {
+    async fn changes(&self, since: &str) -> CoreResult<Delta> {
         let calendars: Vec<&Collection> = self.task_calendars().collect();
         let marks: Vec<(&str, &str)> = since.lines().filter_map(|l| l.split_once('\t')).collect();
         if marks.len() != calendars.len() {
@@ -505,29 +533,29 @@ impl TaskStore for DavTasks<'_> {
             let Some((_, mark)) = marks.iter().find(|(h, _)| same_href(h, &c.href)) else { return Err(cannot_calculate()) };
             let Some(token) = mark.strip_prefix("sync:") else {
                 // Без sync-collection: ctag тот же — изменений нет, иначе — всё заново (сверка `tasks::refresh`).
-                let now = self.dav.client.tokens(&c.href).await.map_err(jmap_error)?;
+                let now = self.dav.client.tokens(&c.href).await.map_err(core_error)?;
                 if mark.strip_prefix("ctag:").is_some_and(|t| now.ctag.as_deref() == Some(t)) {
                     continue;
                 }
                 return Err(cannot_calculate());
             };
-            let ch = self.dav.client.sync(&c.href, Some(token)).await.map_err(jmap_error)?;
+            let ch = self.dav.client.sync(&c.href, Some(token)).await.map_err(core_error)?;
             if ch.full || ch.truncated {
                 return Err(cannot_calculate());
             }
             changed.extend(ch.changed.into_iter().map(|i| i.href));
             destroyed.extend(ch.removed);
         }
-        let state = self.state().await.map_err(jmap_error)?;
-        let changed = self.fetch(&changed).await.map_err(jmap_error)?;
+        let state = self.state().await.map_err(core_error)?;
+        let changed = self.fetch(&changed).await.map_err(core_error)?;
         Ok(Delta { changed, destroyed, state })
     }
 
-    async fn get(&self, ids: &[String]) -> postman_jmap::Result<Vec<Value>> {
-        self.fetch(ids).await.map_err(jmap_error)
+    async fn get(&self, ids: &[String]) -> CoreResult<Vec<Value>> {
+        self.fetch(ids).await.map_err(core_error)
     }
 
-    async fn create(&self, task: &Value) -> postman_jmap::Result<String> {
+    async fn create(&self, task: &Value) -> CoreResult<String> {
         let tz = TimeZone::system();
         let calendar = task["calendarIds"].as_object().and_then(|m| m.keys().next().cloned());
         let calendar = match calendar {
@@ -544,36 +572,173 @@ impl TaskStore for DavTasks<'_> {
             let ics = postman_calendar::ics::block(&uid, title, start, start + secs, &parent, now());
             (uid, ics)
         } else {
-            let t = Task::from_jmap(task).map_err(postman_jmap::Error::Protocol)?;
+            let t = Task::from_jmap(task).map_err(postman_core::model::Error::Protocol)?;
             (t.uid.clone(), postman_calendar::ics::stored_task(&t, now(), &tz))
         };
         let href = child_href(&calendar, &uid, Content::Calendar);
-        self.dav.client.put(&href, Content::Calendar, &ics, Precondition::Create).await.map_err(jmap_error)?;
+        self.dav.client.put(&href, Content::Calendar, &ics, Precondition::Create).await.map_err(core_error)?;
         Ok(href)
     }
 
-    async fn update(&self, id: &str, patch: &Map<String, Value>) -> postman_jmap::Result<()> {
-        let current = self.dav.client.get(id).await.map_err(jmap_error)?;
+    async fn update(&self, id: &str, patch: &Map<String, Value>) -> CoreResult<()> {
+        let current = self.dav.client.get(id).await.map_err(core_error)?;
         let etag = current.etag.clone();
-        let mut values = self.dav.parse_ics(vec![current]).await.map_err(jmap_error)?;
-        let Some(mut v) = values.drain(..).find(Task::is_task) else { return Err(jmap_error(Error::NotFound)) };
+        let mut values = self.dav.parse_ics(vec![current]).await.map_err(core_error)?;
+        let Some(mut v) = values.drain(..).find(Task::is_task) else { return Err(core_error(Error::NotFound)) };
         apply_patch(&mut v, patch);
-        let t = Task::from_jmap(&v).map_err(postman_jmap::Error::Protocol)?;
+        let t = Task::from_jmap(&v).map_err(postman_core::model::Error::Protocol)?;
         let ics = postman_calendar::ics::stored_task(&t, now(), &TimeZone::system());
         let pre = etag.as_deref().map_or(Precondition::None, Precondition::Etag);
-        self.dav.client.put(id, Content::Calendar, &ics, pre).await.map_err(jmap_error)?;
+        self.dav.client.put(id, Content::Calendar, &ics, pre).await.map_err(core_error)?;
         Ok(())
     }
 
-    async fn destroy(&self, id: &str) -> postman_jmap::Result<()> {
-        self.dav.client.delete(id, Precondition::None).await.map(|_| ()).map_err(jmap_error)
+    async fn destroy(&self, id: &str) -> CoreResult<()> {
+        self.dav.client.delete(id, Precondition::None).await.map(|_| ()).map_err(core_error)
     }
 
-    async fn default_calendar(&self) -> postman_jmap::Result<String> {
+    async fn default_calendar(&self) -> CoreResult<String> {
         self.task_calendars()
             .find(|c| c.writable)
             .map(|c| c.href.clone())
-            .ok_or_else(|| postman_jmap::Error::Protocol("no calendar for tasks".into()))
+            .ok_or_else(|| postman_core::model::Error::Protocol("no calendar for tasks".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Плагин областей (ADR 0004).
+
+/// Плагин CalDAV и CardDAV для реестра (`postman_core::backend::Registry`): ключ адреса — `dav`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DavPlugin;
+
+impl AreaPlugin for DavPlugin {
+    fn key(&self) -> &'static str {
+        "dav"
+    }
+
+    /// CalDAV на узле учётной записи: отвечает `https://<узел>/.well-known/caldav` (RFC 6764).
+    fn probe<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let url = format!("https://{host}");
+            postman_dav::has_dav(&url).await.then_some(url)
+        })
+    }
+
+    fn set_tls13_only(&self, on: bool) {
+        postman_dav::set_tls13_only(on);
+    }
+
+    fn connect<'a>(&'a self, url: &'a str, login: &'a Login) -> BoxFuture<'a, CoreResult<Box<dyn Areas>>> {
+        Box::pin(async move {
+            match Dav::connect(url, &login.user, &login.password, &login.email).await {
+                Ok(d) => Ok(Box::new(d) as Box<dyn Areas>),
+                Err(e) => Err(shown(e)),
+            }
+        })
+    }
+}
+
+impl Areas for Dav {
+    fn features(&self) -> Features {
+        Dav::features(self)
+    }
+
+    fn handle<'a>(&'a mut self, cmd: Command, ctx: AreaCtx<'a>) -> BoxFuture<'a, Option<Command>> {
+        Box::pin(self.command(cmd, ctx))
+    }
+
+    fn respond<'a>(&'a mut self, invite: &'a postman_calendar::Invitation, status: Partstat) -> BoxFuture<'a, CoreResult<bool>> {
+        Box::pin(async move { Dav::respond(self, &invite.event.uid, invite.event.span, status).await.map_err(shown) })
+    }
+
+    fn flush_tasks<'a>(&'a mut self, ctx: AreaCtx<'a>) -> BoxFuture<'a, CoreResult<()>> {
+        Box::pin(async move {
+            let notify = ctx.notify;
+            postman_core::tasks::handle(&self.tasks(), ctx.cache, postman_core::tasks::Request::Flush, &|r| notify(SyncEvent::Tasks(r))).await
+        })
+    }
+
+    fn changed(&mut self) -> BoxFuture<'_, CoreResult<bool>> {
+        Box::pin(async move { Dav::changed(self).await.map_err(shown) })
+    }
+}
+
+impl Dav {
+    /// Календарь, задачи и контакты — тот же договор событий, что у JMAP; чужая команда — назад.
+    async fn command(&mut self, cmd: Command, ctx: AreaCtx<'_>) -> Option<Command> {
+        let notify = ctx.notify;
+        match cmd {
+            Command::Events { from, to } => notify(match self.events(from, to).await {
+                Ok(events) => {
+                    let (events, colleagues) = owned_by(&ctx.owner.cloned(), events, Vec::new());
+                    SyncEvent::EventsLoaded { from, to, events, colleagues, account: ctx.profile.map(str::to_owned) }
+                }
+                Err(e) => SyncEvent::CalendarFailed(e.to_string()),
+            }),
+            Command::SearchEvents { text, from, to } => notify(match self.search(&text, from, to).await {
+                Ok(events) => SyncEvent::EventsFound { text, events, error: None },
+                Err(e) => SyncEvent::EventsFound { text, events: Vec::new(), error: Some(e.to_string()) },
+            }),
+            Command::Availability { ticket, emails, from, to, .. } => notify(match self.availability(&emails, from, to).await {
+                Ok((me, people)) => SyncEvent::Availability { ticket, me, people, error: None },
+                Err(e) => SyncEvent::Availability {
+                    ticket,
+                    me: Vec::new(),
+                    people: emails.into_iter().map(|e| (e, None)).collect(),
+                    error: Some(e.to_string()),
+                },
+            }),
+            Command::CreateMeeting { meeting, ticket } => match self.create_meeting(&meeting).await {
+                Ok(_) => {
+                    notify(SyncEvent::MeetingCreated { ticket, uid: meeting.uid.clone() });
+                    notify(SyncEvent::CalendarChanged);
+                }
+                Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            Command::ShareFreeBusy { email } => notify(match self.share_free_busy(&email).await {
+                Ok(()) => SyncEvent::FreeBusyShared { email },
+                Err(e) => SyncEvent::CalendarFailed(e.to_string()),
+            }),
+            Command::Tasks(request) => {
+                if let Err(e) = postman_core::tasks::handle(&self.tasks(), ctx.cache, request, &|r| notify(SyncEvent::Tasks(r))).await {
+                    tracing::warn!("caldav tasks: {e}");
+                    notify(SyncEvent::Tasks(postman_core::tasks::Reply::Failed { uid: None, error: e.to_string() }));
+                }
+            }
+            Command::Contacts => {
+                self.load_contacts(notify).await;
+                // Справочника у CardDAV нет: раздел «Справочник» скрыт (`Features`), список — пустой.
+                notify(SyncEvent::DirectoryLoaded(Vec::new()));
+            }
+            Command::SaveContact { card, old, ticket } => {
+                notify(match self.save_contact(&card, old.as_deref()).await {
+                    Ok(id) => SyncEvent::ContactSaved { ticket, id },
+                    Err(e) => SyncEvent::ContactFailed { ticket, error: e.to_string() },
+                });
+                self.load_contacts(notify).await;
+            }
+            Command::DeleteContact { id, ticket } => {
+                notify(match self.delete_contact(&id).await {
+                    Ok(()) => SyncEvent::ContactDeleted { ticket, id },
+                    Err(e) => SyncEvent::ContactFailed { ticket, error: e.to_string() },
+                });
+                self.load_contacts(notify).await;
+            }
+            other => return Some(other),
+        }
+        None
+    }
+
+    /// Личные контакты CardDAV — разделу целиком и подсказкам адресов парами (имя, адрес), как у JMAP.
+    async fn load_contacts(&mut self, notify: &dyn Fn(SyncEvent)) {
+        match self.contacts().await {
+            Ok(cards) => {
+                notify(SyncEvent::Contacts(cards.iter().flat_map(|c| c.emails.iter().map(|e| (c.name.clone(), e.clone()))).collect()));
+                notify(SyncEvent::ContactsLoaded(cards));
+            }
+            Err(e) => notify(SyncEvent::ContactFailed { ticket: 0, error: e.to_string() }),
+        }
     }
 }
 
@@ -609,10 +774,12 @@ mod tests {
 
     #[test]
     fn errors_keep_their_kind() {
-        use crate::sync::ErrorKind;
-        assert_eq!(ErrorKind::of(&jmap_error(Error::Precondition)), ErrorKind::Server);
-        assert!(matches!(jmap_error(Error::SyncToken), postman_jmap::Error::Method { kind, .. } if kind == "cannotCalculateChanges"));
-        assert_eq!(ErrorKind::of(&jmap_error(Error::Protocol("x".into()))), ErrorKind::Protocol);
+        assert_eq!(ErrorKind::of(&core_error(Error::Precondition)), ErrorKind::Server);
+        assert_eq!(core_error(Error::SyncToken).code(), Some("cannotCalculateChanges"));
+        assert_eq!(core_error(Error::NotFound).to_string(), "CalDAV: notFound ");
+        assert_eq!(shown(Error::Forbidden).to_string(), "forbidden");
+        assert_eq!(shown(Error::Auth).kind(), ErrorKind::Server);
+        assert_eq!(ErrorKind::of(&core_error(Error::Protocol("x".into()))), ErrorKind::Protocol);
     }
 
     #[test]

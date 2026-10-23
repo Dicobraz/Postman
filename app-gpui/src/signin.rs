@@ -186,7 +186,7 @@ impl SignIn {
 /// (S7-04б).
 pub(crate) fn normalize_url(raw: &str) -> String {
     let url = raw.trim().trim_end_matches('/');
-    if url.is_empty() || url.starts_with("http://") || url.starts_with("https://") || postman_core::imap::is_imap_url(url) {
+    if url.is_empty() || url.starts_with("http://") || url.starts_with("https://") || crate::plugins::registry().claims(url) {
         url.to_owned()
     } else {
         format!("https://{url}")

@@ -684,7 +684,7 @@ fn has_code_number(s: &[char]) -> bool {
 }
 
 /// Рассылка во «Входящих»: письмо с `List-Id` или `List-Unsubscribe` (RFC 2919, RFC 2369). Заголовки читает сервер
-/// (`postman_jmap::Client::list_letters`): в кэше их нет, а условие `header` в `Email/query` Stalwart не выполняет.
+/// (у JMAP — `postman_jmap::Client::list_letters` в плагине `postman-backend-jmap`): в кэше их нет, а условие `header` в `Email/query` Stalwart не выполняет.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewsItem {
     pub id: String,

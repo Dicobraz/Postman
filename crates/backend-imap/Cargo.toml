@@ -1,0 +1,27 @@
+[package]
+name = "postman-backend-imap"
+description = "Путь IMAP + SMTP — плагин ядра (ADR 0004): почта учётной записи «стандарты» и Exchange; календарь и контакты — пути областей"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-core.workspace = true
+postman-imap.workspace = true
+postman-cache.workspace = true
+postman-calendar.workspace = true
+postman-compose.workspace = true
+postman-worker.workspace = true
+jiff = "0.2"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Стенд: учётная запись «стандарты» целиком (CalDAV и CardDAV — плагином), вид сервера по адресу (JMAP — плагином).
+postman-backend-dav.workspace = true
+postman-backend-jmap.workspace = true
+postman-dav.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

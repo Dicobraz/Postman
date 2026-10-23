@@ -1,15 +1,12 @@
 [package]
 name = "postman-core"
-description = "Слой без UI: синхронизация, поиск, извлечение текста, разбор писем в воркере, файлы, адресная книга"
+description = "Слой без UI и без протоколов: модель, кэш, договор путей к серверам (плагины), поиск, извлечение текста, разбор писем в воркере, файлы, адресная книга"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
 postman-ir.workspace = true
-postman-jmap.workspace = true
-postman-imap.workspace = true
-postman-dav.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
 postman-compose.workspace = true
@@ -19,7 +16,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 jiff = "0.2"
-percent-encoding = "2"
 cpu-time = "1"
 memory-stats = "1"
 open = "5"
@@ -36,11 +32,9 @@ features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"]
 
 [dev-dependencies]
 postman-smime = { workspace = true, features = ["testkit"] }
-# Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
+# Демо-данные в тестах поручений и меток; в обычных зависимостях демо нет (слои).
 postman-demo.workspace = true
 tempfile = "3"
-# CalDAV в тесте стенда задач (S6-01): PROPFIND, REPORT, PUT .ics — тем же HTTP-клиентом, что у `postman-jmap`.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [lints]
 workspace = true

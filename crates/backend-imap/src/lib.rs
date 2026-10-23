@@ -1,6 +1,7 @@
-//! Учётная запись IMAP + SMTP (ADR 0003, S7-04б): своя синхронизация с тем же договором команд и событий, что у JMAP
-//! (`sync::Command`, `sync::Event`), на том же кэше. Интерфейс не знает, какой сервер у учётной записи: адрес
-//! `imaps://…` или `imap://…` вместо адреса JMAP — и только.
+//! Путь IMAP + SMTP — плагин ядра (ADR 0004, S7-02б): учётная запись «стандарты» и почта Exchange (ADR 0003,
+//! S7-04б) — своя синхронизация с тем же договором команд и событий, что у JMAP (`postman_core::sync::Command`,
+//! `Event`), на том же кэше. Интерфейс не знает, какой сервер у учётной записи: адрес `imaps://…` или `imap://…`
+//! вместо адреса JMAP — и только.
 //!
 //! - **Папки** — `LIST` с ролями (SPECIAL-USE, иначе по имени); ключ папки в кэше — `f<хэш имени>` (в имени IMAP
 //!   бывает `/`, а он — разделитель аккаунта в ключах кэша).
@@ -14,8 +15,9 @@
 //! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». «Отменить» — письмо держит сама синхронизация
 //!   (`Release::After`, S7-04в): до срока его можно вернуть в черновики; закрыли Postman — уходит сразу. «Отправить
 //!   позже» — нет (сервер не держит письмо): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
-//! - Календарь, задачи, занятость и контакты — CalDAV и CardDAV рядом (`?dav=https://…` в адресе, S7-05б, модуль
-//!   [`crate::dav`]): `Features` — по тому, что нашлось на сервере. Без них, как и правил и автоответа, — нет.
+//! - Календарь, задачи, занятость и контакты — пути областей рядом (`?<ключ>=https://…` в адресе: `dav=` — плагин
+//!   `postman-backend-dav`, S7-05б; `postman_core::backend::Areas`): `Features` — по тому, что нашлось на сервере.
+//!   Без них, как и правил и автоответа, — нет.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
@@ -27,7 +29,10 @@ use postman_imap::state::{FolderState, Plan};
 use postman_imap::{Config, Header, Role, Security, Session, flags, smtp, uid_set};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::sync::{Command, ErrorKind, Event, Index, Sender, Stage, Status, SyncError};
+use postman_core::backend::{AreaCtx, AreaPlugin, Areas, BoxFuture, MailPlugin, Spawn};
+use postman_core::backend::Login;
+use postman_core::model::{Auth, Feature, Features};
+use postman_core::sync::{Account, Command, ErrorKind, Event, Index, Sender, Stage, Status, SyncError};
 
 /// Писем папки при первом входе — не больше (дальше — «Загрузить ещё»).
 pub const INITIAL: usize = 500;
@@ -48,12 +53,12 @@ pub struct ImapAccount {
     pub email: String,
     pub imap: Config,
     pub smtp: Config,
-    /// Адрес CalDAV и CardDAV (`https://узел[/путь]`, S7-05б); `None` — только почта.
-    pub dav: Option<String>,
+    /// Адреса путей областей по ключам (`dav` → `https://узел[/путь]`, S7-05б); нет — только почта.
+    pub areas: Vec<(String, String)>,
 }
 
 /// Адрес учётной записи IMAP: `imaps://imap.host[:порт][?smtp=smtp.host[:порт]][&dav=https://dav.host]` (TLS) или
-/// `imap://…` (STARTTLS).
+/// `imap://…` (STARTTLS). Кроме `smtp=` — адреса путей областей: `<ключ>=https://…` (`dav` — CalDAV и CardDAV).
 pub fn is_imap_url(url: &str) -> bool {
     let u = url.trim().to_ascii_lowercase();
     u.starts_with("imaps://") || u.starts_with("imap://")
@@ -94,8 +99,89 @@ impl ImapAccount {
             password: password.to_owned(),
         };
         let smtp = Config { host: smtp_host, port: smtp_port, security: security(smtp_port, 465), user: user.to_owned(), password: password.to_owned() };
-        let dav = query.split('&').find_map(|kv| kv.strip_prefix("dav=")).map(str::trim).filter(|d| d.starts_with("https://") || d.starts_with("http://"));
-        Some(ImapAccount { email: user.to_owned(), imap, smtp, dav: dav.map(str::to_owned) })
+        let areas = query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .filter(|(k, _)| *k != "smtp" && !k.is_empty())
+            .map(|(k, v)| (k.to_owned(), v.trim().to_owned()))
+            .filter(|(_, v)| v.starts_with("https://") || v.starts_with("http://"))
+            .collect();
+        Some(ImapAccount { email: user.to_owned(), imap, smtp, areas })
+    }
+
+    /// Адрес пути областей с ключом `key`.
+    pub fn area(&self, key: &str) -> Option<&str> {
+        self.areas.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// Из учётной записи договора (адрес и пароль); вход по токену у IMAP нет.
+    pub fn of(a: &Account) -> Option<ImapAccount> {
+        match &a.auth {
+            Auth::Basic { user, password } => ImapAccount::from_url(&a.url, user, password),
+            Auth::Bearer(_) => None,
+        }
+    }
+}
+
+/// Узел адреса IMAP (`imaps://узел[:порт][?…]` → `узел`) — там ищут пути областей.
+fn host_of(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let server = rest.split('?').next().unwrap_or_default().trim_end_matches('/');
+    let host = server.rsplit_once(':').map_or(server, |(h, _)| h);
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// Плагин пути IMAP + SMTP для реестра (`postman_core::backend::Registry`): адреса `imaps://` и `imap://`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ImapPlugin;
+
+impl MailPlugin for ImapPlugin {
+    fn name(&self) -> &'static str {
+        "imap"
+    }
+
+    fn claims(&self, url: &str) -> bool {
+        is_imap_url(url)
+    }
+
+    /// IMAP на том же узле (S7-04в): адрес без схемы и пути, порт 993 отвечает → `imaps://узел`. Явный порт или
+    /// путь — это адрес JMAP; угадывать не будем.
+    fn probe<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let host = url.split_once("://").map_or(url, |(_, r)| r);
+            let has_path = host.contains('/') || host.contains('?');
+            let host = host.split(['/', '?']).next().unwrap_or_default();
+            if host.is_empty() || has_path || host.contains(':') {
+                return None;
+            }
+            let open = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect((host, 993))).await;
+            matches!(open, Ok(Ok(_))).then(|| format!("imaps://{host}"))
+        })
+    }
+
+    fn area_host(&self, url: &str) -> Option<String> {
+        host_of(url)
+    }
+
+    fn has_area(&self, url: &str, key: &str) -> bool {
+        let query = url.split_once('?').map_or("", |(_, q)| q);
+        query.split('&').any(|kv| kv.strip_prefix(key).is_some_and(|r| r.starts_with('=')))
+    }
+
+    fn with_area(&self, url: &str, key: &str, area: &str) -> String {
+        format!("{url}{}{key}={area}", if url.contains('?') { '&' } else { '?' })
+    }
+
+    fn spawn(&self, s: Spawn) -> UnboundedSender<Command> {
+        match ImapAccount::of(&s.account) {
+            Some(a) => spawn(a, s.profile, s.cache, s.index, s.events, s.repaint, s.areas),
+            None => {
+                let detail = format!("not an IMAP account: {}", s.account.url);
+                let _ = s.events.send(Event::Error(SyncError { kind: ErrorKind::Protocol, stage: Stage::Start, detail }));
+                (s.repaint)();
+                unbounded_channel().0
+            }
+        }
     }
 }
 
@@ -208,7 +294,8 @@ fn db(e: postman_cache::Error) -> postman_imap::Error {
     postman_imap::Error::Protocol(format!("cache: {e}"))
 }
 
-/// Синхронизация учётной записи IMAP: свой поток, как у JMAP (`sync::spawn_as`).
+/// Синхронизация учётной записи IMAP: свой поток, как у JMAP (`postman_core::sync::spawn_thread`). `areas` — пути
+/// областей реестра: подключаются те, чьи адреса есть у учётной записи.
 pub fn spawn(
     account: ImapAccount,
     profile: Option<String>,
@@ -216,23 +303,12 @@ pub fn spawn(
     index: Index,
     events: mpsc::Sender<Event>,
     repaint: impl Fn() + Send + 'static,
+    areas: Vec<Arc<dyn AreaPlugin>>,
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
-    let failed = events.clone();
-    let started = std::thread::Builder::new().name("sync-imap".into()).spawn(move || {
-        let notify = |e: Event| {
-            let _ = events.send(e);
-            repaint();
-        };
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => return notify(Event::Error(SyncError::internal(format!("tokio runtime: {e}")))),
-        };
-        rt.block_on(run(account, profile, cache, index, rx, &notify));
+    postman_core::sync::spawn_thread("sync-imap", events, Box::new(repaint), move |notify| async move {
+        run(account, profile, cache, index, rx, areas, &|e| notify.send(e)).await;
     });
-    if let Err(e) = started {
-        let _ = failed.send(Event::Error(SyncError::internal(format!("sync thread: {e}"))));
-    }
     tx
 }
 
@@ -248,8 +324,9 @@ struct Imap {
     /// Письма в окне «Отменить» (S7-04в): уходят по сроку, отмена возвращает их в черновики.
     held: Vec<Held>,
     next_hold: u64,
-    /// Календарь, задачи и контакты (S7-05б); `None` — у учётной записи только почта.
-    dav: Option<crate::dav::Dav>,
+    /// Календарь, задачи и контакты — пути областей (S7-05б): ключ и подключение; пусто — у учётной записи только
+    /// почта.
+    areas: Vec<(&'static str, Box<dyn Areas>)>,
 }
 
 /// Письмо, которое держит синхронизация до срока окна «Отменить».
@@ -261,7 +338,15 @@ struct Held {
     at: tokio::time::Instant,
 }
 
-async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index: Index, mut rx: UnboundedReceiver<Command>, notify: &impl Fn(Event)) {
+async fn run(
+    account: ImapAccount,
+    profile: Option<String>,
+    cache: Cache,
+    index: Index,
+    mut rx: UnboundedReceiver<Command>,
+    plugins: Vec<Arc<dyn AreaPlugin>>,
+    notify: &impl Fn(Event),
+) {
     notify(Event::Status(Status::Connecting { url: format!("{}:{}", account.imap.host, account.imap.port) }));
     let session = match Session::connect(&account.imap).await {
         Ok(s) => s,
@@ -279,15 +364,20 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
         worker: None,
         held: Vec::new(),
         next_hold: 0,
-        dav: None,
+        areas: Vec::new(),
     };
     notify(Event::Status(Status::SignedIn { user: me.account.email.clone() }));
-    if let Some(url) = me.account.dav.clone() {
-        match crate::dav::Dav::connect(&url, &me.account.imap.user, &me.account.imap.password, &me.account.email).await {
-            Ok(d) => me.dav = Some(d),
+    let login = Login { user: me.account.imap.user.clone(), password: me.account.imap.password.clone(), email: me.account.email.clone() };
+    for (key, url) in me.account.areas.clone() {
+        let Some(plugin) = plugins.iter().find(|p| p.key() == key) else {
+            tracing::warn!("imap: no area backend for {key}=");
+            continue;
+        };
+        match plugin.connect(&url, &login).await {
+            Ok(a) => me.areas.push((plugin.key(), a)),
             // Без календаря почта всё равно работает: ошибка — тостом календаря, области скрыты.
             Err(e) => {
-                tracing::warn!("caldav: {e}");
+                tracing::warn!("{key}: {e}");
                 notify(Event::CalendarFailed(e.to_string()));
             }
         }
@@ -296,7 +386,7 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
     if me.profile.is_none() {
         // Основная учётная запись IMAP: почта и то, что нашлось по CalDAV/CardDAV (S7-03а «Нет у сервера — нет на
         // экране»).
-        notify(Event::Features(me.dav.as_ref().map_or(crate::model::Features::NONE, |d| d.features())));
+        notify(Event::Features(me.areas.iter().fold(Features::NONE, |f, (_, a)| f.union(a.features()))));
         notify(Event::Me { address: address.clone(), signature: String::new() });
     }
     notify(Event::Senders(vec![Sender { account: me.scope.clone(), address, signature: String::new() }]));
@@ -354,12 +444,12 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
                 if let Err(e) = me.refresh_all(notify).await {
                     notify(Event::Error(e));
                 }
-                // CalDAV без push: изменения календарей — по ctag и sync-token.
-                if let Some(d) = me.dav.as_mut() {
-                    match d.changed().await {
+                // Области без push (CalDAV): изменения календарей — опросом (ctag и sync-token).
+                for (key, a) in me.areas.iter_mut() {
+                    match a.changed().await {
                         Ok(true) => notify(Event::CalendarChanged),
                         Ok(false) => {}
-                        Err(e) => tracing::debug!("caldav poll: {e}"),
+                        Err(e) => tracing::debug!("{key} poll: {e}"),
                     }
                 }
             }
@@ -722,7 +812,7 @@ impl Imap {
         if draft.encrypt_to.is_empty() {
             return Ok(raw);
         }
-        crate::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_imap::Error::Protocol(format!("{e:?}")))
+        postman_core::smime::seal_outgoing(&raw, &draft.encrypt_to).map_err(|e| postman_imap::Error::Protocol(format!("{e:?}")))
     }
 
     async fn send(&mut self, mut draft: Draft, replace: Option<String>) -> postman_imap::Result<()> {
@@ -888,7 +978,7 @@ impl Imap {
                     self.set_keywords(std::slice::from_ref(&p.id), &add, &remove).await?;
                     // Перенос: папка, куда письмо добавлено («Архив» — роль archive).
                     let to = p.mailboxes.iter().find(|(_, on)| *on).and_then(|(k, _)| {
-                        if k == crate::lifecycle::ARCHIVE { self.folder_by_role(Role::Archive).cloned() } else { self.folder_by_key(k).cloned() }
+                        if k == postman_core::lifecycle::ARCHIVE { self.folder_by_role(Role::Archive).cloned() } else { self.folder_by_key(k).cloned() }
                     });
                     if let Some(to) = to {
                         self.move_letters(std::slice::from_ref(&p.id), &to).await?;
@@ -933,12 +1023,12 @@ impl Imap {
             }
             Command::Send { draft, replace, ticket, release } => {
                 let hold = match release {
-                    crate::model::Release::At(_) => {
+                    postman_core::model::Release::At(_) => {
                         notify(Event::ComposeFailed { ticket, error: "send later is not available for IMAP".into() });
                         return Ok(());
                     }
-                    crate::model::Release::After(s) => s,
-                    crate::model::Release::Now => 0,
+                    postman_core::model::Release::After(s) => s,
+                    postman_core::model::Release::Now => 0,
                 };
                 if hold > 0 {
                     // Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
@@ -990,22 +1080,21 @@ impl Imap {
                 }
                 notify(Event::Withheld { ticket, too_late, error: None });
             }
-            other if self.dav.is_some() => self.dav_command(other, notify).await,
-            // Правил и автоответа у IMAP нет, календаря и контактов без CalDAV/CardDAV — тоже: интерфейс их не
-            // показывает (`Features`).
-            other => tracing::debug!("imap: command not supported: {}", command_name(&other)),
+            // Календарь, задачи, занятость, контакты — путям областей. Правил и автоответа у IMAP нет, календаря и
+            // контактов без путей областей — тоже: интерфейс их не показывает (`Features`).
+            other => self.area_command(other, notify).await,
         }
         Ok(())
     }
 
     /// Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
-    fn hold(&mut self, draft: Draft, replace: Option<String>, secs: u32) -> crate::send_later::Scheduled {
+    fn hold(&mut self, draft: Draft, replace: Option<String>, secs: u32) -> postman_core::send_later::Scheduled {
         self.next_hold += 1;
         let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
         let send_at = jiff::Timestamp::now().as_second() + i64::from(secs);
         let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(secs));
         self.held.push(Held { id: id.clone(), draft, replace, at });
-        crate::send_later::Scheduled { submission: id.clone(), email: id, send_at }
+        postman_core::send_later::Scheduled { submission: id.clone(), email: id, send_at }
     }
 
     /// Ответ на приглашение: своей копией на CalDAV (REPLY шлёт сервер), иначе — письмом организатору (iMIP).
@@ -1017,10 +1106,10 @@ impl Imap {
         notify: &impl Fn(Event),
     ) {
         let uid = inv.event.uid.clone();
-        if let Some(d) = &self.dav {
-            match d.respond(&uid, inv.event.span, status).await {
+        if let Some((_, a)) = self.areas.iter_mut().find(|(_, a)| a.features().has(Feature::Calendar)) {
+            match a.respond(&inv, status).await {
                 Ok(true) => {
-                    notify(Event::InviteAnswered { uid, status, delivery: crate::invite::Delivery::Server });
+                    notify(Event::InviteAnswered { uid, status, delivery: postman_core::invite::Delivery::Server });
                     notify(Event::CalendarChanged);
                     return;
                 }
@@ -1029,28 +1118,30 @@ impl Imap {
             }
         }
         let me = Address::new("", &self.account.email);
-        let Some(draft) = crate::invite::reply_draft(&inv, &me, status, in_reply_to, jiff::Timestamp::now().as_second()) else {
+        let Some(draft) = postman_core::invite::reply_draft(&inv, &me, status, in_reply_to, jiff::Timestamp::now().as_second()) else {
             return notify(Event::InviteFailed { uid, error: "the invitation has no organizer".into() });
         };
         match self.send(draft, None).await {
-            Ok(()) => notify(Event::InviteAnswered { uid, status, delivery: crate::invite::Delivery::Mail { imported: false } }),
+            Ok(()) => notify(Event::InviteAnswered { uid, status, delivery: postman_core::invite::Delivery::Mail { imported: false } }),
             Err(e) => notify(Event::InviteFailed { uid, error: e.to_string() }),
         }
     }
 
     /// Шаг поручения (S6-09): своя копия задачи — на CalDAV (без рассылки сервером, `SCHEDULE-AGENT=CLIENT`), затем
     /// письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
-    async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, release: crate::model::Release, notify: &impl Fn(Event)) {
-        let Some(d) = &self.dav else {
-            return notify(Event::Delegated { ticket, uid, error: Some("no CalDAV".into()), scheduled: Vec::new() });
+    async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, release: postman_core::model::Release, notify: &impl Fn(Event)) {
+        let owner = self.owner();
+        let Some((_, a)) = self.areas.iter_mut().find(|(_, a)| a.features().has(Feature::Tasks)) else {
+            return notify(Event::Delegated { ticket, uid, error: Some("no tasks on the server".into()), scheduled: Vec::new() });
         };
-        if let Err(e) = crate::tasks::handle(&d.tasks(), &self.cache, crate::tasks::Request::Flush, &|r| notify(Event::Tasks(r))).await {
+        let ctx = AreaCtx { cache: &self.cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
+        if let Err(e) = a.flush_tasks(ctx).await {
             return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled: Vec::new() });
         }
         let mut scheduled = Vec::new();
         for draft in drafts {
             match release {
-                crate::model::Release::After(s) if s > 0 => scheduled.push(self.hold(draft, None, s)),
+                postman_core::model::Release::After(s) if s > 0 => scheduled.push(self.hold(draft, None, s)),
                 _ => {
                     if let Err(e) = self.send(draft, None).await {
                         return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled });
@@ -1061,88 +1152,31 @@ impl Imap {
         notify(Event::Delegated { ticket, uid, error: None, scheduled });
     }
 
-    /// Календарь, задачи и контакты — по CalDAV и CardDAV (`crate::dav`), тот же договор событий, что у JMAP.
-    async fn dav_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
-        let owner = self.profile.as_ref().map(|_| postman_calendar::Owner { email: self.account.email.clone(), name: self.account.email.clone() });
-        let profile = self.profile.clone();
-        let Some(d) = self.dav.as_mut() else { return };
-        match cmd {
-            Command::Events { from, to } => notify(match d.events(from, to).await {
-                Ok(events) => {
-                    let (events, colleagues) = crate::sync::owned_by(&owner, events, Vec::new());
-                    Event::EventsLoaded { from, to, events, colleagues, account: profile }
-                }
-                Err(e) => Event::CalendarFailed(e.to_string()),
-            }),
-            Command::SearchEvents { text, from, to } => notify(match d.search(&text, from, to).await {
-                Ok(events) => Event::EventsFound { text, events, error: None },
-                Err(e) => Event::EventsFound { text, events: Vec::new(), error: Some(e.to_string()) },
-            }),
-            Command::Availability { ticket, emails, from, to, .. } => notify(match d.availability(&emails, from, to).await {
-                Ok((me, people)) => Event::Availability { ticket, me, people, error: None },
-                Err(e) => Event::Availability {
-                    ticket,
-                    me: Vec::new(),
-                    people: emails.into_iter().map(|e| (e, None)).collect(),
-                    error: Some(e.to_string()),
-                },
-            }),
-            Command::CreateMeeting { meeting, ticket } => match d.create_meeting(&meeting).await {
-                Ok(_) => {
-                    notify(Event::MeetingCreated { ticket, uid: meeting.uid.clone() });
-                    notify(Event::CalendarChanged);
-                }
-                Err(e) => notify(Event::MeetingFailed { ticket, error: e.to_string() }),
-            },
-            Command::ShareFreeBusy { email } => notify(match d.share_free_busy(&email).await {
-                Ok(()) => Event::FreeBusyShared { email },
-                Err(e) => Event::CalendarFailed(e.to_string()),
-            }),
-            Command::Tasks(request) => {
-                if let Err(e) = crate::tasks::handle(&d.tasks(), &self.cache, request, &|r| notify(Event::Tasks(r))).await {
-                    tracing::warn!("caldav tasks: {e}");
-                    notify(Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
-                }
-            }
-            Command::Contacts => {
-                load_contacts(d, notify).await;
-                // Справочника у CardDAV нет: раздел «Справочник» скрыт (`Features`), список — пустой.
-                notify(Event::DirectoryLoaded(Vec::new()));
-            }
-            Command::SaveContact { card, old, ticket } => {
-                notify(match d.save_contact(&card, old.as_deref()).await {
-                    Ok(id) => Event::ContactSaved { ticket, id },
-                    Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
-                });
-                load_contacts(d, notify).await;
-            }
-            Command::DeleteContact { id, ticket } => {
-                notify(match d.delete_contact(&id).await {
-                    Ok(()) => Event::ContactDeleted { ticket, id },
-                    Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
-                });
-                load_contacts(d, notify).await;
-            }
-            other => tracing::debug!("imap: command not supported: {}", command_name(&other)),
-        }
+    /// Владелец событий дополнительной учётной записи в общем календаре (S7-03б); у основной — `None`.
+    fn owner(&self) -> Option<postman_calendar::Owner> {
+        self.profile.as_ref().map(|_| postman_calendar::Owner { email: self.account.email.clone(), name: self.account.email.clone() })
     }
-}
 
-/// Личные контакты CardDAV — разделу целиком и подсказкам адресов парами (имя, адрес), как у JMAP.
-async fn load_contacts(d: &mut crate::dav::Dav, notify: &impl Fn(Event)) {
-    match d.contacts().await {
-        Ok(cards) => {
-            notify(Event::Contacts(cards.iter().flat_map(|c| c.emails.iter().map(|e| (c.name.clone(), e.clone()))).collect()));
-            notify(Event::ContactsLoaded(cards));
+    /// Календарь, задачи и контакты — путям областей по порядку (`postman_core::backend::Areas`), тот же договор
+    /// событий, что у JMAP.
+    async fn area_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
+        let owner = self.owner();
+        let mut cmd = cmd;
+        for (_, a) in self.areas.iter_mut() {
+            let ctx = AreaCtx { cache: &self.cache, profile: self.profile.as_deref(), owner: owner.as_ref(), notify };
+            match a.handle(cmd, ctx).await {
+                None => return,
+                Some(back) => cmd = back,
+            }
         }
-        Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
+        tracing::debug!("imap: command not supported: {}", command_name(&cmd));
     }
 }
 
 /// Условие фильтра Postman → `SEARCH` IMAP (RFC 3501 §6.4.4) и папка, если условие её задаёт (`InMailbox` в «И»).
 /// `None` — IMAP так не умеет.
-pub fn imap_query(f: &crate::model::Filter) -> Option<(String, Option<String>)> {
-    use crate::model::Filter as F;
+pub fn imap_query(f: &postman_core::model::Filter) -> Option<(String, Option<String>)> {
+    use postman_core::model::Filter as F;
     fn date(utc: &str) -> Option<String> {
         const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         let d: jiff::civil::Date = utc.get(..10)?.parse().ok()?;
@@ -1221,13 +1255,13 @@ mod tests {
         assert_eq!((b.imap.port, b.imap.security), (143, Security::StartTls));
         assert_eq!((b.smtp.host.as_str(), b.smtp.port, b.smtp.security), ("smtp.example.test", 587, Security::StartTls));
         assert!(ImapAccount::from_url("https://x", "u", "p").is_none());
-        assert_eq!(a.dav, None);
+        assert!(a.areas.is_empty());
         // CalDAV и CardDAV рядом (S7-05б).
         let c = ImapAccount::from_url("imaps://mail.example.test?dav=https://mail.example.test", "u", "p").unwrap();
-        assert_eq!((c.dav.as_deref(), c.smtp.port), (Some("https://mail.example.test"), 465));
+        assert_eq!((c.area("dav"), c.smtp.port), (Some("https://mail.example.test"), 465));
         let d = ImapAccount::from_url("imaps://m.example.test?smtp=s.example.test&dav=https://d.example.test/dav/", "u", "p").unwrap();
-        assert_eq!((d.dav.as_deref(), d.smtp.host.as_str()), (Some("https://d.example.test/dav/"), "s.example.test"));
-        assert_eq!(ImapAccount::from_url("imaps://m?dav=ftp://x", "u", "p").unwrap().dav, None);
+        assert_eq!((d.area("dav"), d.smtp.host.as_str()), (Some("https://d.example.test/dav/"), "s.example.test"));
+        assert_eq!(ImapAccount::from_url("imaps://m?dav=ftp://x", "u", "p").unwrap().area("dav"), None);
         assert!(ImapAccount::from_url("imaps://", "u", "p").is_none());
         // Пароль — не в `Debug`.
         assert!(!format!("{a:?}").contains("secret"));
@@ -1235,7 +1269,7 @@ mod tests {
 
     #[test]
     fn filters_become_imap_search() {
-        use crate::model::Filter as F;
+        use postman_core::model::Filter as F;
         let q = |f: F| super::imap_query(&f);
         assert_eq!(q(F::NotKeyword("$seen".into())).unwrap().0, "CHARSET UTF-8 UNSEEN");
         assert_eq!(q(F::HasKeyword("pm.due".into())).unwrap().0, "CHARSET UTF-8 KEYWORD pm.due");

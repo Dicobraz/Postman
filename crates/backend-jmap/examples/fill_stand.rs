@@ -1,7 +1,7 @@
 //! Большой ящик на стенде (S4-03): заполнить учётную запись Stalwart `N` письмами — для замеров живого ящика.
 //!
 //!   POSTMAN_URL=https://<стенд> POSTMAN_USER=… POSTMAN_PASSWORD=… [POSTMAN_INSECURE_TLS=1]
-//!   cargo run --release -p postman-core --example fill_stand -- 20000 [--batch 250]
+//!   cargo run --release -p postman-backend-jmap --example fill_stand -- 20000 [--batch 250]
 //!
 //! Письма — из содержимого демо-ящика (`postman-demo`: отправители, темы, текст), текст и HTML (Markdown →
 //! `postman_ir::markdown_to_html`), даты — в прошлое от сейчас. Пачка — один запрос `Email/set create` с телом

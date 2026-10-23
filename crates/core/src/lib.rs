@@ -1,4 +1,5 @@
-//! Слой приложения без UI: всё, что нужно интерфейсу, кроме самого интерфейса.
+//! Слой приложения без UI: всё, что нужно интерфейсу, кроме самого интерфейса и протоколов серверов. Протоколы —
+//! плагины `postman-backend-*` по договору `backend` (ADR 0004).
 //! Интерфейс шлёт команды и получает события; данные читает из хранилища.
 
 pub mod assign;
@@ -14,8 +15,6 @@ pub mod extract;
 pub mod files;
 pub mod filters;
 pub mod fuzzy;
-pub mod dav;
-pub mod imap;
 pub mod indexer;
 pub mod invite;
 pub mod labels;
