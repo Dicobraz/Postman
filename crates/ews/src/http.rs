@@ -2,7 +2,6 @@
 //! и следующие запросы идут по нему. Вход — по ответу 401: схема из `WWW-Authenticate`, токены — SSPI (`sys`),
 //! с привязкой к каналу TLS. Соединение закрылось — новое и вход заново.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use http_body_util::{BodyExt as _, Full, Limited};
@@ -42,6 +41,15 @@ pub(crate) struct Http {
     pub(crate) min_interval: std::time::Duration,
     /// Предел на запрос целиком (с соединением и входом).
     pub(crate) timeout: std::time::Duration,
+    /// Схема последнего удачного входа (`Negotiate`, `NTLM`).
+    pub(crate) signed_in: Option<&'static str>,
+}
+
+/// Только TLS 1.3 («Настройки → Безопасность», S5-30), как у JMAP и DAV; иначе — 1.2 и выше. Новые соединения.
+static TLS13_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_tls13_only(on: bool) {
+    TLS13_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// `POSTMAN_INSECURE_TLS=1` — не проверять сертификат сервера (как у JMAP и IMAP). Только для стенда; у рабочего
@@ -50,70 +58,42 @@ fn insecure_tls() -> bool {
     std::env::var("POSTMAN_INSECURE_TLS").is_ok_and(|v| v == "1")
 }
 
-fn tls_connector() -> Result<tokio_rustls::TlsConnector> {
-    use rustls_platform_verifier::BuilderVerifierExt as _;
-    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
-    let builder = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| Error::Tls(e.to_string()))?;
-    let mut config = if insecure_tls() {
+/// TLS — SChannel Windows (`native-tls`), как у Outlook: шифры и протоколы — политика Windows, сертификат проверяет
+/// хранилище Windows. rustls здесь не годится: Exchange компании (IIS) принимает ECDHE только с
+/// AES-CBC (`ECDHE-RSA-AES256-SHA384`), а GCM — только без ECDHE; rustls не умеет ни того ни другого, и SChannel
+/// сервера рвёт соединение на ClientHello (TCP RST) — так на боевом Exchange (S7-06б, `docs/EXCHANGE.md`).
+fn tls_connector() -> Result<tokio_native_tls::TlsConnector> {
+    let mut b = native_tls::TlsConnector::builder();
+    let tls13 = TLS13_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+    b.min_protocol_version(Some(if tls13 { native_tls::Protocol::Tlsv13 } else { native_tls::Protocol::Tlsv12 }));
+    if insecure_tls() {
         tracing::warn!("POSTMAN_INSECURE_TLS: server certificate is NOT verified (test stand only)");
-        builder.dangerous().with_custom_certificate_verifier(Arc::new(stand::AnyCert(provider))).with_no_client_auth()
-    } else {
-        builder.with_platform_verifier().map_err(|e| Error::Tls(e.to_string()))?.with_no_client_auth()
-    };
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
-}
-
-/// Проверка сертификата стенда (`POSTMAN_INSECURE_TLS=1`): любой сертификат, подписи рукопожатия — проверяются.
-mod stand {
-    use std::sync::Arc;
-
-    use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-    use tokio_rustls::rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
-    use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-    use tokio_rustls::rustls::{DigitallySignedStruct, Error, SignatureScheme};
-
-    #[derive(Debug)]
-    pub(super) struct AnyCert(pub(super) Arc<CryptoProvider>);
-
-    impl ServerCertVerifier for AnyCert {
-        fn verify_server_cert(
-            &self,
-            _: &CertificateDer<'_>,
-            _: &[CertificateDer<'_>],
-            _: &ServerName<'_>,
-            _: &[u8],
-            _: UnixTime,
-        ) -> Result<ServerCertVerified, Error> {
-            Ok(ServerCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-            verify_tls12_signature(m, c, d, &self.0.signature_verification_algorithms)
-        }
-
-        fn verify_tls13_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-            verify_tls13_signature(m, c, d, &self.0.signature_verification_algorithms)
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.0.signature_verification_algorithms.supported_schemes()
-        }
+        b.danger_accept_invalid_certs(true);
     }
+    let c = b.build().map_err(|e| Error::Tls(e.to_string()))?;
+    Ok(tokio_native_tls::TlsConnector::from(c))
 }
 
 fn hyper_err(e: hyper::Error) -> Error {
     if e.is_closed() || e.is_canceled() || e.is_incomplete_message() { Error::Closed } else { Error::Http(e.to_string()) }
 }
 
-async fn connect(host: &str, port: u16) -> Result<Conn> {
+async fn connect(host: &str, port: u16, plain: bool) -> Result<Conn> {
     let tcp = TcpStream::connect((host, port)).await?;
     tcp.set_nodelay(true)?;
-    let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|e| Error::Tls(e.to_string()))?;
-    let tls = tls_connector()?.connect(name, tcp).await.map_err(|e| Error::Tls(e.to_string()))?;
-    let binding = tls.get_ref().1.peer_certificates().and_then(|c| c.first()).map(|c| auth::channel_binding(c.as_ref()));
+    if plain {
+        // Только сборка с `testkit` (подменный сервер тестов): без TLS и без привязки к каналу.
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await.map_err(hyper_err)?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        return Ok(Conn { host: host.to_owned(), port, sender, binding: None });
+    }
+    let tls = tls_connector()?.connect(host, tcp).await.map_err(|e| Error::Tls(e.to_string()))?;
+    let binding = match tls.get_ref().peer_certificate() {
+        Ok(Some(cert)) => cert.to_der().ok().map(|der| auth::channel_binding(&der)),
+        _ => None,
+    };
     let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await.map_err(hyper_err)?;
     // Соединение живёт, пока жив `sender`; закрылось — следующий запрос откроет новое.
     tokio::spawn(async move {
@@ -158,7 +138,7 @@ impl Conn {
 
 impl Http {
     pub(crate) fn new(auth: Auth) -> Http {
-        Http { auth, conn: None, last: None, min_interval: MIN_INTERVAL, timeout: TIMEOUT }
+        Http { auth, conn: None, last: None, min_interval: MIN_INTERVAL, timeout: TIMEOUT, signed_in: None }
     }
 
     /// POST тела XML; ответ — любой статус (разбирает вызывающий). Вход — по 401.
@@ -182,9 +162,20 @@ impl Http {
             None => true,
         };
         if stale {
-            self.conn = Some(connect(host, port).await?);
+            self.conn = Some(connect(host, port, url.scheme() == "http").await?);
         }
         self.conn.as_mut().ok_or(Error::Closed)
+    }
+
+    /// POST без входа: ответ как есть (401 — тоже). Для [`crate::probe`].
+    pub(crate) async fn post_anonymous(&mut self, url: &url::Url, body: Vec<u8>) -> Result<Reply> {
+        let body = Bytes::from(body);
+        tokio::time::timeout(self.timeout, async { self.conn(url).await?.send(url, &body, None).await }).await.map_err(|_| Error::Timeout)?
+    }
+
+    /// Сервер предлагает Negotiate или NTLM (по ответу 401).
+    pub(crate) fn offers_sspi(reply: &Reply) -> bool {
+        reply.status == 401 && auth::choose(&reply.www_authenticate).is_some()
     }
 
     async fn post_once(&mut self, url: &url::Url, body: &Bytes) -> Result<Reply> {
@@ -204,7 +195,9 @@ impl Http {
         let auth = self.auth.clone();
         let conn = self.conn(url).await?;
         tracing::debug!(scheme = scheme.name(), binding = conn.binding.is_some(), "ews sign-in");
-        handshake(conn, &auth, scheme, url, body).await
+        let reply = handshake(conn, &auth, scheme, url, body).await?;
+        self.signed_in = Some(scheme.name());
+        Ok(reply)
     }
 }
 
