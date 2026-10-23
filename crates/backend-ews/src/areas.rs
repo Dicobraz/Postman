@@ -7,14 +7,15 @@
 //!   после отмены организатором — `IsCancelled`) не показываются, как у JMAP.
 //! - **Встреча** — `CreateItem` с рассылкой сервером (копия — в «Отправленные», как у Outlook); пояс — Windows id
 //!   (`postman_ews::tz`, таблица CLDR целиком); сервер не знает этот пояс — встреча уходит в UTC. UID задаёт сервер —
-//!   он и уходит в `MeetingCreated`. Перенос и отмена — [`EwsAreas::reschedule`], [`EwsAreas::cancel`] (`UpdateItem`,
-//!   `DeleteItem` с рассылкой); команд интерфейса для них пока нет — в макете нет правки и отмены встречи.
+//!   он и уходит в `MeetingCreated`. Правка и отмена (`Command::UpdateMeeting`, `CancelMeeting`, S7-07б) — `UpdateItem`
+//!   и `DeleteItem` с рассылкой: экземпляр серии — его исключение, серия — по серии со сдвигом на ту же разницу.
 //! - **Ответ на приглашение** — `AcceptItem`/`TentativelyAcceptItem`/`DeclineItem` по встрече в календаре (её кладёт
 //!   туда сам Exchange при доставке приглашения), найденной по UID ([`pick`]); у серии — по самой серии, у приглашения
 //!   на один экземпляр (`recurrenceId`) — по экземпляру. Встречи с этим UID нет — ответ письмом iMIP (почтовый путь).
 //! - **Занятость** — `GetUserAvailability` (моя — тем же запросом); ошибка по адресу — «нет данных», не «свободен».
 //! - **Справочник** — `FindPeople` по GAL (`Command::FindPeople` → `PeopleFound`) с должностью, отделом и телефоном;
-//!   сервер его не знает — `ResolveNames`. GAL целиком EWS не отдаёт, `DirectoryLoaded` — пустой.
+//!   сервер его не знает — `ResolveNames`. GAL целиком EWS не отдаёт, `DirectoryLoaded` — пустой. Телефон для
+//!   карточки — `ResolveNames` по адресу (`Command::PersonDetails`): `FindPeople` у Exchange 2013 его не отдаёт.
 //! - **Изменения** — опрос `SyncFolderItems` календаря по таймеру синхронизации → `CalendarChanged`.
 
 use std::collections::HashMap;
@@ -164,6 +165,22 @@ pub fn pick<'a>(known: impl IntoIterator<Item = (&'a str, ItemKind, &'a Event)>,
     best.map(|(item, kind, _)| (item, kind))
 }
 
+/// Правка встречи полями вкладки «Встреча»: всё заново; время — сдвиг события недели (`was`), применённый к
+/// правимому объекту (`target`: сама встреча или серия), с новой длительностью.
+pub fn edit_changes(item: NewItem, was: Span, target: Span) -> Changes {
+    let shift = item.span.start - was.start;
+    Changes {
+        title: Some(item.title),
+        description: Some(item.description),
+        location: Some(item.location),
+        time: Some((Span::new(target.start + shift, target.start + shift + item.span.len()), false)),
+        time_zone: item.time_zone,
+        required: Some(item.required),
+        optional: Some(item.optional),
+        ..Changes::default()
+    }
+}
+
 /// Перенос встречи: новое время (`Span`, UTC) в поясе IANA `time_zone` — правка `UpdateItem`.
 pub fn moved(span: Span, time_zone: &str) -> Changes {
     Changes { time: Some((span, false)), time_zone: Some(time_zone.to_owned()), ..Changes::default() }
@@ -273,14 +290,15 @@ impl EwsAreas {
         Ok((id, if uid.is_empty() { meeting.uid.clone() } else { uid }))
     }
 
-    /// Объект сервера для правки и отмены по событию недели: сама встреча, а у экземпляра серии с `series` — серия.
-    async fn item_of(&mut self, event: &Event, series: bool) -> Result<Option<ItemId>, Error> {
-        let known = self.items.get(&event.id).map(|k| (ItemId { id: event.id.clone(), change_key: k.change_key.clone() }, k.kind));
-        let (id, kind) = match known {
+    /// Объект сервера для правки и отмены по событию недели и его время: сама встреча, а у экземпляра серии с
+    /// `series` — серия (её время — время первого экземпляра).
+    async fn target(&mut self, event: &Event, series: bool) -> Result<Option<(ItemId, Span)>, Error> {
+        let known = self.items.get(&event.id).map(|k| (ItemId { id: event.id.clone(), change_key: k.change_key.clone() }, k.kind, k.event.span));
+        let (id, kind, span) = match known {
             Some(k) => k,
             None => match self.client.get_items(&[ItemId::new(event.id.clone())]).await?.pop() {
                 Some(it) => {
-                    let k = (it.id.clone(), it.kind);
+                    let k = (it.id.clone(), it.kind, it.event.span);
                     self.remember(it);
                     k
                 }
@@ -288,27 +306,59 @@ impl EwsAreas {
             },
         };
         if series && matches!(kind, ItemKind::Occurrence | ItemKind::Exception) {
-            return Ok(self.client.master_of(&id).await?.map(|m| m.id));
+            return Ok(self.client.master_of(&id).await?.map(|m| (m.id, m.event.span)));
         }
-        Ok(Some(id))
+        Ok(Some((id, span)))
     }
 
-    /// Перенести или изменить встречу (организатор): изменение — всем участникам, копия — в «Отправленные». `series` —
-    /// у экземпляра серии изменить всю серию. Встречи нет — `false`.
-    pub async fn reschedule(&mut self, event: &Event, changes: &Changes, series: bool) -> Result<bool, Error> {
-        let Some(id) = self.item_of(event, series).await? else { return Ok(false) };
-        self.client.update(&id, changes, Notify::AllAndSaveCopy).await?;
+    /// Правка с рассылкой участникам (копия — в «Отправленные»); сервер не знает пояс — без пояса (UTC).
+    async fn update_item(&mut self, id: &ItemId, changes: &Changes) -> Result<(), Error> {
+        match self.client.update(id, changes, Notify::AllAndSaveCopy).await {
+            Err(e) if bad_time_zone(&e) && changes.time_zone.is_some() => {
+                tracing::warn!("exchange: unknown time zone id, meeting in UTC");
+                let utc = Changes { time_zone: None, ..changes.clone() };
+                self.client.update(id, &utc, Notify::AllAndSaveCopy).await?;
+            }
+            r => {
+                r?;
+            }
+        }
         self.items.remove(&id.id);
+        Ok(())
+    }
+
+    /// Перенести или изменить встречу (организатор) готовой правкой: изменение — всем участникам, копия — в
+    /// «Отправленные». `series` — у экземпляра серии изменить всю серию. Встречи нет — `false`.
+    pub async fn reschedule(&mut self, event: &Event, changes: &Changes, series: bool) -> Result<bool, Error> {
+        let Some((id, _)) = self.target(event, series).await? else { return Ok(false) };
+        self.update_item(&id, changes).await?;
+        Ok(true)
+    }
+
+    /// Изменить свою встречу полями вкладки «Встреча» (`Command::UpdateMeeting`): тема, место, описание, участники,
+    /// время и пояс. У серии (`series`) время серии сдвигается на ту же разницу, что у экземпляра; без `series` у
+    /// экземпляра — исключение (так делает сервер). Встречи нет — `false`.
+    pub async fn update_meeting(&mut self, event: &Event, meeting: &Meeting, series: bool) -> Result<bool, Error> {
+        let item = new_item(meeting).map_err(|e| Error::Ews { code: "ClientMeeting".into(), message: e })?;
+        let Some((id, span)) = self.target(event, series).await? else { return Ok(false) };
+        let changes = edit_changes(item, event.span, span);
+        self.update_item(&id, &changes).await?;
         Ok(true)
     }
 
     /// Отменить встречу (организатор): участникам — отмена, встреча — в «Удалённые», как у Outlook. `series` — у
     /// экземпляра серии отменить всю серию (иначе — только этот экземпляр). Встречи нет — `false`.
     pub async fn cancel(&mut self, event: &Event, series: bool) -> Result<bool, Error> {
-        let Some(id) = self.item_of(event, series).await? else { return Ok(false) };
+        let Some((id, _)) = self.target(event, series).await? else { return Ok(false) };
         self.client.delete(std::slice::from_ref(&id), DeleteMode::MoveToDeletedItems, Notify::AllAndSaveCopy).await?;
         self.items.remove(&id.id);
         Ok(true)
+    }
+
+    /// Подробности человека справочника по адресу (`ResolveNames`, с телефоном — `FindPeople` его не отдаёт).
+    pub async fn person(&mut self, email: &str) -> Result<Option<Principal>, Error> {
+        let found = self.client.resolve_names(email, 5).await?;
+        Ok(found.into_iter().find(|p| p.email.eq_ignore_ascii_case(email.trim())).map(principal))
     }
 
     /// Ответ на приглашение по встрече в календаре около приглашения ([`pick`]); встречи нет — `false` (ответ письмом).
@@ -383,6 +433,29 @@ impl EwsAreas {
                 }
                 Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
             },
+            Command::UpdateMeeting { event, meeting, series, ticket } => match self.update_meeting(&event, &meeting, series).await {
+                Ok(true) => {
+                    notify(SyncEvent::MeetingUpdated { ticket, uid: event.uid.clone() });
+                    notify(SyncEvent::CalendarChanged);
+                }
+                Ok(false) => notify(SyncEvent::MeetingFailed { ticket, error: "the meeting is not in the calendar".into() }),
+                Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            Command::CancelMeeting { event, series, ticket, .. } => match self.cancel(&event, series).await {
+                Ok(true) => {
+                    notify(SyncEvent::MeetingCancelled { ticket, uid: event.uid.clone() });
+                    notify(SyncEvent::CalendarChanged);
+                }
+                Ok(false) => notify(SyncEvent::MeetingFailed { ticket, error: "the meeting is not in the calendar".into() }),
+                Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            Command::PersonDetails { email } => {
+                let person = self.person(&email).await.unwrap_or_else(|e| {
+                    tracing::debug!("ews person: {e}");
+                    None
+                });
+                notify(SyncEvent::PersonDetails { email, person });
+            }
             Command::Contacts => {
                 // Личных контактов по EWS нет; справочник — только поиском (`FindPeople`).
                 notify(SyncEvent::ContactsLoaded(Vec::new()));
@@ -533,4 +606,19 @@ mod tests {
         assert_eq!(ch.time_zone.as_deref(), Some("Europe/Moscow"));
         assert!(ch.title.is_none() && ch.required.is_none());
     }
+    /// Правка вкладкой «Встреча»: экземпляр перенесён на час — у серии (её время раньше) тот же сдвиг, длительность новая.
+    #[test]
+    fn edit_shifts_the_target() {
+        let item = new_item(&meeting(vec![("Борис".into(), "boris@example.test".into())])).unwrap();
+        let was = Span::new(item.span.start - 3600, item.span.start - 1800);
+        let series = Span::new(was.start - 7 * 86_400, was.start - 7 * 86_400 + 1800);
+        let ch = edit_changes(item.clone(), was, series);
+        assert_eq!(ch.time, Some((Span::new(series.start + 3600, series.start + 3600 + 3600), false)));
+        assert_eq!(ch.title.as_deref(), Some("Обзор"));
+        assert_eq!(ch.required.as_ref().map(|r| r[0].email.as_str()), Some("boris@example.test"));
+        assert_eq!(ch.optional.as_ref().map(Vec::len), Some(1));
+        let same = edit_changes(item.clone(), item.span, item.span);
+        assert_eq!(same.time, Some((item.span, false)), "одиночная — новое время как есть");
+    }
+
 }

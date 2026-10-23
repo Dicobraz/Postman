@@ -105,6 +105,10 @@ enum Scene {
     Assistant,
     /// Календарь с подробностями самого людного события (S3-05).
     Event,
+    /// Своя встреча с участниками (S7-07б): в подробностях — «Изменить» и «Отменить встречу».
+    EventOrganizer,
+    /// «Отменить встречу» у своей повторяющейся встречи: строка «Только эту / Всю серию / Не отменять».
+    EventCancel,
     /// Календари коллег (S5-22): события коллег цветом их календаря и с именем владельца, слева «Календари коллег»;
     /// открыто событие из календаря коллеги.
     CalendarColleagues,
@@ -287,6 +291,8 @@ const SCENES: &[Scene] = &[
     Scene::PaletteQuery,
     Scene::Calendar,
     Scene::Event,
+    Scene::EventOrganizer,
+    Scene::EventCancel,
     Scene::CalendarColleagues,
     Scene::CalendarDay,
     Scene::CalendarWeek,
@@ -417,6 +423,8 @@ impl Scene {
             Scene::Calendar => "calendar",
             Scene::Assistant => "assistant",
             Scene::Event => "event",
+            Scene::EventOrganizer => "event-organizer",
+            Scene::EventCancel => "event-cancel",
             Scene::CalendarColleagues => "calendar-colleagues",
             Scene::CalendarDay => "calendar-day",
             Scene::CalendarWeek => "calendar-week",
@@ -833,6 +841,11 @@ fn enter(m: &mut Mailer, scene: Scene, window: &mut Window, cx: &mut Context<Mai
         }
         Scene::Event => {
             m.cal.update(cx, |c, cx| c.select_busiest(cx));
+            m.set_section(Section::Calendar, cx);
+        }
+        Scene::EventOrganizer | Scene::EventCancel => {
+            let cancel = matches!(scene, Scene::EventCancel);
+            m.cal.update(cx, |c, cx| c.select_own(cancel, cx));
             m.set_section(Section::Calendar, cx);
         }
         Scene::CalendarColleagues => {
@@ -1454,7 +1467,7 @@ fn ready(m: &Mailer, scene: Scene, cx: &App) -> bool {
             m.section == Section::Calendar && c.view == want
         }
         Scene::CalendarSearch => m.section == Section::Calendar && m.cal.read(cx).results_ready(),
-        Scene::Event => {
+        Scene::Event | Scene::EventOrganizer | Scene::EventCancel => {
             // Живая неделя может быть пустой: тогда снимок — без подробностей.
             let c = m.cal.read(cx);
             m.section == Section::Calendar && (c.selected() || c.is_empty())

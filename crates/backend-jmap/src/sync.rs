@@ -1038,6 +1038,20 @@ async fn handle(
                 Err(e) => Event::MeetingFailed { ticket, error: e.to_string() },
             });
         }
+        Command::UpdateMeeting { event, meeting, series, ticket } => {
+            notify(match schedule::update(client, identities, &event, &meeting, series).await {
+                Ok(uid) => Event::MeetingUpdated { ticket, uid },
+                Err(e) => Event::MeetingFailed { ticket, error: e.to_string() },
+            });
+        }
+        Command::CancelMeeting { event, series, ticket, .. } => {
+            notify(match schedule::cancel(client, &event, series).await {
+                Ok(uid) => Event::MeetingCancelled { ticket, uid },
+                Err(e) => Event::MeetingFailed { ticket, error: e.to_string() },
+            });
+        }
+        // Должности, отдела и телефона у JMAP `Principal` нет — подробностей сверх найденного тоже.
+        Command::PersonDetails { email } => notify(Event::PersonDetails { email, person: None }),
         Command::ShareFreeBusy { email } => {
             notify(match schedule::share_free_busy(client, &email).await {
                 Ok(()) => Event::FreeBusyShared { email },

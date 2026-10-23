@@ -429,6 +429,14 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
     отвечает 403, PROPFIND `/dav/pal/` Depth 1 — только свой: найти коллегу по адресу CalDAV нельзя. Клиент берёт
     путь по образцу своего (`dav::sibling_principal`), ACL на него сервер принимает. Где по CalDAV видны календари,
     открытые мне коллегами, — [проверить] (неделя Postman по CalDAV их пока не показывает).
+49. **Исключение экземпляра серии по CalDAV** (S7-07б, тест `caldav_meeting_edit_and_cancel`). Ресурс с исключением
+    (`RECURRENCE-ID`, RFC 5545 §3.8.4.4) сервер хранит как есть, но `calendar-query` с `<C:expand>`: (1) пока у серии
+    нет `EXDATE`, отдаёт и исключение, и прежний экземпляр на его месте — в неделе два экземпляра вместо одного; с
+    любым `EXDATE` у серии — верно; (2) у исключения отдаёт `RECURRENCE-ID`, равный его новому началу, а не исходному.
+    По JMAP (`recurrenceOverrides`) — верно. Клиент: исключение ищется и по началу (`ics::instance_rid`), правка
+    исключения повторно работает; дубль в неделе — от сервера. В `docs/STALWART-GAPS.md` — №49.
+    `recurrenceRules` (RFC 8984) в `CalendarEvent/set` — `invalidProperties`, повтор — `recurrenceRule` (JSCalendar
+    2.0); путь внутрь пустой карты `recurrenceOverrides/<id>` — `invalidProperties`, карта — целиком.
 
 ## S/MIME (S5-12 Ф2)
 

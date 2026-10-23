@@ -6,7 +6,8 @@
 //! - **Неделя** — `calendar-query` с `expand` (повторы разворачивает сервер, как у JMAP), .ics — в воркере
 //!   (`postman_worker::parse_calendar`, JSCalendar) → `postman_calendar::Event`.
 //! - **Встреча** — VEVENT с ORGANIZER и ATTENDEE (`SCHEDULE-AGENT=SERVER`, `postman_calendar::ics`): приглашения,
-//!   ответы и отмены рассылает сервер. **Ответ на приглашение** — PARTSTAT своей копии с `If-Schedule-Tag-Match`;
+//!   ответы и отмены рассылает сервер. Правка — новая версия своего ресурса (экземпляр серии — исключение с
+//!   `RECURRENCE-ID`), отмена — DELETE (экземпляр — `EXDATE`), S7-07б. **Ответ на приглашение** — PARTSTAT своей копии с `If-Schedule-Tag-Match`;
 //!   копии нет — письмом iMIP (это делает почтовый путь).
 //! - **Занятость** — POST VFREEBUSY в outbox; моя — из моих событий. Пустая занятость коллеги — «нет данных», как у
 //!   JMAP (`docs/STALWART.md` п. 46). **Открыть занятость** — ACL `read-free-busy` календарей.
@@ -116,6 +117,14 @@ fn now() -> i64 {
 }
 
 /// Новый UID: время и счётчик (как у задач, `tasks::new_uid`).
+/// `recurrenceId` экземпляра (JSCalendar, `2026-11-02T07:00:00`, время `expand` — UTC) → `RECURRENCE-ID` в UTC.
+fn rid_ical(rid: &str) -> String {
+    match jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", rid.trim().trim_end_matches('Z')) {
+        Ok(dt) => dt.strftime("%Y%m%dT%H%M%SZ").to_string(),
+        Err(_) => rid.trim().to_owned(),
+    }
+}
+
 fn new_uid() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     postman_core::tasks::new_uid(nanos)
@@ -314,6 +323,53 @@ impl Dav {
         let href = child_href(&cal, &meeting.uid, Content::Calendar);
         self.client.put(&href, Content::Calendar, &ics, Precondition::Create).await?;
         Ok(href)
+    }
+
+    /// Своя встреча недели: ресурс (путь до `#`) и экземпляр серии — `RECURRENCE-ID` в UTC (`20261102T070000Z`; id
+    /// экземпляра — `путь#recurrenceId`, время экземпляров `expand` отдаёт в UTC).
+    async fn own_meeting(&self, event: &Event) -> Result<(postman_dav::Resource, Option<String>), Error> {
+        let (href, rid) = match event.id.split_once('#') {
+            Some((h, r)) => (h, Some(rid_ical(r))),
+            None => (event.id.as_str(), None),
+        };
+        let res = self.client.get(href).await?;
+        // У исключения Stalwart отдаёт в `expand` его новое начало вместо исходного `RECURRENCE-ID` (№49).
+        let rid = rid.map(|r| postman_calendar::ics::instance_rid(&res.data, &r));
+        Ok((res, rid))
+    }
+
+    /// Изменить свою встречу (организатор): новая версия ресурса, изменения участникам рассылает сервер. У экземпляра
+    /// серии — его исключение (`RECURRENCE-ID`) или, с `series`, вся серия со сдвигом на ту же разницу.
+    pub async fn update_meeting(&self, event: &Event, meeting: &Meeting, series: bool) -> Result<String, Error> {
+        let (res, rid) = self.own_meeting(event).await?;
+        let attendees = meeting.attendee_refs();
+        let ev = meeting.new_event("", ("", &self.me), &attendees);
+        let shift = meeting.shift_from(event).ok_or_else(|| Error::Protocol(format!("time zone {}", meeting.time_zone)))?;
+        let edit = match rid.as_deref() {
+            Some(r) if !series => postman_calendar::ics::Edit::Instance { rid: r },
+            _ => postman_calendar::ics::Edit::Whole { shift },
+        };
+        let ics = postman_calendar::ics::edited(&res.data, &ev, edit, now()).ok_or_else(|| Error::Protocol("no meeting in the resource".into()))?;
+        let pre = res.etag.as_deref().map_or(Precondition::None, Precondition::Etag);
+        self.client.put(&res.href, Content::Calendar, &ics, pre).await?;
+        Ok(event.uid.clone())
+    }
+
+    /// Отменить свою встречу: ресурс удаляется — участникам отмену рассылает сервер (RFC 6638 §3.2.1.2). Экземпляр
+    /// серии без `series` — `EXDATE` у серии (отмена только его).
+    pub async fn cancel_meeting(&self, event: &Event, series: bool) -> Result<String, Error> {
+        let (res, rid) = self.own_meeting(event).await?;
+        let pre = res.etag.as_deref().map_or(Precondition::None, Precondition::Etag);
+        match rid.as_deref().filter(|_| !series && postman_calendar::ics::is_series(&res.data)) {
+            Some(r) => {
+                let ics = postman_calendar::ics::without_instance(&res.data, r, now()).ok_or_else(|| Error::Protocol("no series in the resource".into()))?;
+                self.client.put(&res.href, Content::Calendar, &ics, pre).await?;
+            }
+            None => {
+                self.client.delete(&res.href, pre).await?;
+            }
+        }
+        Ok(event.uid.clone())
     }
 
     /// Ответ на приглашение своей копией (сервер шлёт REPLY организатору). `false` — копии нет (приглашение пришло
@@ -705,6 +761,22 @@ impl Dav {
                 }
                 Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
             },
+            Command::UpdateMeeting { event, meeting, series, ticket } => match self.update_meeting(&event, &meeting, series).await {
+                Ok(uid) => {
+                    notify(SyncEvent::MeetingUpdated { ticket, uid });
+                    notify(SyncEvent::CalendarChanged);
+                }
+                Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            Command::CancelMeeting { event, series, ticket, .. } => match self.cancel_meeting(&event, series).await {
+                Ok(uid) => {
+                    notify(SyncEvent::MeetingCancelled { ticket, uid });
+                    notify(SyncEvent::CalendarChanged);
+                }
+                Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            // Справочника у CardDAV нет — подробностей человека тоже.
+            Command::PersonDetails { email } => notify(SyncEvent::PersonDetails { email, person: None }),
             Command::ShareFreeBusy { email } => notify(match self.share_free_busy(&email).await {
                 Ok(()) => SyncEvent::FreeBusyShared { email },
                 Err(e) => SyncEvent::CalendarFailed(e.to_string()),
@@ -755,6 +827,13 @@ impl Dav {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn instance_id_to_recurrence_id() {
+        assert_eq!(rid_ical("2026-11-02T07:00:00"), "20261102T070000Z");
+        assert_eq!(rid_ical("2026-11-02T07:00:00Z"), "20261102T070000Z");
+        assert_eq!(rid_ical("x"), "x");
+    }
 
     #[test]
     fn patch_paths_and_removal() {

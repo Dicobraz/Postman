@@ -35,11 +35,11 @@ IMAP4 и приём SMTP от клиентов выключены. Плагин 
 | Поиск, фильтры | `FindItem` с `QueryString` (AQS) | по папкам; даты и размер в AQS — [проверить] |
 | Неделя календаря | `FindItem` + `CalendarView`, `GetItem` | повторы разворачивает сервер: экземпляры и изменённые — своими событиями с общим UID, удалённых нет; та же версия (`ChangeKey`) — без `GetItem`; отменённые не показываются |
 | Новая встреча | `CreateItem`, `SendToAllAndSaveCopy` | пояс — Windows id (`postman_ews::tz`, CLDR `windowsZones` целиком; сервер пояс не знает — UTC); UID задаёт сервер |
-| Перенос, отмена | `UpdateItem`, `DeleteItem` с рассылкой (`SendToAllAndSaveCopy`) | у плагина (`EwsAreas::reschedule`, `cancel`); в интерфейсе — нет: в макете нет правки и отмены встречи (S7-07, вопрос владельцу) |
+| Правка, отмена своей встречи | `UpdateItem`, `DeleteItem` с рассылкой (`SendToAllAndSaveCopy`) | «Изменить» и «Отменить встречу» в подробностях (S7-07б, `UpdateMeeting`, `CancelMeeting`): экземпляр серии — исключение сервера, серия — по серии (`RecurringMasterItemId`) со сдвигом на ту же разницу |
 | Ответ на приглашение | `AcceptItem` / `TentativelyAcceptItem` / `DeclineItem` | из карточки письма и из календаря — по встрече с UID приглашения (серия — по серии, `RecurringMasterItemId`; приглашение на один экземпляр — ему); нет её — письмом iMIP |
 | Письма встреч | `MeetingRequest`, `MeetingResponse`, `MeetingCancellation` — как письма | в списке, MIME с `text/calendar` — карточка приглашения |
 | «Помощник планирования» | `GetUserAvailability` | ошибка по адресу — «нет данных», не «свободен» |
-| Справочник | `FindPeople` по GAL (папка `directory`), отказал — `ResolveNames` | `Command::FindPeople` → `PeopleFound`: имя, адрес, должность, отдел (телефон — только у `ResolveNames`); GAL целиком EWS не отдаёт |
+| Справочник | `FindPeople` по GAL (папка `directory`), отказал — `ResolveNames` | `Command::FindPeople` → `PeopleFound`: имя, адрес, должность, отдел; телефон — `ResolveNames` по адресу при открытии карточки (`Command::PersonDetails`, S7-08б); GAL целиком EWS не отдаёт |
 
 Ограничения сервера: не чаще 5 запросов в секунду; `ErrorServerBusy` — пауза `BackOffMilliseconds` и до 2 повторов.
 

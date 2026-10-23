@@ -438,3 +438,93 @@ fn carddav_round_trip() {
     let Event::ContactsLoaded(cards) = live.wait("ContactsLoaded", |e| matches!(e, Event::ContactsLoaded(_))) else { unreachable!() };
     assert!(!cards.iter().any(|c| c.id == id));
 }
+
+/// Правка и отмена своей встречи (S7-07б) user1 → user2: `UpdateMeeting` (на час позже) — у user2 новое время;
+/// `CancelMeeting` — у user2 встречи нет (или отменена). Серия (каждый день, 3 раза, PUT напрямую): второй экземпляр —
+/// на час позже (исключение), третий — отменён (`EXDATE`), затем вся серия (DELETE). Уборка — календари и письма.
+#[test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+fn caldav_meeting_edit_and_cancel() {
+    // Забытое упавшими прогонами — убрать сначала.
+    clean_calendar(1, "postman-std-edit-");
+    clean_calendar(2, "postman-std-edit-");
+    let (a, b) = (Live::start(1), Live::start(2));
+    let uid = format!("postman-std-edit-{}", stamp());
+    let at = slot(46);
+    let (from, to) = (at - 86_400, at + 4 * 86_400);
+    let done = |what: &str, ticket: u64| {
+        a.wait(what, |e| match e {
+            Event::MeetingFailed { ticket: t, error } if *t == ticket => panic!("{what}: {error}"),
+            Event::MeetingUpdated { ticket: t, .. } | Event::MeetingCancelled { ticket: t, .. } => *t == ticket,
+            _ => false,
+        });
+    };
+    let peer = vec![("User 2".to_string(), b.me.clone())];
+    a.send(Command::CreateMeeting { meeting: Box::new(meeting(&uid, &format!("Правка {uid}"), at, peer.clone())), ticket: 1 });
+    a.wait("MeetingCreated", |e| matches!(e, Event::MeetingCreated { ticket: 1, .. }));
+    b.events_until(from, to, "приглашение у user2 (п. 17 STALWART.md?)", |e| e.iter().any(|x| x.uid == uid));
+    let mine = a.events_until(from, to, "встреча у user1", |e| e.iter().any(|x| x.uid == uid));
+    let ev = mine.into_iter().find(|x| x.uid == uid).unwrap();
+    a.send(Command::UpdateMeeting { event: Box::new(ev.clone()), meeting: Box::new(meeting(&uid, &format!("Позже {uid}"), at + 3600, peer.clone())), series: false, ticket: 2 });
+    done("MeetingUpdated", 2);
+    b.events_until(from, to, "перенос у user2", |e| e.iter().any(|x| x.uid == uid && x.span.start == at + 3600));
+    let ev = a.events_until(from, to, "перенос у user1", |e| e.iter().any(|x| x.uid == uid && x.span.start == at + 3600));
+    let ev = ev.into_iter().find(|x| x.uid == uid).unwrap();
+    a.send(Command::CancelMeeting { event: Box::new(ev), series: false, from: None, ticket: 3 });
+    done("MeetingCancelled", 3);
+    // Отменённая копия у участника остаётся со `STATUS:CANCELLED` (`docs/STALWART.md`) — неделя её не показывает.
+    b.events_until(from, to, "отмена у user2", |e| !e.iter().any(|x| x.uid == uid));
+
+    // Серия user1 (без участников — проверка правки экземпляра и EXDATE, рассылка — выше).
+    let suid = format!("{uid}-series");
+    rt().block_on(async {
+        let c = dav(1);
+        let d = c.discover().await.unwrap();
+        let cal = c.calendars(&d.calendar_home[0]).await.unwrap().into_iter().find(|c| c.supports("VEVENT")).unwrap().href;
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Postman//stand//RU\r\nBEGIN:VEVENT\r\nUID:{suid}\r\nDTSTAMP:20261023T000000Z\r\nDTSTART:{}\r\nDTEND:{}\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Серия {suid}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            jiff::Timestamp::from_second(at).unwrap().strftime("%Y%m%dT%H%M%SZ"),
+            jiff::Timestamp::from_second(at + 1800).unwrap().strftime("%Y%m%dT%H%M%SZ")
+        );
+        let href = postman_dav::child_href(&cal, &suid, postman_dav::Content::Calendar);
+        c.put(&href, postman_dav::Content::Calendar, &ics, postman_dav::Precondition::Create).await.unwrap();
+    });
+    let ours = |e: &[postman_calendar::Event]| e.iter().filter(|x| x.uid == suid).cloned().collect::<Vec<_>>();
+    let all = ours(&a.events_until(from, to, "три экземпляра", |e| ours(e).len() == 3));
+    let second = all.iter().find(|x| x.span.start == at + 86_400).unwrap().clone();
+    let mut later = meeting(&suid, &format!("Серия {suid}"), at + 86_400 + 3600, Vec::new());
+    later.duration_secs = 1800;
+    a.send(Command::UpdateMeeting { event: Box::new(second), meeting: Box::new(later), series: false, ticket: 4 });
+    done("MeetingUpdated экземпляра", 4);
+    // Stalwart v0.16.27: пока у серии нет `EXDATE`, `expand` отдаёт и исключение, и прежний экземпляр (ресурс —
+    // верный, RFC 5545 §3.8.4.4; `docs/STALWART-GAPS.md` №49) — прежний здесь терпим, но печатаем.
+    let all = ours(&a.events_until(from, to, "исключение", |e| ours(e).iter().any(|x| x.span.start == at + 86_400 + 3600)));
+    let gap = all.iter().any(|x| x.span.start == at + 86_400);
+    println!("исключение экземпляра: прежний экземпляр в expand — {}", if gap { "остался (№49)" } else { "заменён" });
+    // Исключение — ещё раз (его `RECURRENCE-ID` в `expand` у Stalwart — новое начало, №49): ещё на полчаса позже.
+    let moved = all.iter().find(|x| x.span.start == at + 86_400 + 3600).unwrap().clone();
+    let mut again = meeting(&suid, &format!("Серия {suid}"), at + 86_400 + 5400, Vec::new());
+    again.duration_secs = 1800;
+    a.send(Command::UpdateMeeting { event: Box::new(moved), meeting: Box::new(again), series: false, ticket: 7 });
+    done("MeetingUpdated исключения", 7);
+    let twice = |e: &[postman_calendar::Event]| {
+        let o = ours(e);
+        o.iter().any(|x| x.span.start == at + 86_400 + 5400) && !o.iter().any(|x| x.span.start == at + 86_400 + 3600)
+    };
+    let all = ours(&a.events_until(from, to, "исключение ещё раз — то же исключение", twice));
+    let third = all.iter().find(|x| x.span.start == at + 2 * 86_400).unwrap().clone();
+    a.send(Command::CancelMeeting { event: Box::new(third), series: false, from: None, ticket: 5 });
+    done("MeetingCancelled экземпляра", 5);
+    let gone = |e: &[postman_calendar::Event]| {
+        let o = ours(e);
+        !o.iter().any(|x| x.span.start == at + 2 * 86_400) && o.iter().any(|x| x.span.start == at + 86_400 + 5400)
+    };
+    let all = ours(&a.events_until(from, to, "без третьего", gone));
+    assert!(all.iter().any(|x| x.span.start == at), "первый — на месте");
+    a.send(Command::CancelMeeting { event: Box::new(all[0].clone()), series: true, from: None, ticket: 6 });
+    done("MeetingCancelled серии", 6);
+    a.events_until(from, to, "серии нет", |e| ours(e).is_empty());
+    clean_calendar(1, &uid);
+    clean_calendar(2, &uid);
+    clean_letters("postman-std-edit-");
+}

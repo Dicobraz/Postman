@@ -56,7 +56,7 @@ const ROOMS: usize = 6;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Тикет команды встречи: итог синхронизации находит свою вкладку по нему.
-fn next_ticket() -> u64 {
+pub(crate) fn next_ticket() -> u64 {
     NEXT_TICKET.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -102,6 +102,24 @@ pub(crate) struct MeetingModel {
     pub(crate) status: Status,
     /// Тикет отправки, итог которой ждём.
     sending: Option<u64>,
+    /// Правка своей встречи (S7-07б): вкладка отправляет `UpdateMeeting`, а не `CreateMeeting`.
+    pub(crate) editing: Option<Editing>,
+}
+
+/// Какую встречу правит вкладка: событие недели и у повтора — вся ли серия.
+#[derive(Debug, Clone)]
+pub(crate) struct Editing {
+    pub(crate) event: Box<postman_calendar::Event>,
+    pub(crate) series: bool,
+}
+
+/// Участник строкой поля вкладки: «Имя <адрес>», без имени — адрес.
+fn person_line(name: &str, email: &str) -> String {
+    match name.trim() {
+        "" => email.to_string(),
+        n if n.contains([',', ';', '<', '"']) => format!("\"{}\" <{email}>", n.replace('"', "")),
+        n => format!("{n} <{email}>"),
+    }
 }
 
 /// Дата: «дд.мм.гггг», «дд.мм» (год — текущий), «гггг-мм-дд».
@@ -241,7 +259,31 @@ impl MeetingModel {
             from: None,
             status: Status::None,
             sending: None,
+            editing: None,
         }
+    }
+
+    /// Вкладка правки своей встречи (S7-07б): поля — из события недели в поясе `tz`, «От» — организатор (встреча
+    /// остаётся в своей учётной записи), участники — кроме меня-организатора.
+    pub(crate) fn editing(e: &postman_calendar::Event, series: bool, tz: &TimeZone) -> Self {
+        let start = jiff::Timestamp::from_second(e.span.start).map(|t| t.to_zoned(tz.clone()).datetime()).unwrap_or_default();
+        let mut m = Self::new(start, e.span.len().max(MIN_STEP));
+        m.title = e.title.clone();
+        m.location = e.location.clone();
+        m.description = e.description.clone();
+        let list = |optional: bool| {
+            e.participants
+                .iter()
+                .filter(|p| p.attendee && !p.owner && p.optional == optional && !p.email.is_empty())
+                .map(|p| person_line(&p.name, &p.email))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        m.attendees = list(false);
+        m.optional = list(true);
+        m.from = e.organizer().map(|o| o.email.clone()).filter(|x| !x.is_empty());
+        m.editing = Some(Editing { event: Box::new(e.clone()), series });
+        m
     }
 
     pub(crate) fn field(&self, f: Field) -> &str {
@@ -340,10 +382,16 @@ impl MeetingModel {
     /// Начать отправку: команда для `Backend::send` или `None` (ошибка — в `status`).
     pub(crate) fn begin(&mut self, ticket: u64, uid: String, tz: &TimeZone, today: Date) -> Option<Command> {
         match self.meeting(uid, tz, today) {
-            Ok(m) => {
+            Ok(mut m) => {
                 self.sending = Some(ticket);
                 self.status = Status::Sending;
-                Some(Command::CreateMeeting { meeting: Box::new(m), ticket })
+                Some(match &self.editing {
+                    Some(ed) => {
+                        m.uid = ed.event.uid.clone();
+                        Command::UpdateMeeting { event: ed.event.clone(), meeting: Box::new(m), series: ed.series, ticket }
+                    }
+                    None => Command::CreateMeeting { meeting: Box::new(m), ticket },
+                })
             }
             Err(s) => {
                 self.status = s;
@@ -399,6 +447,8 @@ impl MeetingModel {
 pub(crate) struct Created {
     pub(crate) title: String,
     pub(crate) invited: bool,
+    /// Правка своей встречи (S7-07б): изменения разосланы.
+    pub(crate) edited: bool,
     pub(crate) tab: u64,
 }
 
@@ -434,11 +484,13 @@ impl Meetings {
         self.tabs.iter().find(|(t, _)| *t == tab).map(|(_, v)| v)
     }
 
-    /// Название вкладки: «Новая встреча · тема».
+    /// Название вкладки: «Новая встреча · тема» или «Изменение встречи · тема».
     pub(crate) fn title(&self, tab: u64, cx: &App) -> String {
-        match self.view(tab).map(|v| v.read(cx).model.title.trim().to_string()) {
-            Some(t) if !t.is_empty() => tr!("meeting-tab-titled", title = t),
-            _ => tr!("meeting-title-new"),
+        let model = self.view(tab).map(|v| &v.read(cx).model);
+        let edit = model.is_some_and(|m| m.editing.is_some());
+        match model.map(|m| m.title.trim().to_string()) {
+            Some(t) if !t.is_empty() => tr!(if edit { "meeting-tab-edit-titled" } else { "meeting-tab-titled" }, title = t),
+            _ => tr!(if edit { "meeting-title-edit" } else { "meeting-title-new" }),
         }
     }
 
@@ -511,8 +563,11 @@ impl Mailer {
     pub(crate) fn meetings_created(&mut self, created: Vec<Created>, cx: &mut Context<Self>) {
         for c in &created {
             let title = if c.title.is_empty() { tr!("meeting-untitled") } else { c.title.clone() };
-            let text =
-                if c.invited { tr!("meeting-sent", title = title) } else { tr!("meeting-created", title = title) };
+            let text = match (c.edited, c.invited) {
+                (true, _) => tr!("meeting-updated", title = title),
+                (false, true) => tr!("meeting-sent", title = title),
+                (false, false) => tr!("meeting-created", title = title),
+            };
             self.toasts.update(cx, |t, cx| t.push(Toast::Success, text, cx));
             self.meetings.remove(c.tab);
             self.tabs.close(c.tab);
@@ -1046,10 +1101,11 @@ impl MeetingView {
                 cx.notify();
                 None
             }
-            Event::MeetingCreated { ticket, .. } if self.model.on_created(*ticket) => {
+            Event::MeetingCreated { ticket, .. } | Event::MeetingUpdated { ticket, .. } if self.model.on_created(*ticket) => {
                 cx.notify();
                 let invited = !self.model.people().is_empty() || !self.model.optional_people().is_empty();
-                Some(Created { title: self.model.title.trim().to_string(), invited, tab: 0 })
+                let edited = matches!(ev, Event::MeetingUpdated { .. });
+                Some(Created { title: self.model.title.trim().to_string(), invited, edited, tab: 0 })
             }
             Event::MeetingFailed { ticket, error } => {
                 if self.model.on_failed(*ticket, error.clone()) {
@@ -1224,7 +1280,8 @@ impl MeetingView {
     /// «От» (S7-03б, решение владельца 2026-10-23): то же поле, что в письме, — адрес и меню адресов моих учётных
     /// записей; учётная запись одна — строки нет.
     fn sender_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.senders.len() < 2 {
+        // Правка своей встречи: организатор не меняется (встреча остаётся в своей учётной записи).
+        if self.senders.len() < 2 || self.model.editing.is_some() {
             return None;
         }
         let l = crate::roles::look(cx);
@@ -2277,6 +2334,52 @@ mod tests {
         m.refused();
         assert_eq!(m.status, Status::NoServer);
         assert!(!m.busy());
+    }
+
+    /// Правка своей встречи (S7-07б): поля — из события, участники — кроме меня-организатора, «От» — организатор;
+    /// отправка — `UpdateMeeting` с UID события и выбором «вся серия».
+    #[test]
+    fn edit_sends_update() {
+        use postman_calendar::{Event as CalEvent, EventStatus, FreeBusy, Participant, Partstat};
+        let tz = TimeZone::UTC;
+        let start = jiff::civil::date(2026, 10, 21).at(9, 30, 0, 0).to_zoned(tz.clone()).unwrap().timestamp().as_second();
+        let p = |name: &str, email: &str, owner, optional| Participant {
+            name: name.into(),
+            email: email.into(),
+            owner,
+            attendee: true,
+            optional,
+            status: Partstat::Accepted,
+        };
+        let e = CalEvent {
+            id: "e1".into(),
+            uid: "uid-1".into(),
+            calendar_ids: Vec::new(),
+            title: "Итоги".into(),
+            description: "Повестка".into(),
+            location: "Каб. 1".into(),
+            span: Span::new(start, start + 2700),
+            all_day: false,
+            status: EventStatus::Confirmed,
+            free_busy: FreeBusy::Busy,
+            participants: vec![p("Я", "me@x.test", true, false), p("Борис, ИТ", "b@x.test", false, false), p("", "room@x.test", false, true)],
+            recurring: true,
+            keywords: Vec::new(),
+            sequence: 1,
+            owner: None,
+        };
+        let mut m = MeetingModel::editing(&e, true, &tz);
+        assert_eq!((m.date.as_str(), m.start.as_str(), m.duration), ("21.10.2026", "09:30", 2700));
+        assert_eq!((m.attendees.as_str(), m.optional.as_str()), ("\"Борис, ИТ\" <b@x.test>", "room@x.test"));
+        assert_eq!(m.from.as_deref(), Some("me@x.test"));
+        m.title = "Итоги недели".into();
+        let Some(Command::UpdateMeeting { event, meeting, series, ticket }) = m.begin(3, "new-uid".into(), &tz, today()) else {
+            panic!("нет UpdateMeeting")
+        };
+        assert_eq!((event.id.as_str(), meeting.uid.as_str(), series, ticket), ("e1", "uid-1", true, 3));
+        assert_eq!(meeting.attendees, [("Борис, ИТ".to_string(), "b@x.test".to_string())]);
+        assert_eq!(meeting.title, "Итоги недели");
+        assert!(m.on_created(3));
     }
 
     #[test]
