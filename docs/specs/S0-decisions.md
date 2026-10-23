@@ -2,6 +2,17 @@
 
 Источник правды по решениям: выше всех остальных документов. Новое решение — строкой сверху, с датой.
 
+## 2026-10-23 (вечер). Почта Exchange — по EWS, не через IMAP/SMTP
+
+Разведка боевого Exchange компании (S7-06б, тестовые учётки): Autodiscover POX и вход Negotiate работают, но IMAP4 и
+приём SMTP от клиентов на Exchange выключены (почта домена живёт на другой системе). Владелец решил: читать и
+отправлять почту Exchange по EWS, сервер не трогать. Путь «почта Exchange — его IMAP/SMTP» (решение 2026-10-23,
+вопрос 1) снят. Крейт `ews` получает почту: `SyncFolderHierarchy` (дерево папок), `SyncFolderItems` (письма),
+`GetItem` с `MimeContent` (разбор MIME — воркер), `UpdateItem` (прочитано, флаг), `MoveItem`/`DeleteItem`,
+`CreateItem` из MIME (`SendAndSaveCopy`, черновик `SaveOnly`), `FindItem` (AQS), `GetAttachment`. Сервер по факту —
+Exchange 2013 CU23 (15.0.1497.46), а не 2016+: EWS тот же, «best effort» остаётся. TLS к Exchange — через SChannel
+Windows (`native-tls`): его шифры rustls не умеет (S7-06б, `docs/EXCHANGE.md`). Вопрос 1 S7 закрыт.
+
 ## 2026-10-23. Ядро функциональное, протоколы — плагины (ADR 0004, S7-02б)
 
 Слова владельца: «ядро функциональное, а протоколы — плагины». `core` — модель, кэш, общий цикл синхронизации,

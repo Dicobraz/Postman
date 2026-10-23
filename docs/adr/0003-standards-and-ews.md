@@ -5,6 +5,11 @@
 плагины `backend-*` (L2b); перечисления путей в `core` заменены договором плагинов — разделы «Слои» и «Нейтральная
 модель» ниже читать с этой поправкой.
 
+> Уточнение 2026-10-23 (вечер, `S0-decisions.md`): почта Exchange идёт **по EWS**, не через его IMAP/SMTP — у
+> Exchange компании IMAP4 и приём SMTP от клиентов выключены (`docs/EXCHANGE.md`). Строки таблицы ниже «Почта,
+> отправка → IMAP + SMTP submission Exchange» и абзац «Почему так у Exchange» в этой части заменены: почта
+> Exchange — крейт `ews` (`SyncFolderHierarchy`/`SyncFolderItems`/`GetItem` MimeContent/`CreateItem` и т. д.).
+
 ⚠ отступление от ТЗ: `docs/HANDOFF.md` §1 — «JMAP-only». Решение владельца 2026-10-23 (`S0-decisions.md`): цель —
 по-прежнему Stalwart по JMAP; второй путь — стандарты, на переходный период — ещё и Exchange компании (on-prem) в
 том, чего стандартами не достать.

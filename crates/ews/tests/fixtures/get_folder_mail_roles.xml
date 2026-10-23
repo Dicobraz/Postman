@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:GetFolderResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADinbox" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADdrafts" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADsent" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADtrash" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADjunk" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders><t:Folder><t:FolderId Id="AAMkADoutbox" ChangeKey="RK"/></t:Folder></m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Error">
+          <m:MessageText>not found</m:MessageText><m:ResponseCode>ErrorFolderNotFound</m:ResponseCode>
+          <m:Folders/>
+        </m:GetFolderResponseMessage>
+      </m:ResponseMessages>
+    </m:GetFolderResponse>
+  </s:Body>
+</s:Envelope>

@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use futures::FutureExt as _;
 use postman_calendar::{FreeBusy, Partstat, Span};
 use postman_ews::{
-    Attendee, Auth, Changes, Client, DayOfWeek, DeleteMode, FolderRef, ItemKind, NewItem, Notify, Pattern, Range, Recurrence,
-    Reply, Source, WellKnown, discover,
+    Attendee, Auth, Changes, Client, DayOfWeek, DeleteMode, FolderRef, ItemKind, MailRole, NewItem, Notify, Pattern, Range,
+    Recurrence, Reply, Source, WellKnown, discover,
 };
 
 struct Account {
@@ -86,7 +86,7 @@ fn now() -> i64 {
 /// Всё с меткой — насовсем, без рассылки: календарь, «Входящие» (приглашения, ответы, отмены), «Отправленные»,
 /// «Удалённые».
 async fn cleanup(c: &mut Client, tag: &str) {
-    for folder in [WellKnown::Calendar, WellKnown::Inbox, WellKnown::SentItems, WellKnown::DeletedItems] {
+    for folder in [WellKnown::Calendar, WellKnown::Inbox, WellKnown::Drafts, WellKnown::SentItems, WellKnown::DeletedItems] {
         match c.find_by_subject(folder, tag, 20).await {
             Ok(ids) if !ids.is_empty() => {
                 if let Err(e) = c.delete(&ids, DeleteMode::HardDelete, Notify::None).await {
@@ -378,5 +378,146 @@ fn ews_resolve_names() {
         assert!(people.iter().any(|p| p.email.eq_ignore_ascii_case(&a.email)), "своя учётка в GAL");
         assert!(people.len() <= 10);
         println!("справочник: найдено {}", people.len());
+    });
+}
+
+/// Письмо (RFC 5322) себе с меткой в теме.
+fn letter(me: &str, subject: &str) -> Vec<u8> {
+    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    format!(
+        "From: <{me}>
+To: <{me}>
+Subject: {subject}
+Message-ID: <{id}@postman.test>
+Content-Type: text/plain; charset=utf-8
+
+Проверка почты Exchange по EWS.
+"
+    )
+    .into_bytes()
+}
+
+/// Дерево папок и роли: вход, отправленные и удалённые на месте.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn ews_mail_folders() {
+    rt().block_on(async {
+        let mut c = client(&first()).await;
+        let roles = c.mail_roles().await.unwrap();
+        assert!(roles.iter().any(|(r, _)| *r == MailRole::Inbox), "роль «Входящие»");
+        let mut state = None;
+        let mut all = Vec::new();
+        for _ in 0..25 {
+            match c.sync_folders(state.as_ref(), &roles).await {
+                Ok(ch) => {
+                    all.extend(ch.created);
+                    all.extend(ch.updated);
+                    let done = ch.done;
+                    state = Some(ch.state);
+                    if done {
+                        break;
+                    }
+                }
+                // Боевой Exchange 2013 CU23 отвечает на SyncFolderHierarchy ErrorInternalServerError (баг сервера,
+                // docs/EXCHANGE.md); роли из GetFolder при этом работают.
+                Err(e) if e.code() == Some("ErrorInternalServerError") => {
+                    eprintln!("SyncFolderHierarchy не поддержан этим сервером (docs/EXCHANGE.md); роли есть: {}", roles.len());
+                    return;
+                }
+                Err(e) => panic!("sync_folders: {}", e.code().unwrap_or("ошибка")),
+            }
+        }
+        assert!(all.iter().any(|f| f.role == Some(MailRole::Inbox)), "«Входящие» в дереве");
+        println!("папок: {}; ролей: {}", all.len(), roles.len());
+    });
+}
+
+/// Письмо себе: отправка, появление во «Входящих», заголовок, тело (MIME), прочитано, флаг, перенос, удаление.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn ews_mail_self_round_trip() {
+    rt().block_on(async {
+        let a = first();
+        let tag = tag();
+        guarded(&tag, &[&a], async {
+            let mut c = client(&a).await;
+            let me = test_recipient(&a.email);
+            let subject = format!("{tag} self");
+            c.send_mail(&letter(&me, &subject), true).await.unwrap();
+
+            let id = poll!("письмо во «Входящих»", c.find_by_subject(WellKnown::Inbox, &tag, 5).await.ok().and_then(|v| v.into_iter().next()));
+            let h = c.mail_headers(std::slice::from_ref(&id)).await.unwrap().pop().expect("заголовок");
+            assert!(h.subject.contains(&tag) && h.from_addr.eq_ignore_ascii_case(&me) && h.size > 0);
+
+            let mail = c.get_mail(&id).await.unwrap().expect("письмо");
+            assert!(!mail.mime.is_empty());
+            let text = String::from_utf8_lossy(&mail.mime);
+            assert!(text.contains(&subject), "MIME содержит тему");
+
+            let id = c.set_read(&id, true).await.unwrap();
+            let h = c.mail_headers(std::slice::from_ref(&id)).await.unwrap().pop().unwrap();
+            assert!(h.is_read, "прочитано");
+            let id = c.set_flag(&id, true).await.unwrap();
+            assert!(!id.id.is_empty(), "флаг поставлен");
+
+            let moved = c.move_mail(std::slice::from_ref(&id), &FolderRef::WellKnown(WellKnown::DeletedItems)).await.unwrap();
+            assert_eq!(moved.len(), 1);
+            c.delete_mail(&moved, DeleteMode::HardDelete).await.unwrap();
+            println!("письмо себе: отправлено, прочитано, флаг, перенос, удалено");
+        })
+        .await;
+    });
+}
+
+/// Письмо между тестовыми учётками: user1 → user2, у user2 во «Входящих», тело читается.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»; нужна POSTMAN_EWS_USER2"]
+fn ews_mail_between_accounts() {
+    rt().block_on(async {
+        let (a, b) = (first(), account("2").expect("POSTMAN_EWS_USER2"));
+        let tag = tag();
+        guarded(&tag, &[&a, &b], async {
+            let (mut c1, mut c2) = (client(&a).await, client(&b).await);
+            let to = test_recipient(&b.email);
+            let subject = format!("{tag} cross");
+            let mime = format!(
+                "From: <{}>
+To: <{to}>
+Subject: {subject}
+Content-Type: text/plain; charset=utf-8
+
+Между тестовыми учётками.
+",
+                a.email
+            );
+            c1.send_mail(mime.as_bytes(), true).await.unwrap();
+
+            let id = poll!("письмо у user2", c2.find_by_subject(WellKnown::Inbox, &tag, 5).await.ok().and_then(|v| v.into_iter().next()));
+            let mail = c2.get_mail(&id).await.unwrap().expect("письмо");
+            let text = String::from_utf8_lossy(&mail.mime);
+            assert!(text.contains(&subject) && text.contains("Subject:"), "MIME доставлено целиком");
+            println!("письмо user1 → user2: доставлено и прочитано");
+        })
+        .await;
+    });
+}
+
+/// Черновик: сохранение в «Черновики», поиск по теме, удаление.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn ews_mail_draft() {
+    rt().block_on(async {
+        let a = first();
+        let tag = tag();
+        guarded(&tag, &[&a], async {
+            let mut c = client(&a).await;
+            let subject = format!("{tag} draft");
+            let id = c.save_draft(&letter(&a.email, &subject), None).await.unwrap();
+            assert!(!id.id.is_empty());
+            let found = poll!("черновик в «Черновиках»", c.find_by_subject(WellKnown::Drafts, &tag, 5).await.ok().and_then(|v| v.into_iter().next()));
+            c.delete_mail(std::slice::from_ref(&found), DeleteMode::HardDelete).await.unwrap();
+            println!("черновик: сохранён, найден, удалён");
+        })
+        .await;
     });
 }

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:Message>
+              <t:ItemId Id="AAMkADmsg1" ChangeKey="HK"/>
+              <t:MimeContent CharacterSet="UTF-8">RnJvbTog0JDQvdC90LAg0J/QtdGC0YDQvtCy0LAgPGFubmFAZXhhbXBsZS50ZXN0Pg0KVG86INCv
+IDx1c2VyMUBleGFtcGxlLnRlc3Q+DQpTdWJqZWN0OiDQntGC0YfRkdGCINC30LAg0L3QtdC00LXQ
+u9GODQpNZXNzYWdlLUlEOiA8YTFiMkBleGFtcGxlLnRlc3Q+DQpDb250ZW50LVR5cGU6IHRleHQv
+cGxhaW47IGNoYXJzZXQ9dXRmLTgNCg0K0KLQtdC70L4g0L/QuNGB0YzQvNCwLg0K</t:MimeContent>
+              <t:IsRead>false</t:IsRead>
+            </t:Message>
+          </m:Items>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>

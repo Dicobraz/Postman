@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:Message>
+              <t:ItemId Id="AAMkADmsg1" ChangeKey="HK"/>
+              <t:ParentFolderId Id="AAMkADinbox" ChangeKey="PK"/>
+              <t:ItemClass>IPM.Note</t:ItemClass>
+              <t:Subject>Отчёт за неделю</t:Subject>
+              <t:DateTimeReceived>2026-10-20T07:00:00Z</t:DateTimeReceived>
+              <t:Size>24576</t:Size>
+              <t:Flag><t:FlagStatus>Flagged</t:FlagStatus></t:Flag><t:HasAttachments>true</t:HasAttachments>
+              <t:From><t:Mailbox><t:Name>Анна Петрова</t:Name><t:EmailAddress>anna@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType></t:Mailbox></t:From>
+              <t:IsRead>false</t:IsRead>
+              <t:InternetMessageId>&lt;a1b2@example.test&gt;</t:InternetMessageId>
+              <t:InReplyTo>&lt;a0@example.test&gt;</t:InReplyTo><t:References>&lt;root@example.test&gt; &lt;a0@example.test&gt;</t:References>
+            </t:Message>
+          </m:Items>
+        </m:GetItemResponseMessage>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:Message>
+              <t:ItemId Id="AAMkADmsg2" ChangeKey="HK"/>
+              <t:ParentFolderId Id="AAMkADinbox" ChangeKey="PK"/>
+              <t:ItemClass>IPM.Note</t:ItemClass>
+              <t:Subject>Re: Планы</t:Subject>
+              <t:DateTimeReceived>2026-10-20T08:30:00Z</t:DateTimeReceived>
+              <t:Size>4096</t:Size>
+              <t:HasAttachments>false</t:HasAttachments>
+              <t:From><t:Mailbox><t:Name>Борис</t:Name><t:EmailAddress>boris@example.test</t:EmailAddress><t:RoutingType>SMTP</t:RoutingType></t:Mailbox></t:From>
+              <t:IsRead>true</t:IsRead>
+              <t:InternetMessageId>&lt;c3d4@example.test&gt;</t:InternetMessageId>
+              
+            </t:Message>
+          </m:Items>
+        </m:GetItemResponseMessage>
+        <m:GetItemResponseMessage ResponseClass="Error">
+          <m:MessageText>not found</m:MessageText>
+          <m:ResponseCode>ErrorItemNotFound</m:ResponseCode>
+          <m:Items/>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:SyncFolderItemsResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:SyncFolderItemsResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>bWFpbC1zdGF0ZQ==</m:SyncState>
+          <m:IncludesLastItemInRange>true</m:IncludesLastItemInRange>
+          <m:Changes>
+            <t:Create><t:Message><t:ItemId Id="AAMkADmsg1" ChangeKey="MK1"/></t:Message></t:Create>
+            <t:Create><t:Message><t:ItemId Id="AAMkADmsg2" ChangeKey="MK2"/></t:Message></t:Create>
+            <t:Update><t:Message><t:ItemId Id="AAMkADmsgUpd" ChangeKey="MK3"/></t:Message></t:Update>
+            <t:Delete><t:ItemId Id="AAMkADmsgDel"/></t:Delete>
+            <t:ReadFlagChange><t:ItemId Id="AAMkADmsgRead"/><t:IsRead>true</t:IsRead></t:ReadFlagChange>
+            <t:ReadFlagChange><t:ItemId Id="AAMkADmsgUnread"/><t:IsRead>false</t:IsRead></t:ReadFlagChange>
+          </m:Changes>
+        </m:SyncFolderItemsResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderItemsResponse>
+  </s:Body>
+</s:Envelope>
