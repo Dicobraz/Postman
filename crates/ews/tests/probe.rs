@@ -2,7 +2,8 @@
 //! входом (схема, версия), IMAP4 (вход, возможности, хранит ли ключевые слова), SMTP submission (вход, без отправки).
 //! Вывод — только коды, версии и признаки: ни адресов, ни узлов, ни имён.
 //!
-//! Окружение — как у `stand.rs`; узлы IMAP и SMTP — `POSTMAN_EXCH_IMAP`, `POSTMAN_EXCH_SMTP` (`узел`), иначе узел EWS.
+//! Окружение — как у `stand.rs`; IMAP и SMTP — только с `POSTMAN_PROBE_MAIL=1` и узлами `POSTMAN_EXCH_IMAP`,
+//! `POSTMAN_EXCH_SMTP` (`узел`; SMTP — по умолчанию узел IMAP).
 //! Запуск: cargo test -p postman-ews --test probe -- --ignored --nocapture
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
@@ -126,12 +127,13 @@ fn probe() {
             Err(e) => println!("EWS вход: ошибка {}", kind(&e)),
         }
 
-        // IMAP4 и SMTP — не дёргать вход лишний раз (неудачные входы блокируют учётку): `POSTMAN_PROBE_MAIL=0`.
-        if env("POSTMAN_PROBE_MAIL").as_deref() == Some("0") {
+        // IMAP4 и SMTP — только по явной просьбе (`POSTMAN_PROBE_MAIL=1`) и с узлами из окружения: неудачные входы
+        // блокируют учётку, а узел почты у Exchange компании может быть другой системой.
+        if env("POSTMAN_PROBE_MAIL").as_deref() != Some("1") || env("POSTMAN_EXCH_IMAP").is_none() {
             return;
         }
         // IMAP4.
-        let mail_host = env("POSTMAN_EXCH_IMAP").unwrap_or_else(|| host_of(&url));
+        let mail_host = need("POSTMAN_EXCH_IMAP");
         for (port, security) in [(993u16, postman_imap::Security::Tls), (143, postman_imap::Security::StartTls)] {
             let cfg = postman_imap::Config { host: mail_host.clone(), port, security, user: user.clone(), password: password.clone() };
             match tokio::time::timeout(Duration::from_secs(20), postman_imap::Session::connect(&cfg)).await {
