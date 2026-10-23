@@ -26,6 +26,10 @@ fn fixture(name: &str) -> String {
 /// `SyncFolderHierarchy` боевого Exchange 2013: внутренняя ошибка сервера.
 const HIERARCHY_FAILS: &str = r#"<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><m:SyncFolderHierarchyResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"><m:ResponseMessages><m:SyncFolderHierarchyResponseMessage ResponseClass="Error"><m:MessageText>internal</m:MessageText><m:ResponseCode>ErrorInternalServerError</m:ResponseCode></m:SyncFolderHierarchyResponseMessage></m:ResponseMessages></m:SyncFolderHierarchyResponse></s:Body></s:Envelope>"#;
 
+/// `FindItem` пустой папки. Готовым ответом, а не правкой текста корпуса: на CI файлы корпуса — с CRLF
+/// (`core.autocrlf`), и замена многострочного куска молча не срабатывала.
+const EMPTY_PAGE: &str = r#"<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><m:FindItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"><m:ResponseMessages><m:FindItemResponseMessage ResponseClass="Success"><m:ResponseCode>NoError</m:ResponseCode><m:RootFolder IndexedPagingOffset="0" TotalItemsInView="0" IncludesLastItemInRange="true"><t:Items/></m:RootFolder></m:FindItemResponseMessage></m:ResponseMessages></m:FindItemResponse></s:Body></s:Envelope>"#;
+
 /// Ответ подменного сервера по телу запроса.
 fn answer(body: &str) -> String {
     let op = |tag: &str| body.contains(&format!("<m:{tag}"));
@@ -46,12 +50,8 @@ fn answer(body: &str) -> String {
     } else if op("FindItem") && body.contains("AAMkADinbox") {
         fixture("find_item_mail_page.xml")
     } else if op("FindItem") {
-        // Другие папки — пустые (в корпусе одни и те же письма).
-        fixture("find_item_mail_page.xml").replace(r#"IncludesLastItemInRange="false""#, r#"IncludesLastItemInRange="true""#).replace(
-            r#"<t:Message><t:ItemId Id="AAMkADmsg2" ChangeKey="K2"/></t:Message>
-              <t:Message><t:ItemId Id="AAMkADmsg1" ChangeKey="K1"/></t:Message>"#,
-            "",
-        )
+        // Другие папки — пустые: в корпусе одни и те же письма, и строки одной папки иначе перезапишут другую.
+        EMPTY_PAGE.to_owned()
     } else if op("GetItem") && body.contains("IncludeMimeContent") {
         fixture("get_item_message_mime.xml")
     } else if op("GetItem") && body.contains("calendar:") {
