@@ -25,11 +25,11 @@ impl ItemId {
         ItemId { id: id.into(), change_key: None }
     }
 
-    fn xml(&self, name: &str) -> String {
+    pub(crate) fn xml(&self, name: &str) -> String {
         id_el(name, &self.id, self.change_key.as_deref())
     }
 
-    fn from_el(el: &El) -> Option<ItemId> {
+    pub(crate) fn from_el(el: &El) -> Option<ItemId> {
         Some(ItemId { id: el.attr("Id")?.to_owned(), change_key: el.attr("ChangeKey").map(str::to_owned) })
     }
 }
@@ -47,6 +47,7 @@ pub struct FolderId {
 pub enum WellKnown {
     Calendar,
     Inbox,
+    Drafts,
     SentItems,
     DeletedItems,
 }
@@ -56,6 +57,7 @@ impl WellKnown {
         match self {
             WellKnown::Calendar => "calendar",
             WellKnown::Inbox => "inbox",
+            WellKnown::Drafts => "drafts",
             WellKnown::SentItems => "sentitems",
             WellKnown::DeletedItems => "deleteditems",
         }
@@ -70,7 +72,7 @@ pub enum FolderRef {
 }
 
 impl FolderRef {
-    fn xml(&self) -> String {
+    pub(crate) fn xml(&self) -> String {
         match self {
             FolderRef::WellKnown(w) => format!(r#"<t:DistinguishedFolderId Id="{}"/>"#, w.id()),
             FolderRef::Id(f) => id_el("t:FolderId", &f.id, f.change_key.as_deref()),
@@ -747,7 +749,7 @@ pub enum DeleteMode {
 }
 
 impl DeleteMode {
-    fn ews(self) -> &'static str {
+    pub(crate) fn ews(self) -> &'static str {
         match self {
             DeleteMode::MoveToDeletedItems => "MoveToDeletedItems",
             DeleteMode::SoftDelete => "SoftDelete",

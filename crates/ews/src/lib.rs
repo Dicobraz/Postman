@@ -1,8 +1,8 @@
-//! Минимальный EWS для Exchange on-prem (2016+, best effort; ADR 0003, S7-06): только то, чего не достать
-//! стандартами, — календарь и ответы на встречи, занятость (`GetUserAvailability`), справочник (`ResolveNames`).
-//! Почта Exchange идёт через его IMAP/SMTP (`postman-imap`), здесь её нет. Без надстроек Microsoft: ни правил, ни
-//! главного списка категорий, ни флагов, ни OOF, ни задач, ни общих ящиков, ни streaming-уведомлений — изменения
-//! календаря берутся опросом `SyncFolderItems`.
+//! Минимальный EWS для Exchange on-prem (best effort; ADR 0003, S7-06): календарь и ответы на встречи, занятость
+//! (`GetUserAvailability`), справочник (`ResolveNames`) и почта (`mail`). Почта Exchange идёт по EWS — решение
+//! владельца 2026-10-23 (у Exchange компании IMAP4 и приём SMTP выключены, `docs/EXCHANGE.md`). Без надстроек
+//! Microsoft: ни правил, ни главного списка категорий, ни OOF, ни задач, ни общих ящиков, ни streaming-уведомлений
+//! — изменения берутся опросом `SyncFolderItems`/`SyncFolderHierarchy`.
 //!
 //! Транспорт — HTTP/1.1 одним соединением TLS на сессию (hyper, тот же, что под reqwest): вход Negotiate (Kerberos
 //! от учётной записи Windows) или NTLM с паролем через SSPI Windows (`sys`), с привязкой к каналу TLS. Basic и
@@ -19,6 +19,7 @@ pub mod autodiscover;
 pub mod availability;
 pub mod calendar;
 pub mod directory;
+pub mod mail;
 mod http;
 mod soap;
 mod sys;
@@ -34,6 +35,7 @@ pub use calendar::{
     NewItem, Notify, Occurrence, Pattern, Range, Recurrence, Reply, SyncChanges, SyncState, WeekIndex, WellKnown,
 };
 pub use directory::Person;
+pub use mail::{Attachment, Disposition, HierarchyChanges, MailFolder, MailHeader, MailItem, MailRole, MailSync, apply_roles};
 
 /// Сколько ждать соединения и ответа на один запрос.
 pub const TIMEOUT: Duration = Duration::from_secs(60);

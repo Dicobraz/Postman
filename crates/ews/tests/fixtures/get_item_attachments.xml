@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:GetItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:Message>
+              <t:ItemId Id="AAMkADmsg1" ChangeKey="HK"/>
+              <t:Attachments>
+                <t:FileAttachment>
+                  <t:AttachmentId Id="AAMkADmsg1att1"/>
+                  <t:Name>отчёт.pdf</t:Name>
+                  <t:ContentType>application/pdf</t:ContentType>
+                  <t:Size>20480</t:Size>
+                  <t:IsInline>false</t:IsInline>
+                </t:FileAttachment>
+              </t:Attachments>
+            </t:Message>
+          </m:Items>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types"/>
+  </s:Header>
+  <s:Body>
+    <m:SyncFolderHierarchyResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+      <m:ResponseMessages>
+        <m:SyncFolderHierarchyResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>aGllci1zdGF0ZQ==</m:SyncState>
+          <m:IncludesLastFolderInRange>false</m:IncludesLastFolderInRange>
+          <m:Changes>
+            <t:Create>
+            <t:Folder>
+              <t:FolderId Id="AAMkADinbox" ChangeKey="CK1"/>
+              <t:FolderClass>IPF.Note</t:FolderClass>
+              <t:DisplayName>Inbox</t:DisplayName>
+              <t:TotalCount>42</t:TotalCount>
+              <t:ChildFolderCount>0</t:ChildFolderCount>
+              <t:UnreadCount>3</t:UnreadCount>
+            </t:Folder>
+            </t:Create>
+            <t:Create>
+            <t:Folder>
+              <t:FolderId Id="AAMkADsent" ChangeKey="CK2"/>
+              <t:FolderClass>IPF.Note</t:FolderClass>
+              <t:DisplayName>Sent Items</t:DisplayName>
+              <t:TotalCount>10</t:TotalCount>
+              <t:ChildFolderCount>0</t:ChildFolderCount>
+              <t:UnreadCount>0</t:UnreadCount>
+            </t:Folder>
+            </t:Create>
+            <t:Create>
+            <t:Folder>
+              <t:FolderId Id="AAMkADproj" ChangeKey="CK3"/>
+              <t:ParentFolderId Id="AAMkADinbox" ChangeKey="PK"/><t:FolderClass>IPF.Note</t:FolderClass>
+              <t:DisplayName>Проект</t:DisplayName>
+              <t:TotalCount>5</t:TotalCount>
+              <t:ChildFolderCount>0</t:ChildFolderCount>
+              <t:UnreadCount>0</t:UnreadCount>
+            </t:Folder>
+            </t:Create>
+            <t:Update>
+            <t:Folder>
+              <t:FolderId Id="AAMkADjunk" ChangeKey="CK4"/>
+              <t:FolderClass>IPF.Note</t:FolderClass>
+              <t:DisplayName>Junk Email</t:DisplayName>
+              <t:TotalCount>2</t:TotalCount>
+              <t:ChildFolderCount>0</t:ChildFolderCount>
+              <t:UnreadCount>1</t:UnreadCount>
+            </t:Folder>
+            </t:Update>
+            <t:Delete>
+              <t:FolderId Id="AAMkADgone" ChangeKey="CK5"/>
+            </t:Delete>
+          </m:Changes>
+        </m:SyncFolderHierarchyResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderHierarchyResponse>
+  </s:Body>
+</s:Envelope>
