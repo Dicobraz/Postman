@@ -91,6 +91,14 @@ pub enum Command {
     Availability { ticket: u64, emails: Vec<String>, from: i64, to: i64, sender: Option<String> },
     /// Создать встречу и разослать приглашения → `MeetingCreated` или `MeetingFailed`.
     CreateMeeting { meeting: Box<Meeting>, ticket: u64 },
+    /// Изменить свою встречу (я — организатор) и разослать изменения → `MeetingUpdated` или `MeetingFailed` (S7-07б,
+    /// решение владельца 2026-10-23). `event` — событие недели (id и UID — как их дал путь); `meeting` — поля вкладки
+    /// встречи (`uid` — UID события, `from` — организатор). `series` — у экземпляра повтора изменить всю серию (время
+    /// серии сдвигается на ту же разницу), иначе — только этот экземпляр; у одиночной не важно.
+    UpdateMeeting { event: Box<postman_calendar::Event>, meeting: Box<Meeting>, series: bool, ticket: u64 },
+    /// Отменить свою встречу: участникам — отмена, у меня встречи нет → `MeetingCancelled` или `MeetingFailed`.
+    /// `series` — как у `UpdateMeeting` (иначе — только этот экземпляр); `from` — адрес организатора (учётная запись).
+    CancelMeeting { event: Box<postman_calendar::Event>, series: bool, from: Option<String>, ticket: u64 },
     /// Открыть коллеге (адрес) только мою занятость → `FreeBusyShared` или `CalendarFailed`.
     ShareFreeBusy { email: String },
     /// Настройки ящика на сервере: автоответ, квота (`settings.rs`) → `Event::Settings`.
@@ -100,6 +108,9 @@ pub enum Command {
     /// Люди справочника по набранной строке → `PeopleFound` (S7-08): поиск людей — функция ядра, каждый путь отвечает
     /// своим поиском (JMAP — `Principal/query`, EWS — `FindPeople`, запасной — `ResolveNames`); справочника нет — пусто.
     FindPeople { text: String },
+    /// Подробности человека справочника по адресу — при открытии его карточки → `PersonDetails` (S7-08б): у EWS
+    /// `FindPeople` телефона не отдаёт, его даёт `ResolveNames`. У кого подробностей нет — `person: None`.
+    PersonDetails { email: String },
     /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
     SaveContact { card: Box<ContactCard>, old: Option<Box<ContactCard>>, ticket: u64 },
     /// Удалить карточку → `ContactDeleted` или `ContactFailed`, затем `ContactsLoaded`.
@@ -190,7 +201,10 @@ impl Command {
             Command::Withhold { scheduled, .. } => scheduled.first().map_or(Target::Profile(None), |s| one(&s.submission)),
             Command::Query { mailbox, .. } | Command::Counts { mailbox, .. } | Command::Search { mailbox, .. } => scope(mailbox),
             Command::Send { draft, .. } | Command::SaveDraft { draft, .. } => Target::Sender(draft.from.email.clone()),
-            Command::CreateMeeting { meeting, .. } => meeting.from.clone().map_or(Target::Profile(None), Target::Sender),
+            Command::CreateMeeting { meeting, .. } | Command::UpdateMeeting { meeting, .. } => {
+                meeting.from.clone().map_or(Target::Profile(None), Target::Sender)
+            }
+            Command::CancelMeeting { from, .. } => from.clone().map_or(Target::Profile(None), Target::Sender),
             Command::Availability { sender, .. } => sender.clone().map_or(Target::Profile(None), Target::Sender),
             Command::Events { .. } | Command::Scheduled | Command::Reconnect | Command::Newsletters { .. } => Target::All,
             Command::SetKeywords { .. } | Command::Patch { .. } | Command::ReportPhishing { .. } => return self.split(),
@@ -382,6 +396,11 @@ pub enum Event {
     /// не найден): это не «свободен». `error` — запрос не удался целиком.
     Availability { ticket: u64, me: Vec<Busy>, people: Vec<(String, Option<Vec<Busy>>)>, error: Option<String> },
     MeetingCreated { ticket: u64, uid: String },
+    /// Встреча изменена, изменения разосланы (`UpdateMeeting`).
+    MeetingUpdated { ticket: u64, uid: String },
+    /// Встреча отменена, участникам ушла отмена (`CancelMeeting`).
+    MeetingCancelled { ticket: u64, uid: String },
+    /// Ошибка создания, правки или отмены встречи с этим тикетом.
     MeetingFailed { ticket: u64, error: String },
     FreeBusyShared { email: String },
     /// Ошибка календаря (неделя, открытие занятости) — тостом.
@@ -394,6 +413,8 @@ pub enum Event {
     DirectoryLoaded(Vec<Principal>),
     /// Найдено в справочнике по строке `FindPeople` — к уже загруженному (подсказки адресов, поиск в «Контактах»).
     PeopleFound { text: String, people: Vec<Principal> },
+    /// Подробности человека справочника (`PersonDetails`): `None` — путь их не даёт или человек не найден.
+    PersonDetails { email: String, person: Option<Principal> },
     ContactSaved { ticket: u64, id: String },
     ContactDeleted { ticket: u64, id: String },
     /// Ошибка контактов: `ticket` — сохранения или удаления, `0` — загрузки.

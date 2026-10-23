@@ -276,7 +276,27 @@ pub(crate) enum CalendarAction {
     },
     /// Письмо участникам встречи.
     Write(Vec<Address>),
+    /// «Изменить» своей встречи (S7-07б): вкладка встречи с её полями; `series` — у повтора вся серия.
+    Edit {
+        event: Box<Event>,
+        series: bool,
+    },
+    /// «Отменить встречу» (S7-07б): `Command::CancelMeeting` → `MeetingCancelled` или `MeetingFailed`.
+    Cancel {
+        event: Box<Event>,
+        series: bool,
+        ticket: u64,
+    },
     Toast(Toast, String),
+}
+
+/// Что спрашиваем о своей встрече строкой у подробностей (S7-07б).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Own {
+    /// «Изменить» повтора: эту или всю серию.
+    Edit,
+    /// «Отменить встречу»: подтверждение (у повтора — эту или всю серию).
+    Cancel,
 }
 
 /// Поиск в календаре: найденное сервером по тексту и ошибка.
@@ -333,6 +353,10 @@ pub(crate) struct CalendarView {
     owner_names: bool,
     /// Ответ ушёл, итога нет: (uid, ответ).
     answering: Option<(String, Partstat)>,
+    /// Своя встреча (S7-07б): что спрашиваем одной строкой у подробностей — серию или подтверждение отмены.
+    own: Option<Own>,
+    /// Отмена, итог которой ждём: тикет.
+    cancelling: Option<u64>,
     /// «Изменить ответ»: кнопки ответа снова видны.
     changing: bool,
     /// Снимки: «сейчас» — здесь, а не по часам (линия «сейчас» видна в рабочее время).
@@ -416,6 +440,8 @@ impl CalendarView {
             owner_colors: cal.owner_colors,
             owner_names: cal.owner_names,
             answering: None,
+            own: None,
+            cancelling: None,
             changing: false,
             clock: None,
             share_open: false,
@@ -530,6 +556,7 @@ impl CalendarView {
     pub(crate) fn not_sent(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
         self.answering = None;
+        self.cancelling = None;
         self.searching = None;
         if self.sharing.take().is_some() {
             self.share_status = None;
@@ -638,6 +665,17 @@ impl CalendarView {
             }
             SyncEvent::InviteFailed { uid, .. } if self.answering.as_ref().is_some_and(|(u, _)| u == uid) => {
                 self.answering = None;
+            }
+            SyncEvent::MeetingCancelled { ticket, .. } if self.cancelling == Some(*ticket) => {
+                self.cancelling = None;
+                self.own = None;
+                self.selected = None;
+                cx.emit(CalendarAction::Toast(Toast::Success, tr!("cal-meeting-cancelled")));
+                self.refresh(cx);
+            }
+            SyncEvent::MeetingFailed { ticket, error } if self.cancelling == Some(*ticket) => {
+                self.cancelling = None;
+                cx.emit(CalendarAction::Toast(Toast::Error, tr!("cal-cancel-failed", error = error.clone())));
             }
             SyncEvent::FreeBusyShared { email } => {
                 self.sharing = None;
@@ -884,6 +922,7 @@ impl CalendarView {
     fn select(&mut self, i: usize, cx: &mut Context<Self>) {
         self.selected = if self.selected == Some(i) { None } else { Some(i) };
         self.changing = false;
+        self.own = None;
         self.results_open = false;
         cx.notify();
     }
@@ -895,6 +934,105 @@ impl CalendarView {
         }
         self.answering = Some((e.uid.clone(), status));
         cx.emit(CalendarAction::Respond { event: Box::new(e.clone()), status });
+        cx.notify();
+    }
+
+    /// «Изменить» или «Отменить встречу» своей встречи: у повтора — сначала одной строкой «эту или всю серию», у
+    /// отмены — подтверждение одной строкой (модальных окон нет).
+    fn own_step(&mut self, step: Own, cx: &mut Context<Self>) {
+        let Some(e) = self.selected.and_then(|i| self.events.get(i)) else { return };
+        if step == Own::Edit && !e.recurring {
+            cx.emit(CalendarAction::Edit { event: Box::new(e.clone()), series: false });
+            self.own = None;
+        } else {
+            self.own = Some(step);
+        }
+        cx.notify();
+    }
+
+    /// Ответ на вопрос строки: `series` — у повтора вся серия.
+    fn own_answer(&mut self, series: bool, cx: &mut Context<Self>) {
+        let Some(e) = self.selected.and_then(|i| self.events.get(i)).cloned() else { return };
+        match self.own.take() {
+            Some(Own::Edit) => cx.emit(CalendarAction::Edit { event: Box::new(e), series }),
+            Some(Own::Cancel) if self.cancelling.is_none() => {
+                let ticket = crate::meeting::next_ticket();
+                self.cancelling = Some(ticket);
+                self.own = Some(Own::Cancel);
+                cx.emit(CalendarAction::Cancel { event: Box::new(e), series, ticket });
+            }
+            other => self.own = other,
+        }
+        cx.notify();
+    }
+
+    /// Строка вопроса о своей встрече: серия («Только эту» / «Всю серию») или подтверждение отмены.
+    fn own_line(&self, e: &Event, step: Own, l: &Look, cx: &mut Context<Self>) -> Div {
+        let busy = self.cancelling.is_some();
+        let cancel = step == Own::Cancel;
+        let answer = |id: &'static str, text: String, strong: bool, act: Option<bool>, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex_none()
+                .px_3()
+                .py_0p5()
+                .rounded_md()
+                .cursor_pointer()
+                .when(strong, |d| d.bg(l.error_bg()).text_color(l.error()).font_weight(FontWeight::SEMIBOLD))
+                .when(!strong, |d| d.bg(l.fill()).hover(|d| d.bg(l.pressed())))
+                .child(text)
+                .on_click(cx.listener(move |this, _, _, cx| match act {
+                    Some(series) => this.own_answer(series, cx),
+                    None => {
+                        this.own = None;
+                        cx.notify();
+                    }
+                }))
+        };
+        let question = match (busy, cancel, e.recurring) {
+            (true, _, _) => tr!("cal-cancelling"),
+            (false, true, true) => tr!("cal-cancel-series-ask"),
+            (false, true, false) => tr!("cal-cancel-ask"),
+            (false, false, _) => tr!("cal-edit-series-ask"),
+        };
+        let answers = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .when(e.recurring, |d| {
+                d.child(answer("own-one", tr!("cal-series-one"), cancel, Some(false), cx))
+                    .child(answer("own-all", tr!("cal-series-all"), cancel, Some(true), cx))
+            })
+            .when(!e.recurring && cancel, |d| d.child(answer("own-yes", tr!("cal-cancel-meeting"), true, Some(false), cx)))
+            .child(answer("own-no", tr!(if cancel { "cal-cancel-keep" } else { "cal-cancel-back" }), false, None, cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .mx(px(-20.))
+            .px(px(20.))
+            .py(px(10.))
+            .bg(l.warning_bg())
+            .child(question)
+            .when(!busy, |d| d.child(answers))
+    }
+
+    /// Снимки (`event-organizer`, `event-cancel`): своя встреча с участниками, у повтора — первый экземпляр.
+    pub(crate) fn select_own(&mut self, cancel: bool, cx: &mut Context<Self>) {
+        let me = self.me.clone();
+        let (from, to) = self.range();
+        self.selected = (0..self.events.len()).find(|&i| {
+            let e = &self.events[i];
+            let mine = my_part(e, me.as_deref());
+            mine.is_some_and(|p| p.owner) && e.participants.len() > 1 && e.span.start < to && e.span.end > from
+        });
+        self.own = cancel.then_some(Own::Cancel);
+        cx.notify();
+    }
+
+    /// Отмена не ушла (демо: нужен сервер).
+    pub(crate) fn cancel_refused(&mut self, cx: &mut Context<Self>) {
+        self.cancelling = None;
         cx.notify();
     }
 
@@ -1955,6 +2093,33 @@ impl CalendarView {
                     d.child(div().text_size(px(12.)).text_color(l.text2()).child(tr!("reading-invite-sending")))
                 })
         });
+        // Своя встреча (S7-07б, решение владельца 2026-10-23): «Изменить» — вкладка встречи с её полями, «Отменить
+        // встречу» — подтверждение одной строкой; у повтора — сначала «Только эту / Всю серию». Календарь коллеги — нет.
+        let organizer = owner && !(e.owner.is_some() && mine.is_none());
+        let own_buttons = organizer.then(|| {
+            div()
+                .flex()
+                .gap(px(4.))
+                .child(
+                    crate::buttons::secondary("own-edit", l)
+                        .flex_1()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .child(icon(g::EDIT, 14.))
+                        .child(tr!("cal-edit-meeting"))
+                        .on_click(cx.listener(|this, _, _, cx| this.own_step(Own::Edit, cx))),
+                )
+                .child(
+                    crate::buttons::secondary("own-cancel", l)
+                        .flex_1()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .child(icon(g::CANCEL, 12.))
+                        .child(tr!("cal-cancel-meeting"))
+                        .on_click(cx.listener(|this, _, _, cx| this.own_step(Own::Cancel, cx))),
+                )
+        });
+        let own_line = self.own.filter(|_| organizer).map(|step| self.own_line(e, step, l, cx));
         let answered = (invited && !asking).then(|| {
             let text = match status {
                 Some(Partstat::Tentative) => tr!("cal-answered-tentative"),
@@ -2132,6 +2297,8 @@ impl CalendarView {
             .child(title)
             .children(invite_block)
             .children(answered)
+            .children(own_buttons)
+            .children(own_line)
             .child(info)
             .when(has_people, |d| {
                 d.child(
@@ -2341,15 +2508,31 @@ impl crate::Mailer {
                 self.open_compose(Draft { to: to.clone(), ..Default::default() }, cx);
                 return;
             }
+            CalendarAction::Edit { event, series } => {
+                let tz = crate::prefs::get(cx).calendar.zone();
+                self.open_meeting(Some(crate::meeting::MeetingModel::editing(event, *series, &tz)), cx);
+                return;
+            }
+            CalendarAction::Cancel { event, series, ticket } => Command::CancelMeeting {
+                event: event.clone(),
+                series: *series,
+                from: event.organizer().map(|o| o.email.clone()).filter(|e| !e.is_empty()),
+                ticket: *ticket,
+            },
             CalendarAction::Toast(level, text) => {
                 self.toasts.update(cx, |t, cx| t.push(*level, text.clone(), cx));
                 return;
             }
         };
         let respond = matches!(action, CalendarAction::Respond { .. });
+        let cancel = matches!(action, CalendarAction::Cancel { .. });
         if !self.backend.send(command) {
             self.needs_server(cx);
-            self.cal.update(cx, |c, cx| if respond { c.respond_refused(cx) } else { c.not_sent(cx) });
+            self.cal.update(cx, |c, cx| match (respond, cancel) {
+                (true, _) => c.respond_refused(cx),
+                (_, true) => c.cancel_refused(cx),
+                _ => c.not_sent(cx),
+            });
         }
     }
 

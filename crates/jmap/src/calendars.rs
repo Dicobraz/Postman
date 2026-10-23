@@ -14,7 +14,7 @@ const USING: &[&str] = &[CORE, CALENDARS, PRINCIPALS];
 /// Свойства события, нужные для отображения; `utcStart`/`utcEnd` вычисляет сервер.
 pub const EVENT_PROPERTIES: &[&str] = &[
     "id", "uid", "calendarIds", "title", "description", "start", "timeZone", "duration", "showWithoutTime",
-    "status", "freeBusyStatus", "participants", "locations", "recurrenceRules", "recurrenceId", "utcStart",
+    "status", "freeBusyStatus", "participants", "locations", "recurrenceRules", "recurrenceRule", "recurrenceOverrides", "recurrenceId", "utcStart",
     "utcEnd", "keywords", "categories", "sequence",
 ];
 
@@ -185,6 +185,15 @@ impl Client {
         let mut r = self.call(USING, &calls).await?;
         let g: GetResponse<Value> = take(&mut r, "g")?;
         Ok(g.list.into_iter().find(|e| e["uid"].as_str() == Some(uid)))
+    }
+
+    /// Событие по id — у экземпляра повтора (id из `expandRecurrences`) с `recurrenceId`; нет такого — `None`.
+    pub async fn event_by_id(&self, id: &str) -> Result<Option<Value>> {
+        let acc = self.calendar_account()?;
+        let args = json!({ "accountId": acc, "ids": [id], "properties": EVENT_PROPERTIES });
+        let mut r = self.call(USING, &[inv("CalendarEvent/get", args, "g")]).await?;
+        let g: GetResponse<Value> = take(&mut r, "g")?;
+        Ok(g.list.into_iter().next())
     }
 
     /// Изменить событие патчем (`"title": …`, `"participants/<id>/participationStatus": …`).

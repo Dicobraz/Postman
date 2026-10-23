@@ -237,3 +237,20 @@ cal-group-colleagues = Календари коллег
 cal-colleague-calendar = Календарь: { $name }
 cal-chip-colleague = Календарь коллеги
 cal-color-change = Цвет календаря
+
+# Правка и отмена своей встречи (S7-07б)
+cal-edit-meeting = Изменить
+cal-cancel-meeting = Отменить встречу
+cal-edit-series-ask = Повторяющаяся встреча — изменить:
+cal-cancel-series-ask = Отменить повторяющуюся встречу? Участники получат отмену.
+cal-cancel-ask = Отменить встречу? Участники получат отмену.
+cal-series-one = Только эту
+cal-series-all = Всю серию
+cal-cancel-keep = Не отменять
+cal-cancel-back = Назад
+cal-cancelling = Отменяем встречу…
+cal-meeting-cancelled = Встреча отменена, участникам ушла отмена
+cal-cancel-failed = Встреча не отменена: { $error }
+meeting-title-edit = Изменение встречи
+meeting-tab-edit-titled = Изменение встречи · { $title }
+meeting-updated = Изменения отправлены: { $title }

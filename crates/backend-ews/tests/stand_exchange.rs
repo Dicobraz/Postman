@@ -515,3 +515,105 @@ fn exchange_directory_fields() {
     assert!(me, "своя учётка в GAL");
     assert!(people.len() <= postman_backend_ews::areas::PEOPLE_LIMIT);
 }
+
+/// Ждать итог правки или отмены встречи с тикетом `ticket` (`MeetingFailed` — провал с кодом).
+fn meeting_done(live: &Live, what: &str, ticket: u64) {
+    live.wait(what, |e| match e {
+        Event::MeetingFailed { ticket: t, error } if *t == ticket => panic!("{what}: {error}"),
+        Event::MeetingUpdated { ticket: t, .. } | Event::MeetingCancelled { ticket: t, .. } => *t == ticket,
+        _ => false,
+    });
+}
+
+/// Правка и отмена своей встречи командами интерфейса (S7-07б, `UpdateMeeting`, `CancelMeeting`) user1 → user2:
+/// одиночная — на час позже и новая тема (у user2 — новое время), затем отмена (у user2 встречи нет); серия с user2
+/// (каждый день, 3 раза) — второй экземпляр на час позже, третий отменён, затем вся серия. Карточка справочника —
+/// `PersonDetails` по своему адресу (`ResolveNames`).
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn exchange_meeting_edit_through_commands() {
+    let (a, b) = (first(), account("2").expect("POSTMAN_EWS_USER2 — вторая тестовая учётка"));
+    let _guard = Cleanup(vec![first(), account("2").unwrap()]);
+    rt().block_on(cleanup(&a));
+    rt().block_on(cleanup(&b));
+    let (la, lb) = (Live::start(&a), Live::start(&b));
+    let tag = tag();
+    let tz = "Europe/Moscow";
+    let zone = jiff::tz::TimeZone::get(tz).unwrap();
+    let local = |ts: i64| jiff::Timestamp::from_second(ts).unwrap().to_zoned(zone.clone()).datetime();
+    let start = (now() / 3600 + 96) * 3600;
+    let (from, to) = (start - 86_400, start + 4 * 86_400);
+    let peer = test_recipient(&b.email);
+    let meeting = |title: &str, at: i64| Meeting {
+        uid: String::new(),
+        title: title.into(),
+        location: String::new(),
+        description: "Проверка правки Postman".into(),
+        start: local(at),
+        time_zone: tz.into(),
+        duration_secs: 1800,
+        attendees: vec![(String::new(), peer.clone())],
+        optional: vec![],
+        from: None,
+    };
+
+    // Одиночная: правка и отмена.
+    let title = format!("Правка {tag}");
+    la.send(Command::CreateMeeting { meeting: Box::new(meeting(&title, start)), ticket: 11 });
+    la.wait("MeetingCreated", |e| matches!(e, Event::MeetingCreated { ticket: 11, .. }));
+    let ev = la.events_until(from, to, "встреча у user1", |e| e.iter().any(|x| x.title == title)).into_iter().find(|x| x.title == title).unwrap();
+    let later = format!("Позже {tag}");
+    la.send(Command::UpdateMeeting { event: Box::new(ev), meeting: Box::new(meeting(&later, start + 3600)), series: false, ticket: 12 });
+    meeting_done(&la, "MeetingUpdated", 12);
+    lb.events_until(from, to, "правка у user2", |e| e.iter().any(|x| x.title == later && x.span.start == start + 3600));
+    let ev = la.events_until(from, to, "правка у user1", |e| e.iter().any(|x| x.title == later)).into_iter().find(|x| x.title == later).unwrap();
+    la.send(Command::CancelMeeting { event: Box::new(ev), series: false, from: None, ticket: 13 });
+    meeting_done(&la, "MeetingCancelled", 13);
+    lb.events_until(from, to, "отмена у user2", |e| !e.iter().any(|x| x.title == later));
+
+    // Серия с участником: экземпляр позже, экземпляр отменён, вся серия отменена.
+    let stitle = format!("Серия {tag}");
+    let rt0 = rt();
+    let mut c1 = Client::new(&rt0.block_on(ews_url(&a)), postman_backend_ews::auth(&a.user, &a.password)).unwrap();
+    let day = jiff::Timestamp::from_second(start).unwrap().to_zoned(zone.clone()).date();
+    let item = postman_ews::NewItem {
+        title: stitle.clone(),
+        description: String::new(),
+        location: String::new(),
+        span: postman_calendar::Span::new(start, start + 1800),
+        all_day: false,
+        time_zone: Some(tz.into()),
+        free_busy: postman_calendar::FreeBusy::Busy,
+        required: vec![postman_ews::Attendee { name: String::new(), email: peer.clone() }],
+        optional: vec![],
+        recurrence: Some(postman_ews::Recurrence { pattern: postman_ews::Pattern::Daily { interval: 1 }, range: postman_ews::Range::Numbered { start: day, count: 3 } }),
+    };
+    rt0.block_on(c1.create(None, &item, postman_ews::Notify::All)).unwrap();
+    let ours = |e: &[postman_calendar::Event]| {
+        let mut v: Vec<_> = e.iter().filter(|x| x.title == stitle).cloned().collect();
+        v.sort_by_key(|x| x.span.start);
+        v
+    };
+    let all = ours(&la.events_until(from, to, "три экземпляра", |e| ours(e).len() == 3));
+    let second = all[1].clone();
+    let mut moved = meeting(&stitle, second.span.start + 3600);
+    moved.description = String::new();
+    la.send(Command::UpdateMeeting { event: Box::new(second.clone()), meeting: Box::new(moved), series: false, ticket: 14 });
+    meeting_done(&la, "MeetingUpdated экземпляра", 14);
+    let all = ours(&la.events_until(from, to, "исключение у user1", |e| ours(e).iter().any(|x| x.span.start == second.span.start + 3600)));
+    assert_eq!(all.len(), 3, "перенос экземпляра — не новая встреча");
+    lb.events_until(from, to, "исключение у user2", |e| e.iter().any(|x| x.title == stitle && x.span.start == second.span.start + 3600));
+    la.send(Command::CancelMeeting { event: Box::new(all[2].clone()), series: false, from: None, ticket: 15 });
+    meeting_done(&la, "MeetingCancelled экземпляра", 15);
+    let all = ours(&la.events_until(from, to, "без третьего", |e| ours(e).len() == 2));
+    la.send(Command::CancelMeeting { event: Box::new(all[0].clone()), series: true, from: None, ticket: 16 });
+    meeting_done(&la, "MeetingCancelled серии", 16);
+    la.events_until(from, to, "серии нет у user1", |e| ours(e).is_empty());
+    lb.events_until(from, to, "серии нет у user2", |e| ours(e).is_empty());
+
+    // Карточка справочника: подробности по адресу.
+    la.send(Command::PersonDetails { email: a.email.clone() });
+    let Event::PersonDetails { person, .. } = la.wait("PersonDetails", |e| matches!(e, Event::PersonDetails { .. })) else { unreachable!() };
+    let p = person.expect("своя учётка по ResolveNames");
+    println!("правка командами: одиночная и серия; карточка: телефон {}, должность {}", !p.phone.is_empty(), !p.title.is_empty());
+}

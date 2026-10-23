@@ -237,3 +237,20 @@ cal-group-colleagues = Colleagues’ calendars
 cal-colleague-calendar = Calendar: { $name }
 cal-chip-colleague = Colleague’s calendar
 cal-color-change = Calendar color
+
+# Правка и отмена своей встречи (S7-07б)
+cal-edit-meeting = Edit
+cal-cancel-meeting = Cancel meeting
+cal-edit-series-ask = Recurring meeting — edit:
+cal-cancel-series-ask = Cancel the recurring meeting? Attendees will get a cancellation.
+cal-cancel-ask = Cancel the meeting? Attendees will get a cancellation.
+cal-series-one = This one
+cal-series-all = The whole series
+cal-cancel-keep = Don't cancel
+cal-cancel-back = Back
+cal-cancelling = Cancelling the meeting…
+cal-meeting-cancelled = Meeting cancelled, attendees notified
+cal-cancel-failed = Meeting not cancelled: { $error }
+meeting-title-edit = Edit meeting
+meeting-tab-edit-titled = Edit meeting · { $title }
+meeting-updated = Changes sent: { $title }

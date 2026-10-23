@@ -708,8 +708,15 @@ pub mod calendar {
             event("e14", "Вебинар вендора", 2, (12, 30), 60, "", false, Invited(Declined), ""),
             weekly("e10", 3),
             event("e11", "Обучение: Stalwart", 3, (12, 0), 180, "Учебный класс", false, Invited(Accepted), "team"),
-            event("e12", "Итоги недели", 4, (16, 0), 60, "Переговорная 1", false, Owner, ""),
         ];
+        // Своя повторяющаяся встреча с участниками (S7-07б): «Изменить» и «Отменить встречу» в подробностях.
+        let mut results = event("e12", "Итоги недели", 4, (16, 0), 60, "Переговорная 1", false, Owner, "");
+        results.recurring = true;
+        results.participants.extend([
+            Participant { name: "Иванова Мария".into(), email: "m.ivanova@corp.example".into(), owner: false, attendee: true, optional: false, status: Accepted },
+            Participant { name: "Сидоров Игорь".into(), email: "i.sidorov@corp.example".into(), owner: false, attendee: true, optional: false, status: NeedsAction },
+        ]);
+        v.push(results);
         // На весь день, два дня: четверг и пятница.
         let mut conference = event("e15", "Выездной семинар", 3, (0, 0), 2 * 24 * 60, "Конгресс-центр", false, Invited(Accepted), "clients");
         conference.all_day = true;

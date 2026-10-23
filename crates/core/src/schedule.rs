@@ -59,6 +59,17 @@ impl Meeting {
         }
     }
 
+    /// Начало встречи в Unix-секундах (местное начало в её поясе); пояса нет в базе — `None`.
+    pub fn start_ts(&self) -> Option<i64> {
+        let tz = TimeZone::get(&self.time_zone).ok()?;
+        self.start.to_zoned(tz).ok().map(|z| z.timestamp().as_second())
+    }
+
+    /// Насколько правка сдвигает встречу `event` (секунды): у серии — каждый экземпляр на столько же (S7-07б).
+    pub fn shift_from(&self, event: &Event) -> Option<i64> {
+        Some(self.start_ts()? - event.span.start)
+    }
+
     pub fn to_jmap(&self, calendar_id: &str, organizer: (&str, &str)) -> Value {
         let attendees = self.attendee_refs();
         self.new_event(calendar_id, organizer, &attendees).to_jmap()

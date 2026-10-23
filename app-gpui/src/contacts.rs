@@ -326,6 +326,9 @@ enum Mode {
 pub(crate) enum ContactsAction {
     /// Перечитать контакты и справочник (`Command::Contacts`).
     Load,
+    /// Подробности человека справочника при открытии карточки (`Command::PersonDetails`, S7-08б): телефон, которого
+    /// не дал поиск (у Exchange — `ResolveNames`).
+    PersonDetails(String),
     Save {
         card: Box<ContactCard>,
         old: Option<Box<ContactCard>>,
@@ -395,6 +398,8 @@ pub(crate) struct ContactsView {
     /// Мой адрес: «Внешний» у чужих доменов, заголовок источников.
     me: Option<String>,
     today: Today,
+    /// Адреса, чьи подробности уже спрошены (`PersonDetails`): карточка спрашивает один раз.
+    details_asked: std::collections::HashSet<String>,
     tz: TimeZone,
     _subscriptions: Vec<Subscription>,
 }
@@ -439,6 +444,7 @@ impl ContactsView {
             want_first: false,
             me: Some(postman_demo::ME.to_string()),
             today: Today::default(),
+            details_asked: std::collections::HashSet::new(),
             tz: crate::prefs::get(cx).calendar.zone(),
             _subscriptions: vec![on_search],
         };
@@ -586,7 +592,21 @@ impl ContactsView {
         self.selected = Some(id);
         self.mode = Mode::View;
         self.ask_today(cx);
+        self.ask_details(cx);
         cx.notify();
+    }
+
+    /// Карточка человека справочника без телефона: подробности с сервера (S7-08б, решение владельца 2026-10-23 —
+    /// у Exchange телефон даёт `ResolveNames`, `FindPeople` его не отдаёт). Один раз на адрес; демо — нет.
+    fn ask_details(&mut self, cx: &mut Context<Self>) {
+        let Some(e) = self.selected_entry() else { return };
+        if !self.live || e.kind != Kind::Person || !e.card.phones.is_empty() {
+            return;
+        }
+        let Some(email) = e.card.emails.first().map(|m| m.to_lowercase()) else { return };
+        if self.details_asked.insert(email.clone()) {
+            cx.emit(ContactsAction::PersonDetails(email));
+        }
     }
 
     /// Занятость выбранного сегодня: сотрудники и переговорные (у личных контактов — нет).
@@ -869,6 +889,22 @@ impl ContactsView {
                     }
                 }
                 sort(&mut self.directory);
+            }
+            // Подробности человека (S7-08б): телефон, должность и отдел — в пустые поля его карточек справочника.
+            SyncEvent::PersonDetails { email, person: Some(p) } if self.live => {
+                for e in self.directory.iter_mut().filter(|e| e.card.emails.iter().any(|m| m.eq_ignore_ascii_case(email))) {
+                    let mut card = e.card.clone();
+                    if card.phones.is_empty() && !p.phone.trim().is_empty() {
+                        card.phones = vec![p.phone.trim().to_owned()];
+                    }
+                    if card.title.is_empty() {
+                        card.title = p.title.trim().to_owned();
+                    }
+                    if card.organization.is_empty() {
+                        card.organization = p.department.trim().to_owned();
+                    }
+                    *e = Entry::new(card, e.kind);
+                }
             }
             SyncEvent::Me { address, .. } => {
                 self.me = Some(address.email.clone());
@@ -1715,6 +1751,7 @@ impl crate::Mailer {
                 Command::SaveContact { card: card.clone(), old: old.clone(), ticket: *ticket }
             }
             ContactsAction::Delete { id, ticket } => Command::DeleteContact { id: id.clone(), ticket: *ticket },
+            ContactsAction::PersonDetails(email) => Command::PersonDetails { email: email.clone() },
             ContactsAction::Availability { ticket, email, from, to } => {
                 Command::Availability { ticket: *ticket, emails: vec![email.clone()], from: *from, to: *to, sender: None }
             }

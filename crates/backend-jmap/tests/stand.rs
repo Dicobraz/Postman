@@ -861,3 +861,132 @@ async fn stand_calendar_search() {
     assert!(none.iter().all(|e| e.uid != meeting.uid), "чужое слово нашло событие");
     a.client.destroy_event(&id, false).await.unwrap();
 }
+
+/// Правка и отмена своей встречи через синхронизацию (S7-07б): user1 приглашает user3 → `UpdateMeeting` (на час позже,
+/// новая тема) → у user3 новое время и тема → `CancelMeeting` → у user3 отмена. Серия (каждый день, 3 раза) с user3:
+/// второй экземпляр — на час позже (`series: false`, исключение), третий — отменён (`EXDATE`), затем вся серия отменена.
+#[tokio::test]
+#[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
+async fn meeting_edit_and_cancel_through_sync() {
+    use postman_backend_jmap::schedule::Meeting;
+    use postman_calendar::Event as CalEvent;
+    use postman_core::sync::{Command, Event as SyncEvent};
+
+    let (a, c) = (user(1).await, user(3).await);
+    let tz = "Europe/Moscow";
+    let zone = jiff::tz::TimeZone::get(tz).unwrap();
+    let zoned = |d: jiff::civil::DateTime| d.to_zoned(zone.clone()).unwrap().timestamp().as_second();
+    let local = |ts: i64| jiff::Timestamp::from_second(ts).unwrap().to_zoned(zone.clone()).datetime();
+    let stamp = stamp();
+    let (commands, rx) = sync_of(1, env("POSTMAN_STAND_PASSWORD1"));
+    let start = start_in(12).date().at(11, 0, 0, 0);
+    let (from, to) = (zoned(start.date().at(0, 0, 0, 0)), zoned(start.date().at(0, 0, 0, 0)) + 4 * 86_400);
+    let week = |what: &str| -> Vec<CalEvent> {
+        assert!(commands.send(Command::Events { from, to }).is_ok());
+        wait_for(&rx, what, |e| match e {
+            SyncEvent::EventsLoaded { events, .. } => Some(events.clone()),
+            _ => None,
+        })
+    };
+    let done = |what: &str, ticket: u64| {
+        wait_for(&rx, what, |e| match e {
+            SyncEvent::MeetingUpdated { ticket: t, .. } | SyncEvent::MeetingCancelled { ticket: t, .. } if *t == ticket => Some(()),
+            SyncEvent::MeetingFailed { ticket: t, error } if *t == ticket => panic!("{what}: {error}"),
+            _ => None,
+        })
+    };
+    let theirs = |uid: String| {
+        let c = &c.client;
+        async move { c.event_by_uid(&uid).await.ok().flatten().and_then(|v| CalEvent::from_jmap(&v, &jiff::tz::TimeZone::UTC).ok()) }
+    };
+    // Забытое прошлыми прогонами (упавший тест) — убрать у обоих: события с UID `postman-s707b-` в окне.
+    for u in [&a, &c] {
+        let utc = |t: i64| jiff::Timestamp::from_second(t).unwrap().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut uids: Vec<String> = u.client.events(None, &utc(from), &utc(to)).await.unwrap().iter().filter_map(|v| v["uid"].as_str().map(str::to_owned)).filter(|x| x.starts_with("postman-s707b-")).collect();
+        uids.dedup();
+        for x in uids {
+            if let Some(e) = u.client.event_by_uid(&x).await.unwrap() {
+                u.client.destroy_event(e["id"].as_str().unwrap(), false).await.unwrap();
+            }
+        }
+    }
+    let meeting = |uid: &str, title: &str, at: jiff::civil::DateTime| Meeting {
+        uid: uid.into(),
+        title: title.into(),
+        location: "Переговорная 2".into(),
+        description: String::new(),
+        start: at,
+        time_zone: tz.into(),
+        duration_secs: 1800,
+        attendees: vec![("User 3".into(), c.email.clone())],
+        optional: Vec::new(),
+        from: None,
+    };
+
+    // Одиночная встреча: создать, перенести на час, отменить.
+    let uid = format!("postman-s707b-{stamp}@itt.test");
+    assert!(commands.send(Command::CreateMeeting { meeting: Box::new(meeting(&uid, "Postman: правка", start)), ticket: 1 }).is_ok());
+    wait_for(&rx, "MeetingCreated", |e| matches!(e, SyncEvent::MeetingCreated { ticket: 1, .. }).then_some(()));
+    eventually("приглашение у user3", || theirs(uid.clone())).await;
+    let ev = week("неделя").into_iter().find(|e| e.uid == uid).expect("встреча в неделе");
+    let moved = meeting(&uid, "Postman: правка, позже", local(ev.span.start + 3600));
+    assert!(commands.send(Command::UpdateMeeting { event: Box::new(ev.clone()), meeting: Box::new(moved), series: false, ticket: 2 }).is_ok());
+    done("MeetingUpdated", 2);
+    eventually("перенос у user3", || {
+        let f = theirs(uid.clone());
+        let want = ev.span.start + 3600;
+        async move { f.await.filter(|e| e.span.start == want && e.title == "Postman: правка, позже") }
+    })
+    .await;
+    let ev = week("неделя после правки").into_iter().find(|e| e.uid == uid).expect("встреча после правки");
+    assert_eq!(ev.span.start, zoned(start) + 3600);
+    assert!(commands.send(Command::CancelMeeting { event: Box::new(ev), series: false, from: None, ticket: 3 }).is_ok());
+    done("MeetingCancelled", 3);
+    eventually("отмена у user3", || {
+        let f = theirs(uid.clone());
+        async move {
+            match f.await {
+                None => Some(()),
+                Some(e) => (e.status == postman_calendar::EventStatus::Cancelled).then_some(()),
+            }
+        }
+    })
+    .await;
+    assert!(!week("неделя после отмены").iter().any(|e| e.uid == uid));
+
+    // Серия: экземпляр позже, экземпляр отменён, затем вся серия.
+    let suid = format!("postman-s707b-series-{stamp}@itt.test");
+    let identities = a.client.identities().await.unwrap();
+    let me = identities.first().expect("Identity user1");
+    let mut series = meeting(&suid, "Postman: серия", start).to_jmap(&first_calendar(&a.client).await, (&me.name, &me.email));
+    // Stalwart — JSCalendar 2.0: одно правило `recurrenceRule` (`recurrenceRules` — `invalidProperties`).
+    series["recurrenceRule"] = serde_json::json!({ "frequency": "daily", "count": 3 });
+    a.client.create_event(series, true).await.unwrap();
+    let ours = |w: Vec<CalEvent>| w.into_iter().filter(|e| e.uid == suid).collect::<Vec<_>>();
+    let all = ours(week("серия"));
+    assert_eq!(all.len(), 3, "три экземпляра: {all:?}");
+    let second = all[1].clone();
+    let later = meeting(&suid, "Postman: серия", local(second.span.start + 3600));
+    assert!(commands.send(Command::UpdateMeeting { event: Box::new(second.clone()), meeting: Box::new(later), series: false, ticket: 4 }).is_ok());
+    done("MeetingUpdated экземпляра", 4);
+    let all = ours(week("серия после правки экземпляра"));
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().any(|e| e.span.start == second.span.start + 3600), "экземпляр не перенесён: {all:?}");
+    assert!(all.iter().any(|e| e.span.start == zoned(start)), "первый — на месте");
+    let third = all.iter().max_by_key(|e| e.span.start).unwrap().clone();
+    assert!(commands.send(Command::CancelMeeting { event: Box::new(third), series: false, from: None, ticket: 5 }).is_ok());
+    done("MeetingCancelled экземпляра", 5);
+    let all = ours(week("серия без экземпляра"));
+    assert_eq!(all.len(), 2, "отменённый экземпляр остался: {all:?}");
+    assert!(commands.send(Command::CancelMeeting { event: Box::new(all[0].clone()), series: true, from: None, ticket: 6 }).is_ok());
+    done("MeetingCancelled серии", 6);
+    assert!(ours(week("серия отменена")).is_empty());
+    drop(commands);
+
+    // Уборка: копии у user3.
+    for u in [&uid, &suid] {
+        if let Some(e) = c.client.event_by_uid(u).await.unwrap() {
+            c.client.destroy_event(e["id"].as_str().unwrap(), false).await.unwrap();
+        }
+    }
+}

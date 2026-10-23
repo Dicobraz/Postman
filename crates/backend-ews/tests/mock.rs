@@ -60,6 +60,8 @@ fn answer(body: &str) -> String {
         fixture("get_item_meeting.xml")
     } else if op("GetItem") {
         fixture("get_item_headers.xml")
+    } else if op("DeleteItem") {
+        fixture("delete_item.xml")
     } else if op("UpdateItem") {
         fixture("update_item_read.xml")
     } else if op("CreateItem") && ["<t:AcceptItem", "<t:TentativelyAcceptItem", "<t:DeclineItem"].iter().any(|r| body.contains(r)) {
@@ -449,4 +451,51 @@ fn people_fall_back_to_resolve_names() {
     }
     assert_eq!(requests(&log, 0, "FindPeople").len(), 1, "отказал — больше не спрашиваем");
     assert_eq!(requests(&log, 0, "ResolveNames").len(), 2);
+}
+
+/// Правка и отмена своей встречи (S7-07б): `UpdateItem` по встрече недели — тема, время (UTC), пояс, участники,
+/// рассылка всем с копией; `DeleteItem` — отмена участникам, встреча — в «Удалённые».
+#[test]
+fn meeting_edit_and_cancel_requests() {
+    let (url, log) = server();
+    let live = ready(&url);
+    live.commands.send(Command::Events { from: ts("2026-10-12T00:00:00Z"), to: ts("2026-10-26T00:00:00Z") }).unwrap();
+    let Event::EventsLoaded { events, .. } = live.wait("EventsLoaded", |e| matches!(e, Event::EventsLoaded { .. })) else { unreachable!() };
+    let ev = events.into_iter().find(|e| e.id == "AAMkADmeet").expect("встреча корпуса");
+    let meeting = postman_core::schedule::Meeting {
+        uid: ev.uid.clone(),
+        title: "Планёрка, позже".into(),
+        location: String::new(),
+        description: String::new(),
+        start: "2026-10-20T11:00:00".parse().unwrap(),
+        time_zone: "Europe/Moscow".into(),
+        duration_secs: 3600,
+        attendees: vec![("Борис".into(), "boris@example.test".into())],
+        optional: vec![],
+        from: None,
+    };
+    let n = log.lock().unwrap().len();
+    live.commands.send(Command::UpdateMeeting { event: Box::new(ev.clone()), meeting: Box::new(meeting), series: false, ticket: 21 }).unwrap();
+    let done = |e: &Event| matches!(e, Event::MeetingUpdated { ticket: 21, .. } | Event::MeetingCancelled { ticket: 22, .. } | Event::MeetingFailed { .. });
+    let Event::MeetingUpdated { uid, .. } = live.wait("MeetingUpdated", done) else { panic!("правка не ушла") };
+    assert_eq!(uid, MEETING_UID);
+    let upd = requests(&log, n, "UpdateItem").pop().expect("UpdateItem");
+    for part in [
+        r#"SendMeetingInvitationsOrCancellations="SendToAllAndSaveCopy""#,
+        r#"<t:ItemId Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7"/>"#,
+        "<t:Subject>Планёрка, позже</t:Subject>",
+        "<t:Start>2026-10-20T08:00:00Z</t:Start>",
+        "<t:End>2026-10-20T09:00:00Z</t:End>",
+        r#"<t:StartTimeZone Id="Russian Standard Time"/>"#,
+        "<t:EmailAddress>boris@example.test</t:EmailAddress>",
+        r#"<t:DeleteItemField><t:FieldURI FieldURI="calendar:Location"/>"#,
+    ] {
+        assert!(upd.contains(part), "нет «{part}» в {upd}");
+    }
+
+    let n = log.lock().unwrap().len();
+    live.commands.send(Command::CancelMeeting { event: Box::new(ev), series: false, from: None, ticket: 22 }).unwrap();
+    let Event::MeetingCancelled { .. } = live.wait("MeetingCancelled", done) else { panic!("отмена не ушла") };
+    let del = requests(&log, n, "DeleteItem").pop().expect("DeleteItem");
+    assert!(del.contains(r#"DeleteType="MoveToDeletedItems" SendMeetingCancellations="SendToAllAndSaveCopy""#) && del.contains("AAMkADmeet"), "{del}");
 }
