@@ -528,13 +528,14 @@ impl TaskStore for DavTasks<'_> {
         if marks.len() != calendars.len() {
             return Err(cannot_calculate());
         }
-        let (mut changed, mut destroyed) = (Vec::new(), Vec::new());
+        let (mut changed, mut destroyed, mut lines) = (Vec::new(), Vec::new(), Vec::new());
         for c in calendars {
             let Some((_, mark)) = marks.iter().find(|(h, _)| same_href(h, &c.href)) else { return Err(cannot_calculate()) };
             let Some(token) = mark.strip_prefix("sync:") else {
                 // Без sync-collection: ctag тот же — изменений нет, иначе — всё заново (сверка `tasks::refresh`).
                 let now = self.dav.client.tokens(&c.href).await.map_err(core_error)?;
                 if mark.strip_prefix("ctag:").is_some_and(|t| now.ctag.as_deref() == Some(t)) {
+                    lines.push(format!("{}\t{mark}", c.href));
                     continue;
                 }
                 return Err(cannot_calculate());
@@ -543,10 +544,18 @@ impl TaskStore for DavTasks<'_> {
             if ch.full || ch.truncated {
                 return Err(cannot_calculate());
             }
+            if !ch.removed.is_empty() {
+                // Только имена ресурсов: путь коллекции содержит адрес пользователя.
+                let names: Vec<&str> = ch.removed.iter().map(|h| h.trim_end_matches('/').rsplit('/').next().unwrap_or_default()).collect();
+                tracing::debug!("caldav tasks: removed {names:?}");
+            }
+            // Состояние — токен этого же ответа, а не новый PROPFIND: изменение между двумя запросами (другой клиент
+            // удалил задачу) иначе потерялось бы навсегда — следующая дельта начиналась бы уже после него.
+            lines.push(format!("{}\tsync:{}", c.href, ch.token));
             changed.extend(ch.changed.into_iter().map(|i| i.href));
             destroyed.extend(ch.removed);
         }
-        let state = self.state().await.map_err(core_error)?;
+        let state = lines.join("\n");
         let changed = self.fetch(&changed).await.map_err(core_error)?;
         Ok(Delta { changed, destroyed, state })
     }
