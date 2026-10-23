@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?><A:schedule-response xmlns:D="DAV:" xmlns:A="urn:ietf:params:xml:ns:caldav"><A:response><A:recipient><D:href>mailto:user3@itt.test</D:href></A:recipient><A:request-status>2.0;Success</A:request-status><A:calendar-data><![CDATA[BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+METHOD:REPLY
+BEGIN:VFREEBUSY
+DTSTART:20261020T000000Z
+DTEND:20261030T000000Z
+DTSTAMP:20261022T232529Z
+ORGANIZER:mailto:user1@itt.test
+ATTENDEE:mailto:user3@itt.test
+UID:postman-fb-rec
+END:VFREEBUSY
+END:VCALENDAR
+]]></A:calendar-data></A:response><A:response><A:recipient><D:href>mailto:nobody@itt.test</D:href></A:recipient><A:request-status>3.7;Invalid calendar user or insufficient permissions</A:request-status></A:response><A:response><A:recipient><D:href>mailto:user2@itt.test</D:href></A:recipient><A:request-status>2.0;Success</A:request-status><A:calendar-data><![CDATA[BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+METHOD:REPLY
+BEGIN:VFREEBUSY
+DTSTART:20261020T000000Z
+DTEND:20261030T000000Z
+DTSTAMP:20261022T232529Z
+FREEBUSY;FBTYPE=BUSY:20261021T090000Z/20261021T100000Z,20261028T110000Z/202
+ 61028T120000Z
+ORGANIZER:mailto:user1@itt.test
+ATTENDEE:mailto:user2@itt.test
+UID:postman-fb-rec
+END:VFREEBUSY
+END:VCALENDAR
+]]></A:calendar-data></A:response></A:schedule-response>
