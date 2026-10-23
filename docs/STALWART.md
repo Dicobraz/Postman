@@ -83,8 +83,14 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
 | `postman-dav stand::caldav_meeting_cycle` | S7-05а: user1 кладёт встречу с ATTENDEE user2 → копия в календаре user2 со Schedule-Tag → ответ правкой копии с `If-Schedule-Tag-Match` → у организатора PARTSTAT=ACCEPTED (старый ETag — 412) → DELETE организатором → у user2 `STATUS:CANCELLED`; входящие планирования: у user2 REQUEST и CANCEL, у user1 REPLY → убраны вместе с письмами сервера (п. 47) |
 | `postman-dav stand::carddav_round_trip` | S7-05а: vCard 4.0 PUT → `sync-collection` → `addressbook-multiget` → правка с `If-Match` (старый ETag — 412) → новый ETag в `sync-collection` → DELETE → удаление в `sync-collection` (п. 45) |
 | `postman-dav stand::dav_wrong_password` | S7-05а: неверный пароль — `Error::Auth` (401) на поиске, а не «нет CalDAV» |
+| `stand_standards::caldav_event_round_trip` | S7-05б, через синхронизацию «стандартов» (IMAP + CalDAV): `Features` — календарь, задачи, контакты, занятость (без справочника и правил) → `CreateMeeting` без участников → неделя (`expand`) → `SearchEvents` → убрано |
+| `stand_standards::caldav_meeting_cycle` | S7-05б: user1 → user2 `CreateMeeting` → у user2 в неделе «нужен ответ» → `RespondInvite` своей копией (`Delivery::Server`) → у user1 user2 принял → убрано вместе с входящими планирования и письмами (п. 47) |
+| `stand_standards::caldav_free_busy` | S7-05б: событие user2, календарь открыт user1 → `Availability` — занятость user2 ровно на событии, неизвестный адрес — нет данных → `ShareFreeBusy` — ACL только `read-free-busy` (п. 46, 48) |
+| `stand_standards::caldav_task_round_trip` | S7-05б: задача с исполнителем user2 → у второго клиента после загрузки → выполнена вторым → у первого по дельте `sync-collection` → удалена → у второго нет; у user2 копии нет (`SCHEDULE-AGENT=CLIENT`, п. 48) |
+| `stand_standards::carddav_round_trip` | S7-05б: `SaveContact` → в `ContactsLoaded` → правка (телефон убран, должность и организация) → `DeleteContact` → нет |
+| `stand_imap::server_kind_by_address` | S7-04в, S7-05б: адрес JMAP — как есть; к адресу IMAP — `dav=https://<узел>` (`.well-known/caldav` отвечает), с `dav=` — как есть |
 
-Последний прогон — 2026-10-23: `postman-dav` `stand` 6 из 6 (S7-05а, HTTPS напрямую); IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
+Последний прогон — 2026-10-23: `postman-core` `stand_standards` 5 из 5 и `stand_imap` 5 из 5 (S7-05б), `postman-dav` `stand` 6 из 6 (S7-05а, HTTPS напрямую); IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
 `postman-imap` `stand` 4 из 4 (S7-04а), `postman-core` `stand_imap` 2 из 2 (S7-04б), 5 из 5 (S7-04в: «Отменить», беседа, фильтры, вид сервера); 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
@@ -412,6 +418,13 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
     планирования: у участника — REQUEST и CANCEL, у организатора — REPLY; PROPFIND их перечисляет, GET отдаёт, но
     **`calendar-multiget` и `calendar-query` по входящим — 404** на каждый ресурс. Клиент: `Client::inbox` читает
     недостающее GET по одному.
+48. **CalDAV для Postman** (S7-05б, тест `stand_standards`). `calendar-query` с `<C:expand>` (RFC 4791 §9.6.5) —
+    поддерживается: экземпляры повтора — отдельные VEVENT с `RECURRENCE-ID` и временем в UTC (неделя Postman — как
+    у JMAP). `SCHEDULE-AGENT=CLIENT` у ATTENDEE соблюдается: VTODO с исполнителем сервер не рассылает и копию
+    исполнителю не кладёт (письма поручения шлёт Postman). Чужой принципал (`/dav/pal/<адрес коллеги>/`) — PROPFIND
+    отвечает 403, PROPFIND `/dav/pal/` Depth 1 — только свой: найти коллегу по адресу CalDAV нельзя. Клиент берёт
+    путь по образцу своего (`dav::sibling_principal`), ACL на него сервер принимает. Где по CalDAV видны календари,
+    открытые мне коллегами, — [проверить] (неделя Postman по CalDAV их пока не показывает).
 
 ## S/MIME (S5-12 Ф2)
 

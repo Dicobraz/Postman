@@ -4,6 +4,7 @@
 
 pub mod display;
 pub mod mailto;
+pub mod vcard;
 
 pub use mailto::{Mailto, parse_mailto};
 

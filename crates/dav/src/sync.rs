@@ -121,7 +121,14 @@ impl Client {
     /// `calendar-query`: ресурсы с компонентом (`VEVENT`, `VTODO`), пересекающие окно (`None` — все). Повторы
     /// сервер проверяет сам (RFC 4791 §9.9): событие с повтором в окне — в ответе целиком.
     pub async fn calendar_query(&self, collection: &str, component: &str, range: Option<Span>) -> Result<Vec<Resource>> {
-        let ms = self.multistatus("REPORT", collection, Some("1"), query_body(component, range)?).await?;
+        let ms = self.multistatus("REPORT", collection, Some("1"), query_body(component, range, false)?).await?;
+        Ok(fetched(&ms, Data::Calendar).resources)
+    }
+
+    /// `calendar-query` с развёрнутыми повторами (`expand`, RFC 4791 §9.6.5): каждый экземпляр в окне — свой VEVENT с
+    /// `RECURRENCE-ID`, время — UTC (как у JMAP, где повторы разворачивает сервер).
+    pub async fn calendar_expand(&self, collection: &str, component: &str, range: Span) -> Result<Vec<Resource>> {
+        let ms = self.multistatus("REPORT", collection, Some("1"), query_body(component, Some(range), true)?).await?;
         Ok(fetched(&ms, Data::Calendar).resources)
     }
 }
@@ -155,12 +162,19 @@ pub(crate) fn ical_utc(secs: i64) -> Result<String> {
     Ok(t.strftime("%Y%m%dT%H%M%SZ").to_string())
 }
 
-fn query_body(component: &str, range: Option<Span>) -> Result<String> {
+fn query_body(component: &str, range: Option<Span>, expand: bool) -> Result<String> {
     if !component.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err(Error::Protocol("bad component name".into()));
     }
     let mut s = xml::open("c:calendar-query");
-    s.push_str("<d:prop><d:getetag/><c:calendar-data/><c:schedule-tag/></d:prop>");
+    match range.filter(|_| expand) {
+        Some(r) => s.push_str(&format!(
+            "<d:prop><d:getetag/><c:calendar-data><c:expand start=\"{}\" end=\"{}\"/></c:calendar-data><c:schedule-tag/></d:prop>",
+            ical_utc(r.start)?,
+            ical_utc(r.end)?
+        )),
+        None => s.push_str("<d:prop><d:getetag/><c:calendar-data/><c:schedule-tag/></d:prop>"),
+    }
     s.push_str(&format!("<c:filter><c:comp-filter name=\"VCALENDAR\"><c:comp-filter name=\"{}\">", component.to_ascii_uppercase()));
     if let Some(r) = range {
         s.push_str(&format!("<c:time-range start=\"{}\" end=\"{}\"/>", ical_utc(r.start)?, ical_utc(r.end)?));
@@ -309,10 +323,13 @@ mod tests {
         let m = multiget_body(Data::Address, &["/a&b.vcf".into()]);
         assert!(m.starts_with("<?xml") && m.contains("<r:addressbook-multiget ") && m.contains("<d:href>/a&amp;b.vcf</d:href>"));
         crate::xml::parse(m.as_bytes()).unwrap();
-        let q = query_body("vevent", Some(Span::new(1_793_000_000, 1_793_086_400))).unwrap();
+        let q = query_body("vevent", Some(Span::new(1_793_000_000, 1_793_086_400)), false).unwrap();
         assert!(q.contains("name=\"VEVENT\"") && q.contains("start=\"20261026T") && q.contains("Z\" end=\""), "{q}");
         crate::xml::parse(q.as_bytes()).unwrap();
-        assert!(query_body("VEVENT\"/><x", None).is_err());
+        assert!(query_body("VEVENT\"/><x", None, false).is_err());
+        let e = query_body("VEVENT", Some(Span::new(0, 3600)), true).unwrap();
+        assert!(e.contains("<c:calendar-data><c:expand start=\"19700101T000000Z\" end=\"19700101T010000Z\"/></c:calendar-data>"), "{e}");
+        crate::xml::parse(e.as_bytes()).unwrap();
     }
 
     #[test]

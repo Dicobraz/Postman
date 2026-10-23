@@ -14,7 +14,8 @@
 //! - **Отправка** — SMTP submission, копия — `APPEND` в «Отправленные». «Отменить» — письмо держит сама синхронизация
 //!   (`Release::After`, S7-04в): до срока его можно вернуть в черновики; закрыли Postman — уходит сразу. «Отправить
 //!   позже» — нет (сервер не держит письмо): `Scheduled` с `max_delay: 0` — интерфейс прячет «позже».
-//! - Контакты, календарь, задачи, правила, автоответ — нет: `Features` основной учётной записи IMAP пустые.
+//! - Календарь, задачи, занятость и контакты — CalDAV и CardDAV рядом (`?dav=https://…` в адресе, S7-05б, модуль
+//!   [`crate::dav`]): `Features` — по тому, что нашлось на сервере. Без них, как и правил и автоответа, — нет.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
@@ -47,9 +48,12 @@ pub struct ImapAccount {
     pub email: String,
     pub imap: Config,
     pub smtp: Config,
+    /// Адрес CalDAV и CardDAV (`https://узел[/путь]`, S7-05б); `None` — только почта.
+    pub dav: Option<String>,
 }
 
-/// Адрес учётной записи IMAP: `imaps://imap.host[:порт][?smtp=smtp.host[:порт]]` (TLS) или `imap://…` (STARTTLS).
+/// Адрес учётной записи IMAP: `imaps://imap.host[:порт][?smtp=smtp.host[:порт]][&dav=https://dav.host]` (TLS) или
+/// `imap://…` (STARTTLS).
 pub fn is_imap_url(url: &str) -> bool {
     let u = url.trim().to_ascii_lowercase();
     u.starts_with("imaps://") || u.starts_with("imap://")
@@ -90,7 +94,8 @@ impl ImapAccount {
             password: password.to_owned(),
         };
         let smtp = Config { host: smtp_host, port: smtp_port, security: security(smtp_port, 465), user: user.to_owned(), password: password.to_owned() };
-        Some(ImapAccount { email: user.to_owned(), imap, smtp })
+        let dav = query.split('&').find_map(|kv| kv.strip_prefix("dav=")).map(str::trim).filter(|d| d.starts_with("https://") || d.starts_with("http://"));
+        Some(ImapAccount { email: user.to_owned(), imap, smtp, dav: dav.map(str::to_owned) })
     }
 }
 
@@ -243,6 +248,8 @@ struct Imap {
     /// Письма в окне «Отменить» (S7-04в): уходят по сроку, отмена возвращает их в черновики.
     held: Vec<Held>,
     next_hold: u64,
+    /// Календарь, задачи и контакты (S7-05б); `None` — у учётной записи только почта.
+    dav: Option<crate::dav::Dav>,
 }
 
 /// Письмо, которое держит синхронизация до срока окна «Отменить».
@@ -272,12 +279,24 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
         worker: None,
         held: Vec::new(),
         next_hold: 0,
+        dav: None,
     };
     notify(Event::Status(Status::SignedIn { user: me.account.email.clone() }));
+    if let Some(url) = me.account.dav.clone() {
+        match crate::dav::Dav::connect(&url, &me.account.imap.user, &me.account.imap.password, &me.account.email).await {
+            Ok(d) => me.dav = Some(d),
+            // Без календаря почта всё равно работает: ошибка — тостом календаря, области скрыты.
+            Err(e) => {
+                tracing::warn!("caldav: {e}");
+                notify(Event::CalendarFailed(e.to_string()));
+            }
+        }
+    }
     let address = Address::new("", &me.account.email);
     if me.profile.is_none() {
-        // Основная учётная запись IMAP: только почта (S7-03а «Нет у сервера — нет на экране»).
-        notify(Event::Features(crate::model::Features::NONE));
+        // Основная учётная запись IMAP: почта и то, что нашлось по CalDAV/CardDAV (S7-03а «Нет у сервера — нет на
+        // экране»).
+        notify(Event::Features(me.dav.as_ref().map_or(crate::model::Features::NONE, |d| d.features())));
         notify(Event::Me { address: address.clone(), signature: String::new() });
     }
     notify(Event::Senders(vec![Sender { account: me.scope.clone(), address, signature: String::new() }]));
@@ -334,6 +353,14 @@ async fn run(account: ImapAccount, profile: Option<String>, cache: Cache, index:
             _ = poll.tick() => {
                 if let Err(e) = me.refresh_all(notify).await {
                     notify(Event::Error(e));
+                }
+                // CalDAV без push: изменения календарей — по ctag и sync-token.
+                if let Some(d) = me.dav.as_mut() {
+                    match d.changed().await {
+                        Ok(true) => notify(Event::CalendarChanged),
+                        Ok(false) => {}
+                        Err(e) => tracing::debug!("caldav poll: {e}"),
+                    }
                 }
             }
         }
@@ -915,12 +942,7 @@ impl Imap {
                 };
                 if hold > 0 {
                     // Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
-                    self.next_hold += 1;
-                    let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
-                    let send_at = jiff::Timestamp::now().as_second() + i64::from(hold);
-                    let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(hold));
-                    self.held.push(Held { id: id.clone(), draft: *draft, replace, at });
-                    let scheduled = crate::send_later::Scheduled { submission: id.clone(), email: id, send_at };
+                    let scheduled = self.hold(*draft, replace, hold);
                     notify(Event::Sent { ticket, scheduled: Some(scheduled) });
                     return Ok(());
                 }
@@ -955,10 +977,165 @@ impl Imap {
                     self.session().await?;
                 }
             }
-            // Календаря, контактов, задач, правил и автоответа у IMAP нет: интерфейс их не показывает (`Features`).
+            Command::RespondInvite { invite, status, in_reply_to } => self.respond_invite(*invite, status, in_reply_to, notify).await,
+            Command::Delegate { uid, drafts, ticket, release } => self.delegate(uid, drafts, ticket, release, notify).await,
+            Command::Withhold { scheduled, ticket } => {
+                // Письма шага поручения в окне «Отменить» держит синхронизация: убрать те, что ещё здесь.
+                let mut too_late = false;
+                for s in &scheduled {
+                    match self.held.iter().position(|h| h.id == s.submission) {
+                        Some(i) => drop(self.held.remove(i)),
+                        None => too_late = true,
+                    }
+                }
+                notify(Event::Withheld { ticket, too_late, error: None });
+            }
+            other if self.dav.is_some() => self.dav_command(other, notify).await,
+            // Правил и автоответа у IMAP нет, календаря и контактов без CalDAV/CardDAV — тоже: интерфейс их не
+            // показывает (`Features`).
             other => tracing::debug!("imap: command not supported: {}", command_name(&other)),
         }
         Ok(())
+    }
+
+    /// Окно «Отменить» держит синхронизация: письмо уйдёт по сроку (`release_held`).
+    fn hold(&mut self, draft: Draft, replace: Option<String>, secs: u32) -> crate::send_later::Scheduled {
+        self.next_hold += 1;
+        let id = scoped(self.scope(), &format!("hold.{}", self.next_hold));
+        let send_at = jiff::Timestamp::now().as_second() + i64::from(secs);
+        let at = tokio::time::Instant::now() + Duration::from_secs(u64::from(secs));
+        self.held.push(Held { id: id.clone(), draft, replace, at });
+        crate::send_later::Scheduled { submission: id.clone(), email: id, send_at }
+    }
+
+    /// Ответ на приглашение: своей копией на CalDAV (REPLY шлёт сервер), иначе — письмом организатору (iMIP).
+    async fn respond_invite(
+        &mut self,
+        inv: postman_calendar::Invitation,
+        status: postman_calendar::Partstat,
+        in_reply_to: Option<String>,
+        notify: &impl Fn(Event),
+    ) {
+        let uid = inv.event.uid.clone();
+        if let Some(d) = &self.dav {
+            match d.respond(&uid, inv.event.span, status).await {
+                Ok(true) => {
+                    notify(Event::InviteAnswered { uid, status, delivery: crate::invite::Delivery::Server });
+                    notify(Event::CalendarChanged);
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => return notify(Event::InviteFailed { uid, error: e.to_string() }),
+            }
+        }
+        let me = Address::new("", &self.account.email);
+        let Some(draft) = crate::invite::reply_draft(&inv, &me, status, in_reply_to, jiff::Timestamp::now().as_second()) else {
+            return notify(Event::InviteFailed { uid, error: "the invitation has no organizer".into() });
+        };
+        match self.send(draft, None).await {
+            Ok(()) => notify(Event::InviteAnswered { uid, status, delivery: crate::invite::Delivery::Mail { imported: false } }),
+            Err(e) => notify(Event::InviteFailed { uid, error: e.to_string() }),
+        }
+    }
+
+    /// Шаг поручения (S6-09): своя копия задачи — на CalDAV (без рассылки сервером, `SCHEDULE-AGENT=CLIENT`), затем
+    /// письма iTIP шага по SMTP; окно «Отменить» — как у `Send`.
+    async fn delegate(&mut self, uid: String, drafts: Vec<Draft>, ticket: u64, release: crate::model::Release, notify: &impl Fn(Event)) {
+        let Some(d) = &self.dav else {
+            return notify(Event::Delegated { ticket, uid, error: Some("no CalDAV".into()), scheduled: Vec::new() });
+        };
+        if let Err(e) = crate::tasks::handle(&d.tasks(), &self.cache, crate::tasks::Request::Flush, &|r| notify(Event::Tasks(r))).await {
+            return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled: Vec::new() });
+        }
+        let mut scheduled = Vec::new();
+        for draft in drafts {
+            match release {
+                crate::model::Release::After(s) if s > 0 => scheduled.push(self.hold(draft, None, s)),
+                _ => {
+                    if let Err(e) = self.send(draft, None).await {
+                        return notify(Event::Delegated { ticket, uid, error: Some(e.to_string()), scheduled });
+                    }
+                }
+            }
+        }
+        notify(Event::Delegated { ticket, uid, error: None, scheduled });
+    }
+
+    /// Календарь, задачи и контакты — по CalDAV и CardDAV (`crate::dav`), тот же договор событий, что у JMAP.
+    async fn dav_command(&mut self, cmd: Command, notify: &impl Fn(Event)) {
+        let owner = self.profile.as_ref().map(|_| postman_calendar::Owner { email: self.account.email.clone(), name: self.account.email.clone() });
+        let profile = self.profile.clone();
+        let Some(d) = self.dav.as_mut() else { return };
+        match cmd {
+            Command::Events { from, to } => notify(match d.events(from, to).await {
+                Ok(events) => {
+                    let (events, colleagues) = crate::sync::owned_by(&owner, events, Vec::new());
+                    Event::EventsLoaded { from, to, events, colleagues, account: profile }
+                }
+                Err(e) => Event::CalendarFailed(e.to_string()),
+            }),
+            Command::SearchEvents { text, from, to } => notify(match d.search(&text, from, to).await {
+                Ok(events) => Event::EventsFound { text, events, error: None },
+                Err(e) => Event::EventsFound { text, events: Vec::new(), error: Some(e.to_string()) },
+            }),
+            Command::Availability { ticket, emails, from, to, .. } => notify(match d.availability(&emails, from, to).await {
+                Ok((me, people)) => Event::Availability { ticket, me, people, error: None },
+                Err(e) => Event::Availability {
+                    ticket,
+                    me: Vec::new(),
+                    people: emails.into_iter().map(|e| (e, None)).collect(),
+                    error: Some(e.to_string()),
+                },
+            }),
+            Command::CreateMeeting { meeting, ticket } => match d.create_meeting(&meeting).await {
+                Ok(_) => {
+                    notify(Event::MeetingCreated { ticket, uid: meeting.uid.clone() });
+                    notify(Event::CalendarChanged);
+                }
+                Err(e) => notify(Event::MeetingFailed { ticket, error: e.to_string() }),
+            },
+            Command::ShareFreeBusy { email } => notify(match d.share_free_busy(&email).await {
+                Ok(()) => Event::FreeBusyShared { email },
+                Err(e) => Event::CalendarFailed(e.to_string()),
+            }),
+            Command::Tasks(request) => {
+                if let Err(e) = crate::tasks::handle(&d.tasks(), &self.cache, request, &|r| notify(Event::Tasks(r))).await {
+                    tracing::warn!("caldav tasks: {e}");
+                    notify(Event::Tasks(crate::tasks::Reply::Failed { uid: None, error: e.to_string() }));
+                }
+            }
+            Command::Contacts => {
+                load_contacts(d, notify).await;
+                // Справочника у CardDAV нет: раздел «Справочник» скрыт (`Features`), список — пустой.
+                notify(Event::DirectoryLoaded(Vec::new()));
+            }
+            Command::SaveContact { card, old, ticket } => {
+                notify(match d.save_contact(&card, old.as_deref()).await {
+                    Ok(id) => Event::ContactSaved { ticket, id },
+                    Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
+                });
+                load_contacts(d, notify).await;
+            }
+            Command::DeleteContact { id, ticket } => {
+                notify(match d.delete_contact(&id).await {
+                    Ok(()) => Event::ContactDeleted { ticket, id },
+                    Err(e) => Event::ContactFailed { ticket, error: e.to_string() },
+                });
+                load_contacts(d, notify).await;
+            }
+            other => tracing::debug!("imap: command not supported: {}", command_name(&other)),
+        }
+    }
+}
+
+/// Личные контакты CardDAV — разделу целиком и подсказкам адресов парами (имя, адрес), как у JMAP.
+async fn load_contacts(d: &mut crate::dav::Dav, notify: &impl Fn(Event)) {
+    match d.contacts().await {
+        Ok(cards) => {
+            notify(Event::Contacts(cards.iter().flat_map(|c| c.emails.iter().map(|e| (c.name.clone(), e.clone()))).collect()));
+            notify(Event::ContactsLoaded(cards));
+        }
+        Err(e) => notify(Event::ContactFailed { ticket: 0, error: e.to_string() }),
     }
 }
 
@@ -1044,6 +1221,13 @@ mod tests {
         assert_eq!((b.imap.port, b.imap.security), (143, Security::StartTls));
         assert_eq!((b.smtp.host.as_str(), b.smtp.port, b.smtp.security), ("smtp.example.test", 587, Security::StartTls));
         assert!(ImapAccount::from_url("https://x", "u", "p").is_none());
+        assert_eq!(a.dav, None);
+        // CalDAV и CardDAV рядом (S7-05б).
+        let c = ImapAccount::from_url("imaps://mail.example.test?dav=https://mail.example.test", "u", "p").unwrap();
+        assert_eq!((c.dav.as_deref(), c.smtp.port), (Some("https://mail.example.test"), 465));
+        let d = ImapAccount::from_url("imaps://m.example.test?smtp=s.example.test&dav=https://d.example.test/dav/", "u", "p").unwrap();
+        assert_eq!((d.dav.as_deref(), d.smtp.host.as_str()), (Some("https://d.example.test/dav/"), "s.example.test"));
+        assert_eq!(ImapAccount::from_url("imaps://m?dav=ftp://x", "u", "p").unwrap().dav, None);
         assert!(ImapAccount::from_url("imaps://", "u", "p").is_none());
         // Пароль — не в `Debug`.
         assert!(!format!("{a:?}").contains("secret"));

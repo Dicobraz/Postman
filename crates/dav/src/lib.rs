@@ -332,6 +332,27 @@ pub(crate) fn status_error(reply: &Reply) -> Error {
     }
 }
 
+/// Есть ли CalDAV на адресе (`https://узел`) — без входа: `.well-known/caldav` отвечает 207, перенаправлением или
+/// 401 (RFC 6764 §5). Для вида сервера по адресу (`postman_core::backend::detect`); ни сети, ни ответа — `false`.
+pub async fn has_dav(url: &str) -> bool {
+    let Ok(base) = Url::parse(url) else { return false };
+    let Ok(target) = base.join("/.well-known/caldav") else { return false };
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("Postman/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none());
+    if insecure_tls() {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    let Ok(http) = builder.build() else { return false };
+    let Ok(method) = reqwest::Method::from_bytes(b"PROPFIND") else { return false };
+    match http.request(method, target).header("Depth", "0").send().await {
+        Ok(r) => matches!(r.status().as_u16(), 207 | 301 | 302 | 303 | 307 | 308 | 401),
+        Err(_) => false,
+    }
+}
+
 /// Путь нового ресурса в коллекции: имя — из UID (процентное кодирование всего, кроме букв, цифр и `-._~`).
 pub fn child_href(collection: &str, name: &str, content: Content) -> String {
     const KEEP: &percent_encoding::AsciiSet =

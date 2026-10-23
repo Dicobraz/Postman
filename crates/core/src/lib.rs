@@ -14,6 +14,7 @@ pub mod extract;
 pub mod files;
 pub mod filters;
 pub mod fuzzy;
+pub mod dav;
 pub mod imap;
 pub mod indexer;
 pub mod invite;
