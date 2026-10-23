@@ -1,7 +1,9 @@
 //! Плагин EWS (`postman_backend_ews`) против подменного сервера EWS: HTTP без TLS (сборка `postman-ews` с `testkit`),
 //! ответы — корпус `crates/ews/tests/fixtures` (по примерам Microsoft, обезличен). Проверяет синхронизацию почты тем
 //! же договором команд и событий без боевого Exchange: вход, роли папок, запасное дерево `FindFolder` (сервер падает на
-//! `SyncFolderHierarchy`, как боевой 2013), первые письма папки, «прочитано», отправка из MIME, справочник, области.
+//! `SyncFolderHierarchy`, как боевой 2013), первые письма папки, «прочитано», отправка из MIME, справочник, области;
+//! календарь (S7-07, S7-08): ответ на приглашение по UID или письмом, новая встреча и UID от сервера, порядок
+//! занятости и «нет данных», неделя без повторных `GetItem`, запасной `ResolveNames`.
 //! Боевой Exchange — `stand_exchange.rs` (`#[ignore]`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // тест: «не падать» — для кода приложения (S2-03)
@@ -60,8 +62,14 @@ fn answer(body: &str) -> String {
         fixture("get_item_headers.xml")
     } else if op("UpdateItem") {
         fixture("update_item_read.xml")
+    } else if op("CreateItem") && ["<t:AcceptItem", "<t:TentativelyAcceptItem", "<t:DeclineItem"].iter().any(|r| body.contains(r)) {
+        fixture("accept_item.xml")
+    } else if op("CreateItem") && body.contains("SendMeetingInvitations") {
+        fixture("create_item.xml")
     } else if op("CreateItem") {
         fixture("create_item_send.xml")
+    } else if op("FindPeople") {
+        fixture("find_people.xml")
     } else if op("ResolveNames") {
         fixture("resolve_names.xml")
     } else if op("GetUserAvailabilityRequest") {
@@ -71,7 +79,10 @@ fn answer(body: &str) -> String {
     }
 }
 
-async fn serve(mut s: TcpStream, log: Arc<Mutex<Vec<String>>>) {
+/// Свои ответы теста поверх корпуса: `None` — ответ по умолчанию ([`answer`]).
+type Extra = fn(&str) -> Option<String>;
+
+async fn serve(mut s: TcpStream, log: Arc<Mutex<Vec<String>>>, extra: Extra) {
     loop {
         let mut head = Vec::new();
         let mut b = [0u8; 1];
@@ -87,7 +98,7 @@ async fn serve(mut s: TcpStream, log: Arc<Mutex<Vec<String>>>) {
         let mut body = vec![0u8; len];
         s.read_exact(&mut body).await.unwrap();
         let body = String::from_utf8(body).unwrap();
-        let reply = answer(&body);
+        let reply = extra(&body).unwrap_or_else(|| answer(&body));
         log.lock().unwrap().push(body);
         let out = format!("HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: {}\r\n\r\n{reply}", reply.len());
         s.write_all(out.as_bytes()).await.unwrap();
@@ -96,6 +107,10 @@ async fn serve(mut s: TcpStream, log: Arc<Mutex<Vec<String>>>) {
 
 /// Сервер в своём потоке (синхронизация плагина — в своём).
 fn server() -> (String, Arc<Mutex<Vec<String>>>) {
+    server_with(|_| None)
+}
+
+fn server_with(extra: Extra) -> (String, Arc<Mutex<Vec<String>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = std::sync::mpsc::channel();
     let l = log.clone();
@@ -105,7 +120,7 @@ fn server() -> (String, Arc<Mutex<Vec<String>>>) {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(listener.local_addr().unwrap()).unwrap();
             while let Ok((s, _)) = listener.accept().await {
-                tokio::spawn(serve(s, l.clone()));
+                tokio::spawn(serve(s, l.clone(), extra));
             }
         });
     });
@@ -188,10 +203,14 @@ fn exchange_mail_through_the_plugin() {
     let upd = log.lock().unwrap().iter().rev().find(|b| b.contains("<m:UpdateItem")).cloned().unwrap();
     assert!(upd.contains(r#"FieldURI="message:IsRead""#) && upd.contains("<t:IsRead>true</t:IsRead>") && upd.contains("AAMkADmsg1"));
 
-    // Справочник — ResolveNames.
+    // Справочник — FindPeople по GAL: должность и отдел (телефонов FindPeople у Exchange 2013 не отдаёт).
     live.commands.send(Command::FindPeople { text: "Петр".into() }).unwrap();
     let Event::PeopleFound { people, .. } = live.wait("PeopleFound", |e| matches!(e, Event::PeopleFound { .. })) else { unreachable!() };
     assert_eq!(people.len(), 3);
+    let anna = &people[0];
+    assert_eq!((anna.title.as_str(), anna.department.as_str(), anna.phone.as_str()), ("Ведущий инженер", "Отдел разработки", ""));
+    assert_eq!(people[2].kind, "group");
+    assert!(log.lock().unwrap().iter().any(|b| b.contains("<m:FindPeople")) && !log.lock().unwrap().iter().any(|b| b.contains("<m:ResolveNames")));
 
     // Отправка из MIME — CreateItem SendAndSaveCopy.
     let draft = postman_compose::Draft {
@@ -210,4 +229,224 @@ fn exchange_mail_through_the_plugin() {
     live.commands.send(Command::Events { from: 1_792_368_000, to: 1_792_972_800 }).unwrap();
     let Event::EventsLoaded { events, .. } = live.wait("EventsLoaded", |e| matches!(e, Event::EventsLoaded { .. })) else { unreachable!() };
     assert_eq!(events.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), ["Планёрка & отчёт"]);
+}
+
+/// Запросы теста с операцией `op` (после `from`-го).
+fn requests(log: &Arc<Mutex<Vec<String>>>, from: usize, op: &str) -> Vec<String> {
+    log.lock().unwrap()[from..].iter().filter(|b| b.contains(&format!("<m:{op}"))).cloned().collect()
+}
+
+/// Учётка поднялась: области подключены, первая сверка прошла.
+fn ready(url: &str) -> Live {
+    let live = start(url);
+    live.wait("Synced", |e| matches!(e, Event::Status(Status::Synced)));
+    live
+}
+
+/// UID встречи корпуса (`get_item_meeting.xml`).
+const MEETING_UID: &str = "040000008200E00074C5B7101A82E00800000000A1B2C3D4";
+/// UID, который сервер задал новой встрече.
+const NEW_UID: &str = "040000008200E00074C5B7101A82E008000000005E2F0000";
+
+fn ts(s: &str) -> i64 {
+    s.parse::<jiff::Timestamp>().unwrap().as_second()
+}
+
+/// Приглашение из письма (как его даёт воркер): организатор, я, UID и время встречи.
+fn invite(uid: &str) -> postman_calendar::Invitation {
+    let person = |name: &str, email: &str, owner: bool| postman_calendar::Participant {
+        name: name.into(),
+        email: email.into(),
+        owner,
+        attendee: true,
+        optional: false,
+        status: postman_calendar::Partstat::NeedsAction,
+    };
+    let event = postman_calendar::Event {
+        id: String::new(),
+        uid: uid.into(),
+        calendar_ids: Vec::new(),
+        title: "Планёрка".into(),
+        description: String::new(),
+        location: String::new(),
+        span: postman_calendar::Span::new(ts("2026-10-20T07:00:00Z"), ts("2026-10-20T08:00:00Z")),
+        all_day: false,
+        status: postman_calendar::EventStatus::Confirmed,
+        free_busy: postman_calendar::FreeBusy::Busy,
+        participants: vec![person("Анна Петрова", "anna@example.test", true), person("", "user1@example.test", false)],
+        recurring: false,
+        keywords: Vec::new(),
+        sequence: 0,
+        owner: None,
+    };
+    postman_calendar::Invitation { method: "REQUEST".into(), event, sequence: 0, raw: serde_json::json!({ "uid": uid }) }
+}
+
+/// Ответ на приглашение: встреча с UID приглашения в календаре Exchange — `AcceptItem` по ней (ответ шлёт сервер);
+/// встречи нет — письмо iMIP организатору (`CreateItem` из MIME).
+#[test]
+fn invite_reply_by_uid_or_by_mail() {
+    let (url, log) = server();
+    let live = ready(&url);
+    let accepted = postman_calendar::Partstat::Accepted;
+    let answered = |e: &Event| matches!(e, Event::InviteAnswered { .. } | Event::InviteFailed { .. });
+
+    let n = log.lock().unwrap().len();
+    live.commands.send(Command::RespondInvite { invite: Box::new(invite(MEETING_UID)), status: accepted, in_reply_to: None }).unwrap();
+    let Event::InviteAnswered { delivery, uid, .. } = live.wait("InviteAnswered", answered) else { panic!("ответ не ушёл") };
+    assert_eq!((delivery, uid.as_str()), (postman_core::invite::Delivery::Server, MEETING_UID));
+    let sent = requests(&log, n, "CreateItem");
+    assert_eq!(sent.len(), 1, "один ответ");
+    assert!(sent[0].contains("<t:AcceptItem>") && sent[0].contains(r#"<t:ReferenceItemId Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7"/>"#), "{}", sent[0]);
+    assert!(!sent[0].contains("<t:MimeContent>"), "не письмом");
+
+    let n = log.lock().unwrap().len();
+    let other = invite("not-in-calendar@example.test");
+    live.commands.send(Command::RespondInvite { invite: Box::new(other), status: accepted, in_reply_to: Some("<inv@example.test>".into()) }).unwrap();
+    let Event::InviteAnswered { delivery, .. } = live.wait("InviteAnswered", answered) else { panic!("ответ письмом не ушёл") };
+    assert_eq!(delivery, postman_core::invite::Delivery::Mail { imported: false });
+    let sent = requests(&log, n, "CreateItem");
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("<t:MimeContent>") && sent[0].contains(r#"MessageDisposition="SendAndSaveCopy""#));
+    assert!(!sent[0].contains("AcceptItem"));
+}
+
+/// `GetItem` новой встречи: UID, который задал сервер.
+fn new_meeting(body: &str) -> Option<String> {
+    (body.contains("<m:GetItem") && body.contains(r#"Id="AAMkADnew""#))
+        .then(|| fixture("get_item_meeting.xml").replace(r#"Id="AAMkADmeet""#, r#"Id="AAMkADnew""#).replace(MEETING_UID, NEW_UID))
+}
+
+/// Новая встреча вкладки «Встреча»: `CreateItem` с рассылкой сервером (участники, пояс Windows, время UTC, без своего
+/// UID) → `MeetingCreated` с UID, который задал сервер.
+#[test]
+fn new_meeting_request_and_server_uid() {
+    let (url, log) = server_with(new_meeting);
+    let live = ready(&url);
+    let meeting = postman_core::schedule::Meeting {
+        uid: "client-uid".into(),
+        title: "Обзор <Q4>".into(),
+        location: "Зал".into(),
+        description: "Повестка".into(),
+        start: "2026-11-02T10:00:00".parse().unwrap(),
+        time_zone: "Europe/Moscow".into(),
+        duration_secs: 3600,
+        attendees: vec![("Борис".into(), "boris@example.test".into())],
+        optional: vec![("Вера".into(), "vera@example.test".into())],
+        from: None,
+    };
+    let n = log.lock().unwrap().len();
+    live.commands.send(Command::CreateMeeting { meeting: Box::new(meeting), ticket: 3 }).unwrap();
+    let created = |e: &Event| matches!(e, Event::MeetingCreated { ticket: 3, .. } | Event::MeetingFailed { .. });
+    let Event::MeetingCreated { uid, .. } = live.wait("MeetingCreated", created) else { panic!("встреча не создана") };
+    assert_eq!(uid, NEW_UID, "UID — от сервера, не свой");
+    live.wait("CalendarChanged", |e| matches!(e, Event::CalendarChanged));
+
+    let create = requests(&log, n, "CreateItem");
+    assert_eq!(create.len(), 1);
+    let c = &create[0];
+    for part in [
+        r#"<m:CreateItem SendMeetingInvitations="SendToAllAndSaveCopy">"#,
+        "<t:Subject>Обзор &lt;Q4&gt;</t:Subject>",
+        "<t:Start>2026-11-02T07:00:00Z</t:Start><t:End>2026-11-02T08:00:00Z</t:End>",
+        "<t:RequiredAttendees><t:Attendee><t:Mailbox><t:Name>Борис</t:Name><t:EmailAddress>boris@example.test</t:EmailAddress>",
+        "<t:OptionalAttendees><t:Attendee><t:Mailbox><t:Name>Вера</t:Name><t:EmailAddress>vera@example.test</t:EmailAddress>",
+        r#"<t:StartTimeZone Id="Russian Standard Time"/><t:EndTimeZone Id="Russian Standard Time"/>"#,
+    ] {
+        assert!(c.contains(part), "нет «{part}» в {c}");
+    }
+    assert!(!c.contains("<t:UID>") && !c.contains("client-uid"), "UID задаёт сервер");
+    assert!(requests(&log, n, "GetItem").iter().any(|b| b.contains(r#"Id="AAMkADnew""#)), "UID — из GetItem новой встречи");
+}
+
+/// Занятость: моя — первым адресом запроса, затем участники в порядке вкладки встречи; адрес, которого сервер не нашёл,
+/// — «нет данных» (`None`), а не «свободен».
+#[test]
+fn free_busy_in_order_unknown_is_no_data() {
+    let (url, log) = server();
+    let live = ready(&url);
+    let n = log.lock().unwrap().len();
+    let emails = vec!["vera@example.test".to_owned(), "nobody@example.test".to_owned()];
+    let (from, to) = (ts("2026-10-19T00:00:00Z"), ts("2026-10-26T00:00:00Z"));
+    live.commands.send(Command::Availability { ticket: 9, emails, from, to, sender: None }).unwrap();
+    let Event::Availability { me, people, error, .. } = live.wait("Availability", |e| matches!(e, Event::Availability { ticket: 9, .. })) else {
+        unreachable!()
+    };
+    assert_eq!(error, None);
+    assert_eq!(me.len(), 2, "моя занятость — первый ответ (без «свободен»)");
+    assert_eq!(people.iter().map(|(e, _)| e.as_str()).collect::<Vec<_>>(), ["vera@example.test", "nobody@example.test"]);
+    let vera = people[0].1.as_ref().expect("занятость известна");
+    assert_eq!(vera[0].kind, postman_calendar::BusyKind::Unavailable, "OOF — «вне офиса»");
+    assert_eq!(people[1].1, None, "не найден — нет данных");
+
+    let req = requests(&log, n, "GetUserAvailabilityRequest").pop().unwrap();
+    let order: Vec<&str> = req.split("<t:Address>").skip(1).filter_map(|s| s.split("</t:Address>").next()).collect();
+    assert_eq!(order, [r"EXAMPLE\user1", "vera@example.test", "nobody@example.test"], "я — первым, затем по порядку");
+}
+
+/// `GetItem` календаря: все три встречи окна корпуса (экземпляр серии, исключение, одиночная) с теми же версиями.
+fn whole_week(body: &str) -> Option<String> {
+    if !(body.contains("<m:GetItem") && body.contains("calendar:UID")) {
+        return None;
+    }
+    let one = fixture("get_item_meeting.xml");
+    let start = one.find("<t:CalendarItem>").unwrap();
+    let end = one.find("</t:CalendarItem>").unwrap() + "</t:CalendarItem>".len();
+    let item = |id: &str, kind: &str| {
+        one[start..end]
+            .replace(r#"Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7""#, id)
+            .replace("<t:CalendarItemType>Single</t:CalendarItemType>", &format!("<t:CalendarItemType>{kind}</t:CalendarItemType>"))
+    };
+    let items = [
+        item(r#"Id="AAMkADocc1" ChangeKey="DwAAABYAAAA8""#, "Occurrence"),
+        item(r#"Id="AAMkADexc1" ChangeKey="DwAAABYAAAA9""#, "Exception"),
+        item(r#"Id="AAMkADmeet" ChangeKey="DwAAABYAAAA7""#, "Single"),
+    ]
+    .concat();
+    let head = &one[..one.find("<m:ResponseMessages>").unwrap()];
+    Some(format!(
+        r#"{head}<m:ResponseMessages><m:GetItemResponseMessage ResponseClass="Success"><m:ResponseCode>NoError</m:ResponseCode><m:Items>{items}</m:Items></m:GetItemResponseMessage></m:ResponseMessages></m:GetItemResponse></s:Body></s:Envelope>"#
+    ))
+}
+
+/// Неделя второй раз: встречи той же версии (`ChangeKey` окна совпал) заново не запрашиваются; экземпляры серии —
+/// отдельными событиями с общим UID.
+#[test]
+fn unchanged_meeting_is_not_fetched_again() {
+    let (url, log) = server_with(whole_week);
+    let live = ready(&url);
+    let (from, to) = (ts("2026-10-12T00:00:00Z"), ts("2026-10-26T00:00:00Z"));
+    let week = |live: &Live| {
+        live.commands.send(Command::Events { from, to }).unwrap();
+        let Event::EventsLoaded { events, .. } = live.wait("EventsLoaded", |e| matches!(e, Event::EventsLoaded { .. })) else { unreachable!() };
+        events
+    };
+    let n = log.lock().unwrap().len();
+    let first = week(&live);
+    assert_eq!(first.len(), 3);
+    assert!(first.iter().all(|e| e.uid == MEETING_UID));
+    assert_eq!(first.iter().filter(|e| e.recurring).count(), 2, "экземпляр и исключение — серия");
+    let details = |from: usize| requests(&log, from, "GetItem").into_iter().filter(|b| b.contains("calendar:UID")).count();
+    assert_eq!(details(n), 1, "подробности — одним запросом");
+
+    let n = log.lock().unwrap().len();
+    let again = week(&live);
+    assert_eq!(again.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), first.iter().map(|e| e.id.as_str()).collect::<Vec<_>>());
+    assert_eq!(requests(&log, n, "FindItem").len(), 1, "окно — снова");
+    assert_eq!(details(n), 0, "те же версии — без GetItem");
+}
+
+/// Сервер без `FindPeople` (отказ схемы): справочник — `ResolveNames`, и дальше `FindPeople` не спрашивается.
+#[test]
+fn people_fall_back_to_resolve_names() {
+    let (url, log) = server_with(|b| b.contains("<m:FindPeople").then(|| fixture("fault_schema.xml")));
+    let live = ready(&url);
+    for text in ["Петр", "Анна"] {
+        live.commands.send(Command::FindPeople { text: text.into() }).unwrap();
+        let Event::PeopleFound { people, .. } = live.wait("PeopleFound", |e| matches!(e, Event::PeopleFound { .. })) else { unreachable!() };
+        assert_eq!(people.len(), 3);
+        assert_eq!((people[0].department.as_str(), people[0].phone.as_str()), ("Отдел разработки", "+7 495 000-00-01"), "у ResolveNames — и телефон");
+    }
+    assert_eq!(requests(&log, 0, "FindPeople").len(), 1, "отказал — больше не спрашиваем");
+    assert_eq!(requests(&log, 0, "ResolveNames").len(), 2);
 }

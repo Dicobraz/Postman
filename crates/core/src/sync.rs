@@ -98,7 +98,7 @@ pub enum Command {
     /// Перечитать личные контакты и справочник → `ContactsLoaded`, `DirectoryLoaded` (и `Contacts` для подсказок).
     Contacts,
     /// Люди справочника по набранной строке → `PeopleFound` (S7-08): поиск людей — функция ядра, каждый путь отвечает
-    /// своим поиском (JMAP — `Principal/query`, EWS — `ResolveNames`); справочника нет — пусто.
+    /// своим поиском (JMAP — `Principal/query`, EWS — `FindPeople`, запасной — `ResolveNames`); справочника нет — пусто.
     FindPeople { text: String },
     /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
     SaveContact { card: Box<ContactCard>, old: Option<Box<ContactCard>>, ticket: u64 },

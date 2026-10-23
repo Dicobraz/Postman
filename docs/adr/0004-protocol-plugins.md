@@ -89,7 +89,8 @@ ADR 0003: раздел «Слои» и «Нейтральная модель» (
 EWS (S7-06г): `postman-backend-ews` — почта Exchange по EWS (решение владельца 2026-10-23 вечер) — `MailPlugin`
 (адрес учётной записи — URL EWS), календарь, ответы на встречи, занятость и GAL — `AreaPlugin` с ключом `ews` (почтовый
 путь EWS подключает их сам; у IMAP-учётки на Exchange — `imaps://…?ews=https://…`). Поиск людей справочника —
-`Command::FindPeople` → `Event::PeopleFound` (S7-06г): JMAP — `Principal/query`, EWS — `ResolveNames`.
+`Command::FindPeople` → `Event::PeopleFound` (S7-06г): JMAP — `Principal/query`, EWS — `FindPeople` (запасной — `ResolveNames`,
+S7-08).
 
 ### Новая функция — может расширить ядро; новый протокол — нет
 

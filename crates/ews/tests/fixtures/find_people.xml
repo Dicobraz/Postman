@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <h:ServerVersionInfo MajorVersion="15" MinorVersion="0" MajorBuildNumber="1497" MinorBuildNumber="46" Version="V2_23" xmlns:h="http://schemas.microsoft.com/exchange/services/2006/types" xmlns="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <FindPeopleResponse ResponseClass="Success" xmlns="http://schemas.microsoft.com/exchange/services/2006/messages">
+      <ResponseCode>NoError</ResponseCode>
+      <People>
+        <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+          <PersonaId Id="AAUQAOFwb2xsbw=="/>
+          <PersonaType>Person</PersonaType>
+          <DisplayName>Петрова Анна Сергеевна</DisplayName>
+          <Title>Ведущий инженер</Title>
+          <Departments>
+            <StringAttributedValue><Value>Отдел разработки</Value><Attributions><Attribution>0</Attribution></Attributions></StringAttributedValue>
+          </Departments>
+          <CompanyName>Пример</CompanyName>
+          <EmailAddress>
+            <Name>Петрова Анна Сергеевна</Name>
+            <EmailAddress>anna@example.test</EmailAddress>
+            <RoutingType>SMTP</RoutingType>
+            <MailboxType>Mailbox</MailboxType>
+          </EmailAddress>
+          <OfficeLocations>
+            <StringAttributedValue><Value>Москва, 5 этаж</Value><Attributions><Attribution>0</Attribution></Attributions></StringAttributedValue>
+          </OfficeLocations>
+        </Persona>
+        <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+          <PersonaId Id="AAUQAOFwb2xsbx=="/>
+          <PersonaType>Person</PersonaType>
+          <DisplayName>Петров Антон</DisplayName>
+          <EmailAddress>
+            <Name>Петров Антон</Name>
+            <EmailAddress>anton@example.test</EmailAddress>
+            <RoutingType>SMTP</RoutingType>
+            <MailboxType>Mailbox</MailboxType>
+          </EmailAddress>
+        </Persona>
+        <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+          <PersonaId Id="AAUQAOFwb2xsby=="/>
+          <PersonaType>DistributionList</PersonaType>
+          <DisplayName>Петербургский офис</DisplayName>
+          <EmailAddress>
+            <Name>Петербургский офис</Name>
+            <EmailAddress>spb@example.test</EmailAddress>
+            <RoutingType>SMTP</RoutingType>
+            <MailboxType>PublicDL</MailboxType>
+          </EmailAddress>
+        </Persona>
+        <Persona xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
+          <PersonaId Id="AAUQAOFwb2xsbz=="/>
+          <PersonaType>Person</PersonaType>
+          <DisplayName>Без адреса</DisplayName>
+        </Persona>
+      </People>
+      <TotalNumberOfPeopleInView>4</TotalNumberOfPeopleInView>
+      <FirstMatchingRowIndex>0</FirstMatchingRowIndex>
+      <FirstLoadedRowIndex>0</FirstLoadedRowIndex>
+    </FindPeopleResponse>
+  </s:Body>
+</s:Envelope>

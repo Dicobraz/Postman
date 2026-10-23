@@ -6052,6 +6052,7 @@ dependencies = [
  "postman-core",
  "postman-ews",
  "postman-worker",
+ "serde_json",
  "tokio",
  "tracing",
 ]

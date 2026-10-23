@@ -384,6 +384,7 @@ mod tests {
             description: None,
             email: email.map(str::to_string),
             kind: kind.into(),
+            ..Default::default()
         };
         // Как у Stalwart: `name` — логин, ФИО — в `description`; порядок — по ФИО.
         let login = crate::model::Principal {
@@ -392,6 +393,7 @@ mod tests {
             description: Some("Борисов Иван".into()),
             email: Some("z.boris@corp.example".into()),
             kind: "individual".into(),
+            ..Default::default()
         };
         let people = directory(vec![
             p("Щукин Алексей", Some("a.shchukin@corp.example"), "individual"),

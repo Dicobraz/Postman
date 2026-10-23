@@ -1,64 +1,25 @@
 //! Пояса IANA ↔ Windows id (`StartTimeZone Id="Russian Standard Time"`): по поясу встречи Exchange разворачивает
-//! повторы и переводы часов. Здесь — пояса России и соседей и самые частые зарубежные (по CLDR `windowsZones`);
-//! полная таблица — с календарём Exchange в модели (S7-07). Пояса нет в таблице — встреча уходит в UTC без пояса:
-//! одиночная — верно, серия через перевод часов — со сдвигом.
+//! повторы и переводы часов. Таблица — CLDR `windowsZones` целиком ([`zones`], вшита; в работе ничего не
+//! запрашивается): все пояса базы IANA, включая прежние имена (`Asia/Calcutta` и `Asia/Kolkata`, `Europe/Kiev` и
+//! `Europe/Kyiv`). Пояса нет в таблице — встреча уходит в UTC без пояса: одиночная — верно, серия через перевод
+//! часов — со сдвигом.
 
-/// (IANA, Windows) — по CLDR `windowsZones.xml`, территория по умолчанию (`001`) и Россия.
-const ZONES: &[(&str, &str)] = &[
-    ("UTC", "UTC"),
-    ("Etc/UTC", "UTC"),
-    ("Europe/Kaliningrad", "Kaliningrad Standard Time"),
-    ("Europe/Moscow", "Russian Standard Time"),
-    ("Europe/Simferopol", "Russian Standard Time"),
-    ("Europe/Kirov", "Russian Standard Time"),
-    ("Europe/Volgograd", "Volgograd Standard Time"),
-    ("Europe/Astrakhan", "Astrakhan Standard Time"),
-    ("Europe/Ulyanovsk", "Astrakhan Standard Time"),
-    ("Europe/Saratov", "Saratov Standard Time"),
-    ("Europe/Samara", "Russia Time Zone 3"),
-    ("Asia/Yekaterinburg", "Ekaterinburg Standard Time"),
-    ("Asia/Omsk", "Omsk Standard Time"),
-    ("Asia/Novosibirsk", "N. Central Asia Standard Time"),
-    ("Asia/Barnaul", "Altai Standard Time"),
-    ("Asia/Tomsk", "Tomsk Standard Time"),
-    ("Asia/Krasnoyarsk", "North Asia Standard Time"),
-    ("Asia/Novokuznetsk", "North Asia Standard Time"),
-    ("Asia/Irkutsk", "North Asia East Standard Time"),
-    ("Asia/Chita", "Transbaikal Standard Time"),
-    ("Asia/Yakutsk", "Yakutsk Standard Time"),
-    ("Asia/Vladivostok", "Vladivostok Standard Time"),
-    ("Asia/Sakhalin", "Sakhalin Standard Time"),
-    ("Asia/Magadan", "Magadan Standard Time"),
-    ("Asia/Srednekolymsk", "Russia Time Zone 10"),
-    ("Asia/Kamchatka", "Russia Time Zone 11"),
-    ("Europe/Minsk", "Belarus Standard Time"),
-    ("Asia/Tbilisi", "Georgian Standard Time"),
-    ("Asia/Yerevan", "Caucasus Standard Time"),
-    ("Asia/Baku", "Azerbaijan Standard Time"),
-    ("Asia/Tashkent", "West Asia Standard Time"),
-    ("Asia/Bishkek", "Central Asia Standard Time"),
-    ("Europe/Istanbul", "Turkey Standard Time"),
-    ("Europe/London", "GMT Standard Time"),
-    ("Europe/Berlin", "W. Europe Standard Time"),
-    ("Europe/Paris", "Romance Standard Time"),
-    ("Europe/Warsaw", "Central European Standard Time"),
-    ("Europe/Helsinki", "FLE Standard Time"),
-    ("Asia/Dubai", "Arabian Standard Time"),
-    ("Asia/Shanghai", "China Standard Time"),
-    ("Asia/Tokyo", "Tokyo Standard Time"),
-    ("America/New_York", "Eastern Standard Time"),
-    ("America/Chicago", "Central Standard Time"),
-    ("America/Los_Angeles", "Pacific Standard Time"),
-];
+mod zones;
+
+use zones::{IANA_TO_WINDOWS, WINDOWS_TO_IANA};
+
+fn lookup(table: &[(&'static str, &'static str)], key: &str) -> Option<&'static str> {
+    table.binary_search_by(|(k, _)| (*k).cmp(key)).ok().map(|i| table[i].1)
+}
 
 /// Windows id пояса IANA.
 pub fn windows_zone(iana: &str) -> Option<&'static str> {
-    ZONES.iter().find(|(i, _)| *i == iana).map(|(_, w)| *w)
+    lookup(IANA_TO_WINDOWS, iana.trim())
 }
 
-/// Пояс IANA по Windows id (первый в таблице — основной для этого id).
+/// Основной пояс IANA по Windows id (территория `001` CLDR).
 pub fn iana_zone(windows: &str) -> Option<&'static str> {
-    ZONES.iter().find(|(_, w)| *w == windows).map(|(i, _)| *i)
+    lookup(WINDOWS_TO_IANA, windows.trim())
 }
 
 #[cfg(test)]
@@ -68,11 +29,37 @@ mod tests {
     #[test]
     fn both_ways() {
         assert_eq!(windows_zone("Europe/Moscow"), Some("Russian Standard Time"));
+        assert_eq!(windows_zone("Asia/Almaty"), Some("Central Asia Standard Time"));
+        assert_eq!(windows_zone("Asia/Kolkata"), Some("India Standard Time"));
+        assert_eq!(windows_zone("Asia/Calcutta"), Some("India Standard Time"));
+        assert_eq!(windows_zone("Europe/Kyiv"), windows_zone("Europe/Kiev"));
+        assert_eq!(windows_zone("UTC"), Some("UTC"));
         assert_eq!(iana_zone("Russian Standard Time"), Some("Europe/Moscow"));
         assert_eq!(iana_zone("North Asia Standard Time"), Some("Asia/Krasnoyarsk"));
+        assert_eq!(iana_zone("UTC"), Some("Etc/UTC"));
         assert_eq!(windows_zone("Mars/Olympus"), None);
-        // Каждый пояс таблицы знает и jiff (база IANA Windows или встроенная).
-        for (iana, _) in ZONES {
+        assert_eq!(iana_zone("Mars Standard Time"), None);
+    }
+
+    /// Таблицы упорядочены (двоичный поиск), без повторов; каждый Windows id — в обе стороны.
+    #[test]
+    fn tables_are_sorted_and_closed() {
+        for t in [IANA_TO_WINDOWS, WINDOWS_TO_IANA] {
+            assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "по ключу, без повторов");
+        }
+        assert!(IANA_TO_WINDOWS.len() > 400 && WINDOWS_TO_IANA.len() > 130, "таблица CLDR целиком");
+        for (iana, win) in IANA_TO_WINDOWS {
+            assert!(iana_zone(win).is_some(), "{iana}: у {win} нет основного пояса");
+        }
+        for (win, iana) in WINDOWS_TO_IANA {
+            assert_eq!(windows_zone(iana), Some(*win), "{win} → {iana} → назад");
+        }
+    }
+
+    /// Основные пояса знает и jiff (база IANA Windows или встроенная): по ним считается время встречи.
+    #[test]
+    fn jiff_knows_the_main_zones() {
+        for (_, iana) in WINDOWS_TO_IANA {
             assert!(jiff::tz::TimeZone::get(iana).is_ok(), "{iana}");
         }
     }

@@ -1,24 +1,32 @@
 //! Области Exchange по EWS (ADR 0004, `Areas`): календарь, ответы на встречи, занятость и справочник (GAL) — тем же
 //! договором событий, что у JMAP и CalDAV; экраны те же, чего нет (задач, личных контактов) — скрыто по `Features`.
 //!
-//! - **Неделя** — `FindItem` + `CalendarView` (повторы разворачивает сервер), подробности — `GetItem` пачками; встреча
-//!   той же версии (`ChangeKey`) второй раз не запрашивается.
-//! - **Встреча** — `CreateItem` с рассылкой сервером (копия — в «Отправленные», как у Outlook); пояс — Windows id.
+//! - **Неделя** — `FindItem` + `CalendarView`: повторы разворачивает сервер (экземпляры и изменённые экземпляры —
+//!   отдельными событиями со своим id и общим UID серии; удалённые экземпляры сервер не показывает), подробности —
+//!   `GetItem` пачками; встреча той же версии (`ChangeKey`) второй раз не запрашивается. Отменённые встречи (у участника
+//!   после отмены организатором — `IsCancelled`) не показываются, как у JMAP.
+//! - **Встреча** — `CreateItem` с рассылкой сервером (копия — в «Отправленные», как у Outlook); пояс — Windows id
+//!   (`postman_ews::tz`, таблица CLDR целиком); сервер не знает этот пояс — встреча уходит в UTC. UID задаёт сервер —
+//!   он и уходит в `MeetingCreated`. Перенос и отмена — [`EwsAreas::reschedule`], [`EwsAreas::cancel`] (`UpdateItem`,
+//!   `DeleteItem` с рассылкой); команд интерфейса для них пока нет — в макете нет правки и отмены встречи.
 //! - **Ответ на приглашение** — `AcceptItem`/`TentativelyAcceptItem`/`DeclineItem` по встрече в календаре (её кладёт
-//!   туда сам Exchange при доставке приглашения); встречи с этим UID нет — ответ письмом iMIP (почтовый путь).
+//!   туда сам Exchange при доставке приглашения), найденной по UID ([`pick`]); у серии — по самой серии, у приглашения
+//!   на один экземпляр (`recurrenceId`) — по экземпляру. Встречи с этим UID нет — ответ письмом iMIP (почтовый путь).
 //! - **Занятость** — `GetUserAvailability` (моя — тем же запросом); ошибка по адресу — «нет данных», не «свободен».
-//! - **Справочник** — `ResolveNames` по набранной строке (`Command::FindPeople` → `PeopleFound`): GAL целиком EWS не
-//!   отдаёт, `DirectoryLoaded` — пустой.
+//! - **Справочник** — `FindPeople` по GAL (`Command::FindPeople` → `PeopleFound`) с должностью, отделом и телефоном;
+//!   сервер его не знает — `ResolveNames`. GAL целиком EWS не отдаёт, `DirectoryLoaded` — пустой.
 //! - **Изменения** — опрос `SyncFolderItems` календаря по таймеру синхронизации → `CalendarChanged`.
 
 use std::collections::HashMap;
 
-use postman_calendar::{Busy, Event, Invitation, Partstat, Span};
+use postman_calendar::{Busy, Event, EventStatus, Invitation, Partstat, Span};
 use postman_core::backend::{AreaCtx, Areas, BoxFuture};
 use postman_core::model::{Feature, Features, Principal};
 use postman_core::schedule::{Meeting, SEARCH_LIMIT};
 use postman_core::sync::{Command, Event as SyncEvent, owned_by};
-use postman_ews::{CalendarItem, Client, Error, FolderRef, ItemId, NewItem, Notify, Reply, SyncState, WellKnown};
+use postman_ews::{
+    CalendarItem, Changes, Client, DeleteMode, Error, FolderRef, ItemId, ItemKind, NewItem, Notify, Reply, SyncState, WellKnown,
+};
 
 /// Встреч в окне календаря — не больше (месяц с запасом).
 const VIEW_LIMIT: u32 = 1000;
@@ -30,17 +38,29 @@ const SYNC_PAGES: usize = 20;
 pub const PEOPLE_LIMIT: usize = 20;
 /// Поиск справочника — со скольки символов.
 pub const PEOPLE_FROM: usize = 3;
+/// Где искать встречу приглашения: сутки до и после него.
+const AROUND: i64 = 86_400;
 
 /// Занятость: моя и по адресам (`None` у адреса — нет данных), как у JMAP и CalDAV.
 pub type Availability = (Vec<Busy>, Vec<(String, Option<Vec<Busy>>)>);
+
+/// Встреча, которую уже видели: версия, вид (экземпляр серии или нет) и событие.
+#[derive(Debug, Clone)]
+struct Known {
+    change_key: Option<String>,
+    kind: ItemKind,
+    event: Event,
+}
 
 /// Области EWS одной учётной записи.
 pub struct EwsAreas {
     client: Client,
     me: String,
     state: Option<SyncState>,
-    /// Встречи по `ItemId`: версия и событие.
-    items: HashMap<String, (Option<String>, Event)>,
+    /// Встречи по `ItemId.Id`.
+    items: HashMap<String, Known>,
+    /// `FindPeople` работает на этом сервере; отказал однажды — справочник по `ResolveNames`.
+    find_people: bool,
 }
 
 impl std::fmt::Debug for EwsAreas {
@@ -65,7 +85,18 @@ pub fn new_item(meeting: &Meeting) -> Result<NewItem, String> {
     NewItem::from_event(&meeting.new_event("", ("", ""), &refs))
 }
 
-/// Человек справочника → `Principal` модели (как у JMAP): id — адрес, вид — человек или список рассылки.
+/// Кому рассылать новую встречу: без участников — никому (своё событие), иначе — всем, с копией в «Отправленные».
+pub fn notify_for(item: &NewItem) -> Notify {
+    if item.required.is_empty() && item.optional.is_empty() { Notify::None } else { Notify::AllAndSaveCopy }
+}
+
+/// Сервер не знает Windows id пояса (старый Exchange, новый пояс): встречу — в UTC без пояса.
+fn bad_time_zone(e: &Error) -> bool {
+    e.code().is_some_and(|c| c.contains("TimeZone"))
+}
+
+/// Человек справочника → `Principal` модели (как у JMAP): id — адрес, вид — человек или список рассылки; должность,
+/// отдел и телефон — из GAL.
 pub fn principal(p: postman_ews::Person) -> Principal {
     Principal {
         id: p.email.to_lowercase(),
@@ -73,6 +104,9 @@ pub fn principal(p: postman_ews::Person) -> Principal {
         description: None,
         email: (!p.email.is_empty()).then_some(p.email),
         kind: if p.group { "group".into() } else { "individual".into() },
+        title: p.title,
+        department: p.department,
+        phone: p.phone,
     }
 }
 
@@ -90,7 +124,8 @@ pub fn matching(events: Vec<Event>, text: &str) -> Vec<Event> {
     found
 }
 
-/// Занятость `GetUserAvailability` → (моя, по адресам): первый адрес запроса — мой; ошибка у адреса — `None`.
+/// Занятость `GetUserAvailability` → (моя, по адресам): первый адрес запроса — мой; ответы — в порядке адресов;
+/// ошибка у адреса (не найден, нет доступа) — `None`, «нет данных».
 pub fn split_availability(mut all: Vec<postman_ews::Availability>, emails: &[String]) -> Availability {
     let me = if all.is_empty() { Vec::new() } else { all.remove(0).busy };
     let people = emails
@@ -101,12 +136,45 @@ pub fn split_availability(mut all: Vec<postman_ews::Availability>, emails: &[Str
     (me, people)
 }
 
+/// Что за приглашение: на один экземпляр серии (`recurrenceId` в JSCalendar) или на всю встречу.
+pub fn for_instance(invite: &Invitation) -> bool {
+    invite.raw.get("recurrenceId").is_some_and(|v| !v.is_null())
+}
+
+/// Встреча календаря для ответа: сначала — та же (`id` — ответ из подробностей события), затем — по UID: одиночная или
+/// серия; у экземпляров — тот, что в это время (`start`), иначе ближайший. `None` — встречи нет (ответ письмом).
+pub fn pick<'a>(known: impl IntoIterator<Item = (&'a str, ItemKind, &'a Event)>, id: &str, uid: &str, start: i64) -> Option<(&'a str, ItemKind)> {
+    let mut best: Option<(&str, ItemKind, i64)> = None;
+    for (item, kind, e) in known {
+        if !id.is_empty() && item == id {
+            return Some((item, kind));
+        }
+        if uid.is_empty() || !e.uid.eq_ignore_ascii_case(uid) {
+            continue;
+        }
+        // Одиночная и серия — точнее экземпляра; экземпляры — по близости ко времени приглашения.
+        let rank = match kind {
+            ItemKind::Single | ItemKind::RecurringMaster => -1,
+            ItemKind::Occurrence | ItemKind::Exception => (e.span.start - start).abs(),
+        };
+        if best.is_none_or(|(_, _, r)| rank < r) {
+            best = Some((item, kind, rank));
+        }
+    }
+    best.map(|(item, kind, _)| (item, kind))
+}
+
+/// Перенос встречи: новое время (`Span`, UTC) в поясе IANA `time_zone` — правка `UpdateItem`.
+pub fn moved(span: Span, time_zone: &str) -> Changes {
+    Changes { time: Some((span, false)), time_zone: Some(time_zone.to_owned()), ..Changes::default() }
+}
+
 impl EwsAreas {
     /// Войти (основной календарь) и запомнить состояние календаря «сейчас».
     pub async fn connect(url: &str, user: &str, password: &str, email: &str) -> Result<EwsAreas, Error> {
         let mut client = Client::new(url, crate::auth(user, password))?;
         client.calendar_folder().await?;
-        let mut a = EwsAreas { client, me: email.to_owned(), state: None, items: HashMap::new() };
+        let mut a = EwsAreas { client, me: email.to_owned(), state: None, items: HashMap::new(), find_people: true };
         a.poll().await?;
         Ok(a)
     }
@@ -143,7 +211,7 @@ impl EwsAreas {
         Ok(changed && !first)
     }
 
-    /// Встречи окна (экземпляры серий — отдельно, как разворачивает сервер), по началу.
+    /// Встречи окна (экземпляры серий — отдельно, как разворачивает сервер), по началу; отменённые — нет.
     pub async fn events(&mut self, from: i64, to: i64) -> Result<Vec<Event>, Error> {
         let (refs, all) = self.client.calendar_view(&FolderRef::WellKnown(WellKnown::Calendar), Span::new(from, to), VIEW_LIMIT).await?;
         if !all {
@@ -151,7 +219,7 @@ impl EwsAreas {
         }
         let missing: Vec<ItemId> = refs
             .iter()
-            .filter(|r| self.items.get(&r.id.id).is_none_or(|(ck, _)| *ck != r.id.change_key))
+            .filter(|r| self.items.get(&r.id.id).is_none_or(|k| k.change_key != r.id.change_key))
             .map(|r| r.id.clone())
             .collect();
         if !missing.is_empty() {
@@ -159,13 +227,18 @@ impl EwsAreas {
                 self.remember(it);
             }
         }
-        let mut out: Vec<Event> = refs.iter().filter_map(|r| self.items.get(&r.id.id).map(|(_, e)| e.clone())).collect();
+        let mut out: Vec<Event> = refs
+            .iter()
+            .filter_map(|r| self.items.get(&r.id.id))
+            .filter(|k| k.event.status != EventStatus::Cancelled)
+            .map(|k| k.event.clone())
+            .collect();
         out.sort_by_key(|e| (e.span.start, e.span.end));
         Ok(out)
     }
 
     fn remember(&mut self, it: CalendarItem) {
-        self.items.insert(it.id.id.clone(), (it.id.change_key.clone(), it.event));
+        self.items.insert(it.id.id.clone(), Known { change_key: it.id.change_key.clone(), kind: it.kind, event: it.event });
     }
 
     pub async fn search(&mut self, text: &str, from: i64, to: i64) -> Result<Vec<Event>, Error> {
@@ -180,35 +253,101 @@ impl EwsAreas {
         Ok(split_availability(got, emails))
     }
 
-    /// Встреча с рассылкой приглашений сервером → её UID (у Exchange UID задаёт сервер).
-    pub async fn create_meeting(&mut self, meeting: &Meeting) -> Result<String, Error> {
-        let item = new_item(meeting).map_err(|e| Error::Ews { code: "ClientMeeting".into(), message: e })?;
-        let notify = if item.required.is_empty() && item.optional.is_empty() { Notify::None } else { Notify::AllAndSaveCopy };
-        let id = self.client.create(None, &item, notify).await?;
-        let uid = self.client.get_items(std::slice::from_ref(&id)).await?.pop().map(|it| it.event.uid).unwrap_or_default();
-        Ok(if uid.is_empty() { meeting.uid.clone() } else { uid })
+    /// Встреча с рассылкой приглашений сервером → её id и UID (у Exchange UID задаёт сервер).
+    pub async fn create_meeting(&mut self, meeting: &Meeting) -> Result<(ItemId, String), Error> {
+        let mut item = new_item(meeting).map_err(|e| Error::Ews { code: "ClientMeeting".into(), message: e })?;
+        let notify = notify_for(&item);
+        let id = match self.client.create(None, &item, notify).await {
+            Err(e) if bad_time_zone(&e) && item.time_zone.is_some() => {
+                tracing::warn!("exchange: unknown time zone id, meeting in UTC");
+                item.time_zone = None;
+                self.client.create(None, &item, notify).await?
+            }
+            r => r?,
+        };
+        let created = self.client.get_items(std::slice::from_ref(&id)).await?.pop();
+        let uid = created.as_ref().map(|it| it.event.uid.clone()).unwrap_or_default();
+        if let Some(it) = created {
+            self.remember(it);
+        }
+        Ok((id, if uid.is_empty() { meeting.uid.clone() } else { uid }))
     }
 
-    /// Ответ на приглашение по встрече с этим UID в календаре около `around`; встречи нет — `false` (ответ письмом).
-    pub async fn answer(&mut self, uid: &str, around: Span, status: Partstat) -> Result<bool, Error> {
-        let Some(reply) = reply(status) else { return Ok(false) };
-        let window = Span::new(around.start - 86_400, around.end.max(around.start) + 86_400);
-        self.events(window.start, window.end).await?;
-        let found = self
-            .items
-            .iter()
-            .find(|(_, (_, e))| !uid.is_empty() && e.uid.eq_ignore_ascii_case(uid))
-            .map(|(id, (ck, _))| ItemId { id: id.clone(), change_key: ck.clone() });
-        let Some(id) = found else { return Ok(false) };
-        self.client.respond(&id, reply, None, true).await?;
+    /// Объект сервера для правки и отмены по событию недели: сама встреча, а у экземпляра серии с `series` — серия.
+    async fn item_of(&mut self, event: &Event, series: bool) -> Result<Option<ItemId>, Error> {
+        let known = self.items.get(&event.id).map(|k| (ItemId { id: event.id.clone(), change_key: k.change_key.clone() }, k.kind));
+        let (id, kind) = match known {
+            Some(k) => k,
+            None => match self.client.get_items(&[ItemId::new(event.id.clone())]).await?.pop() {
+                Some(it) => {
+                    let k = (it.id.clone(), it.kind);
+                    self.remember(it);
+                    k
+                }
+                None => return Ok(None),
+            },
+        };
+        if series && matches!(kind, ItemKind::Occurrence | ItemKind::Exception) {
+            return Ok(self.client.master_of(&id).await?.map(|m| m.id));
+        }
+        Ok(Some(id))
+    }
+
+    /// Перенести или изменить встречу (организатор): изменение — всем участникам, копия — в «Отправленные». `series` —
+    /// у экземпляра серии изменить всю серию. Встречи нет — `false`.
+    pub async fn reschedule(&mut self, event: &Event, changes: &Changes, series: bool) -> Result<bool, Error> {
+        let Some(id) = self.item_of(event, series).await? else { return Ok(false) };
+        self.client.update(&id, changes, Notify::AllAndSaveCopy).await?;
         self.items.remove(&id.id);
         Ok(true)
     }
 
-    /// Люди справочника по строке (`ResolveNames`).
+    /// Отменить встречу (организатор): участникам — отмена, встреча — в «Удалённые», как у Outlook. `series` — у
+    /// экземпляра серии отменить всю серию (иначе — только этот экземпляр). Встречи нет — `false`.
+    pub async fn cancel(&mut self, event: &Event, series: bool) -> Result<bool, Error> {
+        let Some(id) = self.item_of(event, series).await? else { return Ok(false) };
+        self.client.delete(std::slice::from_ref(&id), DeleteMode::MoveToDeletedItems, Notify::AllAndSaveCopy).await?;
+        self.items.remove(&id.id);
+        Ok(true)
+    }
+
+    /// Ответ на приглашение по встрече в календаре около приглашения ([`pick`]); встречи нет — `false` (ответ письмом).
+    /// Приглашение на серию — ответ всей серии (по экземпляру сервер ответил бы только ему), на один экземпляр — ему.
+    pub async fn answer(&mut self, invite: &Invitation, status: Partstat) -> Result<bool, Error> {
+        let Some(reply) = reply(status) else { return Ok(false) };
+        let ev = &invite.event;
+        self.events(ev.span.start - AROUND, ev.span.end.max(ev.span.start) + AROUND).await?;
+        let found = pick(self.items.iter().map(|(id, k)| (id.as_str(), k.kind, &k.event)), &ev.id, &ev.uid, ev.span.start)
+            .map(|(id, kind)| (ItemId { id: id.to_owned(), change_key: self.items.get(id).and_then(|k| k.change_key.clone()) }, kind));
+        let Some((mut id, kind)) = found else { return Ok(false) };
+        if !for_instance(invite)
+            && matches!(kind, ItemKind::Occurrence | ItemKind::Exception)
+            && let Some(master) = self.client.master_of(&id).await?
+        {
+            id = master.id;
+        }
+        self.client.respond(&id, reply, None, true).await?;
+        // Ответ меняет встречу (у «Отклонить» — убирает): эту серию — перечитать.
+        let uid = self.items.get(&id.id).map(|k| k.event.uid.clone()).unwrap_or_else(|| ev.uid.clone());
+        self.items.retain(|item, k| *item != id.id && !(!uid.is_empty() && k.event.uid.eq_ignore_ascii_case(&uid)));
+        Ok(true)
+    }
+
+    /// Люди справочника по строке: `FindPeople`, сервер его не знает — `ResolveNames` (и дальше — только он).
     pub async fn find_people(&mut self, text: &str) -> Result<Vec<Principal>, Error> {
         if text.trim().chars().count() < PEOPLE_FROM {
             return Ok(Vec::new());
+        }
+        if self.find_people {
+            match self.client.find_people(text, PEOPLE_LIMIT).await {
+                Ok(people) => return Ok(people.into_iter().map(principal).collect()),
+                // Отказ сервера (нет операции, схема) — не сеть: дальше — `ResolveNames`.
+                Err(e) if e.code().is_some() => {
+                    tracing::info!(code = e.code().unwrap_or(""), "exchange: FindPeople refused, using ResolveNames");
+                    self.find_people = false;
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(self.client.resolve_names(text, PEOPLE_LIMIT).await?.into_iter().map(principal).collect())
     }
@@ -238,8 +377,8 @@ impl EwsAreas {
                 },
             }),
             Command::CreateMeeting { meeting, ticket } => match self.create_meeting(&meeting).await {
-                Ok(_) => {
-                    notify(SyncEvent::MeetingCreated { ticket, uid: meeting.uid.clone() });
+                Ok((_, uid)) => {
+                    notify(SyncEvent::MeetingCreated { ticket, uid });
                     notify(SyncEvent::CalendarChanged);
                 }
                 Err(e) => notify(SyncEvent::MeetingFailed { ticket, error: e.to_string() }),
@@ -252,7 +391,7 @@ impl EwsAreas {
             Command::FindPeople { text } => match self.find_people(&text).await {
                 Ok(people) => notify(SyncEvent::PeopleFound { text, people }),
                 Err(e) => {
-                    tracing::debug!("ews resolve names: {e}");
+                    tracing::debug!("ews find people: {e}");
                     notify(SyncEvent::PeopleFound { text, people: Vec::new() });
                 }
             },
@@ -274,7 +413,7 @@ impl Areas for EwsAreas {
     }
 
     fn respond<'a>(&'a mut self, invite: &'a Invitation, status: Partstat) -> BoxFuture<'a, postman_core::model::Result<bool>> {
-        Box::pin(async move { self.answer(&invite.event.uid, invite.event.span, status).await.map_err(crate::core_error) })
+        Box::pin(async move { self.answer(invite, status).await.map_err(crate::core_error) })
     }
 
     /// Задач по EWS у Postman нет (`Features` их не объявляет) — шагу поручения нечего отправлять.
@@ -313,14 +452,26 @@ mod tests {
         assert_eq!(it.span.start, "2026-11-02T07:00:00Z".parse::<jiff::Timestamp>().unwrap().as_second());
         assert_eq!((it.required[0].email.as_str(), it.optional[0].email.as_str()), ("boris@example.test", "vera@example.test"));
         assert_eq!(it.time_zone.as_deref(), Some("Europe/Moscow"));
+        assert_eq!(notify_for(&it), Notify::AllAndSaveCopy);
+        let alone = NewItem { required: vec![], optional: vec![], ..it };
+        assert_eq!(notify_for(&alone), Notify::None, "своё событие — без рассылки");
+        assert!(bad_time_zone(&Error::Ews { code: "ErrorTimeZone".into(), message: String::new() }));
     }
 
     #[test]
     fn replies_and_people() {
         assert_eq!(reply(Partstat::Tentative), Some(Reply::Tentative));
         assert_eq!(reply(Partstat::NeedsAction), None);
-        let p = principal(postman_ews::Person { name: "Анна".into(), email: "Anna@example.test".into(), ..Default::default() });
+        let p = principal(postman_ews::Person {
+            name: "Анна".into(),
+            email: "Anna@example.test".into(),
+            title: "Инженер".into(),
+            department: "Отдел разработки".into(),
+            phone: "+7 495 000-00-01".into(),
+            ..Default::default()
+        });
         assert_eq!((p.id.as_str(), p.display_name(), p.email.as_deref(), p.kind.as_str()), ("anna@example.test", "Анна", Some("Anna@example.test"), "individual"));
+        assert_eq!((p.title.as_str(), p.department.as_str(), p.phone.as_str()), ("Инженер", "Отдел разработки", "+7 495 000-00-01"));
         let g = principal(postman_ews::Person { email: "dev@example.test".into(), group: true, ..Default::default() });
         assert_eq!((g.display_name(), g.kind.as_str()), ("dev@example.test", "group"));
     }
@@ -333,5 +484,53 @@ mod tests {
             split_availability(vec![a(busy(1), None), a(busy(2), None), a(Vec::new(), Some("ErrorMailRecipientNotFound"))], &["b@example.test".into(), "x@example.test".into()]);
         assert_eq!(me, busy(1));
         assert_eq!(people, [("b@example.test".to_owned(), Some(busy(2))), ("x@example.test".to_owned(), None)]);
+    }
+
+    fn ev(uid: &str, start: i64) -> Event {
+        Event {
+            id: String::new(),
+            uid: uid.into(),
+            calendar_ids: Vec::new(),
+            title: String::new(),
+            description: String::new(),
+            location: String::new(),
+            span: Span::new(start, start + 600),
+            all_day: false,
+            status: EventStatus::Confirmed,
+            free_busy: postman_calendar::FreeBusy::Busy,
+            participants: Vec::new(),
+            recurring: true,
+            keywords: Vec::new(),
+            sequence: 0,
+            owner: None,
+        }
+    }
+
+    /// Встреча для ответа: та же по id, иначе по UID — одиночная или серия, затем экземпляр ближе ко времени.
+    #[test]
+    fn invite_finds_its_meeting() {
+        let (a, b, c, other) = (ev("UID-1", 1000), ev("uid-1", 5000), ev("UID-1", 9000), ev("UID-2", 5000));
+        let known = || vec![("occ-a", ItemKind::Occurrence, &a), ("exc-b", ItemKind::Exception, &b), ("occ-c", ItemKind::Occurrence, &c), ("x", ItemKind::Single, &other)];
+        assert_eq!(pick(known(), "", "UID-1", 8000), Some(("occ-c", ItemKind::Occurrence)), "экземпляр — ближайший ко времени");
+        assert_eq!(pick(known(), "", "uid-1", 4000), Some(("exc-b", ItemKind::Exception)), "UID — без учёта регистра");
+        assert_eq!(pick(known(), "occ-a", "UID-1", 9000), Some(("occ-a", ItemKind::Occurrence)), "из подробностей события — та же");
+        assert_eq!(pick(known(), "", "UID-3", 0), None, "нет встречи — ответ письмом");
+        assert_eq!(pick(known(), "", "", 0), None, "без UID — не угадывать");
+        let single = ev("UID-1", 0);
+        let mut list = known();
+        list.push(("one", ItemKind::Single, &single));
+        assert_eq!(pick(list, "", "UID-1", 9000), Some(("one", ItemKind::Single)), "одиночная — точнее экземпляра");
+
+        let inv = |raw: serde_json::Value| Invitation { method: "REQUEST".into(), event: ev("UID-1", 0), sequence: 0, raw };
+        assert!(for_instance(&inv(serde_json::json!({ "uid": "UID-1", "recurrenceId": "2026-11-02T10:00:00" }))));
+        assert!(!for_instance(&inv(serde_json::json!({ "uid": "UID-1" }))));
+    }
+
+    #[test]
+    fn reschedule_changes() {
+        let ch = moved(Span::new(3600, 7200), "Europe/Moscow");
+        assert_eq!(ch.time, Some((Span::new(3600, 7200), false)));
+        assert_eq!(ch.time_zone.as_deref(), Some("Europe/Moscow"));
+        assert!(ch.title.is_none() && ch.required.is_none());
     }
 }

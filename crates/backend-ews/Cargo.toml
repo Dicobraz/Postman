@@ -20,6 +20,7 @@ tracing = "0.1"
 # Подменный сервер EWS (`tests/mock.rs`): адрес http:// без TLS — только в тестах.
 postman-ews = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["io-util"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

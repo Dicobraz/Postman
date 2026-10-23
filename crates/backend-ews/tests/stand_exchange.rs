@@ -5,7 +5,8 @@
 //! Правила: только тестовые учётки; письма и встречи — только им (`test_recipient`); созданное — с меткой
 //! `[postman-test <прогон>]` в теме, убирается в начале и в конце (`cleanup`, только ящики из окружения); справочник и
 //! занятость — только чтение; запросы — последовательно (клиент EWS — не чаще 5 в секунду), ожидание — раз в 5 с, не
-//! дольше минуты. Вывод — только счётчики и коды.
+//! дольше минуты. Вывод — только счётчики и коды. Встречи (S7-07) — только между тестовыми учётками; справочник и
+//! занятость (S7-08) — только чтение.
 //!
 //! Окружение — как у `postman-ews` (`crates/ews/tests/stand.rs`): POSTMAN_EWS_URL (или Autodiscover по адресу),
 //! POSTMAN_EWS_USER, POSTMAN_EWS_PASSWORD, POSTMAN_EWS_USER2/PASSWORD2 (необязательно).
@@ -158,6 +159,20 @@ impl Live {
         self.cache.mailboxes().unwrap().into_iter().find(|b| b.role.as_deref() == Some("inbox")).expect("«Входящие»").id
     }
 
+    /// Неделя `[from, to)`, пока не выполнится условие: `Events` раз в 5 с, не дольше минуты.
+    fn events_until(&self, from: i64, to: i64, what: &str, ok: impl Fn(&[postman_calendar::Event]) -> bool) -> Vec<postman_calendar::Event> {
+        let start = Instant::now();
+        loop {
+            self.send(Command::Events { from, to });
+            let Event::EventsLoaded { events, .. } = self.wait("EventsLoaded", |e| matches!(e, Event::EventsLoaded { .. })) else { unreachable!() };
+            if ok(&events) {
+                return events;
+            }
+            assert!(start.elapsed() < WAIT, "не дождались за минуту: {what}");
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    }
+
     /// Письмо с меткой во «Входящих»: сверка по `Reconnect` раз в 5 с, не дольше минуты.
     fn arrived(&self, tag: &str) -> postman_cache::EmailRow {
         let start = Instant::now();
@@ -265,4 +280,238 @@ fn exchange_calendar_and_people() {
     assert!(people[0].1.is_some(), "занятость тестовой учётки известна");
     rt().block_on(cleanup(&a));
     println!("календарь, справочник, занятость: ок");
+}
+
+/// Уборка по метке у всех учёток — и при падении теста (`Drop`).
+struct Cleanup(Vec<Account2>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for a in &self.0 {
+            rt().block_on(cleanup(a));
+        }
+    }
+}
+
+/// Области EWS учётки напрямую: перенос и отмена встречи — у плагина есть, команд интерфейса для них пока нет.
+fn areas(a: &Account2) -> (tokio::runtime::Runtime, postman_backend_ews::EwsAreas) {
+    let rt = rt();
+    let url = rt.block_on(ews_url(a));
+    let areas = rt.block_on(postman_backend_ews::EwsAreas::connect(&url, &a.user, &a.password, &a.email)).unwrap();
+    (rt, areas)
+}
+
+/// Приглашение из письма, как его видит карточка письма: часть `text/calendar` (`Command::Blob`) → воркер → `Invitation`.
+fn invite_in_mail(live: &Live, tag: &str) -> (postman_calendar::Invitation, Option<String>) {
+    let row = live.arrived(tag);
+    live.send(Command::Body(row.id.clone()));
+    live.wait("BodyReady", |e| matches!(e, Event::BodyReady(k) if *k == row.id));
+    let body = live.cache.body(&row.id).unwrap().expect("тело приглашения");
+    // «Прочитано» у письма встречи (`MeetingRequest`) — та же правка, что у письма.
+    live.send(Command::Keyword { id: row.id.clone(), keyword: "$seen", on: true });
+    let part = body.attachments.iter().find(|a| a.mime.to_ascii_lowercase().starts_with("text/calendar")).expect("часть text/calendar в письме");
+    live.send(Command::Blob { blob_id: part.blob_id.clone(), name: part.name.clone(), mime: part.mime.clone() });
+    let Event::BlobReady { data, .. } = live.wait("BlobReady", |e| matches!(e, Event::BlobReady { blob_id, .. } if *blob_id == part.blob_id)) else {
+        unreachable!()
+    };
+    let v = postman_worker::parse_calendar(&data).expect("приглашение разобрано");
+    let inv = postman_calendar::Invitation::from_worker(&v, &jiff::tz::TimeZone::UTC).expect("приглашение");
+    (inv, body.message_id)
+}
+
+fn status_of(e: &postman_calendar::Event, who: &str) -> Option<postman_calendar::Partstat> {
+    e.participants.iter().find(|p| p.email.eq_ignore_ascii_case(who)).map(|p| p.status)
+}
+
+/// Встреча user1 → user2 через плагин: приглашение рассылает сервер (UID — от сервера) → у user2 письмо-приглашение,
+/// UID его `text/calendar` = UID встречи в календаре (карточка письма находит встречу) → «Принять» из карточки — ответ
+/// сервером → у user1 user2 принял → перенос на час (у user2 — новое время) → отмена (у user2 встречи нет) → уборка.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn exchange_meeting_cycle() {
+    let (a, b) = (first(), account("2").expect("POSTMAN_EWS_USER2 — вторая тестовая учётка"));
+    let _guard = Cleanup(vec![first(), account("2").unwrap()]);
+    rt().block_on(cleanup(&a));
+    rt().block_on(cleanup(&b));
+    let (la, lb) = (Live::start(&a), Live::start(&b));
+    let tag = tag();
+    let title = format!("Встреча {tag}");
+    let tz = "Europe/Moscow";
+    let start = jiff::Timestamp::from_second((now() / 3600 + 72) * 3600).unwrap();
+    let local = start.to_zoned(jiff::tz::TimeZone::get(tz).unwrap()).datetime();
+    let (from, to) = (start.as_second() - 86_400, start.as_second() + 86_400);
+    let meeting = Meeting {
+        uid: String::new(),
+        title: title.clone(),
+        location: String::new(),
+        description: "Проверка приглашений Postman".into(),
+        start: local,
+        time_zone: tz.into(),
+        duration_secs: 1800,
+        attendees: vec![(String::new(), test_recipient(&b.email))],
+        optional: vec![],
+        from: None,
+    };
+    la.send(Command::CreateMeeting { meeting: Box::new(meeting), ticket: 5 });
+    let Event::MeetingCreated { uid, .. } = la.wait("MeetingCreated", |e| matches!(e, Event::MeetingCreated { ticket: 5, .. })) else { unreachable!() };
+    assert!(!uid.is_empty(), "UID — от сервера");
+
+    // У user2: письмо-приглашение и встреча в календаре с тем же UID.
+    let (inv, message_id) = invite_in_mail(&lb, &tag);
+    let same_uid = inv.event.uid.eq_ignore_ascii_case(&uid);
+    let theirs = lb.events_until(from, to, "встреча у user2", |e| e.iter().any(|x| x.title == title));
+    let in_calendar = theirs.iter().find(|x| x.title == title).unwrap();
+    assert_eq!(status_of(in_calendar, &b.email), Some(postman_calendar::Partstat::NeedsAction), "у user2 — ждёт ответа");
+    let smtp = in_calendar.participants.iter().all(|p| p.email.contains('@'));
+    let organizer_uid = in_calendar.uid.eq_ignore_ascii_case(&uid);
+    println!("UID письма = UID организатора: {same_uid}; UID встречи у участника = UID организатора: {organizer_uid}; адреса участников SMTP: {smtp}");
+    assert!(same_uid, "UID приглашения в письме ≠ UID встречи: карточка письма не найдёт встречу");
+
+    // «Принять» из карточки письма: ответ — сервером (по встрече с этим UID), не письмом.
+    lb.send(Command::RespondInvite { invite: Box::new(inv), status: postman_calendar::Partstat::Accepted, in_reply_to: message_id });
+    let Event::InviteAnswered { delivery, .. } = lb.wait("InviteAnswered", |e| match e {
+        Event::InviteFailed { error, .. } => panic!("ответ не ушёл ({} символов ошибки)", error.len()),
+        Event::InviteAnswered { .. } => true,
+        _ => false,
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(delivery, postman_core::invite::Delivery::Server);
+    let peer = b.email.clone();
+    let accepted = |e: &[postman_calendar::Event]| e.iter().any(|x| x.title == title && status_of(x, &peer) == Some(postman_calendar::Partstat::Accepted));
+    let mine = la.events_until(from, to, "ответ у организатора", accepted);
+    let event = mine.into_iter().find(|x| x.title == title).unwrap();
+
+    // Перенос на час и отмена — областями плагина (изменение и отмена уходят участникам сервером).
+    let (rt1, mut ar) = areas(&a);
+    let moved = postman_calendar::Span::new(event.span.start + 3600, event.span.end + 3600);
+    assert!(rt1.block_on(ar.reschedule(&event, &postman_backend_ews::areas::moved(moved, tz), false)).unwrap());
+    lb.events_until(from, to + 3600, "перенос у user2", |e| e.iter().any(|x| x.title == title && x.span.start == moved.start));
+    let week = la.events_until(from, to + 3600, "перенос у user1", |e| e.iter().any(|x| x.title == title && x.span.start == moved.start));
+    let event = week.into_iter().find(|x| x.title == title).unwrap();
+    assert!(rt1.block_on(ar.cancel(&event, false)).unwrap());
+    lb.events_until(from, to + 3600, "отмена у user2", |e| !e.iter().any(|x| x.title == title));
+    println!("встреча через плагин: приглашение, UID письма, ответ сервером, перенос, отмена");
+}
+
+/// Приглашение на серию (user1 → user2, 2 недели): ответ из карточки письма — всей серии (по серии, а не по экземпляру)
+/// → у организатора user2 принял серию.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn exchange_series_invite() {
+    let (a, b) = (first(), account("2").expect("POSTMAN_EWS_USER2 — вторая тестовая учётка"));
+    let _guard = Cleanup(vec![first(), account("2").unwrap()]);
+    let lb = Live::start(&b);
+    let tag = tag();
+    let rt = rt();
+    let mut c1 = Client::new(&rt.block_on(ews_url(&a)), postman_backend_ews::auth(&a.user, &a.password)).unwrap();
+    let tz = jiff::tz::TimeZone::get("Europe/Moscow").unwrap();
+    let day = jiff::Timestamp::now().to_zoned(tz.clone()).date().checked_add(jiff::ToSpan::days(8)).unwrap();
+    let start = day.at(11, 0, 0, 0).to_zoned(tz).unwrap().timestamp().as_second();
+    let item = postman_ews::NewItem {
+        title: format!("Серия {tag}"),
+        description: String::new(),
+        location: String::new(),
+        span: postman_calendar::Span::new(start, start + 900),
+        all_day: false,
+        time_zone: Some("Europe/Moscow".into()),
+        free_busy: postman_calendar::FreeBusy::Busy,
+        required: vec![postman_ews::Attendee { name: String::new(), email: test_recipient(&b.email) }],
+        optional: vec![],
+        recurrence: Some(postman_ews::Recurrence {
+            pattern: postman_ews::Pattern::Daily { interval: 7 },
+            range: postman_ews::Range::Numbered { start: day, count: 2 },
+        }),
+    };
+    let id = rt.block_on(c1.create(None, &item, postman_ews::Notify::All)).unwrap();
+    let (inv, message_id) = invite_in_mail(&lb, &tag);
+    assert!(inv.event.recurring, "приглашение на серию");
+    lb.send(Command::RespondInvite { invite: Box::new(inv), status: postman_calendar::Partstat::Accepted, in_reply_to: message_id });
+    let answered = |e: &Event| matches!(e, Event::InviteAnswered { .. } | Event::InviteFailed { .. });
+    let Event::InviteAnswered { delivery, .. } = lb.wait("InviteAnswered", answered) else { panic!("ответ на серию не ушёл") };
+    assert_eq!(delivery, postman_core::invite::Delivery::Server);
+    let started = Instant::now();
+    loop {
+        let master = rt.block_on(c1.get_items(std::slice::from_ref(&id))).unwrap().pop().unwrap();
+        if status_of(&master.event, &b.email) == Some(postman_calendar::Partstat::Accepted) {
+            break;
+        }
+        assert!(started.elapsed() < WAIT, "у серии организатора нет ответа user2 — ответили экземпляру?");
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    println!("серия: ответ из письма — всей серии");
+}
+
+/// Серия своей учётки (без участников): экземпляры — отдельными событиями недели с общим UID; перенос одного экземпляра
+/// — исключение на новом месте; удаление экземпляра — его нет, остальные на месте.
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn exchange_recurring_in_week() {
+    let a = first();
+    let _guard = Cleanup(vec![first()]);
+    let live = Live::start(&a);
+    let tag = tag();
+    let rt0 = rt();
+    let mut c = Client::new(&rt0.block_on(ews_url(&a)), postman_backend_ews::auth(&a.user, &a.password)).unwrap();
+    let tz = jiff::tz::TimeZone::get("Europe/Moscow").unwrap();
+    let day = jiff::Timestamp::now().to_zoned(tz.clone()).date().checked_add(jiff::ToSpan::days(9)).unwrap();
+    let start = day.at(9, 0, 0, 0).to_zoned(tz).unwrap().timestamp().as_second();
+    let title = format!("Серия {tag}");
+    let item = postman_ews::NewItem {
+        title: title.clone(),
+        description: String::new(),
+        location: String::new(),
+        span: postman_calendar::Span::new(start, start + 900),
+        all_day: false,
+        time_zone: Some("Europe/Moscow".into()),
+        free_busy: postman_calendar::FreeBusy::Free,
+        required: vec![],
+        optional: vec![],
+        recurrence: Some(postman_ews::Recurrence {
+            pattern: postman_ews::Pattern::Daily { interval: 1 },
+            range: postman_ews::Range::Numbered { start: day, count: 3 },
+        }),
+    };
+    rt0.block_on(c.create(None, &item, postman_ews::Notify::None)).unwrap();
+    let (from, to) = (start - 3600, start + 4 * 86_400);
+    let ours = |e: &[postman_calendar::Event]| e.iter().filter(|x| x.title == title).cloned().collect::<Vec<_>>();
+    let week = live.events_until(from, to, "три экземпляра", |e| ours(e).len() == 3);
+    let series = ours(&week);
+    assert!(series.iter().all(|x| x.recurring && x.uid == series[0].uid), "экземпляры — серия с общим UID");
+    assert_eq!(series.iter().map(|x| x.span.start - start).collect::<Vec<_>>(), [0, 86_400, 2 * 86_400], "по дням, то же время");
+
+    let (rt1, mut ar) = areas(&a);
+    let second = series[1].clone();
+    let later = postman_calendar::Span::new(second.span.start + 7200, second.span.end + 7200);
+    assert!(rt1.block_on(ar.reschedule(&second, &postman_backend_ews::areas::moved(later, "Europe/Moscow"), false)).unwrap());
+    let week = live.events_until(from, to, "исключение на новом месте", |e| ours(e).iter().any(|x| x.span.start == later.start));
+    assert_eq!(ours(&week).len(), 3, "перенос экземпляра — не новая встреча");
+    let third = ours(&week).into_iter().find(|x| x.span.start == start + 2 * 86_400).unwrap();
+    assert!(rt1.block_on(ar.cancel(&third, false)).unwrap());
+    let week = live.events_until(from, to, "экземпляр удалён", |e| ours(e).len() == 2);
+    assert!(ours(&week).iter().any(|x| x.span.start == start), "первый экземпляр на месте");
+    println!("серия в неделе: экземпляры, исключение, удалённый экземпляр");
+}
+
+/// Справочник через `FindPeople` (только чтение, до 20): своя учётка находится по началу адреса; печать — только
+/// счётчики заполненных полей (должность, отдел, телефон).
+#[test]
+#[ignore = "боевой Exchange: S7 «Проверка на боевом Exchange»"]
+fn exchange_directory_fields() {
+    let a = first();
+    let live = Live::start(&a);
+    let local: String = a.email.split('@').next().unwrap_or("").chars().take(6).collect();
+    live.send(Command::FindPeople { text: local });
+    let Event::PeopleFound { people, .. } = live.wait("PeopleFound", |e| matches!(e, Event::PeopleFound { .. })) else { unreachable!() };
+    let me = people.iter().any(|p| p.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(&a.email)));
+    let count = |f: fn(&postman_core::model::Principal) -> bool| people.iter().filter(|p| f(p)).count();
+    println!(
+        "справочник: найдено {}, своя учётка {me}, с должностью {}, с отделом {}, с телефоном {}",
+        people.len(),
+        count(|p| !p.title.is_empty()),
+        count(|p| !p.department.is_empty()),
+        count(|p| !p.phone.is_empty())
+    );
+    assert!(me, "своя учётка в GAL");
+    assert!(people.len() <= postman_backend_ews::areas::PEOPLE_LIMIT);
 }

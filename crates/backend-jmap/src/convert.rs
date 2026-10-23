@@ -117,8 +117,9 @@ impl ToJmap for ContactCard {
 
 impl FromJmap<postman_jmap::Principal> for Principal {
     fn from_jmap(p: postman_jmap::Principal) -> Self {
+        // Должности, отдела и телефона у JMAP Principal (RFC 9670) нет — пусто.
         let postman_jmap::Principal { id, name, description, email, kind } = p;
-        Principal { id, name, description, email, kind }
+        Principal { id, name, description, email, kind, ..Principal::default() }
     }
 }
 

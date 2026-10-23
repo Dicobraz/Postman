@@ -207,6 +207,15 @@ fn attachment(el: &El) -> Option<Attachment> {
     })
 }
 
+/// Письма в ответе `GetItem`: обычные (`Message`) и письма встреч — приглашение, ответ, отмена (`MeetingRequest`,
+/// `MeetingResponse`, `MeetingCancellation`, `MeetingMessage`). Письма встреч — тоже письма (`MessageType` схемы), у них
+/// та же тема, отправитель, «прочитано» и MIME с частью `text/calendar`: по ней карточка приглашения в письме.
+const MESSAGES: [&str; 5] = ["Message", "MeetingRequest", "MeetingResponse", "MeetingCancellation", "MeetingMessage"];
+
+fn messages(items: Option<&El>) -> impl Iterator<Item = &El> {
+    items.into_iter().flat_map(|i| i.children.iter()).filter(|m| MESSAGES.contains(&m.name.as_str()))
+}
+
 /// Проставить роли папкам по стандартным id (`id` папки совпадает с ролью из [`Client::mail_roles`]).
 pub fn apply_roles(folders: &mut [MailFolder], roles: &[(MailRole, FolderId)]) {
     for f in folders {
@@ -317,7 +326,7 @@ pub(crate) mod parse {
                 continue;
             }
             soap::check(msg)?;
-            out.extend(msg.child("Items").into_iter().flat_map(|i| i.all("Message")).filter_map(header));
+            out.extend(messages(msg.child("Items")).filter_map(header));
         }
         Ok(out)
     }
@@ -329,7 +338,7 @@ pub(crate) mod parse {
                 continue;
             }
             soap::check(msg)?;
-            for m in msg.child("Items").into_iter().flat_map(|i| i.all("Message")) {
+            for m in messages(msg.child("Items")) {
                 let Some(id) = m.child("ItemId").and_then(ItemId::from_el) else { continue };
                 out.push(MailItem { id, mime: b64(&m.str_at(&["MimeContent"])), is_read: m.bool_at(&["IsRead"]) });
             }
@@ -349,7 +358,7 @@ pub(crate) mod parse {
 
     pub(crate) fn attachments(resp: &El) -> Result<Vec<Attachment>> {
         let msg = soap::single(resp)?;
-        Ok(msg.child("Items").into_iter().flat_map(|i| i.all("Message")).flat_map(|m| m.child("Attachments").into_iter().flat_map(|a| a.children.iter())).filter_map(attachment).collect())
+        Ok(messages(msg.child("Items")).flat_map(|m| m.child("Attachments").into_iter().flat_map(|a| a.children.iter())).filter_map(attachment).collect())
     }
 
     /// Содержимое вложения (`GetAttachment` → `FileAttachment/Content`).
@@ -654,6 +663,21 @@ mod tests {
         assert_eq!(first.folder_id.as_deref(), Some("AAMkADinbox"));
         assert_eq!(first.references.as_deref(), Some("<root@example.test> <a0@example.test>"));
         assert!(h[1].is_read && !h[1].flagged);
+    }
+
+    /// Письма встреч (приглашение, отмена) — в списке и с MIME, как обычные: по ним карточка приглашения (S7-07).
+    #[test]
+    fn meeting_messages_are_mail() {
+        let as_kind = |fixture: &[u8], kind: &str| {
+            let text = String::from_utf8(fixture.to_vec()).unwrap().replace("<t:Message>", &format!("<t:{kind}>")).replace("</t:Message>", &format!("</t:{kind}>"));
+            resp(text.as_bytes())
+        };
+        let h = parse::headers(&as_kind(include_bytes!("../tests/fixtures/get_item_headers.xml"), "MeetingRequest")).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].subject, "Отчёт за неделю");
+        let m = parse::mail(&as_kind(include_bytes!("../tests/fixtures/get_item_message_mime.xml"), "MeetingCancellation")).unwrap();
+        assert_eq!(m.len(), 1);
+        assert!(parse::headers(&as_kind(include_bytes!("../tests/fixtures/get_item_headers.xml"), "Contact")).unwrap().is_empty(), "не письма — нет");
     }
 
     #[test]

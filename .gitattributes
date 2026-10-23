@@ -7,3 +7,6 @@
 *.pem binary
 *.pk8 binary
 *.der binary
+# Корпуса тестов (ответы серверов, .ics, .vcf…): как в репозитории, без CRLF на Windows (`core.autocrlf`) —
+# тесты читают их как текст, и на CI с CRLF ломались сравнения и замены.
+crates/*/tests/fixtures/** -text

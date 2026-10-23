@@ -1102,29 +1102,48 @@ pub mod contacts {
         card("Тарасов Олег", &["oleg.tarasov@mail.example"], &["+7 905 111-22-33"], "", ""),
     ];
 
-    /// Справочник: (имя, адрес, тип Principal) — `individual`, `location` (переговорная), `resource`.
-    const DIRECTORY: &[(&str, &str, &str)] = &[
-        ("Бухгалтерия", "buh@corp.example", "individual"),
-        ("Волков Сергей", "s.volkov@corp.example", "individual"),
-        ("Иванова Мария", "m.ivanova@corp.example", "individual"),
-        ("Кузнецова Елена", "e.kuznetsova@corp.example", "individual"),
-        ("Переговорная 1", "room1@corp.example", "location"),
-        ("Переговорная 2", "room2@corp.example", "location"),
-        ("Переговорная 3", "room3@corp.example", "location"),
-        ("Петров Алексей", "a.petrov@corp.example", "individual"),
-        ("Петров Иван", "ivan.petrov@corp.example", "individual"),
-        ("Проектор в учебном классе", "projector@corp.example", "resource"),
-        ("Сидоров Игорь", "i.sidorov@corp.example", "individual"),
-        ("Смирнова Анна", "anna.smirnova@corp.example", "individual"),
-        ("Фёдорова Наталья", "n.fedorova@corp.example", "individual"),
-        ("Щукин Алексей", "a.shchukin@corp.example", "individual"),
+    /// Человек справочника демо: имя, адрес, тип Principal (`individual`, `location` — переговорная, `resource`), должность,
+    /// отдел и телефон (S7-08: справочник Exchange их даёт).
+    pub struct Person {
+        pub name: &'static str,
+        pub email: &'static str,
+        pub kind: &'static str,
+        pub title: &'static str,
+        pub department: &'static str,
+        pub phone: &'static str,
+    }
+
+    const fn person(name: &'static str, email: &'static str, kind: &'static str) -> Person {
+        Person { name, email, kind, title: "", department: "", phone: "" }
+    }
+
+    const fn staff(name: &'static str, email: &'static str, title: &'static str, department: &'static str, phone: &'static str) -> Person {
+        Person { name, email, kind: "individual", title, department, phone }
+    }
+
+    /// Справочник.
+    const DIRECTORY: &[Person] = &[
+        person("Бухгалтерия", "buh@corp.example", "individual"),
+        staff("Волков Сергей", "s.volkov@corp.example", "Системный администратор", "Отдел ИТ", "+7 495 100-20-31"),
+        staff("Иванова Мария", "m.ivanova@corp.example", "Руководитель проектов", "Проектный офис", "+7 495 100-20-12"),
+        staff("Кузнецова Елена", "e.kuznetsova@corp.example", "Главный бухгалтер", "Бухгалтерия", "+7 495 100-20-05"),
+        person("Переговорная 1", "room1@corp.example", "location"),
+        person("Переговорная 2", "room2@corp.example", "location"),
+        person("Переговорная 3", "room3@corp.example", "location"),
+        staff("Петров Алексей", "a.petrov@corp.example", "Ведущий инженер", "Отдел разработки", "+7 495 100-20-44"),
+        staff("Петров Иван", "ivan.petrov@corp.example", "Инженер", "Отдел разработки", ""),
+        person("Проектор в учебном классе", "projector@corp.example", "resource"),
+        staff("Сидоров Игорь", "i.sidorov@corp.example", "Аналитик", "Отдел продаж", "+7 495 100-20-57"),
+        staff("Смирнова Анна", "anna.smirnova@corp.example", "Юрист", "Юридический отдел", "+7 495 100-20-68"),
+        staff("Фёдорова Наталья", "n.fedorova@corp.example", "Менеджер по персоналу", "Отдел кадров", ""),
+        staff("Щукин Алексей", "a.shchukin@corp.example", "Директор по развитию", "Дирекция", "+7 495 100-20-01"),
     ];
 
     pub fn mine() -> &'static [Card] {
         MINE
     }
 
-    pub fn directory() -> &'static [(&'static str, &'static str, &'static str)] {
+    pub fn directory() -> &'static [Person] {
         DIRECTORY
     }
 }

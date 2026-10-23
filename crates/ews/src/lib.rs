@@ -1,5 +1,5 @@
 //! Минимальный EWS для Exchange on-prem (best effort; ADR 0003, S7-06): календарь и ответы на встречи, занятость
-//! (`GetUserAvailability`), справочник (`ResolveNames`) и почта (`mail`). Почта Exchange идёт по EWS — решение
+//! (`GetUserAvailability`), справочник (`FindPeople`, `ResolveNames`) и почта (`mail`). Почта Exchange идёт по EWS — решение
 //! владельца 2026-10-23 (у Exchange компании IMAP4 и приём SMTP выключены, `docs/EXCHANGE.md`). Без надстроек
 //! Microsoft: ни правил, ни главного списка категорий, ни OOF, ни задач, ни общих ящиков, ни streaming-уведомлений
 //! — изменения берутся опросом `SyncFolderItems`/`SyncFolderHierarchy`.
