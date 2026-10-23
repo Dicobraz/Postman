@@ -276,7 +276,10 @@ fn caldav_meeting_cycle() {
     let (from, to) = (at - 86_400, at + 86_400);
     a.send(Command::CreateMeeting { meeting: Box::new(meeting(&uid, &format!("Встреча {uid}"), at, vec![("User 2".into(), b.me.clone())])), ticket: 2 });
     a.wait("MeetingCreated", |e| matches!(e, Event::MeetingCreated { ticket: 2, .. } | Event::MeetingFailed { .. }));
-    let theirs = b.events_until(from, to, "приглашение у user2", |e| e.iter().any(|x| x.uid == uid));
+    // Не дошло — первым делом ограничение входящих Stalwart (25 в час на «домен отправителя × получатель», правило
+    // «Sender address to recipient throttle», `docs/STALWART.md` п. 17): приглашение теряется молча, у отправителя успех.
+    let what = "приглашение у user2 (ограничение входящих Stalwart? docs/STALWART.md п. 17; журнал сервера — smtp.rate-limit-exceeded)";
+    let theirs = b.events_until(from, to, what, |e| e.iter().any(|x| x.uid == uid));
     let ev = theirs.into_iter().find(|x| x.uid == uid).unwrap();
     let mine = |e: &postman_calendar::Event, who: &str| e.participants.iter().find(|p| p.email.eq_ignore_ascii_case(who)).map(|p| p.status);
     assert_eq!(mine(&ev, &b.me), Some(Partstat::NeedsAction));
