@@ -27,6 +27,7 @@ mod attachments;
 mod preview;
 mod invite_card;
 mod backend;
+mod plugins;
 mod bar;
 mod mailer;
 mod account;

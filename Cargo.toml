@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ir", "crates/smime", "crates/jmap", "crates/imap", "crates/dav", "crates/ews", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "app-gpui"]
+members = ["crates/ir", "crates/smime", "crates/jmap", "crates/imap", "crates/dav", "crates/ews", "crates/cache", "crates/compose", "crates/worker", "crates/search", "crates/demo", "crates/calendar", "crates/core", "crates/backend-jmap", "crates/backend-imap", "crates/backend-dav", "app-gpui"]
 
 [workspace.package]
 edition = "2024"
@@ -19,6 +19,9 @@ postman-search = { path = "crates/search" }
 postman-demo = { path = "crates/demo" }
 postman-calendar = { path = "crates/calendar" }
 postman-core = { path = "crates/core" }
+postman-backend-jmap = { path = "crates/backend-jmap" }
+postman-backend-imap = { path = "crates/backend-imap" }
+postman-backend-dav = { path = "crates/backend-dav" }
 postman-worker = { path = "crates/worker" }
 postman-smime = { path = "crates/smime" }
 serde = { version = "1", features = ["derive"] }

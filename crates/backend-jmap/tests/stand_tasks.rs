@@ -16,7 +16,7 @@
 //! (25 в час на пару «домен отправителя × получатель», п. 17), поручение — 10 писем на троих, своё письмо-поручение — 1, напоминания — 2.
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1..3`, `POSTMAN_STAND_PASSWORD1..3` (и `POSTMAN_INSECURE_TLS=1`
-//! напрямую), `cargo test -p postman-core --test stand_tasks -- --ignored --nocapture --test-threads=1`.
+//! напрямую), `cargo test -p postman-backend-jmap --test stand_tasks -- --ignored --nocapture --test-threads=1`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -995,7 +995,8 @@ async fn imip_request_by_mail_lands_in_calendar() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn task_round_trip() {
-    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    use postman_backend_jmap::tasks::JmapStore;
+    use postman_core::tasks::{self, Reply, Request};
     let (a, b) = (user(1).await, user(1).await);
     let prefix = "postman-s601-store-";
     let subject = "Postman s601 store";
@@ -1072,7 +1073,8 @@ async fn letter_row(c: &Client, id: &str) -> Option<postman_cache::EmailRow> {
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn mail_due_is_task() {
     use postman_core::mailtask;
-    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    use postman_backend_jmap::tasks::JmapStore;
+    use postman_core::tasks::{self, Reply, Request};
     let (a, b) = (user(1).await, user(1).await);
     let prefix = "postman-s601-maildue-";
     let subject = "Postman s601 maildue";
@@ -1135,7 +1137,8 @@ async fn mail_due_is_task() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn task_block_in_calendar() {
-    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    use postman_backend_jmap::tasks::JmapStore;
+    use postman_core::tasks::{self, Reply, Request};
     let a = user(1).await;
     let prefix = "postman-s601-block-";
     let subject = "Postman s601 block";
@@ -1176,7 +1179,8 @@ async fn task_block_in_calendar() {
 async fn postman_delegation_cycle() {
     use postman_calendar::assign::{self as model, Action, Incoming, Status};
     use postman_core::assign::{self, Input, Received};
-    use postman_core::tasks::{self, JmapStore, Reply, Request};
+    use postman_backend_jmap::tasks::JmapStore;
+    use postman_core::tasks::{self, Reply, Request};
     let (a, b, w) = (user(1).await, user(2).await, user(3).await);
     let prefix = "postman-s609-deleg-";
     let subject = "Postman s609 deleg";

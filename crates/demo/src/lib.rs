@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use postman_cache::{AccountRow, Addr, AttachmentRow, BodyRow, Cache, EmailRow, MailboxRow, Recipients, Rights, scoped};
 
-/// Отправители демо-писем (имя, адрес); их же берёт заполнение ящика стенда (`postman-core`, пример `fill_stand`).
+/// Отправители демо-писем (имя, адрес); их же берёт заполнение ящика стенда (`postman-backend-jmap`, пример `fill_stand`).
 pub const SENDERS: &[(&str, &str)] = &[
     ("Иванова Мария", "m.ivanova@corp.example"),
     ("Петров Алексей", "a.petrov@corp.example"),

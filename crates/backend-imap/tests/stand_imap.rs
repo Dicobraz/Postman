@@ -1,11 +1,11 @@
-//! Учётная запись IMAP + SMTP через синхронизацию Postman (`postman_core::imap`, S7-04б) против IMAP и submission
+//! Учётная запись IMAP + SMTP через синхронизацию Postman (`postman_backend_imap`, S7-04б) против IMAP и submission
 //! стенда Stalwart: вход, папки, письмо себе, тело (разбор MIME в воркере), вложение, прочитано, перенос, удаление,
 //! копия в «Отправленных», черновик. Без стенда тесты пропускаются (`#[ignore]`); за собой убирают.
 //!
 //! Запуск (пароли и адрес — только в окружении; самоподписанный сертификат стенда — `POSTMAN_INSECURE_TLS=1`;
 //! воркер — `cargo build -p postman-worker` заранее):
 //!   POSTMAN_STAND_IMAP=<адрес>:993 POSTMAN_STAND_SMTP=<адрес>:465 POSTMAN_STAND_USER1=user1@itt.test
-//!   POSTMAN_STAND_PASSWORD1=… cargo test -p postman-core --test stand_imap -- --ignored --test-threads=1
+//!   POSTMAN_STAND_PASSWORD1=… cargo test -p postman-backend-imap --test stand_imap -- --ignored --test-threads=1
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use postman_cache::{Cache, EmailRow};
 use postman_compose::{Address, Attachment, Draft};
-use postman_core::imap::{self, ImapAccount};
+use postman_backend_imap::{self as imap, ImapAccount};
 use postman_core::model::Release;
 use postman_core::sync::{Command, Event, Status, UnboundedSender};
 
@@ -22,6 +22,14 @@ const WAIT: Duration = Duration::from_secs(40);
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} не задан: стенд — docs/STALWART.md"))
+}
+
+/// Пути к серверам, как у приложения (`app-gpui/src/plugins.rs`): JMAP, IMAP; области — CalDAV и CardDAV.
+fn registry() -> postman_core::backend::Registry {
+    postman_core::backend::Registry::default()
+        .with_mail(postman_backend_jmap::JmapPlugin)
+        .with_mail(imap::ImapPlugin)
+        .with_area(postman_backend_dav::DavPlugin)
 }
 
 /// Воркер-песочница — рядом с исполняемым файлом теста (`target/debug/deps`), как у приложения.
@@ -50,7 +58,7 @@ impl Live {
         let account = ImapAccount::from_url(&url, &me, &env("POSTMAN_STAND_PASSWORD1")).unwrap();
         let cache = Cache::open_in_memory().unwrap();
         let (tx, events) = std::sync::mpsc::channel();
-        let commands = imap::spawn(account, None, cache.clone(), None, tx, || {});
+        let commands = imap::spawn(account, None, cache.clone(), None, tx, || {}, Vec::new());
         let live = Live { cache, commands, events, me };
         live.wait("Synced", |e| matches!(e, Event::Status(Status::Synced)));
         live
@@ -247,11 +255,11 @@ fn imap_thread_and_filters() {
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 fn server_kind_by_address() {
     let jmap = env("POSTMAN_STAND_URL");
-    assert_eq!(postman_core::backend::detect_blocking(&jmap), jmap);
+    assert_eq!(registry().detect_blocking(&jmap), jmap);
     let at = env("POSTMAN_STAND_IMAP");
     let host = at.rsplit_once(':').map_or(at.as_str(), |(h, _)| h);
     let imap = format!("imaps://{at}");
     let with_dav = format!("{imap}?dav=https://{host}");
-    assert_eq!(postman_core::backend::detect_blocking(&imap), with_dav);
-    assert_eq!(postman_core::backend::detect_blocking(&with_dav), with_dav);
+    assert_eq!(registry().detect_blocking(&imap), with_dav);
+    assert_eq!(registry().detect_blocking(&with_dav), with_dav);
 }

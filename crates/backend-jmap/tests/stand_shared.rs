@@ -6,7 +6,7 @@
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER3`, `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую);
 //! для `taken_is_seen_by_a_colleague` — ещё `POSTMAN_STAND_USER1/2` и пароли (коллега — тот, кто в группе),
-//! `cargo test -p postman-core --test stand_shared -- --ignored`. Писем — по одному на прогон и адрес (ограничение
+//! `cargo test -p postman-backend-jmap --test stand_shared -- --ignored`. Писем — по одному на прогон и адрес (ограничение
 //! входящих на получателя, `docs/STALWART.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
@@ -84,7 +84,7 @@ type Events = std::sync::mpsc::Receiver<Event>;
 fn sync_user3() -> (sync::UnboundedSender<Command>, Events, Cache) {
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache.clone(), None, tx, || {});
+    let commands = postman_backend_jmap::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: postman_backend_jmap::convert::FromJmap::from_jmap(auth()) }, cache.clone(), None, tx, || {});
     (commands, rx, cache)
 }
 

@@ -7,7 +7,7 @@
 //! тест пропускается (`#[ignore]`).
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1`, `POSTMAN_STAND_PASSWORD1` (и `POSTMAN_INSECURE_TLS=1`
-//! напрямую), `cargo test -p postman-core --test stand_search -- --ignored --nocapture`.
+//! напрямую), `cargo test -p postman-backend-jmap --test stand_search -- --ignored --nocapture`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -59,7 +59,7 @@ async fn hits(c: &Client, inbox: &str, input: &str, a: &str, b: &str) -> (bool, 
     let now = jiff::Zoned::now();
     let env = q.env(&now, |_| None, &[env("POSTMAN_STAND_USER1")]);
     let filter = q.server_filter(&env).expect("условие");
-    let ids = c.query_ids(&Filter::And(vec![Filter::InMailbox(inbox.to_owned()), (&filter).into()]), 100).await.unwrap();
+    let ids = c.query_ids(&Filter::And(vec![Filter::InMailbox(inbox.to_owned()), postman_backend_jmap::convert::ToJmap::to_jmap(&filter)]), 100).await.unwrap();
     let found = (ids.iter().any(|x| x == a), ids.iter().any(|x| x == b));
     println!("{input:<55} → a={} b={}", found.0, found.1);
     found

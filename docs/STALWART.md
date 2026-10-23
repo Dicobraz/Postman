@@ -20,10 +20,10 @@ POSTMAN_STAND_URL=https://<адрес стенда> POSTMAN_INSECURE_TLS=1   # �
 POSTMAN_STAND_USER1=user1@itt.test POSTMAN_STAND_PASSWORD1=…
 POSTMAN_STAND_USER2=user2@itt.test POSTMAN_STAND_PASSWORD2=…
 POSTMAN_STAND_USER3=user3@itt.test POSTMAN_STAND_PASSWORD3=…
-cargo test -p postman-core --test stand -- --ignored
+cargo test -p postman-backend-jmap --test stand -- --ignored
 ```
 
-Пароли — только в окружении процесса. Тесты (`crates/core/tests/stand.rs`) идут тем же кодом, что и приложение,
+Пароли — только в окружении процесса. Тесты (`crates/backend-jmap/tests/stand.rs`, IMAP и «стандарты» — `crates/backend-imap/tests/`) идут тем же кодом, что и приложение,
 и за собой убирают (письма, события, карточки); в CI не запускаются (`#[ignore]`).
 
 Клиент CalDAV и CardDAV (S7-05а, `crates/dav/tests/stand.rs`) — тем же HTTPS 443 (`POSTMAN_STAND_DAV`, иначе
@@ -90,7 +90,7 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
 | `stand_standards::carddav_round_trip` | S7-05б: `SaveContact` → в `ContactsLoaded` → правка (телефон убран, должность и организация) → `DeleteContact` → нет |
 | `stand_imap::server_kind_by_address` | S7-04в, S7-05б: адрес JMAP — как есть; к адресу IMAP — `dav=https://<узел>` (`.well-known/caldav` отвечает), с `dav=` — как есть |
 
-Последний прогон — 2026-10-23: `postman-core` `stand_standards` 5 из 5 и `stand_imap` 5 из 5 (S7-05б), `postman-dav` `stand` 6 из 6 (S7-05а, HTTPS напрямую); IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
+Последний прогон — 2026-10-23, после переноса в плагины (S7-02б): `postman-backend-jmap` `stand` 16 из 16, `postman-backend-imap` `stand_imap` 5 из 5 и `stand_standards` 5 из 5, `postman-dav` `stand` 6 из 6; до него, 2026-10-23: `postman-core` `stand_standards` 5 из 5 и `stand_imap` 5 из 5 (S7-05б), `postman-dav` `stand` 6 из 6 (S7-05а, HTTPS напрямую); IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
 `postman-imap` `stand` 4 из 4 (S7-04а), `postman-core` `stand_imap` 2 из 2 (S7-04б), 5 из 5 (S7-04в: «Отменить», беседа, фильтры, вид сервера); 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
@@ -443,7 +443,7 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
 - `shared-sales@itt.test` — группа (`x:Account/set` от имени администратора), user3 — участник; пароля нет.
 - `shared-ro@itt.test` — пользователь (пароль — в файле владельца рядом с остальными); его «Входящие» открыты user3
   только для чтения (`Mailbox/set` `shareWith` на principal user3).
-- Смотрит user3; тест — `cargo test -p postman-core --test stand_shared -- --ignored`, по одному письму на прогон и
+- Смотрит user3; тест — `cargo test -p postman-backend-jmap --test stand_shared -- --ignored`, по одному письму на прогон и
   адрес (п. 17).
 - «Взять в работу» (S5-28): слова `pm.taken` и `pm.taken.2026-10-22t1551z.user3@itt.test` (с `@` и временем)
   Stalwart хранит как есть, у письма ящика группы — для всех с доступом (`taken_words_survive_the_server`, 2026-10-22,
@@ -459,7 +459,7 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
 
 ```
 POSTMAN_URL=https://<стенд> POSTMAN_INSECURE_TLS=1 POSTMAN_USER=big@itt.test POSTMAN_PASSWORD=…
-cargo run --release -p postman-core --example fill_stand -- 25000        # дополняет до N, ~65 с на 24 тыс.
+cargo run --release -p postman-backend-jmap --example fill_stand -- 25000        # дополняет до N, ~65 с на 24 тыс.
 cargo run --release -p postman-gpui -- --bench --live [--warm] [--keep]  # замер живого ящика
 ```
 

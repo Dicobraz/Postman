@@ -3,7 +3,7 @@
 //! пропускаются (`#[ignore]`); за собой убирают (автоответ выключен, правила и папки удалены, письма удалены).
 //!
 //! Запуск — как `stand.rs` (`docs/STALWART.md`):
-//!   cargo test -p postman-core --test stand_settings -- --ignored
+//!   cargo test -p postman-backend-jmap --test stand_settings -- --ignored
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use postman_compose::{Address, Draft};
 use postman_core::rules::{Action, Field, Rule};
 use postman_core::autoreply::{Audience, AutoReply, Text};
-use postman_core::settings::{self, AutoReplySave, Reply, Request, RulesState};
+use postman_core::settings::{AutoReplySave, Reply, Request, RulesState};
 use postman_core::model::VacationResponse;
 use postman_jmap::{Activate, Auth, Client, Envelope, Invocation, SaveError};
 use serde_json::{Value, json};
@@ -66,7 +66,7 @@ where
 /// Запрос настроек как в приложении; ответы — списком.
 async fn settings(client: &Client, request: Request) -> Vec<Reply> {
     let replies = RefCell::new(Vec::new());
-    settings::handle(client, request, &|r| replies.borrow_mut().push(r)).await;
+    postman_backend_jmap::settings::handle(client, request, &|r| replies.borrow_mut().push(r)).await;
     replies.into_inner()
 }
 
@@ -108,7 +108,7 @@ async fn destroy_all(u: &User, text: &str) {
 async fn vacation_reply_round_trip() {
     let (a, b) = (user(1).await, user(2).await);
     let stamp = stamp();
-    let before = VacationResponse::from(b.client.vacation().await.unwrap());
+    let before = <VacationResponse as postman_backend_jmap::convert::FromJmap<_>>::from_jmap(b.client.vacation().await.unwrap());
     let reply_subject = format!("Postman vacation {stamp}");
 
     let result = async {
@@ -162,7 +162,7 @@ async fn vacation_reply_round_trip() {
 async fn autoreply_split_texts() {
     let (a, b) = (user(1).await, user(2).await);
     let stamp = stamp();
-    let before = VacationResponse::from(b.client.vacation().await.unwrap());
+    let before = <VacationResponse as postman_backend_jmap::convert::FromJmap<_>>::from_jmap(b.client.vacation().await.unwrap());
     let internal = format!("Postman inside {stamp}");
     let external = format!("Postman outside {stamp}");
     let reply = AutoReply {
@@ -302,7 +302,7 @@ async fn rule_files_by_subject_with_vacation() {
     let folder_id = create_mailbox(&b, &folder).await;
     let marker = format!("rule-{stamp}");
     let reply_subject = format!("Postman vacation {stamp}");
-    let vacation_before = VacationResponse::from(b.client.vacation().await.unwrap());
+    let vacation_before = <VacationResponse as postman_backend_jmap::convert::FromJmap<_>>::from_jmap(b.client.vacation().await.unwrap());
 
     let result = async {
         let rule = Rule {

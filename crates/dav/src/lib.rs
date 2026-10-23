@@ -333,7 +333,7 @@ pub(crate) fn status_error(reply: &Reply) -> Error {
 }
 
 /// Есть ли CalDAV на адресе (`https://узел`) — без входа: `.well-known/caldav` отвечает 207, перенаправлением или
-/// 401 (RFC 6764 §5). Для вида сервера по адресу (`postman_core::backend::detect`); ни сети, ни ответа — `false`.
+/// 401 (RFC 6764 §5). Для вида сервера по адресу (`postman_core::backend::Registry::detect`, плагин `postman-backend-dav`); ни сети, ни ответа — `false`.
 pub async fn has_dav(url: &str) -> bool {
     let Ok(base) = Url::parse(url) else { return false };
     let Ok(target) = base.join("/.well-known/caldav") else { return false };
