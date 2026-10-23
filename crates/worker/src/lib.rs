@@ -44,6 +44,8 @@ pub enum Request {
     Text(String),
     /// Приглашение iCalendar (.ics) в бинарной части; ответ — METHOD и JSCalendar (JSON).
     Calendar,
+    /// Карточки vCard (.vcf, одна или несколько) в бинарной части; ответ — JSContact (JSON) каждой (S7-05б, CardDAV).
+    Contacts,
     /// Картинка (PNG/JPEG/GIF/WebP) в бинарной части; ответ — RGBA не больше `max_side` по стороне.
     Image { max_side: u32 },
     /// Встроенный просмотр вложения (S5-07): файл в бинарной части; `page` — страница PDF с нуля; ответ —
@@ -197,6 +199,7 @@ enum Response {
     /// RGBA8 в бинарной части.
     Image { width: u32, height: u32 },
     Calendar(serde_json::Value),
+    Contacts(Vec<serde_json::Value>),
     Preview(Preview),
     /// Итог проверки подписи; DER цепочки — в бинарной части.
     Smime { report: Box<postman_smime::Report>, doc: Option<Document> },
@@ -279,6 +282,39 @@ pub fn parse_calendar(bytes: &[u8]) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "method": method, "data": data }))
 }
 
+/// Карточек в одном .vcf — не больше: адресная книга приходит по карточке на ресурс.
+const MAX_CARDS: usize = 1000;
+
+/// vCard (одна или несколько карточек) → JSContact каждой (RFC 9555, как JMAP Contacts у Stalwart). Чужие данные —
+/// только в песочнице; без песочницы — только для тестов и самого воркера.
+pub fn parse_contacts(bytes: &[u8]) -> Result<Vec<serde_json::Value>, String> {
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err("карточка слишком большая".into());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "карточка не в UTF-8".to_string())?;
+    let mut parser = calcard::Parser::new(text);
+    let mut out = Vec::new();
+    loop {
+        match parser.entry() {
+            calcard::Entry::VCard(card) => {
+                if out.len() >= MAX_CARDS {
+                    return Err("слишком много карточек".into());
+                }
+                let js = card.into_jscontact::<String, String>();
+                out.push(serde_json::to_value(&js.0).map_err(|e| e.to_string())?);
+            }
+            calcard::Entry::Eof => break,
+            calcard::Entry::ICalendar(_) => return Err("не vCard".into()),
+            // Неразборчивая строка или компонент — карточка без неё; остальные — как есть.
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        return Err("нет карточек".into());
+    }
+    Ok(out)
+}
+
 fn write_msg(w: &mut impl Write, json: &[u8], bin: &[u8]) -> io::Result<()> {
     write_frame(w, json)?;
     write_frame(w, bin)
@@ -344,6 +380,10 @@ pub fn serve() -> ! {
             Ok(Request::Text(t)) => Response::Ok(postman_ir::from_plain(&t)),
             Ok(Request::Calendar) => match parse_calendar(&bin) {
                 Ok(v) => Response::Calendar(v),
+                Err(e) => Response::Err(e),
+            },
+            Ok(Request::Contacts) => match parse_contacts(&bin) {
+                Ok(v) => Response::Contacts(v),
                 Err(e) => Response::Err(e),
             },
             Ok(Request::Image { max_side }) => match decode_image(&bin, max_side) {
@@ -493,6 +533,7 @@ impl Client {
             Response::Ok(doc) => Ok(doc),
             Response::Image { .. }
             | Response::Calendar(_)
+            | Response::Contacts(_)
             | Response::Preview(_)
             | Response::Smime { .. }
             | Response::Envelope(_)
@@ -669,6 +710,15 @@ impl Client {
         }
     }
 
+    /// Разобрать карточки vCard (CardDAV) в песочнице → JSContact каждой.
+    pub fn parse_contacts(&mut self, vcf: &[u8]) -> Result<Vec<serde_json::Value>, String> {
+        match self.call(&Request::Contacts, vcf)?.0 {
+            Response::Contacts(v) => Ok(v),
+            Response::Err(e) => Err(e),
+            _ => Err("неожиданный ответ".into()),
+        }
+    }
+
     fn call(&mut self, req: &Request, bin: &[u8]) -> Result<(Response, Vec<u8>), String> {
         self.call_for(req, bin, self.timeout)
     }
@@ -773,4 +823,20 @@ fn exit_name(code: u32) -> String {
         _ => "",
     };
     if code > 0xFFFF { format!("0x{code:08X}{name}") } else { format!("{code}{name}") }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vcard_becomes_jscontact() {
+        let vcf = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:c1\r\nFN:Иван Петров\r\nEMAIL;PREF=1:ivan@example.test\r\nTEL:+7 900\r\nORG:Рога;Отдел\r\nTITLE:Директор\r\nEND:VCARD\r\nBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Вторая\r\nN:;Вторая;;;\r\nEND:VCARD\r\n";
+        let cards = super::parse_contacts(vcf.as_bytes()).unwrap();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0]["name"]["full"], "Иван Петров");
+        assert_eq!(cards[0]["uid"], "c1");
+        assert_eq!(cards[0]["titles"]["k1"]["name"], "Директор");
+        assert_eq!(cards[1]["name"]["full"], "Вторая");
+        assert!(super::parse_contacts(b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n").is_err());
+        assert!(super::parse_contacts(b"").is_err());
+    }
 }

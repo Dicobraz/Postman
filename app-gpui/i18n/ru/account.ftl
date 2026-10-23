@@ -16,7 +16,7 @@ signin-step-server = Сервер
 signin-step-login = Логин
 signin-step-password = Пароль
 signin-url = Адрес сервера
-signin-url-hint = Например, mail.example.com — Postman найдёт настройки JMAP сам (/.well-known/jmap). Почта по IMAP — imaps://imap.example.com (SMTP — тот же узел или ?smtp=smtp.example.com).
+signin-url-hint = Например, mail.example.com — Postman найдёт настройки JMAP сам (/.well-known/jmap). Почта по IMAP — imaps://imap.example.com (SMTP — тот же узел или ?smtp=smtp.example.com; календарь и контакты — CalDAV и CardDAV того же узла, если они там есть, или &dav=https://dav.example.com).
 signin-user = Логин
 signin-user-hint = Обычно — адрес почты.
 signin-password = Пароль

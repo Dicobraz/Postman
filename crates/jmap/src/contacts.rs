@@ -35,6 +35,12 @@ pub struct AddressBook {
 }
 
 impl ContactCard {
+    /// Карточка из объекта JSContact (RFC 9553): ответа JMAP или карточки vCard, разобранной воркером (CardDAV,
+    /// S7-05б). `id` — из объекта (у CardDAV его ставит адаптер — путь ресурса).
+    pub fn from_jscontact(v: &Value) -> ContactCard {
+        card(v)
+    }
+
     /// Карточка для `ContactCard/set create` в книге `book`; пустые свойства не передаются.
     pub fn to_jmap(&self, book: &str) -> Value {
         let mut card = Map::new();

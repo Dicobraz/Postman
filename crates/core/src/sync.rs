@@ -762,7 +762,7 @@ fn senders(own: &[Identity], shared: &[(String, Vec<Identity>)], profile: Option
 
 /// События дополнительной учётной записи (S7-03б) — с владельцем: в общем календаре они рисуются цветом и подписью
 /// владельца, как календари коллег (S5-22). Основная (`me: None`) — как есть.
-fn owned_by(
+pub(crate) fn owned_by(
     me: &Option<postman_calendar::Owner>,
     mut events: Vec<postman_calendar::Event>,
     mut colleagues: Vec<postman_calendar::Owner>,

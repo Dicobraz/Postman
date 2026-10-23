@@ -59,8 +59,7 @@ impl Client {
     /// `.well-known/caldav`, `.well-known/carddav`, корень сервера.
     pub async fn discover(&self) -> Result<Discovery> {
         let principal = self.current_user_principal().await?;
-        let ms = self.multistatus("PROPFIND", &principal, Some("0"), xml::propfind(PRINCIPAL_PROPS)).await?;
-        let mut d = from_principal(&ms, &principal)?;
+        let mut d = self.principal(&principal).await?;
         if d.addressbook_home.is_empty() {
             // CardDAV может жить у другого принципала (другой контекст): спросить его по `.well-known/carddav`.
             if let Ok(other) = self.principal_at("/.well-known/carddav").await
@@ -77,6 +76,13 @@ impl Client {
             "dav discovery"
         );
         Ok(d)
+    }
+
+    /// Свойства принципала по пути: домашние наборы, ящики планирования, адреса участника — свои или коллеги
+    /// (адрес коллеги в `addresses` — проверка, что путь тот).
+    pub async fn principal(&self, href: &str) -> Result<Discovery> {
+        let ms = self.multistatus("PROPFIND", href, Some("0"), xml::propfind(PRINCIPAL_PROPS)).await?;
+        from_principal(&ms, href)
     }
 
     /// `current-user-principal` по очереди мест поиска.

@@ -241,12 +241,17 @@ fn imap_thread_and_filters() {
     }
 }
 
-/// Вид сервера по адресу (S7-04в): у стенда есть JMAP — адрес остаётся адресом JMAP; адрес IMAP — как есть.
+/// Вид сервера по адресу (S7-04в): у стенда есть JMAP — адрес остаётся адресом JMAP; к адресу IMAP — CalDAV и CardDAV
+/// того же узла (`.well-known/caldav` отвечает, S7-05б); `dav=` уже есть — как есть.
 #[test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 fn server_kind_by_address() {
     let jmap = env("POSTMAN_STAND_URL");
     assert_eq!(postman_core::backend::detect_blocking(&jmap), jmap);
-    let imap = format!("imaps://{}", env("POSTMAN_STAND_IMAP"));
-    assert_eq!(postman_core::backend::detect_blocking(&imap), imap);
+    let at = env("POSTMAN_STAND_IMAP");
+    let host = at.rsplit_once(':').map_or(at.as_str(), |(h, _)| h);
+    let imap = format!("imaps://{at}");
+    let with_dav = format!("{imap}?dav=https://{host}");
+    assert_eq!(postman_core::backend::detect_blocking(&imap), with_dav);
+    assert_eq!(postman_core::backend::detect_blocking(&with_dav), with_dav);
 }
