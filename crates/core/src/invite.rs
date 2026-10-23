@@ -2,18 +2,17 @@
 //!
 //! Если событие уже есть в календаре на сервере (сервер разобрал письмо сам) — меняем
 //! свой статус там, ответ организатору шлёт сервер. Иначе отвечаем письмом METHOD:REPLY,
-//! а принятое/«под вопросом» кладём в свой календарь без рассылки.
+//! а принятое/«под вопросом» кладём в свой календарь без рассылки. Запросы к серверу — у плагина пути
+//! (`postman-backend-jmap`: `via_server`, `import`; ADR 0004), здесь — письмо-ответ и состояние карточки.
 //!
 //! Состояние карточки ([`classify`]): новое, отвечено, изменено организатором (что именно), отменено, устарело;
 //! пересечения с моим календарём — [`conflicts`]. Чистые функции: письмо, мой запомненный ответ ([`Seen`]),
 //! копия встречи в моём календаре и «сейчас» — на входе.
 
 use postman_calendar::{
-    Busy, Event, EventStatus, FreeBusy, Invitation, Partstat, Span, imip_reply, partstat_json, participant_id,
-    reply_subject,
+    Busy, Event, EventStatus, FreeBusy, Invitation, Partstat, Span, imip_reply, partstat_json, reply_subject,
 };
 use postman_compose::{Address, CalendarPart, Draft};
-use postman_jmap::Client;
 use serde_json::{Value, json};
 
 /// Как ушёл ответ.
@@ -52,29 +51,6 @@ pub fn import_event(inv: &Invitation, me: &str, status: Partstat, calendar_id: &
         o.insert("calendarIds".into(), json!({ calendar_id: true }));
     }
     ev
-}
-
-/// Попробовать ответить через календарь сервера. `None` — события там нет (или меня в нём нет).
-pub async fn via_server(client: &Client, inv: &Invitation, me: &str, status: Partstat) -> postman_jmap::Result<Option<()>> {
-    if !client.has(postman_jmap::CALENDARS) {
-        return Ok(None);
-    }
-    let Some(ev) = client.event_by_uid(&inv.event.uid).await? else { return Ok(None) };
-    let (Some(id), Some(pid)) = (ev["id"].as_str(), participant_id(&ev, me)) else { return Ok(None) };
-    client.reply(id, &pid, partstat_json(status)).await?;
-    Ok(Some(()))
-}
-
-/// Положить событие в первый видимый календарь (отказ не рассылается — его не кладём).
-pub async fn import(client: &Client, inv: &Invitation, me: &str, status: Partstat) -> postman_jmap::Result<bool> {
-    if status == Partstat::Declined || !client.has(postman_jmap::CALENDARS) {
-        return Ok(false);
-    }
-    let mut cals = client.calendars().await?;
-    cals.sort_by_key(|c| (!c.is_visible, c.sort_order));
-    let Some(cal) = cals.first() else { return Ok(false) };
-    client.create_event(import_event(inv, me, status, &cal.id), false).await?;
-    Ok(true)
 }
 
 // --- состояние карточки приглашения ---

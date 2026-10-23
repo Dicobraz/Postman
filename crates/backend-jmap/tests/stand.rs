@@ -3,7 +3,7 @@
 //!
 //! Запуск (пароли — только в окружении, на диск не пишем):
 //!   POSTMAN_STAND_URL=http://localhost:18080 POSTMAN_STAND_USER1=user1@itt.test POSTMAN_STAND_PASSWORD1=…
-//!   POSTMAN_STAND_USER2=user2@itt.test POSTMAN_STAND_PASSWORD2=… cargo test -p postman-core --test stand -- --ignored
+//!   POSTMAN_STAND_USER2=user2@itt.test POSTMAN_STAND_PASSWORD2=… cargo test -p postman-backend-jmap --test stand -- --ignored
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -233,7 +233,7 @@ async fn invitation_round_trip() {
     let parsed = Event::from_jmap(&theirs, &jiff::tz::TimeZone::UTC).unwrap();
     assert_eq!(parsed.organizer().map(|o| o.email.as_str()), Some(a.email.as_str()));
 
-    // Ответ — тем же путём, что «Принять» в приложении (`postman_core::invite::via_server`).
+    // Ответ — тем же путём, что «Принять» в приложении (`postman_backend_jmap::invite::via_server`).
     let pid = participant_id(&theirs, &b.email).expect("себя среди участников");
     b.client.reply(&their_id, &pid, postman_calendar::partstat_json(Partstat::Accepted)).await.unwrap();
 
@@ -511,7 +511,7 @@ async fn contacts_are_edited_and_directory_is_listed() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn contacts_through_sync() {
-    use postman_core::sync::{self, Account, Command, Event as SyncEvent};
+    use postman_core::sync::{Account, Command, Event as SyncEvent};
     use postman_core::model::ContactCard;
 
     let email = env("POSTMAN_STAND_USER3");
@@ -521,7 +521,7 @@ async fn contacts_through_sync() {
     };
     let cache = postman_cache::Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(account, cache, None, tx, || {});
+    let commands = postman_backend_jmap::spawn(account, cache, None, tx, || {});
     let wait = |what: &str, pick: &dyn Fn(&SyncEvent) -> bool| -> SyncEvent {
         let start = Instant::now();
         loop {
@@ -576,8 +576,8 @@ async fn contacts_through_sync() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn calendar_through_sync() {
-    use postman_core::schedule::{self, Meeting};
-    use postman_core::sync::{self, Account, Command, Event as SyncEvent};
+    use postman_backend_jmap::schedule::{self, Meeting};
+    use postman_core::sync::{Account, Command, Event as SyncEvent};
 
     let (a, c) = (user(1).await, user(3).await);
     let tz = "Europe/Moscow";
@@ -609,7 +609,7 @@ async fn calendar_through_sync() {
     };
     let cache = postman_cache::Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(account, cache, None, tx, || {});
+    let commands = postman_backend_jmap::spawn(account, cache, None, tx, || {});
     let wait = |what: &str, pick: &dyn Fn(&SyncEvent) -> bool| -> SyncEvent {
         let start = Instant::now();
         loop {
@@ -684,11 +684,11 @@ type SyncEvents = std::sync::mpsc::Receiver<postman_core::sync::Event>;
 
 /// Поток синхронизации user`n` на кэше в памяти: команды и события.
 fn sync_of(n: u8, password: String) -> (postman_core::sync::UnboundedSender<postman_core::sync::Command>, SyncEvents) {
-    use postman_core::sync::{self, Account};
+    use postman_core::sync::{Account};
     let user = env(&format!("POSTMAN_STAND_USER{n}"));
     let account = Account { url: env("POSTMAN_STAND_URL"), auth: postman_core::model::Auth::Basic { user, password } };
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
+    let commands = postman_backend_jmap::spawn(account, postman_cache::Cache::open_in_memory().unwrap(), None, tx, || {});
     (commands, rx)
 }
 
@@ -761,7 +761,7 @@ async fn load_more_through_sync() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn calendar_change_arrives_by_push() {
-    use postman_core::schedule::{self, Meeting};
+    use postman_backend_jmap::schedule::{self, Meeting};
     use postman_core::sync::{Event as SyncEvent, Status};
     let u = user(2).await;
     let (_commands, rx) = sync_of(2, env("POSTMAN_STAND_PASSWORD2"));
@@ -800,7 +800,7 @@ async fn calendar_change_arrives_by_push() {
 #[tokio::test]
 #[ignore = "нужен стенд Stalwart: docs/STALWART.md"]
 async fn stand_calendar_search() {
-    use postman_core::schedule::{self, Meeting};
+    use postman_backend_jmap::schedule::{self, Meeting};
 
     let a = user(1).await;
     let stamp = stamp().replace('-', "");

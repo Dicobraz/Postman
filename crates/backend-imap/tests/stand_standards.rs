@@ -1,4 +1,4 @@
-//! Учётная запись «стандарты» через синхронизацию Postman (`postman_core::imap` + `postman_core::dav`, S7-05б) против
+//! Учётная запись «стандарты» через синхронизацию Postman (`postman_backend_imap` + `postman_backend_dav`, S7-05б) против
 //! IMAP, submission, CalDAV и CardDAV стенда Stalwart: событие недели, встреча user1 → user2 с ответом и отменой,
 //! занятость коллеги, задачи двумя клиентами, контакт. Без стенда тесты пропускаются (`#[ignore]`); за собой
 //! убирают: события, задачи, карточки, права календаря, входящие планирования, письма сервера о встрече.
@@ -7,7 +7,7 @@
 //! воркер — `cargo build -p postman-worker` заранее):
 //!   POSTMAN_STAND_IMAP=<адрес>:993 POSTMAN_STAND_SMTP=<адрес>:465 POSTMAN_STAND_DAV=https://<адрес>
 //!   POSTMAN_STAND_USER1=… POSTMAN_STAND_PASSWORD1=… POSTMAN_STAND_USER2=… POSTMAN_STAND_PASSWORD2=…
-//!   cargo test -p postman-core --test stand_standards -- --ignored --test-threads=1
+//!   cargo test -p postman-backend-imap --test stand_standards -- --ignored --test-threads=1
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use postman_cache::Cache;
 use postman_calendar::{Invitation, Partstat, Task};
-use postman_core::imap::{self, ImapAccount};
+use postman_backend_imap::{self as imap, ImapAccount};
 use postman_core::model::{ContactCard, Feature, Features};
 use postman_core::schedule::Meeting;
 use postman_core::sync::{Command, Event, Status, UnboundedSender};
@@ -79,7 +79,7 @@ impl Live {
         let url = format!("imaps://{}?smtp={}&dav={}", env("POSTMAN_STAND_IMAP"), env("POSTMAN_STAND_SMTP"), env("POSTMAN_STAND_DAV"));
         let account = ImapAccount::from_url(&url, &me, &env(&format!("POSTMAN_STAND_PASSWORD{n}"))).unwrap();
         let (tx, events) = std::sync::mpsc::channel();
-        let commands = imap::spawn(account, None, Cache::open_in_memory().unwrap(), None, tx, || {});
+        let commands = imap::spawn(account, None, Cache::open_in_memory().unwrap(), None, tx, || {}, vec![std::sync::Arc::new(postman_backend_dav::DavPlugin)]);
         let mut live = Live { commands, events, me, features: Features::NONE };
         let f = live.wait("Features", |e| matches!(e, Event::Features(_)));
         let Event::Features(f) = f else { unreachable!() };

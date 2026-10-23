@@ -4,16 +4,16 @@
 //! участник); снятие категории с писем. В конце таблицы возвращаются как были (не было — папка удаляется).
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER3`, `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую),
-//! `cargo test -p postman-core --test stand_categories -- --ignored --test-threads 1` (тесты пишут один и тот же файл).
+//! `cargo test -p postman-backend-jmap --test stand_categories -- --ignored --test-threads 1` (тесты пишут один и тот же файл).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
 
 use std::time::{Duration, Instant};
 
 use postman_cache::Cache;
-use postman_core::categories::{self, FILE, FOLDER, Reply, Request};
+use postman_core::categories::{FILE, FOLDER, Reply, Request};
 use postman_core::labels::Categories;
-use postman_core::sync::{self, Account, Command, Event, Status};
+use postman_core::sync::{Account, Command, Event, Status};
 use postman_jmap::{Auth, CORE, Client, Filter, Invocation, MAIL, Written};
 use serde_json::json;
 
@@ -105,13 +105,13 @@ async fn table_is_shared_between_sessions_last_writer_wins() {
         let (folder, _) = a.file_node(&acc, None, FOLDER).await.unwrap();
         a.destroy_file_nodes(&acc, &[folder.unwrap().id]).await.unwrap();
     }
-    assert_eq!(categories::load(&a, &acc).await.unwrap(), None, "таблицы нет — умолчание");
+    assert_eq!(postman_backend_jmap::categories::load(&a, &acc).await.unwrap(), None, "таблицы нет — умолчание");
 
     // Первая запись создаёт папку и файл; вторая сессия читает то же.
     let base = defaults("Стенд");
-    let saved = categories::save(&a, &acc, &base).await.unwrap();
+    let saved = postman_backend_jmap::categories::save(&a, &acc, &base).await.unwrap();
     assert_eq!(saved, base);
-    assert_eq!(categories::load(&b, &acc).await.unwrap().as_ref(), Some(&base), "вторая сессия читает таблицу");
+    assert_eq!(postman_backend_jmap::categories::load(&b, &acc).await.unwrap().as_ref(), Some(&base), "вторая сессия читает таблицу");
     let (folder, _) = a.file_node(&acc, None, FOLDER).await.unwrap();
     let folder = folder.expect("папка .postman создана");
     assert_eq!((folder.parent_id.as_deref(), folder.blob_id.as_deref()), (None, None), "папка в корне");
@@ -127,9 +127,9 @@ async fn table_is_shared_between_sessions_last_writer_wins() {
     let mut tb = base.clone();
     tb.rename("pm.cat.tenders", "B tenders", 3_000).unwrap();
     tb.rename("pm.cat.team", "B team", 1_000).unwrap();
-    categories::save(&a, &acc, &ta).await.unwrap();
-    let merged = categories::save(&b, &acc, &tb).await.unwrap();
-    let on_server = categories::load(&a, &acc).await.unwrap().unwrap();
+    postman_backend_jmap::categories::save(&a, &acc, &ta).await.unwrap();
+    let merged = postman_backend_jmap::categories::save(&b, &acc, &tb).await.unwrap();
+    let on_server = postman_backend_jmap::categories::load(&a, &acc).await.unwrap().unwrap();
     assert_eq!(on_server, merged);
     assert_eq!(name(&on_server, "pm.cat.team").as_deref(), Some("A team"), "у team позже правил A");
     assert_eq!(name(&on_server, "pm.cat.tenders").as_deref(), Some("B tenders"));
@@ -140,10 +140,10 @@ async fn table_is_shared_between_sessions_last_writer_wins() {
     let mut cb = on_server.clone();
     cb.delete("pm.cat.services", 4_100).unwrap();
     cb.rename("pm.cat.pentest", "B pentest", 4_200).unwrap();
-    let (ra, rb) = tokio::join!(categories::save(&a, &acc, &ca), categories::save(&b, &acc, &cb));
+    let (ra, rb) = tokio::join!(postman_backend_jmap::categories::save(&a, &acc, &ca), postman_backend_jmap::categories::save(&b, &acc, &cb));
     ra.unwrap();
     rb.unwrap();
-    let last = categories::load(&a, &acc).await.unwrap().unwrap();
+    let last = postman_backend_jmap::categories::load(&a, &acc).await.unwrap().unwrap();
     assert_eq!(name(&last, &ka).as_deref(), Some("Стенд A"), "добавленная A на месте: {last:?}");
     assert_eq!(name(&last, "pm.cat.services"), None, "удалённая B скрыта");
     assert_eq!(name(&last, "pm.cat.pentest").as_deref(), Some("B pentest"));
@@ -157,11 +157,11 @@ async fn table_is_shared_between_sessions_last_writer_wins() {
     let blob = a.upload(&acc, b"{}".to_vec(), "application/json").await.unwrap();
     let mut other = last.clone();
     other.rename("pm.cat.team", "bump", 5_000).unwrap();
-    categories::save(&b, &acc, &other).await.unwrap();
+    postman_backend_jmap::categories::save(&b, &acc, &other).await.unwrap();
     let w =
         a.write_file(&acc, &folder.id, Some(&file.id), FILE, &blob, "application/json", Some(&state)).await.unwrap();
     assert_eq!(w, Written::Stale);
-    assert_eq!(name(&categories::load(&a, &acc).await.unwrap().unwrap(), "pm.cat.team").as_deref(), Some("bump"));
+    assert_eq!(name(&postman_backend_jmap::categories::load(&a, &acc).await.unwrap().unwrap(), "pm.cat.team").as_deref(), Some("bump"));
     // Создать файл, который уже есть, — alreadyExists с его id.
     let w = a.write_file(&acc, &folder.id, None, FILE, &blob, "application/json", None).await.unwrap();
     assert_eq!(w, Written::Exists(file.id.clone()));
@@ -202,15 +202,15 @@ async fn tables_through_sync_and_shared_mailbox() {
     let was_own = before(&other, &acc).await;
     let was_group = before(&other, &group).await;
     let mine = defaults("Свои");
-    categories::save(&other, &acc, &mine).await.unwrap();
+    postman_backend_jmap::categories::save(&other, &acc, &mine).await.unwrap();
     // Таблица общего ящика — своя: другое имя у clients.
     let mut theirs = defaults("Отдел");
     theirs.rename("pm.cat.clients", "Клиенты отдела", 10).unwrap();
-    let group_saved = categories::save(&other, &group, &theirs).await.unwrap();
+    let group_saved = postman_backend_jmap::categories::save(&other, &group, &theirs).await.unwrap();
 
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let commands = sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth().into() }, cache, None, tx, || {});
+    let commands = postman_backend_jmap::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: postman_backend_jmap::convert::FromJmap::from_jmap(auth()) }, cache, None, tx, || {});
     // При входе — ответ на каждый аккаунт: свой, общий ящик и папка shared-ro, открытая user3 (у неё файлы
     // закрыты — `Unsupported`).
     let readonly = other.session().shared_accounts().into_iter().find(|a| a.name == "shared-ro@itt.test").map(|a| a.id);
@@ -254,7 +254,7 @@ async fn tables_through_sync_and_shared_mailbox() {
     let mut remote = saved.clone();
     remote.rename("pm.cat.tenders", "Тендеры (другой клиент)", 30).unwrap();
     let start = Instant::now();
-    categories::save(&other, &acc, &remote).await.unwrap();
+    postman_backend_jmap::categories::save(&other, &acc, &remote).await.unwrap();
     let pushed = wait_for(&rx, "push таблицы", |e| match e {
         Event::Categories(Reply::Loaded { account: None, table: Some(t) })
             if name(t, "pm.cat.tenders").as_deref() == Some("Тендеры (другой клиент)") =>
@@ -275,7 +275,7 @@ async fn tables_through_sync_and_shared_mailbox() {
         _ => None,
     });
     assert_eq!(gs.by_key(9).map(|c| c.name.as_str()), Some("Клиенты отдела"));
-    assert_eq!(categories::load(&other, &acc).await.unwrap().unwrap().by_key(9), None, "своя таблица не тронута");
+    assert_eq!(postman_backend_jmap::categories::load(&other, &acc).await.unwrap().unwrap().by_key(9), None, "своя таблица не тронута");
 
     drop(commands);
     restore(&other, &acc, was_own).await;
@@ -308,7 +308,7 @@ async fn purge_removes_the_keyword_from_messages() {
 
     let replies = std::sync::Mutex::new(Vec::new());
     let request = Request::Purge { account: None, keyword: kw.clone(), ticket: 1 };
-    categories::handle(&c, &acc, None, request, &|r| replies.lock().unwrap().push(r)).await;
+    postman_backend_jmap::categories::handle(&c, &acc, None, request, &|r| replies.lock().unwrap().push(r)).await;
     let replies = replies.into_inner().unwrap();
     assert_eq!(replies, [Reply::Purged { account: None, keyword: kw.clone(), ticket: 1, count: 2 }]);
     assert!(c.filtered(&Filter::HasKeyword(kw.clone()), 10).await.unwrap().ids.is_empty());

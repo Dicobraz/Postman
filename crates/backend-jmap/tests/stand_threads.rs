@@ -4,7 +4,7 @@
 //! лишь его новые строки. Без стенда тест пропускается (`#[ignore]`).
 //!
 //! Запуск: `POSTMAN_STAND_URL`, `POSTMAN_STAND_USER1`, `POSTMAN_STAND_PASSWORD1`, `POSTMAN_STAND_USER3`,
-//! `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую), `cargo test -p postman-core --test stand_threads
+//! `POSTMAN_STAND_PASSWORD3` (и `POSTMAN_INSECURE_TLS=1` напрямую), `cargo test -p postman-backend-jmap --test stand_threads
 //! -- --ignored`. Писем — три на прогон (ограничение входящих на получателя, `docs/STALWART.md`); в конце они удаляются.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // интеграционный тест: «не падать» — для кода приложения (S2-03)
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use postman_cache::{Cache, EmailRow};
 use postman_compose::{Address, Draft, Mode, Original};
-use postman_core::sync::{self, Account, Command, Event, Status};
+use postman_core::sync::{Account, Command, Event, Status};
 use postman_core::thread::Conversation;
 use postman_ir::{Block, Document};
 use postman_jmap::{Auth, Client, EmailSummary, Envelope};
@@ -161,7 +161,7 @@ async fn reply_chain_is_one_thread_with_new_text_only() {
     let cache = Cache::open_in_memory().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let commands =
-        sync::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: auth(3).into() }, cache.clone(), None, tx, || {});
+        postman_backend_jmap::spawn(Account { url: env("POSTMAN_STAND_URL"), auth: postman_backend_jmap::convert::FromJmap::from_jmap(auth(3)) }, cache.clone(), None, tx, || {});
     wait_for(&rx, "первая синхронизация", |e| {
         matches!(e, Event::Status(Status::Synced)).then_some(())
     });

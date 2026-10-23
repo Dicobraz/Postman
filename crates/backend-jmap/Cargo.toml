@@ -1,0 +1,34 @@
+[package]
+name = "postman-backend-jmap"
+description = "Путь JMAP (Stalwart) — плагин ядра (ADR 0004): синхронизация, календарь, задачи, контакты, справочник, правила, автоответ, квота, категории"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-core.workspace = true
+postman-jmap.workspace = true
+postman-cache.workspace = true
+postman-calendar.workspace = true
+postman-compose.workspace = true
+postman-search.workspace = true
+# Коды ошибок подписи и шифрования S/MIME (`sign_code`, `seal_code`).
+postman-smime = { workspace = true, features = ["soft"] }
+serde_json.workspace = true
+thiserror.workspace = true
+jiff = "0.2"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+postman-ir.workspace = true
+postman-worker.workspace = true
+postman-smime = { workspace = true, features = ["testkit"] }
+# Содержимое писем для заполнения ящика стенда (пример `fill_stand`); в обычных зависимостях демо нет (слои).
+postman-demo.workspace = true
+tempfile = "3"
+# CalDAV в тесте стенда задач (S6-01): PROPFIND, REPORT, PUT .ics — тем же HTTP-клиентом, что у `postman-jmap`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true

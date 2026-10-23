@@ -5956,6 +5956,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-backend-dav"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "percent-encoding",
+ "postman-cache",
+ "postman-calendar",
+ "postman-compose",
+ "postman-core",
+ "postman-dav",
+ "postman-worker",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "postman-backend-imap"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "postman-backend-dav",
+ "postman-backend-jmap",
+ "postman-cache",
+ "postman-calendar",
+ "postman-compose",
+ "postman-core",
+ "postman-dav",
+ "postman-imap",
+ "postman-worker",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "postman-backend-jmap"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "postman-cache",
+ "postman-calendar",
+ "postman-compose",
+ "postman-core",
+ "postman-demo",
+ "postman-ir",
+ "postman-jmap",
+ "postman-search",
+ "postman-smime",
+ "postman-worker",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "postman-cache"
 version = "0.1.0"
 dependencies = [
@@ -5994,19 +6053,14 @@ dependencies = [
  "jiff",
  "memory-stats",
  "open",
- "percent-encoding",
  "postman-cache",
  "postman-calendar",
  "postman-compose",
- "postman-dav",
  "postman-demo",
- "postman-imap",
  "postman-ir",
- "postman-jmap",
  "postman-search",
  "postman-smime",
  "postman-worker",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -6081,6 +6135,9 @@ dependencies = [
  "pets-shell",
  "pets-ui",
  "png 0.17.16",
+ "postman-backend-dav",
+ "postman-backend-imap",
+ "postman-backend-jmap",
  "postman-cache",
  "postman-calendar",
  "postman-compose",

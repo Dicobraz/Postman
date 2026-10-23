@@ -1,4 +1,5 @@
-//! Живой ящик (S3-04): поток синхронизации `postman_core::sync` вместо демо, события — в поток интерфейса.
+//! Живой ящик (S3-04): поток синхронизации учётной записи (плагин пути, `crate::plugins`) вместо демо, события — в
+//! поток интерфейса.
 //!
 //! События идут по `std::sync::mpsc`; поток синхронизации после каждого события зовёт `repaint`, а тот будит
 //! задачу gpui через канал `futures` (`unbounded_send`). Задача спит на `next().await` — таймеров и опроса нет:
@@ -22,17 +23,6 @@ use crate::account::{self, Settings};
 use crate::backend::Backend;
 use crate::list::Flagged;
 use crate::signin::{SignIn, Submit};
-
-/// Учётная запись IMAP + SMTP (S7-04б): адрес `imaps://…` или `imap://…` вместо адреса JMAP.
-fn imap_account(account: &Account) -> Option<postman_core::imap::ImapAccount> {
-    if !postman_core::imap::is_imap_url(&account.url) {
-        return None;
-    }
-    match &account.auth {
-        postman_core::model::Auth::Basic { user, password } => postman_core::imap::ImapAccount::from_url(&account.url, user, password),
-        postman_core::model::Auth::Bearer(_) => None,
-    }
-}
 
 /// Найти не больше — как у сервера (`SEARCH_LIMIT` синхронизации).
 const SEARCH_LIMIT: usize = 1000;
@@ -433,10 +423,8 @@ impl Mailer {
             cx.notify();
         });
         self.live.path = Some(account::cache_path(&crate::data_dir(), &account));
-        let commands = match imap_account(&account) {
-            Some(a) => postman_core::imap::spawn(a, None, self.cache.clone(), index.clone(), events, repaint),
-            None => sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint),
-        };
+        // Путь к серверу — по адресу (ADR 0004): `imaps://…` — IMAP + SMTP, иначе JMAP.
+        let commands = crate::plugins::registry().spawn(account.clone(), None, self.cache.clone(), index.clone(), events, repaint);
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
@@ -640,10 +628,8 @@ impl Mailer {
         tracing::info!("sync start {profile}: {}", account.url);
         self.live.profile.names.retain(|(p, _)| *p != profile);
         self.live.profile.names.push((profile.clone(), extra.settings.clone()));
-        let commands = match imap_account(&account) {
-            Some(a) => postman_core::imap::spawn(a, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
-            None => sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
-        };
+        let commands =
+            crate::plugins::registry().spawn(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint);
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
         self.backend.add_extra(profile.clone(), commands);
@@ -1042,7 +1028,7 @@ impl Mailer {
             // Вид сервера по адресу (S7-04в): JMAP, иначе IMAP на том же узле — в фоне, до входа.
             let (mut account, store, panel) = (s.account.clone(), s.store, panel.clone());
             let url = account.url.clone();
-            let task = cx.background_spawn(async move { postman_core::backend::detect_blocking(&url) });
+            let task = cx.background_spawn(async move { crate::plugins::registry().detect_blocking(&url) });
             cx.spawn_in(window, async move |this, cx| {
                 account.url = task.await;
                 let _ = this.update_in(cx, |m, window, cx| m.submit_account(&panel, account, store, window, cx));
