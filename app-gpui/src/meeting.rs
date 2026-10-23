@@ -818,6 +818,10 @@ impl MeetingView {
                     }
                     self.sync_model(cx);
                     self.refresh_suggestions(cx);
+                    // Справочник, который сервер отдаёт только поиском (Exchange, S7-08).
+                    let typed = self.inputs[kind.index()].read(cx).value().to_string();
+                    let token = current_token(&typed).to_owned();
+                    let _ = self.mailer.update(cx, |m, cx| m.find_people(&token, cx));
                     self.schedule_query(cx);
                 } else {
                     self.model.set(f, value);
@@ -1035,6 +1039,11 @@ impl MeetingView {
             }
             Event::Me { address, .. } => {
                 self.me = Some(address.email.clone());
+                None
+            }
+            Event::PeopleFound { .. } if self.suggest_for.is_some() => {
+                self.refresh_suggestions(cx);
+                cx.notify();
                 None
             }
             Event::MeetingCreated { ticket, .. } if self.model.on_created(*ticket) => {

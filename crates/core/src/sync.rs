@@ -97,6 +97,9 @@ pub enum Command {
     Settings(settings::Request),
     /// Перечитать личные контакты и справочник → `ContactsLoaded`, `DirectoryLoaded` (и `Contacts` для подсказок).
     Contacts,
+    /// Люди справочника по набранной строке → `PeopleFound` (S7-08). Справочник, который сервер отдаёт только поиском
+    /// (Exchange, `ResolveNames`); у JMAP он целиком в `DirectoryLoaded` — ответ пустой, без запроса к серверу.
+    FindPeople { text: String },
     /// Создать (`old: None`) или изменить карточку → `ContactSaved` или `ContactFailed`, затем `ContactsLoaded`.
     SaveContact { card: Box<ContactCard>, old: Option<Box<ContactCard>>, ticket: u64 },
     /// Удалить карточку → `ContactDeleted` или `ContactFailed`, затем `ContactsLoaded`.
@@ -389,6 +392,8 @@ pub enum Event {
     ContactsLoaded(Vec<ContactCard>),
     /// Справочник: сотрудники, переговорные и ресурсы с адресами (раздел «Контакты», подсказки адресов).
     DirectoryLoaded(Vec<Principal>),
+    /// Найдено в справочнике по строке `FindPeople` — к уже загруженному (подсказки адресов, поиск в «Контактах»).
+    PeopleFound { text: String, people: Vec<Principal> },
     ContactSaved { ticket: u64, id: String },
     ContactDeleted { ticket: u64, id: String },
     /// Ошибка контактов: `ticket` — сохранения или удаления, `0` — загрузки.

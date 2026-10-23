@@ -34,6 +34,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("postman-backend-jmap", L2B),
     ("postman-backend-imap", L2B),
     ("postman-backend-dav", L2B),
+    ("postman-backend-ews", L2B),
     ("postman-gpui", L3),
 ];
 const UI_LAYER: u8 = L3;
@@ -46,7 +47,7 @@ const PROTOCOL_CRATES: &[&str] = &["postman-jmap", "postman-imap", "postman-dav"
 
 /// Плагины путей (L2b, ADR 0004) и их протоколы. Новый плагин — сюда (EWS — `postman-backend-ews`, S7-06б).
 const PLUGINS: &[(&str, &str)] =
-    &[("postman-backend-jmap", "postman-jmap"), ("postman-backend-imap", "postman-imap"), ("postman-backend-dav", "postman-dav")];
+    &[("postman-backend-jmap", "postman-jmap"), ("postman-backend-imap", "postman-imap"), ("postman-backend-dav", "postman-dav"), ("postman-backend-ews", "postman-ews")];
 
 const CORE: &str = "postman-core";
 

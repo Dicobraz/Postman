@@ -86,8 +86,10 @@ ADR 0003: раздел «Слои» и «Нейтральная модель» (
    `PLUGINS` теста слоёв.
 3. Строка в `app-gpui/src/plugins.rs`. `core` и экраны не меняются.
 
-EWS (S7-06б): `postman-backend-ews` — `AreaPlugin` с ключом `ews` (календарь, ответы на встречи, занятость, GAL) рядом
-с почтой IMAP Exchange; справочник — `Event::DirectoryLoaded` через тот же `Areas::handle`.
+EWS (S7-06г): `postman-backend-ews` — почта Exchange по EWS (решение владельца 2026-10-23 вечер) — `MailPlugin`
+(адрес учётной записи — URL EWS), календарь, ответы на встречи, занятость и GAL — `AreaPlugin` с ключом `ews` (почтовый
+путь EWS подключает их сам; у IMAP-учётки на Exchange — `imaps://…?ews=https://…`). GAL EWS отдаёт только поиском —
+к договору добавлены `Command::FindPeople` → `Event::PeopleFound` (у JMAP — пустой ответ без запроса).
 
 ## Цена
 

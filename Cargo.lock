@@ -6042,6 +6042,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "postman-backend-ews"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "postman-cache",
+ "postman-calendar",
+ "postman-compose",
+ "postman-core",
+ "postman-ews",
+ "postman-worker",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "postman-backend-imap"
 version = "0.1.0"
 dependencies = [
@@ -6208,6 +6223,7 @@ dependencies = [
  "pets-ui",
  "png 0.17.16",
  "postman-backend-dav",
+ "postman-backend-ews",
  "postman-backend-imap",
  "postman-backend-jmap",
  "postman-cache",

@@ -1049,6 +1049,8 @@ async fn handle(
             tasks::handle(&JmapStore::new(client), cache, request, &|r| notify(Event::Tasks(r))).await?;
         }
         Command::Contacts => load_people(client, notify).await,
+        // Справочник JMAP — целиком в `DirectoryLoaded`.
+        Command::FindPeople { text } => notify(Event::PeopleFound { text, people: Vec::new() }),
         Command::SaveContact { card, old, ticket } => {
             let saved = match &old {
                 Some(old) => client.update_contact(&old.to_jmap(), &card.to_jmap()).await.map(|()| old.id.clone()),

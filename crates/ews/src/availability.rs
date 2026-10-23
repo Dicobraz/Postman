@@ -17,11 +17,12 @@ pub struct Availability {
     pub error: Option<String>,
 }
 
-/// Пояс запроса: UTC (смещение 0, без перевода часов) — `StandardTime` и `DaylightTime` одинаковые.
+/// Пояс запроса: UTC (смещение 0 и зимой, и летом). Переходы — в разные месяцы (как у EWS Managed API): с одинаковыми
+/// `StandardTime` и `DaylightTime` Exchange 2013 падает внутри (`-2146233088`, боевой сервер, `docs/EXCHANGE.md`).
 const UTC: &str = concat!(
     "<t:TimeZone><t:Bias>0</t:Bias>",
-    "<t:StandardTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>",
-    "<t:DaylightTime><t:Bias>0</t:Bias><t:Time>00:00:00</t:Time><t:DayOrder>1</t:DayOrder><t:Month>1</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>",
+    "<t:StandardTime><t:Bias>0</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>5</t:DayOrder><t:Month>10</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:StandardTime>",
+    "<t:DaylightTime><t:Bias>0</t:Bias><t:Time>02:00:00</t:Time><t:DayOrder>5</t:DayOrder><t:Month>3</t:Month><t:DayOfWeek>Sunday</t:DayOfWeek></t:DaylightTime>",
     "</t:TimeZone>"
 );
 

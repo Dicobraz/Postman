@@ -1,0 +1,25 @@
+[package]
+name = "postman-backend-ews"
+description = "Путь EWS — плагин ядра (ADR 0004): почта, календарь, занятость и справочник Exchange on-prem"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+postman-core.workspace = true
+postman-ews.workspace = true
+postman-cache.workspace = true
+postman-calendar.workspace = true
+postman-compose.workspace = true
+postman-worker.workspace = true
+jiff = "0.2"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Подменный сервер EWS (`tests/mock.rs`): адрес http:// без TLS — только в тестах.
+postman-ews = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["io-util"] }
+
+[lints]
+workspace = true

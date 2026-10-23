@@ -238,6 +238,39 @@ pub(crate) mod parse {
         Ok(out)
     }
 
+    /// Дерево `FindFolder` (Deep): почтовые папки (класс `IPF.Note` или без класса); родитель `root` — верхний
+    /// уровень (`None`).
+    pub(crate) fn find_folders(resp: &El, root: &str) -> Result<Vec<MailFolder>> {
+        let msg = soap::single(resp)?;
+        Ok(msg
+            .at(&["RootFolder", "Folders"])
+            .into_iter()
+            .flat_map(|f| f.children.iter())
+            .filter(|f| f.name == "Folder" && f.text_at(&["FolderClass"]).is_none_or(|c| c.is_empty() || c.starts_with("IPF.Note")))
+            .filter_map(mail_folder)
+            .map(|mut f| {
+                if f.parent.as_deref() == Some(root) {
+                    f.parent = None;
+                }
+                f
+            })
+            .collect())
+    }
+
+    /// Id корня из `GetFolder`.
+    pub(crate) fn folder_id(resp: &El) -> Result<String> {
+        let msg = soap::single(resp)?;
+        msg.at(&["Folders"]).and_then(|f| f.children.first()).and_then(|f| f.child("FolderId")).and_then(|i| i.attr("Id")).map(str::to_owned).ok_or_else(|| Error::Xml("GetFolder: no folder".into()))
+    }
+
+    /// Страница `FindItem`: id по порядку и есть ли ещё.
+    pub(crate) fn page(resp: &El) -> Result<(Vec<ItemId>, bool)> {
+        let msg = soap::single(resp)?;
+        let root = msg.child("RootFolder").ok_or_else(|| Error::Xml("FindItem: no RootFolder".into()))?;
+        let ids = root.child("Items").into_iter().flat_map(|i| i.children.iter()).filter_map(|m| m.child("ItemId").and_then(ItemId::from_el)).collect();
+        Ok((ids, root.attr("IncludesLastItemInRange") == Some("false")))
+    }
+
     pub(crate) fn roles(resp: &El) -> Vec<(MailRole, FolderId)> {
         // Сообщения — в порядке запроса (ROLES); не найденная папка (нет такой в 2013) — пропускается.
         let mut out = Vec::new();
@@ -365,6 +398,30 @@ impl Client {
         apply_roles(&mut changes.created, roles);
         apply_roles(&mut changes.updated, roles);
         Ok(changes)
+    }
+
+    /// Дерево почтовых папок обходом `FindFolder` (Deep) под корнем IPM — запасной путь, когда
+    /// `SyncFolderHierarchy` не работает (боевой Exchange 2013 CU23 отвечает на него `ErrorInternalServerError`,
+    /// `docs/EXCHANGE.md`). Роли — по `roles`, как у [`Client::sync_folders`]; изменений не отслеживает — дерево
+    /// целиком.
+    pub async fn find_folders(&mut self, roles: &[(MailRole, FolderId)]) -> Result<Vec<MailFolder>> {
+        let body = r#"<m:GetFolder><m:FolderShape><t:BaseShape>IdOnly</t:BaseShape></m:FolderShape><m:FolderIds><t:DistinguishedFolderId Id="msgfolderroot"/></m:FolderIds></m:GetFolder>"#;
+        let root = parse::folder_id(&self.call("GetFolder", body).await?)?;
+        let body = r#"<m:FindFolder Traversal="Deep"><m:FolderShape><t:BaseShape>Default</t:BaseShape><t:AdditionalProperties><t:FieldURI FieldURI="folder:ParentFolderId"/><t:FieldURI FieldURI="folder:FolderClass"/></t:AdditionalProperties></m:FolderShape><m:IndexedPageFolderView MaxEntriesReturned="1000" Offset="0" BasePoint="Beginning"/><m:ParentFolderIds><t:DistinguishedFolderId Id="msgfolderroot"/></m:ParentFolderIds></m:FindFolder>"#;
+        let mut folders = parse::find_folders(&self.call("FindFolder", body).await?, &root)?;
+        apply_roles(&mut folders, roles);
+        Ok(folders)
+    }
+
+    /// Письма папки по убыванию даты получения, страницей с `offset` (первая загрузка и «Загрузить ещё»): id и есть
+    /// ли ещё.
+    pub async fn mail_page(&mut self, folder: &FolderRef, offset: u32, max: u32) -> Result<(Vec<ItemId>, bool)> {
+        let body = format!(
+            r#"<m:FindItem Traversal="Shallow"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape><m:IndexedPageItemView MaxEntriesReturned="{}" Offset="{offset}" BasePoint="Beginning"/><m:SortOrder><t:FieldOrder Order="Descending"><t:FieldURI FieldURI="item:DateTimeReceived"/></t:FieldOrder></m:SortOrder><m:ParentFolderIds>{}</m:ParentFolderIds></m:FindItem>"#,
+            max.clamp(1, 1000),
+            folder.xml()
+        );
+        parse::page(&self.call("FindItem", &body).await?)
     }
 
     /// Id стандартных папок (вход, черновики, отправленные, удалённые, спам, исходящие, архив) → роль. Папки нет в
@@ -555,6 +612,22 @@ mod tests {
         assert_eq!((project.role, project.parent.as_deref()), (None, Some("AAMkADinbox")));
         assert_eq!(h.deleted, ["AAMkADgone"]);
         assert_eq!(h.updated[0].unread, 1);
+    }
+
+    #[test]
+    fn find_folder_tree_and_page() {
+        let root = parse::folder_id(&resp(include_bytes!("../tests/fixtures/get_folder_msgroot.xml"))).unwrap();
+        assert_eq!(root, "AAMkADroot");
+        let roles = parse::roles(&resp(include_bytes!("../tests/fixtures/get_folder_mail_roles.xml")));
+        let mut f = parse::find_folders(&resp(include_bytes!("../tests/fixtures/find_folder_mail.xml")), &root).unwrap();
+        apply_roles(&mut f, &roles);
+        // Календарь и контакты — не почта; «Проект» — во «Входящих».
+        assert_eq!(f.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Inbox", "Sent Items", "Проект"]);
+        assert_eq!((f[0].role, f[0].parent.as_deref(), f[0].unread), (Some(MailRole::Inbox), None, 3));
+        assert_eq!(f[2].parent.as_deref(), Some("AAMkADinbox"));
+        let (ids, more) = parse::page(&resp(include_bytes!("../tests/fixtures/find_item_mail_page.xml"))).unwrap();
+        assert_eq!(ids.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["AAMkADmsg2", "AAMkADmsg1"]);
+        assert!(more);
     }
 
     #[test]
