@@ -84,7 +84,8 @@ cargo test -p postman-dav --test stand -- --ignored --test-threads=1
 | `postman-dav stand::carddav_round_trip` | S7-05а: vCard 4.0 PUT → `sync-collection` → `addressbook-multiget` → правка с `If-Match` (старый ETag — 412) → новый ETag в `sync-collection` → DELETE → удаление в `sync-collection` (п. 45) |
 | `postman-dav stand::dav_wrong_password` | S7-05а: неверный пароль — `Error::Auth` (401) на поиске, а не «нет CalDAV» |
 
-Последний прогон — 2026-10-23, напрямую по HTTPS: `postman-dav stand` 6 из 6 (S7-05а); 2026-10-22: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
+Последний прогон — 2026-10-23: `postman-dav` `stand` 6 из 6 (S7-05а, HTTPS напрямую); IMAPS 993 и SMTPS 465 напрямую (`POSTMAN_STAND_IMAP`, `POSTMAN_STAND_SMTP`):
+`postman-imap` `stand` 4 из 4 (S7-04а), `postman-core` `stand_imap` 2 из 2 (S7-04б), 5 из 5 (S7-04в: «Отменить», беседа, фильтры, вид сервера); 2026-10-22, напрямую по HTTPS: `stand_tasks::mail_due_is_task` (S6-03), `task_round_trip` (S6-02) и тесты хранения без писем; 2026-10-21: `stand_tasks` 8 из 8 (S6-01; поручение и напоминания — отдельными прогонами, чтобы не упереться в порог входящих, п. 17); `stand_categories` 3 из 3 (корень — `isTopLevel`), `stand_search` 1 из 1
 (словоформы с языком `ru:`), `contacts_are_edited_and_directory_is_listed` (ФИО из `description`); 2026-10-20: `stand_send_later` 3 из 3 (S5-06); `stand_labels` 3 из 3 (S5-02); `stand` 13 из 13 и `stand_shared` 3 из 3 (S4-06); ранее 11 из 11 (S4-03); `contacts_through_sync` (user3, S4-02) — отдельно.
 
 ## Настройка сервера

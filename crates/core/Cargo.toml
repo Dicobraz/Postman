@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 postman-ir.workspace = true
 postman-jmap.workspace = true
+postman-imap.workspace = true
 postman-cache.workspace = true
 postman-worker.workspace = true
 postman-compose.workspace = true
@@ -20,7 +21,7 @@ jiff = "0.2"
 cpu-time = "1"
 memory-stats = "1"
 open = "5"
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net"] }
 # Типы итога проверки S/MIME (S5-12); сам разбор и проверка — только в воркере.
 postman-smime = { workspace = true, features = ["soft"] }
 zeroize = "1"

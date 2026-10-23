@@ -23,6 +23,17 @@ use crate::backend::Backend;
 use crate::list::Flagged;
 use crate::signin::{SignIn, Submit};
 
+/// Учётная запись IMAP + SMTP (S7-04б): адрес `imaps://…` или `imap://…` вместо адреса JMAP.
+fn imap_account(account: &Account) -> Option<postman_core::imap::ImapAccount> {
+    if !postman_core::imap::is_imap_url(&account.url) {
+        return None;
+    }
+    match &account.auth {
+        postman_core::model::Auth::Basic { user, password } => postman_core::imap::ImapAccount::from_url(&account.url, user, password),
+        postman_core::model::Auth::Bearer(_) => None,
+    }
+}
+
 /// Найти не больше — как у сервера (`SEARCH_LIMIT` синхронизации).
 const SEARCH_LIMIT: usize = 1000;
 
@@ -422,7 +433,10 @@ impl Mailer {
             cx.notify();
         });
         self.live.path = Some(account::cache_path(&crate::data_dir(), &account));
-        let commands = sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint);
+        let commands = match imap_account(&account) {
+            Some(a) => postman_core::imap::spawn(a, None, self.cache.clone(), index.clone(), events, repaint),
+            None => sync::spawn(account.clone(), self.cache.clone(), index.clone(), events, repaint),
+        };
         // Поток синхронизации мог не запуститься: его ошибка лежит в канале без пробуждения.
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
@@ -626,8 +640,10 @@ impl Mailer {
         tracing::info!("sync start {profile}: {}", account.url);
         self.live.profile.names.retain(|(p, _)| *p != profile);
         self.live.profile.names.push((profile.clone(), extra.settings.clone()));
-        let commands =
-            sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint);
+        let commands = match imap_account(&account) {
+            Some(a) => postman_core::imap::spawn(a, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
+            None => sync::spawn_as(account, Some(profile.clone()), self.cache.clone(), self.live.index.clone(), events, repaint),
+        };
         let _ = wake_tx.unbounded_send(());
         drop(wake_tx);
         self.backend.add_extra(profile.clone(), commands);
@@ -1022,22 +1038,35 @@ impl Mailer {
     }
 
     pub(crate) fn watch_signin(&mut self, panel: &Entity<SignIn>, window: &mut Window, cx: &mut Context<Self>) {
-        self._subscriptions.push(cx.subscribe_in(panel, window, |this, panel, s: &Submit, window, cx| {
-            // Из настроек, когда учётная запись уже есть: ещё одна — рядом (S7-03б), карточка остаётся в настройках.
-            let from_settings = this.settings.add.as_ref().map(|p| p.entity_id()) == Some(panel.entity_id());
-            if from_settings && this.backend.is_live() && this.live.pending.is_none() {
-                this.add_extra_account(s.account.clone(), s.store, cx);
-                return;
-            }
-            // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
-            if this.live.signin.is_none() {
-                this.live.signin = Some(panel.clone());
-            }
-            this.sign_in(s.account.clone(), s.store, window, cx);
+        self._subscriptions.push(cx.subscribe_in(panel, window, |_, panel, s: &Submit, window, cx| {
+            // Вид сервера по адресу (S7-04в): JMAP, иначе IMAP на том же узле — в фоне, до входа.
+            let (mut account, store, panel) = (s.account.clone(), s.store, panel.clone());
+            let url = account.url.clone();
+            let task = cx.background_spawn(async move { postman_core::backend::detect_blocking(&url) });
+            cx.spawn_in(window, async move |this, cx| {
+                account.url = task.await;
+                let _ = this.update_in(cx, |m, window, cx| m.submit_account(&panel, account, store, window, cx));
+            })
+            .detach();
         }));
         self._subscriptions.push(cx.subscribe_in(panel, window, |this, _, _: &crate::signin::Cancel, _, cx| {
             this.cancel_add_account(cx);
         }));
+    }
+
+    /// «Проверить и подключить» с адресом, вид сервера которого уже известен.
+    fn submit_account(&mut self, panel: &Entity<SignIn>, account: Account, store: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Из настроек, когда учётная запись уже есть: ещё одна — рядом (S7-03б), карточка остаётся в настройках.
+        let from_settings = self.settings.add.as_ref().map(|p| p.entity_id()) == Some(panel.entity_id());
+        if from_settings && self.backend.is_live() && self.live.pending.is_none() {
+            self.add_extra_account(account, store, cx);
+            return;
+        }
+        // Из настроек: дальше вход показывает та же карточка на месте экрана почты.
+        if self.live.signin.is_none() {
+            self.live.signin = Some(panel.clone());
+        }
+        self.sign_in(account, store, window, cx);
     }
 
     /// Адрес и логин учётной записи, с которой идёт синхронизация (для «Настройки → Аккаунты»).
