@@ -103,6 +103,25 @@ fn allowed(url: &url::Url, domain: &str) -> bool {
         })
 }
 
+/// Один адрес Autodiscover (`https://…/autodiscover/autodiscover.xml`) без переадресаций: настройки — адреса EWS,
+/// иначе ошибка с видом ответа. Для разведки и ручного адреса Autodiscover.
+pub async fn discover_at(url: &str, email: &str, auth: &Auth) -> Result<Endpoint> {
+    let parsed = url::Url::parse(url)?;
+    let mut http = crate::http::Http::new(auth.clone());
+    http.timeout = TIMEOUT;
+    let reply = http.post(&parsed, request(email).into_bytes()).await?;
+    if reply.status != 200 {
+        return Err(Error::Status(reply.status));
+    }
+    match parse(&reply.body)? {
+        Pox::Settings { urls, name } if !urls.is_empty() => Ok(Endpoint { urls, source: Source::Autodiscover, display_name: name }),
+        Pox::Settings { .. } => Err(Error::Autodiscover("no EWS URL in settings".into())),
+        Pox::RedirectAddr(_) => Err(Error::Autodiscover("redirectAddr".into())),
+        Pox::RedirectUrl(_) => Err(Error::Autodiscover("redirectUrl".into())),
+        Pox::Error { code, .. } => Err(Error::Autodiscover(format!("error {code}"))),
+    }
+}
+
 /// Адрес EWS по хосту сервера.
 pub fn fallback_url(host: &str) -> String {
     format!("https://{}/EWS/Exchange.asmx", host.trim().trim_end_matches('/'))
