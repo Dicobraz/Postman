@@ -1063,8 +1063,8 @@ impl Mailer {
         self.sign_in(account, store, window, cx);
     }
 
-    /// Поиск в справочнике по набранной строке (S7-08): у Exchange справочник — только поиском (`ResolveNames`); найденное
-    /// придёт `PeopleFound` и ляжет в подсказки адресов и «Контакты». У JMAP ответ пустой и без запроса к серверу.
+    /// Поиск в справочнике по набранной строке (S7-08): JMAP — `Principal/query`, Exchange — `ResolveNames`; найденное
+    /// придёт `PeopleFound` и ляжет в подсказки адресов и «Контакты» (к уже загруженному справочнику).
     pub(crate) fn find_people(&mut self, text: &str, cx: &App) {
         let text = text.trim();
         if text.chars().count() < PEOPLE_FROM
